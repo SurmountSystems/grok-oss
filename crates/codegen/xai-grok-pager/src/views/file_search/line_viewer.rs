@@ -645,7 +645,7 @@ pub enum LineViewerKind {
     #[default]
     FilePreview,
     /// Plan document preview (plan.md) — supports commenting, approval
-    /// buttons, send-feedback, and double-click-to-comment.
+    /// buttons, send-feedback, and an explicit `c` line-comment gesture.
     PlanPreview,
 }
 
@@ -659,7 +659,7 @@ pub struct PlanViewerExtras {
     pub feedback_active: bool,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
-    /// `A notes` — approval mode only.
+    /// Unused Notes hit target (CTA removed; kept so hover/mouse stay typed).
     pub approve_notes_button_area: Option<Rect>,
     pub approve_notes_hovered: bool,
     pub comment_button_area: Option<Rect>,
@@ -735,7 +735,8 @@ pub struct LineViewerState {
     /// `(source_lines index to follow, diagram source)` for affordance rows.
     mermaid_after: Vec<(usize, String)>,
     /// When `true`, the viewer uses the full overlay area instead of the
-    /// 75% centered popup. Toggled by Ctrl+F.
+    /// 75% centered popup. Toggled by Ctrl+F. Soft plan review docks
+    /// right instead of using either overlay.
     pub fullscreen: bool,
 }
 
@@ -998,6 +999,19 @@ impl LineViewerState {
 
     pub fn feedback_active(&self) -> bool {
         self.plan.as_ref().is_some_and(|p| p.feedback_active)
+    }
+
+    /// Soft plan review: right-side pane, not the 75% centered overlay.
+    pub fn is_soft_plan_side_pane(&self) -> bool {
+        self.kind == LineViewerKind::PlanPreview && !self.fullscreen
+    }
+
+    /// Width reserved on the right for a soft plan pane.
+    pub fn soft_plan_pane_width(full_width: u16) -> u16 {
+        let half = full_width / 2;
+        let min = 24.min(full_width);
+        let leave_left = 16.min(full_width.saturating_sub(min));
+        half.max(min).min(full_width.saturating_sub(leave_left))
     }
 
     /// Whether the plan modal should render the action-button footer.
@@ -1440,30 +1454,12 @@ fn build_shortcut_button<'a>(
     ]
 }
 
-/// Key-only CTA button (no label) for narrow plan approval footers.
-fn build_shortcut_button_key_only<'a>(
-    key: char,
-    hovered: bool,
-    theme: &crate::theme::Theme,
-) -> Vec<Span<'a>> {
-    let bg = if hovered {
-        theme.bg_highlight
-    } else {
-        theme.bg_base
-    };
-    let key_style = Style::default()
-        .fg(theme.text_primary)
-        .bg(bg)
-        .add_modifier(Modifier::BOLD);
-    vec![Span::styled(key.to_string(), key_style)]
-}
-
 /// Render the line viewer popup.
 ///
-/// In normal mode, draws a 75% centered panel with dimmed background
-/// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills
-/// the entire overlay area without dimming. Renders the ListPane
-/// inside the panel with syntax-highlighted lines.
+/// File preview uses a 75% centered panel with dimmed background.
+/// Soft plan review docks a right-side pane and leaves the left
+/// transcript undimmed. Fullscreen / modal park fills the overlay
+/// without dimming.
 pub fn render_line_viewer(
     buf: &mut Buffer,
     full_area: Rect,
@@ -1472,11 +1468,10 @@ pub fn render_line_viewer(
     theme: &Theme,
     comment_count: usize,
 ) {
-    // Compute popup area. In enlarge (fullscreen) mode the popup
-    // nearly fills the overlay, but leaves 1 row of top padding and
-    // 2 cols of side padding so it doesn't crowd the screen edges
-    // (the caller already excludes the prompt + turn_status from
-    // `full_area`). In normal mode it sits in a 75% centered popup.
+    // Compute popup area. Soft plan review docks on the right of the
+    // overlay (transcript stays visible on the left). Enlarge /
+    // modal park nearly fills the overlay. File preview stays a 75%
+    // centered popup.
     let (popup_area, should_dim) = if viewer.fullscreen {
         const TOP_PAD: u16 = 1;
         const SIDE_PAD: u16 = 2;
@@ -1486,6 +1481,13 @@ pub fn render_line_viewer(
         let popup_w = full_area.width.saturating_sub(pad_w);
         let popup_h = full_area.height.saturating_sub(TOP_PAD);
         (Rect::new(popup_x, popup_y, popup_w, popup_h), false)
+    } else if viewer.is_soft_plan_side_pane() {
+        let pane_w = LineViewerState::soft_plan_pane_width(full_area.width);
+        let popup_x = full_area.x + full_area.width.saturating_sub(pane_w);
+        (
+            Rect::new(popup_x, full_area.y, pane_w, full_area.height),
+            false,
+        )
     } else {
         let popup_width = (full_area.width as f32 * 0.75) as u16;
         let popup_height = (full_area.height as f32 * 0.75) as u16;
@@ -1740,8 +1742,8 @@ pub fn render_line_viewer(
     //    `render_modal_shortcuts`, sit in a single row separated by
     //    `  |  `, centered within the modal frame.
     //
-    //    - Plan-approval:  a approve | A notes | ? clarify | s revise | q quit
-    //    - Casual preview: c comment | y copy plan | s send  (no `q` — close-X)
+    //    - Plan-approval:  approve | clarify | revise | exit
+    //    - Casual preview: c comment | y copy plan | s send  (no Exit; close-X)
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1753,7 +1755,6 @@ pub fn render_line_viewer(
         let abandon_hovered = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
         let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
         let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
-        let approve_notes_hovered = viewer.plan_ref().is_some_and(|p| p.approve_notes_hovered);
         let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
         let is_approval = viewer.feedback_active();
 
@@ -1771,74 +1772,63 @@ pub fn render_line_viewer(
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
 
         if is_approval {
-            // Clickable CTA buttons. Side panels / narrow terminals must not
-            // drop hit targets: full labels → compact → key-only.
+            // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
+            // prefixes. Narrow docks drop separators, then drop the badge.
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let label_modes: [[&str; 5]; 2] = [
-                ["approve", "notes", "clarify", "revise", "quit"],
-                ["", "", "", "", ""],
-            ];
-            let keys = ['a', 'A', '?', 's', 'q'];
+            let labels = ["approve", "clarify", "revise", "exit"];
             let hovers = [
                 approve_hovered,
-                approve_notes_hovered,
                 questions_hovered,
                 send_hovered,
                 abandon_hovered,
             ];
 
             let mut painted = false;
-            for labels in &label_modes {
-                let span_sets: Vec<Vec<Span>> = keys
-                    .iter()
-                    .zip(labels.iter())
-                    .zip(hovers.iter())
-                    .map(|((&k, &lab), &hov)| {
-                        if lab.is_empty() {
-                            build_shortcut_button_key_only(k, hov, theme)
-                        } else {
-                            build_shortcut_button(k, lab, hov, theme)
-                        }
-                    })
-                    .collect();
-                let widths: Vec<u16> = span_sets
-                    .iter()
-                    .map(|s| s.iter().map(|sp| sp.width() as u16).sum())
-                    .collect();
+            for &(sep, sep_w_here, with_badge) in
+                &[("  |  ", 5u16, true), (" ", 1u16, true), (" ", 1u16, false)]
+            {
+                let widths: Vec<u16> = labels.iter().map(|s| s.width() as u16).collect();
                 let mut total_w = widths.iter().copied().sum::<u16>();
-                total_w = total_w.saturating_add(sep_w.saturating_mul(4));
-                total_w = total_w.saturating_add(badge_w);
+                total_w = total_w.saturating_add(sep_w_here.saturating_mul(3));
+                if with_badge {
+                    total_w = total_w.saturating_add(badge_w);
+                }
                 if total_w > inner.width {
                     continue;
                 }
 
                 let mut x = inner.x + (inner.width - total_w) / 2;
-                let mut areas: [Option<Rect>; 5] = [None; 5];
-                for i in 0..5 {
+                let mut areas: [Option<Rect>; 4] = [None; 4];
+                for i in 0..4 {
                     let start = x;
-                    for span in &span_sets[i] {
-                        let w = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, w);
-                        x += w;
-                    }
-                    if i == 1 && badge_w > 0 {
+                    let style = if hovers[i] {
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .bg(theme.bg_base)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text_primary).bg(theme.bg_base)
+                    };
+                    buf.set_string(x, bottom_y, labels[i], style);
+                    x += widths[i];
+                    if i == 0 && with_badge && badge_w > 0 {
                         buf.set_string(x, bottom_y, &badge_text, badge_style);
                         x += badge_w;
                     }
                     areas[i] = Some(Rect::new(start, bottom_y, widths[i], 1));
-                    if i < 4 {
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
+                    if i < 3 {
+                        buf.set_string(x, bottom_y, sep, sep_style);
+                        x += sep_w_here;
                     }
                 }
 
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = areas[0];
-                plan.approve_notes_button_area = areas[1];
-                plan.questions_button_area = areas[2];
-                plan.send_button_area = areas[3];
-                plan.abandon_button_area = areas[4];
+                plan.questions_button_area = areas[1];
+                plan.send_button_area = areas[2];
+                plan.abandon_button_area = areas[3];
+                plan.approve_notes_button_area = None;
                 plan.comment_button_area = None;
                 plan.copy_button_area = None;
                 painted = true;
@@ -1846,33 +1836,12 @@ pub fn render_line_viewer(
             }
 
             if !painted {
-                let mut x = inner.x;
-                let mut areas: [Option<Rect>; 5] = [None; 5];
-                for (i, &k) in keys.iter().enumerate() {
-                    let spans = build_shortcut_button_key_only(k, hovers[i], theme);
-                    let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-                    let need = if i == 0 { w } else { sep_w.saturating_add(w) };
-                    if x.saturating_sub(inner.x).saturating_add(need) > inner.width {
-                        break;
-                    }
-                    if i > 0 {
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
-                    }
-                    let start = x;
-                    for span in &spans {
-                        let sw = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, sw);
-                        x += sw;
-                    }
-                    areas[i] = Some(Rect::new(start, bottom_y, w, 1));
-                }
                 let plan = viewer.plan_mut();
-                plan.approve_button_area = areas[0];
-                plan.approve_notes_button_area = areas[1];
-                plan.questions_button_area = areas[2];
-                plan.send_button_area = areas[3];
-                plan.abandon_button_area = areas[4];
+                plan.approve_button_area = None;
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.abandon_button_area = None;
                 plan.comment_button_area = None;
                 plan.copy_button_area = None;
             }
@@ -2170,9 +2139,72 @@ mod tests {
         );
     }
 
-    /// Named contract: plan-approval footer is five clickable CTAs
-    /// (Approve / Notes / Clarify / Revise / Quit), not the 1.0.3
-    /// `request changes` + `c comment` placeholder row.
+    /// Soft park is a right-docked pane, not the 75% centered dimmed overlay.
+    #[test]
+    fn plan_soft_park_docks_right_not_centered_overlay() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        buf[(2, 12)].set_char('X');
+        let left_bg_before = buf[(2, 12)].bg;
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("soft park must paint a plan pane");
+        let centered_75_x =
+            full.x + (full.width.saturating_sub((full.width as f32 * 0.75) as u16)) / 2;
+        assert!(
+            modal.x >= full.width / 2,
+            "soft park must sit on the right half, not a centered overlay; modal={modal:?}"
+        );
+        assert!(
+            modal.x > centered_75_x + 8,
+            "soft park must not be the 75% centered popup (that starts near x={centered_75_x}); modal={modal:?}"
+        );
+        assert!(
+            modal.y <= full.y + 1,
+            "soft park must not be vertically centered; modal={modal:?}"
+        );
+        assert_eq!(
+            buf[(2, 12)].symbol(),
+            "X",
+            "left transcript columns must stay visible"
+        );
+        assert_eq!(
+            buf[(2, 12)].bg,
+            left_bg_before,
+            "left transcript must not be dim_area-blended"
+        );
+
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                footer.to_ascii_lowercase().contains(needle),
+                "right pane must keep the four CTAs; missing {needle} in {footer:?}"
+            );
+        }
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "right pane must not paint Notes or Quit; got {footer:?}"
+        );
+    }
+
+    /// Named contract: plan-approval footer is four clickable CTAs
+    /// (Approve / Clarify / Revise / Exit), not the 1.0.3
+    /// `request changes` + `c comment` placeholder row, and not Notes / Quit.
     #[test]
     fn plan_approval_footer_paints_five_cta_vocabulary() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -2199,20 +2231,29 @@ mod tests {
             !footer.contains("request changes"),
             "approval footer must not use the 1.0.3 request-changes placeholder; got {footer:?}"
         );
-        for needle in ["approve", "notes", "clarify", "revise", "quit"] {
+        for needle in ["approve", "clarify", "revise", "exit"] {
             assert!(
                 footer.to_ascii_lowercase().contains(needle),
                 "approval footer must name {needle}; got {footer:?}"
             );
         }
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes"),
+            "approval footer must not paint Notes; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("quit"),
+            "approval footer must not paint Quit; got {footer:?}"
+        );
         let plan = viewer.plan_ref().expect("plan extras");
         assert!(
             plan.approve_button_area.is_some(),
             "Approve must be a clickable hit target"
         );
         assert!(
-            plan.approve_notes_button_area.is_some(),
-            "Notes must be a clickable hit target"
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target"
         );
         assert!(
             plan.questions_button_area.is_some(),
@@ -2224,12 +2265,92 @@ mod tests {
         );
         assert!(
             plan.abandon_button_area.is_some(),
-            "Quit must be a clickable hit target"
+            "Exit must be a clickable hit target"
         );
         assert!(
             plan.comment_button_area.is_none(),
             "approval footer must not paint casual c-comment as a decision CTA"
         );
+    }
+
+    /// Named contract (G1): footer last button is Exit, not Quit.
+    #[test]
+    fn plan_footer_exit_not_quit() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            lower.contains("exit"),
+            "approval footer must name Exit; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("quit"),
+            "approval footer must not name Quit; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "Exit must be a clickable hit target"
+        );
+    }
+
+    /// Named contract (G1): Notes (`A`) is removed from the footer.
+    #[test]
+    fn plan_footer_has_no_notes_button() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes"),
+            "approval footer must not paint Notes; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target"
+        );
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
     }
 
     #[test]

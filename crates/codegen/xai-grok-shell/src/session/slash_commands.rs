@@ -512,6 +512,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "rename",
     "resume",
     "rewind",
+    "running",
     "screenshot",
     "scroll-debug",
     "session-info",
@@ -521,6 +522,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "show-plan",
     "skills",
     "spend",
+    "start",
     "summarize",
     "tasks",
     "terminal-check",
@@ -541,6 +543,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "vim-mode",
     "voice",
     "welcome",
+    "windows",
     "workflows",
     "yolo",
 ];

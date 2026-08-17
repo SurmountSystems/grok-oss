@@ -1,6 +1,5 @@
 //! Plan, yolo, auto, and permission mode transitions and toasts.
 
-use super::ctx::with_active_agent;
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
@@ -11,16 +10,17 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
 ///
-/// Delegates to `AgentView::show_plan_preview()` which reads the plan file
-/// from `~/.grok/sessions/<urlencoded_cwd>/<session_id>/plan.md`.
+/// Plan review lives on the session root. A focused subagent must not
+/// get a second local preview whose Approve ignores a live
+/// `exit_plan_mode` waiter on the parent.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
-    with_active_agent(app, |agent| {
-        if agent.plan_approval_view.is_some() {
-            agent.reopen_plan_approval();
-        } else {
-            agent.show_plan_preview();
-        }
-    });
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    agent.open_plan_from_view_plan_or_status();
     vec![]
 }
 

@@ -46,6 +46,7 @@ pub mod obf;
 pub mod plugin_cmd;
 pub mod pty_wrap;
 pub mod recent_dirs;
+pub mod running_sessions;
 pub mod scrollback;
 pub mod search;
 pub mod sessions_cmd;

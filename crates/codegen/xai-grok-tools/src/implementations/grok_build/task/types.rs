@@ -97,12 +97,25 @@ pub struct SubagentRequest {
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
     pub owner: SubagentOwner,
+    /// Token Economy implement-loop `--effort` (1 through 5, thoroughness).
+    /// `None` means the coordinator default (2). Not how many Review rows to
+    /// launch. The operator-ask bit is not on this request; spawn treats it
+    /// as false (one Review row).
+    pub implement_loop_effort: Option<u8>,
     pub cancel_token: CancellationToken,
 }
 
 impl SubagentRequest {
     pub fn from_scheduler_loop(&self) -> bool {
         self.runtime_overrides.loop_task_id.is_some()
+    }
+
+    /// Live implement-loop effort for the Review-row planner. Out of range
+    /// or missing falls back to 2 (the Token Economy desired default).
+    pub fn implement_loop_effort_or_default(&self) -> u8 {
+        self.implement_loop_effort
+            .filter(|effort| (1..=5).contains(effort))
+            .unwrap_or(2)
     }
 
     /// The caller blocks on the foreground await budget (neither backgrounded
@@ -1020,6 +1033,18 @@ register_resource!(
     "grok_build",
     "CurrentPromptIdResource",
     CurrentPromptIdResource
+);
+
+/// Token Economy implement-loop `--effort` for this parent turn (1 through 5).
+/// `None` means the coordinator default (2). Set when the host promotes a
+/// user prompt. Task tool copies it onto [`SubagentRequest`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImplementLoopEffortResource(pub Option<u8>);
+
+register_resource!(
+    "grok_build",
+    "ImplementLoopEffortResource",
+    ImplementLoopEffortResource
 );
 
 /// True while a `/goal` loop is active. Set by xai-grok-shell at turn start.

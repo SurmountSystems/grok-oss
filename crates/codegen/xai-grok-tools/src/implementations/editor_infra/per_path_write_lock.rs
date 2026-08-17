@@ -1,15 +1,15 @@
 //! Automatic per-path write lock for ACP edit tools.
 //!
-//! `search_replace`, `apply_patch`, and `write` take this lock as part of
-//! the tool call. The happy path is silent: there is no lock argument on
-//! the tool schema and a successful write does not mention the lock. A
-//! held path is a tool error that names the holder and the file. The tool
-//! does not write, does not wait, and does not show a human steal, skip,
-//! or wait menu. Agents resolve the conflict by talking to each other.
+//! `search_replace`, `apply_patch`, `write`, OpenCode `edit`, and
+//! `hashline_edit` take this lock as part of the tool call. The happy
+//! path is silent: there is no lock argument on the tool schema and a
+//! successful write does not mention the lock. A held path is a tool
+//! error that names the holder and the file. The tool does not write,
+//! does not wait, and does not show a human steal, skip, or wait menu.
+//! Agents resolve the conflict by talking to each other.
 //!
 //! This is a fail-fast table, not the unused FIFO waiter in
-//! [`super::file_operation_lock`]. OpenCode `edit` can call the same
-//! helpers later; it is not wired here.
+//! [`super::file_operation_lock`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

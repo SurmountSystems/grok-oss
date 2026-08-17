@@ -1138,10 +1138,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 session_id_clone.clone(),
             ));
         }
-        effects.push(Effect::RegisterActiveSession {
-            session_id: session_id_clone,
-            cwd: agent.session.cwd.display().to_string(),
-        });
+        if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
+            effects.push(effect);
+        }
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         return effects;
@@ -1246,10 +1245,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 session_id_clone.clone(),
             ));
         }
-        effects.push(Effect::RegisterActiveSession {
-            session_id: session_id_clone,
-            cwd: agent.session.cwd.display().to_string(),
-        });
+        if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
+            effects.push(effect);
+        }
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         return effects;

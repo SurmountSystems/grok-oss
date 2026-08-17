@@ -1820,6 +1820,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "voice_stt_language" => {
             let _ = dispatch(Action::SetVoiceSttLanguage("es".to_string()), app);
         }
+        "default_reasoning_effort" => {
+            let _ = dispatch(Action::SetDefaultReasoningEffort("high".to_string()), app);
+        }
         "fork_secondary_model" => {
             use agent_client_protocol as acp;
             use std::sync::Arc;

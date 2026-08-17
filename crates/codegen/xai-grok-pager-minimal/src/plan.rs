@@ -197,7 +197,7 @@ pub fn render(
     let hint = match foc {
         PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
         PlanApprovalFocus::Preview | PlanApprovalFocus::Prompt => {
-            "a approve \u{00b7} A notes \u{00b7} ? clarify \u{00b7} s revise \u{00b7} q quit"
+            "approve \u{00b7} ? clarify \u{00b7} revise \u{00b7} exit"
         }
     };
     let hint_style = theme.dim().bg(Color::Reset);
@@ -293,12 +293,16 @@ mod tests {
             }
         }
         assert!(
-            text.contains("a approve"),
-            "preview strip must paint the approve key legend; got {text:?}"
+            text.contains("approve"),
+            "preview strip must paint the approve CTA; got {text:?}"
         );
         assert!(
-            text.contains("q quit"),
-            "preview strip must paint the quit key legend; got {text:?}"
+            text.contains("exit"),
+            "preview strip must paint the exit CTA; got {text:?}"
+        );
+        assert!(
+            !text.contains("notes") && !text.contains("quit"),
+            "preview strip must not paint Notes or Quit; got {text:?}"
         );
     }
 }

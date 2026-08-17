@@ -32,6 +32,7 @@ git2 = { version = "0.20", default-features = false, features = [
 reqwest = { workspace = true }
 url = { workspace = true }
 xai-grok-env = { workspace = true }
+xai-tty-utils = { workspace = true }
 xai-grok-secrets = { workspace = true }
 xai-mixpanel = { workspace = true }
 xai-grok-config = { workspace = true }

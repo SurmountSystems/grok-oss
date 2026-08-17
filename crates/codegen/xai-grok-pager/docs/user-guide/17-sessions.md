@@ -57,13 +57,15 @@ When a mid-turn is interrupted in a cancel-resumable way, Grok OSS may write `ca
 - Soft stop (`Ctrl+Shift+S` only). That holds the queue after the current turn
 - `SIGKILL` before any turn-start write
 
-Do not confuse these three:
+Do not confuse these:
 
 | What | What it does |
 |------|----------------|
 | Last session for this cwd | Bare `grok-oss` opens that session. Not the Welcome picker. |
 | Continue interrupted turn | `canceled_turn_resume.json` plus the restart setting. |
 | `/resume` or `--resume` | You pick a session (or continue the most recent globally, per CLI). |
+| `/start` | Starts paused or interrupted work in the current session. Not the picker. |
+| Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 
@@ -125,7 +127,9 @@ This opens a session picker that lists recent sessions for the current workspace
 
 Typing in the picker filters the list by title and also searches your conversation content as you type; content matches appear under an "Extended search results" heading. Press `Ctrl+/` to search immediately without the brief pause.
 
-For the live top-level sessions in this pager (parent and forks) — switch, rename, peek, dispatch, or close — use the [Agent Dashboard](23-dashboard.md): `/dashboard` (aliases `/sessions`, `/agents-dashboard`) or `Ctrl+\`.
+For the live top-level sessions in this pager (parent and forks), switch, rename, peek, dispatch, or close them with the [Agent Dashboard](23-dashboard.md): `/dashboard` (aliases `/sessions`, `/agents-dashboard`) or `Ctrl+\`.
+
+To see other live grok-oss TUI windows on this machine, including a second window on the same conversation, use [Running grok-oss sessions](#running-grok-oss-sessions) (`/running`, alias `/windows`). That list is not the Agent Dashboard and not the `/resume` picker.
 
 ### From the Command Line
 
@@ -282,6 +286,34 @@ await connection.request("session/load", {
 The agent persists all session updates automatically. Clients can reconnect and load previous sessions by ID.
 
 ---
+
+## Running grok-oss sessions
+
+**Running grok-oss sessions** lists live grok-oss TUI windows on this machine. It is not disk session history, not the `/resume` picker, not `/start`, not `/tasks`, and not the [Agent Dashboard](23-dashboard.md). Do not merge it into `/dashboard`.
+
+```
+/running
+```
+
+Alias: `/windows`. The report is a transcript table. It refreshes when you open it. It does not keep appending on a timer.
+
+The source is `$GROK_HOME/active_sessions.json` (when `GROK_HOME` is unset, `~/.grok/active_sessions.json`). Two grok homes do not see each other. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
+
+Activity is `working`, `idle`, or `unknown`. A live window with no heartbeat (an older binary) is `unknown`. That is honest, not fake idle. A title, when present, comes from the on-disk session summary (`summary.json`), never from the latest user prompt. The registry never stores prompts, tool arguments, tokens, JWTs, file contents, or message text.
+
+Default headless processes stay unlisted unless `GROK_TRACK_HEADLESS` is already set. Leader daemons stay on `grok-oss leader list`.
+
+From a shell:
+
+```bash
+# Human table (same columns as /running; no this-window marker)
+grok-oss running
+
+# Same filtered rows, safe fields only
+grok-oss running --json
+```
+
+`grok-oss running` is not `grok-oss sessions`. The sessions subcommand is disk history (list and search). `/rebuild` still signals each live grok-oss PID once (dedupe by PID) after two windows can share one conversation.
 
 ## The grok-oss sessions Subcommand
 

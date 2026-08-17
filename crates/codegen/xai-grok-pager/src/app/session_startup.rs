@@ -817,6 +817,20 @@ pub(crate) fn pre_acp_auth_manager(
 /// Pre-TUI remote restore (session state + memory only). Codebase checkout is
 /// never applied on this path; `--restore-code` requires `--worktree`.
 const REMOTE_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn format_remote_restore_timeout_failed() -> String {
+    format!(
+        "Timed out restoring session from remote after {}. Conversation cannot be recovered.",
+        xai_tty_utils::format_human_duration(REMOTE_RESTORE_TIMEOUT)
+    )
+}
+
+fn format_remote_restore_timeout_recovered(local_session_id: &str) -> String {
+    format!(
+        "Remote restore timed out after {}; continuing with conversation {local_session_id}.",
+        xai_tty_utils::format_human_duration(REMOTE_RESTORE_TIMEOUT)
+    )
+}
 /// `--restore-code` without `--worktree` on a remote miss: refuse in-place checkout.
 const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session requires --worktree \
      (refusing to check out snapshot code into the current directory)";
@@ -1252,10 +1266,7 @@ async fn restore_session_from_remote(
         }
         RemoteRestoreOutcome::RecoveredAfterFailure { local_session_id } => {
             let msg = if timed_out {
-                format!(
-                    "Remote restore timed out after {}s; continuing with conversation {local_session_id}.",
-                    REMOTE_RESTORE_TIMEOUT.as_secs(),
-                )
+                format_remote_restore_timeout_recovered(&local_session_id)
             } else if let Some(Err(e)) = restore_result {
                 format!(
                     "Remote restore failed ({e:#}); continuing with conversation {local_session_id}."
@@ -1310,10 +1321,7 @@ pub(crate) fn classify_remote_restore(
         };
     }
     if timed_out {
-        return RemoteRestoreOutcome::Failed(format!(
-            "Timed out restoring session from remote after {}s. Conversation cannot be recovered.",
-            REMOTE_RESTORE_TIMEOUT.as_secs()
-        ));
+        return RemoteRestoreOutcome::Failed(format_remote_restore_timeout_failed());
     }
     if let Some(e) = restore_err {
         return RemoteRestoreOutcome::Failed(format!("Failed to restore session from remote: {e}"));
@@ -1846,6 +1854,14 @@ mod tests {
             RemoteRestoreOutcome::Failed(msg) => {
                 assert!(msg.contains("Timed out"), "{msg}");
                 assert!(msg.contains("cannot be recovered"), "{msg}");
+                assert!(
+                    msg.contains("1m30s"),
+                    "90s remote restore budget must print as minutes, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("90s") && !msg.contains("90 seconds"),
+                    "raw second budget must not leak: {msg}"
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }

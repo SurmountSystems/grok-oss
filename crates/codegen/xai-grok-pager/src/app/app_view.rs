@@ -1141,6 +1141,9 @@ pub struct AppView {
     /// Persisted `[session].auto_compact_threshold_tokens` mirror.
     /// When set, absolute-token mode wins over percent. Live-applied.
     pub auto_compact_threshold_tokens: Option<u64>,
+    /// Persisted `[models].default_reasoning_effort` mirror.
+    /// `None` = no TOML override (baked Grok 4.6 default is medium).
+    pub default_reasoning_effort: Option<String>,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
@@ -1632,6 +1635,7 @@ impl AppView {
             show_tips: None,
             auto_compact_threshold_percent: None,
             auto_compact_threshold_tokens: None,
+            default_reasoning_effort: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,

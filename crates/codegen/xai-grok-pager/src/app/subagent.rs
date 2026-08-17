@@ -32,6 +32,10 @@ pub struct SubagentInfo {
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
     pub parent_prompt_id: Option<Arc<str>>,
+    /// Session that spawned this agent. L2s name the main thread. L3s name their L2.
+    pub parent_session_id: Option<Arc<str>>,
+    /// Nesting depth from the main thread. `1` is an L2. `2` is an L3 specialist.
+    pub depth: Option<u32>,
     pub started_at: Instant,
     /// Wall-clock time of the most recent `SubagentProgress` /
     /// `SubagentFinished` update. For
@@ -466,6 +470,83 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     };
     (label, clean_desc.to_string())
 }
+
+/// Running, non-workflow L2 rows for the L1 Subagents list.
+///
+/// L3 specialists stay in the registry so each L2 can report a count, but they
+/// do not get their own L1 list rows. Two live L2s with the same trimmed
+/// description collapse to the earliest row. Finished children are not listed.
+pub(crate) fn live_subagent_list<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let all: Vec<_> = infos.into_iter().collect();
+    let child_ids: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|info| info.child_session_id.as_ref())
+        .collect();
+    let mut live: Vec<_> = all
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .filter(|info| is_l2_list_row(info, &child_ids))
+        .collect();
+    live.sort_by_key(|info| info.started_at);
+    let mut seen = std::collections::HashSet::<&str>::new();
+    let mut out = Vec::new();
+    for info in live {
+        let key = info.description.trim();
+        if key.is_empty() {
+            out.push(info);
+            continue;
+        }
+        if seen.insert(key) {
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// L2 for the main-thread list: spawned by the main session, not by another
+/// subagent in this registry, and not depth 2 or deeper.
+pub(crate) fn is_l2_list_row(
+    info: &SubagentInfo,
+    child_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    if info.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    match info.parent_session_id.as_deref() {
+        Some(parent) if child_ids.contains(parent) => false,
+        _ => true,
+    }
+}
+
+/// How many live L3 specialists an L2 is using.
+///
+/// Counts running, non-workflow rows whose parent session is this L2.
+pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    infos
+        .into_iter()
+        .filter(|info| {
+            info.is_running()
+                && info.workflow_run_id.is_none()
+                && info.parent_session_id.as_deref() == Some(l2_child_session_id)
+        })
+        .count()
+}
+
+/// L2 row suffix: how many L3 specialists that coordinator is using.
+pub(crate) fn format_live_l3_count(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 specialist".to_string()),
+        n => Some(format!("{n} specialists")),
+    }
+}
+
 pub(crate) fn format_subagent_meta(
     persona: Option<&str>,
     role: Option<&str>,
@@ -519,7 +600,11 @@ pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity
             max_retries,
             ..
         } => {
-            format!("Retrying ({attempt}/{max_retries})")
+            if *max_retries == u32::MAX {
+                format!("Retrying ({attempt})")
+            } else {
+                format!("Retrying ({attempt}/{max_retries})")
+            }
         }
         TurnActivity::WritingToolCall(writing) => writing.label(),
         TurnActivity::Waiting(reason) => reason.label(),
@@ -555,6 +640,8 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,
@@ -1203,6 +1290,141 @@ mod tests {
             "Retrying (2/5)",
         );
     }
+    #[test]
+    fn format_activity_label_unlimited_retry_has_no_u32_max_fraction() {
+        use crate::acp::tracker::TurnActivity;
+        let label = format_activity_label(&TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "rate limited".into(),
+        });
+        assert!(
+            !label.contains("4294967295"),
+            "unlimited retry must not paint Retrying (1/4294967295), got {label}"
+        );
+        assert!(
+            !label.contains(&u32::MAX.to_string()),
+            "unlimited retry must not paint the u32::MAX fraction, got {label}"
+        );
+        assert!(
+            label.contains("Retrying"),
+            "unlimited retry must still say Retrying, got {label}"
+        );
+    }
+    #[test]
+    fn live_subagent_list_does_not_show_two_rows_with_the_same_description() {
+        let mut a = make_info();
+        a.subagent_id = "sa-a".into();
+        a.child_session_id = "cs-a".into();
+        a.description = "[reviewer] Review implementation".into();
+        a.finished = false;
+        let mut b = make_info();
+        b.subagent_id = "sa-b".into();
+        b.child_session_id = "cs-b".into();
+        b.description = "[reviewer] Review implementation".into();
+        b.finished = false;
+        let mut done = make_info();
+        done.subagent_id = "sa-done".into();
+        done.child_session_id = "cs-done".into();
+        done.description = "[reviewer] Review implementation".into();
+        done.finished = true;
+        let mut other = make_info();
+        other.subagent_id = "sa-other".into();
+        other.child_session_id = "cs-other".into();
+        other.description = "[implementer] Land the slice".into();
+        other.finished = false;
+        let rows = live_subagent_list([&a, &b, &done, &other]);
+        let same: Vec<_> = rows
+            .iter()
+            .filter(|info| info.description.as_ref() == "[reviewer] Review implementation")
+            .collect();
+        assert_eq!(
+            same.len(),
+            1,
+            "live Subagents list must not show two same-description rows, got {}",
+            same.len()
+        );
+        assert_eq!(rows.len(), 2, "distinct live descriptions still show");
+    }
+
+    #[test]
+    fn live_subagent_list_shows_only_l2_and_reports_live_l3_count() {
+        fn info(
+            id: &str,
+            desc: &str,
+            parent: Option<&str>,
+            depth: Option<u32>,
+            finished: bool,
+        ) -> SubagentInfo {
+            let mut row = make_info();
+            row.subagent_id = id.into();
+            row.child_session_id = id.into();
+            row.description = desc.into();
+            row.parent_session_id = parent.map(Arc::from);
+            row.depth = depth;
+            row.finished = finished;
+            row
+        }
+        let l2_a = info(
+            "l2-coord",
+            "coordinate the slice",
+            Some("sess-l1"),
+            Some(1),
+            false,
+        );
+        let l2_b = info(
+            "l2-other",
+            "second coordinator",
+            Some("sess-l1"),
+            Some(1),
+            false,
+        );
+        let l3_a = info(
+            "l3-grep",
+            "search the crate",
+            Some("l2-coord"),
+            Some(2),
+            false,
+        );
+        let l3_b = info(
+            "l3-edit",
+            "land the product fix",
+            Some("l2-coord"),
+            Some(2),
+            false,
+        );
+        let l3_done = info(
+            "l3-done",
+            "finished specialist",
+            Some("l2-other"),
+            Some(2),
+            true,
+        );
+        let l3_c = info("l3-live", "still working", Some("l2-other"), Some(2), false);
+        let rows = live_subagent_list([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.child_session_id.as_ref()).collect();
+        assert_eq!(
+            ids,
+            ["l2-coord", "l2-other"],
+            "L1 Subagents list must show only L2s and hide L3 specialists, got {ids:?}"
+        );
+        assert_eq!(
+            live_l3_count([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c], "l2-coord"),
+            2,
+            "L2 row must report two live L3 specialists"
+        );
+        assert_eq!(
+            live_l3_count([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c], "l2-other"),
+            1,
+            "L2 row must report one live L3 specialist"
+        );
+        assert_eq!(
+            format_live_l3_count(2).as_deref(),
+            Some("2 specialists"),
+            "L2 row count text is a specialist count, not a dump of L3 names"
+        );
+    }
+
     #[test]
     fn activity_label_waiting_reasons() {
         use crate::acp::tracker::{TurnActivity, WaitingReason};

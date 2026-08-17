@@ -81,17 +81,18 @@ use super::settings::setters::{
     set_compact_mode, set_confirm_before_rewind, set_contextual_hint_image_input,
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_economic_mode, set_features_session_recap, set_fork_secondary_model, set_group_tool_verbs,
-    set_hide_header, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
-    set_max_thoughts_width, set_multiline_mode, set_notifications_session_recap,
-    set_notifications_session_recap_threshold_secs, set_page_flip_on_send, set_plan_approval_park,
-    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_resume_canceled_turn_on_restart, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_scrub_ascii_punct,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_token_economy_bool, set_token_economy_int, set_vim_mode,
-    set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
+    set_default_model, set_default_reasoning_effort, set_default_selected_permission,
+    set_display_refresh_auto_cadence, set_economic_mode, set_features_session_recap,
+    set_fork_secondary_model, set_group_tool_verbs, set_hide_header, set_hunk_tracker_mode,
+    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
+    set_notifications_session_recap, set_notifications_session_recap_threshold_secs,
+    set_page_flip_on_send, set_plan_approval_park, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds,
+    set_resume_canceled_turn_on_restart, set_screen_mode, set_scroll_lines, set_scroll_mode,
+    set_scroll_speed, set_scrub_ascii_punct, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_token_economy_bool,
+    set_token_economy_int, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1022,6 +1023,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
+        Action::ShowRunningSessions => super::running::dispatch_show_running_sessions(app),
         Action::ShowLimits => super::status::dispatch_show_limits(app),
         Action::ShowSpend => super::status::dispatch_show_spend(app),
         Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
@@ -1059,6 +1061,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
+        Action::StartPausedOrInterruptedWork => {
+            super::start::dispatch_start_paused_or_interrupted(app)
+        }
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
@@ -1118,6 +1123,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
         Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
+        Action::SetDefaultReasoningEffort(s) => set_default_reasoning_effort(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),

@@ -235,6 +235,12 @@ impl xai_tool_runtime::Tool for EditTool {
             }
         }
 
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &path, &ctx, &resources, "edit",
+            )
+            .await?;
+
         // ── Route to creation or replacement ────────────────────────
         if input.old_string.is_empty() {
             handle_new_file_creation(&input, &fs, &notification_handle, &tool_call_id, &path).await
@@ -1262,6 +1268,49 @@ mod tests {
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+
+    // ── Per-path write lock (same contract as search_replace) ────
+
+    /// OpenCode edit must not write a path another agent already holds.
+    /// Same meaning as `two_agents_cannot_write_the_same_path_at_once`
+    /// for search_replace: holder named, file named, disk unchanged.
+    #[tokio::test]
+    async fn opencode_edit_cannot_write_a_path_another_agent_already_holds() {
+        use crate::implementations::editor_infra::per_path_write_lock::try_acquire_write;
+        use crate::types::resources::OwnerSessionId;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shared.txt");
+        std::fs::write(&path, "original\n").unwrap();
+        let _held = try_acquire_write(&path, "explore-agent-a").unwrap();
+
+        let mut resources = test_resources(tmp.path());
+        resources.insert(OwnerSessionId("explore-agent-b".to_string()));
+
+        let err = xai_tool_runtime::Tool::run(
+            &EditTool,
+            test_ctx(resources.into_shared()),
+            make_input("shared.txt", "original\n", "changed by b\n"),
+        )
+        .await
+        .expect_err("second writer must be a tool error");
+
+        assert!(
+            err.detail.contains("explore-agent-a"),
+            "error must name the holder: {}",
+            err.detail
+        );
+        assert!(
+            err.detail.contains("shared.txt"),
+            "error must name the file: {}",
+            err.detail
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "original\n",
+            "disk must be unchanged when the lock is held"
+        );
     }
 
     // ── Notification sent ───────────────────────────────────────

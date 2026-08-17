@@ -1850,6 +1850,10 @@ async fn async_main() -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return run_workspace_mgmt(workspace_args).await;
             }
+            Command::Running { json } => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::running_sessions::run_cli(json);
+            }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();

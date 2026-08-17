@@ -18,11 +18,42 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
+### `/start`
+
+Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
+
+`/start` is not `/resume`. `/resume` only opens the session picker.
+
 ### `/dashboard`
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
 
-Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Not `/running` (alias `/windows`), which lists live grok-oss TUI windows on this machine. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+
+### `/running`
+
+List live grok-oss TUI windows on this machine. Alias: `/windows`.
+
+This is **Running grok-oss sessions**. It is not the [Agent Dashboard](23-dashboard.md), not `/sessions`, not `/tasks`, not `/resume`, and not `/start`. `/dashboard` still owns the roster inside this pager process. Do not treat `/running` as a second dashboard.
+
+The list comes from `$GROK_HOME/active_sessions.json`. When `GROK_HOME` is unset, that file is `~/.grok/active_sessions.json`. Two grok homes do not see each other. Only live grok-oss processes appear. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
+
+Each row shows the PID, a short session id, the working directory, when the window opened, and activity `working`, `idle`, or `unknown`. A title, when present, comes from the on-disk session summary, not from the latest user prompt. A short activity line may name the model, say turn running or paused, or give a subagent count. A live sibling with no heartbeat (an older binary) is `unknown`. That is honest, not fake idle.
+
+The registry never stores prompts, tool arguments, tokens, JWTs, file contents, or message text.
+
+The report is a transcript table. It refreshes when you run `/running`. It does not keep appending on a timer.
+
+Default headless processes stay unlisted unless `GROK_TRACK_HEADLESS` is already set. Leader daemons stay on `grok-oss leader list`.
+
+From a shell, the same filtered list is:
+
+```
+grok-oss running
+grok-oss running --json
+```
+
+The human table uses the same columns. The CLI table does not mark this window, because there is no TUI window. `--json` is the same filtered rows and the same safe fields only (`pid`, `session_id`, `cwd`, `opened_at`, `updated_at`, `activity`, `title`, `activity_line`).
 
 ### `/compact [context]`
 
@@ -33,13 +64,13 @@ Compress conversation history to reclaim context-window space. Pass a note to te
 /compact keep the auth implementation details
 ```
 
-Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* window. With **Economic mode** on (default), that window is soft-capped at 200k tokens.
+Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* sampling window AUTO uses. With **Economic mode** on (default), that sampling window is soft-capped at 200k tokens even when the model catalog is larger (for example 500k). The footer context chip then names both windows (`used / 200K sampling · 500K catalog`) so catalog 500k is not implied as the AUTO gate.
 
 ### `/economic-mode`
 
-Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing. Default **on** for new sessions (`[ui] economic_mode` in `/settings`). Soft-caps the context window for compaction and the context bar.
+Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing. Default **on** for new sessions (`[ui] economic_mode` in `/settings`). Soft-caps the sampling window AUTO compact uses. When that sampling window is smaller than the catalog window, the footer context chip names both.
 
-Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out 1–5, not model reasoning effort `/effort`) on `/implement`. Optional lock and min floor always apply when set. Economic mode plus the cap master still own the hard ceiling (default 3) and desired inject when missing (default 2). See [Configuration → Token Economy](05-configuration.md#token-economy).
+Token Economy may rewrite **implement-loop effort** (thoroughness 1–5, not model reasoning effort `/effort`, and not how many Review rows to launch) on `/implement`. One reviewer unless you explicitly asked for more. Optional lock and min floor always apply when set. Economic mode plus the cap master still own the hard ceiling (default 3) and desired inject when missing (default 2). See [Configuration → Token Economy](05-configuration.md#token-economy).
 
 ```
 /economic-mode              # toggle this conversation
@@ -414,7 +445,7 @@ Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
 1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
 2. Runs `just install` (or a fixed cargo install when `just` is missing).
 3. Verifies package version plus git SHA.
-4. Signals other live product TUIs so they re-exec onto the new binary with the same session.
+4. Signals other live product TUIs so they re-exec onto the new binary with the same session. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
 5. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success.
 
 CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
@@ -522,7 +553,7 @@ Only one `grok-oss` process fetches billing and limits. Other live TUIs read a s
 /limits --json
 ```
 
-`/limits --json` prints the same machine-readable JSON as `grok-oss limits --json` into the conversation (no secrets). Fields include `schemaVersion`, `liveSampling`, and `activeDriver` (`supergrok_free_period` | `supergrok_extras` | `console_key`). That `activeDriver` name is a wire field; the product name for the first value is **included SuperGrok period limits**.
+`/limits --json` prints the same machine-readable JSON as `grok-oss limits --json` into the conversation (no secrets). Fields include `schemaVersion`, `liveSampling`, and `activeDriver` (`supergrok_free_period` | `supergrok_extras` | `console_key`). Those `activeDriver` names are wire fields, not human meter names. `supergrok_free_period` is **included SuperGrok period limits**. `supergrok_extras` is **SuperGrok dollar credits** (prepaid SuperGrok top-ups). `console_key` is console team prepaid / console API credits. SuperGrok is paid. Never call SuperGrok free.
 
 See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
 

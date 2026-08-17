@@ -31,6 +31,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
+impl AgentView {
+    fn reserve_soft_plan_scrollback(&self, layout: &mut AgentViewLayout) {
+        let Some(viewer) = self.line_viewer.as_ref() else {
+            return;
+        };
+        if !viewer.is_soft_plan_side_pane() {
+            return;
+        }
+        let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+            layout.scrollback.width,
+        );
+        layout.reserve_soft_plan_pane(pane_w);
+    }
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
 /// view cannot see itself (the voice pipeline and app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
@@ -142,11 +157,7 @@ impl AgentView {
                     ]
                 } else {
                     vec![
-                        HintItem::new(key!('a'), "approve"),
-                        HintItem::new(key!('A'), "notes"),
                         HintItem::new(key!('?'), "clarify"),
-                        HintItem::new(key!('s'), "revise"),
-                        HintItem::new(key!('q'), "quit"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -892,6 +903,10 @@ impl AgentView {
             global_paused,
         } = app_params;
         self.global_work_paused = global_paused;
+        // A missed `exit_plan_mode` park still has chrome to arm and a plan
+        // body. Surface before layout so the first paint is Plan ready with
+        // the five-CTA panel, not the idle click cue.
+        self.surface_idle_plan_review_if_needed();
         self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
         self.overlay_can_cycle = overlay_can_cycle;
@@ -1383,6 +1398,7 @@ impl AgentView {
             1,
             compact,
         );
+        self.reserve_soft_plan_scrollback(&mut layout);
         let search_active =
             self.scrollback_search.is_some() && self.active_pane == AgentPane::Scrollback;
         let search_reserved_rows =
@@ -1459,6 +1475,7 @@ impl AgentView {
                         1,
                         compact,
                     );
+                    self.reserve_soft_plan_scrollback(&mut layout);
                     if search_reserved_rows > 0 {
                         layout.scrollback.height -= search_reserved_rows;
                         layout.scrollback_content.height = layout
@@ -1559,24 +1576,34 @@ impl AgentView {
             );
         }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
-        let ctx_total = self
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
-        if let Some(ctx_line) = context_bar::context_bar_line_for_session(
+        let catalog_window = self.session.models.get_context_window().or_else(|| {
+            self.context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling_window = catalog_window.map(|catalog| {
+            xai_grok_shell::util::config::apply_economic_context_cap(
+                catalog,
+                crate::appearance::cache::load_economic_mode(),
+            )
+        });
+        if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
-            ctx_total,
+            sampling_window,
+            catalog_window,
             self.hit_context.hovered,
             &theme,
             self.chat_kind,
         ) {
             status.push("context", ctx_line);
         }
+        let compact_identity = crate::views::credit_bar::compact_meter_identity(
+            self.sampling_identity,
+            self.credit_balance.as_ref(),
+        );
         if let Some(credits_line) = crate::views::credit_bar::credit_status_line_for_live_session(
             self.credit_balance.as_ref(),
-            self.sampling_identity,
+            compact_identity,
             self.console_team_prepaid_cents,
             crate::views::credit_bar::resolve_console_team_prepaid_gap_default(),
             self.hit_credits.hovered,
@@ -3594,21 +3621,13 @@ impl AgentView {
                 vec![
                     HintItem::new(key!(Enter), "edit"),
                     HintItem::new(key!('x'), "delete"),
-                    HintItem::new(key!('a'), "approve"),
-                    HintItem::new(key!('A'), "notes"),
                     HintItem::new(key!('?'), "clarify"),
-                    HintItem::new(key!('s'), "revise"),
-                    HintItem::new(key!('q'), "quit"),
                     HintItem::new(key!('y'), "copy"),
                     HintItem::new(key!(Tab), "prompt"),
                 ]
             } else if in_plan_approval {
                 let mut h = vec![
-                    HintItem::new(key!('a'), "approve"),
-                    HintItem::new(key!('A'), "notes"),
                     HintItem::new(key!('?'), "clarify"),
-                    HintItem::new(key!('s'), "revise"),
-                    HintItem::new(key!('q'), "quit"),
                     HintItem::new(key!('y'), "copy"),
                 ];
                 if self.vim_mode {
@@ -4724,12 +4743,52 @@ mod voice_recording_overlay_tests {
             !lower.contains("request changes"),
             "plan approval must not advertise the 1.0.3 request-changes placeholder:\n{text}"
         );
-        for needle in ["approve", "notes", "clarify", "revise", "quit"] {
+        for needle in ["approve", "clarify", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "plan approval chrome must name {needle} on the decision surface:\n{text}"
             );
         }
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "plan approval chrome must not name Notes or Quit:\n{text}"
+        );
+    }
+
+    /// Soft park draw: the plan rect is on the right, status names a
+    /// side panel, and the five CTAs stay.
+    #[test]
+    fn plan_soft_park_draw_right_pane_matches_side_panel_status() {
+        let mut agent = plan_approval_agent();
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| !v.fullscreen),
+            "fixture: soft park is not the covering modal"
+        );
+        let text = render_text(&mut agent, false);
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .expect("draw must paint the plan pane");
+        assert!(
+            modal.x >= 50,
+            "plan pane must sit on the right of a 100-col draw; modal={modal:?}"
+        );
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "status must match the right-side pane geometry:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "right pane must keep the four CTAs; missing {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "right pane must not paint Notes or Quit:\n{text}"
+        );
     }
 
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
@@ -4796,12 +4855,16 @@ mod voice_recording_overlay_tests {
             text.contains("Plan ready. Side panel open"),
             "file-backed park must say Plan ready. Side panel open:\n{text}"
         );
-        for needle in ["approve", "notes", "clarify", "revise", "quit"] {
+        for needle in ["approve", "clarify", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "file-backed plan.md chrome must name {needle}:\n{text}"
             );
         }
+        assert!(
+            !lower.contains("notes"),
+            "file-backed plan.md chrome must not paint Notes:\n{text}"
+        );
 
         let plan = agent
             .line_viewer
@@ -4813,8 +4876,8 @@ mod voice_recording_overlay_tests {
             "Approve must be a clickable hit target on isolated plan.md"
         );
         assert!(
-            plan.approve_notes_button_area.is_some(),
-            "Notes must be a clickable hit target on isolated plan.md"
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target on isolated plan.md"
         );
         assert!(
             plan.questions_button_area.is_some(),
@@ -4826,7 +4889,7 @@ mod voice_recording_overlay_tests {
         );
         assert!(
             plan.abandon_button_area.is_some(),
-            "Quit must be a clickable hit target on isolated plan.md"
+            "Exit must be a clickable hit target on isolated plan.md"
         );
         assert!(
             plan.comment_button_area.is_none(),
@@ -5931,6 +5994,54 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains(PLAN_REVISING_STATUS),
             "fresh present is not Revising:\n{text}"
+        );
+    }
+
+    /// Live shot: `exit_plan_mode` never set `plan_approval_view` on this
+    /// view, then turn-finalize ran, then a plan body exists and chrome
+    /// should arm. First paint must be Plan ready with the five-CTA panel,
+    /// not the idle click cue.
+    #[test]
+    fn present_then_turn_finalize_without_park_still_paints_plan_ready_not_idle_click_cue() {
+        let mut agent = make_agent();
+        agent.clear_plan_loop_flags_for_new_present();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.session.state = AgentState::Idle;
+
+        // handle_exit_plan_mode never landed on this view.
+        assert!(agent.plan_approval_view.is_none());
+        // Turn-finalize pair: no body wired yet, so it must not invent a park.
+        agent.dismiss_plan_approval_after_turn_if_stale();
+        agent.surface_idle_plan_review_if_needed();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "fixture: finalize before a plan body must not invent a park"
+        );
+
+        // Present content is now available. Chrome should arm. Still no park.
+        agent.latest_inline_plan_content = Some("# Review me\n\nBody\n".into());
+        assert!(agent.plan_approval_view.is_none());
+        assert!(
+            agent.should_arm_plan_decision_chrome(),
+            "fixture: chrome should arm after a missed present"
+        );
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "first paint after a missed present must be Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "side panel must be open with five CTAs (feedback_active)"
+        );
+        assert!(
+            !text.contains(PLAN_IDLE_REVIEW_STATUS),
+            "must not paint idle Plan written. Click or /view-plan:\n{text}"
         );
     }
 }

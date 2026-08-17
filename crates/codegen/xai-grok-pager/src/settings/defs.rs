@@ -266,6 +266,26 @@ const PLAN_APPROVAL_PARK_CHOICES: &[EnumChoice] = &[
 
 /// Sticky cancel-subagents preference when cancelling a parent turn.
 /// Canonicals match `[ui].cancel_subagents_on_turn_cancel` / cancel picker.
+/// `[models].default_reasoning_effort`. Baked catalog default is medium
+/// (Grok 4.6 fork contract). Canonicals match `ReasoningEffort` serde.
+const DEFAULT_REASONING_EFFORT_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "low",
+        display: "Low",
+        description: "Quick, fast implementations.",
+    },
+    EnumChoice {
+        canonical: "medium",
+        display: "Medium",
+        description: "Balanced effort (baked Grok 4.6 default).",
+    },
+    EnumChoice {
+        canonical: "high",
+        display: "High",
+        description: "Highest implementation quality with extensive reasoning.",
+    },
+];
+
 const CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "ask",
@@ -1262,6 +1282,25 @@ pub fn default_settings() -> Vec<SettingMeta> {
             kind: SettingKind::DynamicEnum {
                 default: "",
                 source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned `[models].default_reasoning_effort`. Fork contract:
+        // baked Grok 4.6 defaults to medium. Unset in TOML uses the baked
+        // card; this row is the operator override.
+        SettingMeta {
+            key: "default_reasoning_effort",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Default reasoning effort",
+            description: "Reasoning effort for the default model. Baked default is \
+                          medium on Grok 4.6. Persisted as [models].default_reasoning_effort.",
+            keywords: &["effort", "reasoning", "default", "model", "medium", "think"],
+            kind: SettingKind::Enum {
+                default: "medium",
+                choices: DEFAULT_REASONING_EFFORT_CHOICES,
                 supports_preview: false,
             },
             restart_required: false,

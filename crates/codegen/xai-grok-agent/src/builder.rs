@@ -1247,16 +1247,53 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 /// "explore", "plan"). If custom child-visible subagent types become common,
 /// consider generating this list dynamically like the parent description does.
 const CHILD_TASK_DESCRIPTION: &str = "\
-Launch a specialist (L3) for an independent sub-task that needs its own context.\n\
+Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-You are L2. Whenever work is to be done and tools are to be called, agents are \
+Whenever work is to be done and tools are to be called, agents are \
 three layers deep. Always. Including implement loops. \
 You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
-Do not compact-and-continue a product restore on L2. No L4.\n\
+Do not compact-and-continue a product restore on L2. \
+Give each L3 a distinct description. One reviewer unless the operator asked for more. \
+Token Economy effort is not reviewer count.\n\
 \n\
 Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+${{ params.task.run_in_background }}: Returns immediately with a subagent_id.";
+
+/// Reviewer rows for an implement loop.
+///
+/// Token Economy implement-loop effort is thoroughness, not reviewer count.
+/// One reviewer unless the operator explicitly asked for more.
+pub fn review_row_count_for_implement_effort(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> u8 {
+    xai_grok_tools::implementations::grok_build::task::admission::review_row_count_for_implement_effort(
+        effort,
+        operator_asked_for_more_reviewers,
+    )
+}
+
+/// Review-row descriptions the implement loop must spawn for this effort.
+///
+/// Token Economy implement-loop effort is thoroughness. This is the
+/// product spawn list the parent Task tool description uses. One reviewer
+/// unless the operator asked for more.
+pub fn implement_loop_review_rows(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> Vec<String> {
+    let n = review_row_count_for_implement_effort(effort, operator_asked_for_more_reviewers);
+    (1..=n)
+        .map(|i| {
+            if n == 1 {
+                "[reviewer] Review implementation".to_string()
+            } else {
+                format!("[reviewer] Review implementation ({i}/{n})")
+            }
+        })
+        .collect()
+}
 /// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its
 /// `${{ tools.by_kind.* }}` template placeholder, so rendering a built-in's
 /// `tools_template` reproduces the placeholders for the CLI's `TemplateRenderer`
@@ -1334,7 +1371,26 @@ pub(crate) fn build_task_description(
         .collect();
     let mut description = xai_tool_types::build_task_description(&descriptors, &TASK_TOOL_NAMING);
     description.push_str(&task_model_guidance(model_slugs));
+    description.push_str(&implement_loop_review_spawn_guidance());
     description
+}
+
+/// Parent Task tool text for the implement-loop Review spawn list.
+///
+/// Live `/implement --effort` (1 through 5) is thoroughness, not reviewer
+/// count. Without an operator ask, one Review row at every setting.
+fn implement_loop_review_spawn_guidance() -> String {
+    let rows = implement_loop_review_rows(2, false);
+    let list = rows
+        .iter()
+        .map(|row| format!("- {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nImplement-loop Review rows: Token Economy implement-loop effort is thoroughness, \
+         not how many Review rows to launch. One reviewer unless the operator asked for more. \
+         Default spawn (effort 1 through 5 when the operator did not ask, including --effort 3):\n{list}"
+    )
 }
 /// Resolve the shell name for the system prompt.
 ///
@@ -1539,6 +1595,73 @@ mod tests {
             .expect("model guidance should render");
         assert!(rendered.contains("omit `child_model` to inherit the parent model"));
         assert!(!rendered.contains("params.task.model"));
+    }
+    #[test]
+    fn implement_loop_effort_two_spawns_one_review_row_unless_operator_asked() {
+        let rows = implement_loop_review_rows(2, false);
+        assert_eq!(
+            rows.len(),
+            1,
+            "implement-loop effort 2 without an operator ask must spawn one Review row, got {}",
+            rows.len()
+        );
+        assert!(
+            rows[0].contains("Review"),
+            "the one default row must be a Review spawn, got {:?}",
+            rows[0]
+        );
+
+        let asked = implement_loop_review_rows(2, true);
+        assert_eq!(
+            asked.len(),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two Review rows"
+        );
+
+        let subagents = vec![entry(
+            "general-purpose",
+            "General-purpose agent.",
+            SubagentSource::Builtin(BuiltinAgentName::GeneralPurpose),
+        )];
+        let desc = build_task_description(&subagents, &[]);
+        assert!(
+            desc.contains(&rows[0]),
+            "parent Task tool description is the implement-loop spawn path and must list the one default Review row, got {desc}"
+        );
+        for extra in asked.iter().skip(1) {
+            assert!(
+                !desc.contains(extra.as_str()),
+                "default parent Task description must not list extra Review rows unless the operator asked, found {extra} in {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked() {
+        assert_eq!(
+            review_row_count_for_implement_effort(2, false),
+            1,
+            "Token Economy effort 2 is thoroughness, not two Review rows"
+        );
+        assert_eq!(
+            review_row_count_for_implement_effort(3, false),
+            1,
+            "effort 3 must not spawn three Review rows unless the operator asked"
+        );
+        assert_eq!(review_row_count_for_implement_effort(1, false), 1);
+        assert_eq!(
+            review_row_count_for_implement_effort(2, true),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("One reviewer unless"),
+            "child task description must teach one reviewer unless the operator asked"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("distinct"),
+            "child task description must require distinct L3 descriptions"
+        );
     }
     #[test]
     fn child_task_description_is_concise() {

@@ -34,6 +34,40 @@
         );
     }
 
+    #[test]
+    fn apply_compaction_started_names_sampling_window_when_catalog_differs() {
+        let mut session = make_session(Some("s1"));
+        session.models.override_context_window(500_000);
+        let mut scrollback = ScrollbackState::new();
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 200_000,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        match last_session_event(&scrollback) {
+            Some(event) => {
+                let msg = event.message();
+                assert!(
+                    msg.contains("sampling window"),
+                    "started banner must name the sampling window AUTO uses: {msg}"
+                );
+                assert!(
+                    msg.contains("200") && msg.to_ascii_lowercase().contains("token"),
+                    "started banner must include the 200k sampling window size: {msg}"
+                );
+                assert!(
+                    !msg.starts_with("Context 100% full."),
+                    "must not say bare Context 100% full when catalog is 500k: {msg}"
+                );
+            }
+            other => panic!("expected CompactionStarted, got {other:?}"),
+        }
+    }
+
     /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
     #[test]
     fn apply_compaction_failed_keeps_held_prompt() {
@@ -705,6 +739,7 @@
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         assert_eq!(
@@ -742,6 +777,7 @@
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         session.finish_turn(&mut scrollback,
@@ -767,6 +803,7 @@
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         match last_session_event(&scrollback) {
@@ -792,6 +829,7 @@
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(
             &update,
@@ -847,6 +885,7 @@
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,
+            saved_too_little: false,
         };
         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
         assert!(changed);
@@ -929,6 +968,7 @@
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,
+            saved_too_little: false,
         };
         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
         // No child_view means nothing visible changed — must not trigger redraw.
@@ -1160,6 +1200,166 @@
         assert!(
             !session.model_incompatible,
             "non-encrypted_content error types must not set model_incompatible"
+        );
+    }
+
+    /// Named contract: hop-to-console plus SuperGrok dollar credits still on
+    /// the account must not keep the SuperGrok dollar credits chip. Default
+    /// AgentView identity is SuperGrok session; compact paint must follow the
+    /// hop destination (console key).
+    #[test]
+    fn active_driver_console_does_not_paint_supergrok_dollar_credits_chip() {
+        use crate::theme::Theme;
+        use crate::views::credit_bar::{
+            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
+            resolve_console_team_prepaid_gap_default,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.sampling_identity,
+                SamplingIdentityKind::SuperGrokSession,
+                "new AgentView must default to SuperGrok session"
+            );
+            agent.credit_balance = Some(CreditBalance {
+                prepaid_balance_cents: Some(26_264),
+                included_usage_known: true,
+                usage_pct: 100.0,
+                effective_usage_pct: 100.0,
+                ..CreditBalance::default()
+            });
+            agent.console_team_prepaid_cents = Some(22_675);
+        }
+
+        handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::RetryState(RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "Switched SuperGrok session → console key (rate limited)".into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.sampling_identity,
+            SamplingIdentityKind::ConsoleKey,
+            "hop-to-console must flip AgentView.sampling_identity so chrome follows the live key"
+        );
+
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            agent.credit_balance.as_ref(),
+            agent.sampling_identity,
+            agent.console_team_prepaid_cents,
+            resolve_console_team_prepaid_gap_default(),
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session must paint a compact credits chip");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("SuperGrok dollar credits")
+                && !text.to_ascii_lowercase().contains("extras"),
+            "after hop to console, compact must not keep SuperGrok dollar credits (or extras): {text}"
+        );
+        assert_eq!(
+            crate::views::credit_bar::active_spend_driver(
+                agent.sampling_identity,
+                true,
+                100.0,
+                Some(26_264),
+            ),
+            crate::views::credit_bar::ActiveSpendDriver::ConsoleKey,
+            "active driver must be the console key after hop, not SuperGrok dollar credits"
+        );
+    }
+
+    /// Named contract: when console is the live key, compact status and
+    /// /limits human copy name console team prepaid / console API credits.
+    #[test]
+    fn compact_status_names_console_team_prepaid_when_console_is_live() {
+        use crate::theme::Theme;
+        use crate::views::credit_bar::{
+            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
+            resolve_console_team_prepaid_gap_default,
+        };
+        use crate::views::limits_snapshot::{
+            LimitsSnapshot, active_driver_line_for_snapshot, format_limits_detail,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.credit_balance = Some(CreditBalance {
+                prepaid_balance_cents: Some(26_264),
+                included_usage_known: true,
+                usage_pct: 100.0,
+                effective_usage_pct: 100.0,
+                ..CreditBalance::default()
+            });
+            agent.console_team_prepaid_cents = Some(22_675);
+        }
+
+        handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::RetryState(RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "Switched SuperGrok session → console key (out of allowance)".into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.sampling_identity, SamplingIdentityKind::ConsoleKey);
+
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            agent.credit_balance.as_ref(),
+            agent.sampling_identity,
+            agent.console_team_prepaid_cents,
+            resolve_console_team_prepaid_gap_default(),
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session must paint a compact credits chip");
+        let compact: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            compact.contains("console") && compact.contains("226.75"),
+            "compact must name console team prepaid when console is live: {compact}"
+        );
+        assert!(
+            !compact.contains("SuperGrok dollar credits")
+                && !compact.to_ascii_lowercase().contains("extras"),
+            "console-live compact must not paint SuperGrok dollar credits: {compact}"
+        );
+
+        let snap = LimitsSnapshot::from_billing(
+            agent.credit_balance.as_ref(),
+            None,
+            agent.sampling_identity,
+        )
+        .with_console_balance_cents(agent.console_team_prepaid_cents);
+        let active = active_driver_line_for_snapshot(&snap);
+        assert_eq!(active, "Active: console key");
+        let limits = format_limits_detail(&snap);
+        assert!(
+            limits.contains("Team prepaid remaining") && limits.contains("$226.75"),
+            "/limits must name console team prepaid when console is live: {limits}"
+        );
+        assert!(
+            !limits.contains("Active: SuperGrok dollar credits"),
+            "/limits Active must not stay on SuperGrok dollar credits after console hop: {limits}"
         );
     }
 

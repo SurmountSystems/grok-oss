@@ -380,6 +380,73 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
     );
 }
 
+/// A single click on a plan body row focuses or scrolls. It must not
+/// enter Commenting or wipe the composer.
+#[test]
+fn plan_row_click_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("keep typing");
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "clicking a plan row must not steal the composer into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typing",
+        "clicking a plan row must leave the composer typeable"
+    );
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &registry,
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "`c` remains the explicit line-comment gesture"
+    );
+}
+
+/// Empty Enter on the default parked Preview stays on Preview.
+/// Commenting is explicit `c` only.
+#[test]
+fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    let viewer = agent.line_viewer.as_ref().expect("preview is open");
+    assert!(
+        viewer.selected_line_range().is_some(),
+        "fixture must have a selected line so Enter would enter Commenting if routed there"
+    );
+    assert!(agent.prompt.text().trim().is_empty());
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("empty Enter must leave the parked plan open");
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "empty Enter on Preview must not enter Commenting"
+    );
+}
+
 /// A lost mouse-up after a track press must not make the next plan-line
 /// click skip gutter / click-to-comment (sticky `is_scrollbar_dragging`).
 #[test]
@@ -420,10 +487,10 @@ fn lost_scrollbar_up_does_not_block_next_line_click() {
         "content Down must still anchor a comment-gutter drag"
     );
     let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_eq!(
+    assert_ne!(
         pav.focus,
         PlanApprovalFocus::Commenting,
-        "content Down must still enter click-to-comment"
+        "content Down must not steal the composer into Commenting"
     );
 }
 
@@ -554,7 +621,7 @@ fn plan_md_preview_mid_compose_a_types_does_not_approve() {
     );
 }
 
-/// Empty-prompt `a` on the isolated plan.md Preview path still Approves.
+/// Empty-prompt `a` on the isolated plan.md Preview path types.
 #[test]
 fn plan_md_preview_empty_a_still_approves() {
     let mut agent = agent_with_scrollable_plan();
@@ -567,9 +634,10 @@ fn plan_md_preview_empty_a_still_approves() {
     let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     let _ = agent.handle_input(&a, &ActionRegistry::defaults());
     assert!(
-        agent.plan_approval_view.is_none(),
-        "empty-prompt `a` on plan.md Preview still Approves"
+        agent.plan_approval_view.is_some(),
+        "empty-prompt `a` on plan.md Preview must type, not Approve"
     );
+    assert_eq!(agent.prompt.text(), "a");
 }
 
 /// Isolated plan.md Preview is non-capturing: a non-accelerator letter types.

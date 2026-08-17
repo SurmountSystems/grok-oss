@@ -318,6 +318,9 @@ pub struct PagerLocalSnapshot {
     /// `AppView::scheduler_background_loops_seed` before the session response
     /// lands. `/loop` reads it to describe where a scheduled fire runs.
     pub scheduler_background_loops: bool,
+    /// `[models].default_reasoning_effort` mirror. `None` = no TOML override
+    /// (baked Grok 4.6 default is medium).
+    pub default_reasoning_effort: Option<String>,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -349,7 +352,19 @@ impl Default for PagerLocalSnapshot {
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
             // Matches `resolve_scheduler_background_loops`'s default.
             scheduler_background_loops: true,
+            default_reasoning_effort: None,
         }
+    }
+}
+
+/// Settings-row canonical for `[models].default_reasoning_effort`.
+/// Unknown or unset folds to the baked Grok 4.6 default (`medium`).
+pub fn canonical_default_reasoning_effort(raw: Option<&str>) -> &'static str {
+    match raw.map(str::trim) {
+        Some("low") => "low",
+        Some("high") => "high",
+        Some("medium") | None => "medium",
+        Some(_) => "medium",
     }
 }
 
@@ -906,6 +921,11 @@ pub fn current_value_for(
         "default_model" => Some(SettingValue::String(
             pager.current_model_name.clone().unwrap_or_default(),
         )),
+        // Baked Grok 4.6 default is medium. Live TOML override is
+        // `[models].default_reasoning_effort`, mirrored on the snapshot.
+        "default_reasoning_effort" => Some(SettingValue::Enum(canonical_default_reasoning_effort(
+            pager.default_reasoning_effort.as_deref(),
+        ))),
         // max_thoughts_width: `u16` widened to `i64`.
         "max_thoughts_width" => Some(SettingValue::Int(ui.max_thoughts_width as i64)),
         // coding_data_sharing: inverts the `_opt_out` bool.
@@ -1201,6 +1221,13 @@ mod tests {
                         "default_model registry default must be empty string — \
                          the live default is resolved dynamically from \
                          cfg.models.default at session start",
+                    );
+                }
+                ("default_reasoning_effort", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "medium",
+                        "default_reasoning_effort registry default must be medium \
+                         (baked Grok 4.6 fork contract)"
                     );
                 }
                 // max_thoughts_width: `u16` widened to `i64`.

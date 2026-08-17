@@ -10,8 +10,8 @@ When plan mode is active, the agent:
 
 1. Reads and searches the codebase to understand existing patterns and architecture
 2. Designs an implementation approach and writes it to the plan file
-3. May ask questions in the plan file or in chat. This fork prefers **freeform** questions. Do not treat the questionnaire modal (`ask_user_question`) as the operator path
-4. Calls `exit_plan_mode` to **present** the plan for your approval. Present is not Approve. Always-approve permission mode does **not** click Approve for you.
+3. May ask questions in the plan file or in chat. This fork prefers **freeform** questions. The questionnaire modal (`ask_user_question`) is `--legacy` only.
+4. Calls `exit_plan_mode` to **present** the plan for your review. Present is not Approve. Always-approve permission mode does **not** click Approve for you. Soft present docks a real right-side pane. It is not a centered overlay that dims the transcript.
 
 Plan mode is read-only except for the plan file: plan-file edits (`plan.md` in the session directory) are auto-approved, and edits to any other file are rejected outright — the tool call fails with a short message naming the plan file as the only editable path. This holds in every permission mode, including always-approve. Separating planning from implementation lets you review and correct the approach before any code is written.
 
@@ -64,55 +64,54 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk, and the TUI opens a scrollable preview of the plan with an action bar along the bottom.
+When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk. Soft present (`plan_approval_park = "soft"`, the default) docks a scrollable plan pane on the **right** of the transcript. The transcript stays visible and is not dimmed. Status says **Plan ready. Side panel open** only when that plan viewer is actually open. Force a covering overlay with `plan_approval_park = "modal"` (or enlarge). The four footer CTAs stay on the pane.
 
 ### Present is not Approve
 
 A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve.
 
-The five primary actions are mouse buttons (primary path) plus keys when the prompt is empty: **Approve**, **Approve with notes**, **Clarify**, **Revise**, **Quit**. Empty `Enter` on the prompt never approves. Use mouse **Approve** or empty-prompt `a`.
+The four primary actions are mouse buttons: **Approve**, **Clarify**, **Revise**, **Exit**. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
 
-If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, revise (send the agent back to planning), clarify, or quit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
+If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, revise (type notes, then send the agent back to planning), clarify, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan
 
-Scroll the plan with the arrow keys or `j`/`k`. The plan panel footer and the composer shortcut row share the same five actions (mouse buttons are the primary path; keys work when the prompt is empty):
+Scroll the plan with the arrow keys or `j`/`k`. Clicking a plan row focuses or scrolls that line. It does **not** enter Commenting and it does not steal the composer. `c` is the explicit line-comment gesture. The right-pane footer and the composer shortcut row share the same four actions (mouse buttons are the primary path; letter keys type):
 
-| Shortcut | Action |
-| -------- | ------ |
-| `a`      | Approve the plan and start building. Pending line comments ride with the approval. |
-| `A`      | Approve with notes. Focus moves to the prompt so you can type notes; press `Enter` to approve and send them. |
-| `?`      | Clarify. Focus moves to the prompt so you can type a question; the agent answers without rewriting the plan. |
-| `s`      | Revise. Sends immediately (typed notes ride along) and the agent rewrites the plan. |
-| `q`      | Quit plan -- abandon the plan without approving and turn plan mode off. |
-| `y`      | Copy the full plan to the clipboard. |
-| `Tab`    | Move focus between the plan preview and the prompt. |
+| Control | Action |
+| ------- | ------ |
+| **Approve** | Approve the plan and start building. Typed notes and pending line comments ride with the approval. |
+| **Clarify** (`?`) | Focus the box so you can type a question; the agent answers without rewriting the plan. |
+| **Revise** | Focus the box in revise mode and wait. Type notes, then press `Enter` to send. An empty Revise click does not submit. |
+| **Exit** | Abandon the plan without approving and turn plan mode off. Empty `Ctrl+C` also exits. |
+| `y` | Copy the full plan to the clipboard. |
+| `Tab` | Move focus between the plan preview and the prompt. |
 
-Empty `Enter` on the prompt never approves. Use mouse **Approve** or empty-prompt `a`.
+Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
 
 ### Screenshots in plan mode
 
-You can paste or attach screenshots while plan approval is open, the same way as the normal chat composer.
+You can paste or attach screenshots while plan approval is open, the same way as the normal chat composer. Plan-review `Event::Paste` and Ctrl+V run the clipboard image probe (including a GNOME screenshot that is pixels, not a file path). Linux empty bracketed paste on the normal composer also probes. Approve and Revise **drain** attached image chips onto the feedback they send. They do not drop those chips.
 
 **TUI self-screenshot:** `/screenshot` or **F9** captures the current pager frame under `$GROK_HOME/screenshots/tui-*.png`. When plan approval is open, that PNG **auto-attaches** to the plan composer so Approve / Revise / Clarify can send it without a separate paste. Outside plan approval the capture is toast plus path only.
 
-Empty `Enter` with no freeform text, no line comments, and no images is still a no-op. Approve without notes via mouse **Approve** or empty-prompt `a`. Attached screenshots ride with Approve, Revise, or Clarify when you submit those actions.
+Empty `Enter` with no freeform text, no line comments, and no images is still a no-op. Approve without notes via the clickable **Approve** button. Attached screenshots ride with Approve, Revise, or Clarify when you submit those actions.
 
-While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you press `a` to approve.
+While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you click **Approve**.
 
 ### Providing Feedback
 
 The approval view has three focus states:
 
-- **Preview**: Scroll the plan and select lines to comment on.
-- **Commenting**: Add an inline comment to the selected line range (press `c`, or `Enter` on a line).
-- **Prompt**: Type freeform revision notes.
+- **Preview**: Scroll the plan. A click on a row stays here (or leaves the composer typeable). It does not enter Commenting.
+- **Commenting**: Add an inline comment to the selected line range. Press `c` for that explicit line-comment gesture. Do not use a row click for this.
+- **Prompt**: Type freeform revision notes (Revise and Clarify). You can also type `also` or `Also` here.
 
-Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate.
+Press `Tab` to switch between the preview and the prompt. When you send feedback (inline comments, freeform notes, or both) the agent receives it and revises the plan. Plan mode stays active so you can iterate.
 
 ### Leaving the Approval View
 
-Press `Esc` to return focus from the prompt to the plan preview. To dismiss the approval without approving or sending feedback, press `q` to quit the plan. Quitting abandons the proposed plan and turns plan mode off.
+Press `Esc` to return focus from the prompt to the plan preview. To dismiss the approval without approving or sending feedback, click **Exit**. That abandons the proposed plan and turns plan mode off. Empty `Ctrl+C` does the same.
 
 ---
 

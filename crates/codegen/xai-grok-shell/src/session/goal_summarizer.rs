@@ -183,6 +183,7 @@ impl ChannelSpawner {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());

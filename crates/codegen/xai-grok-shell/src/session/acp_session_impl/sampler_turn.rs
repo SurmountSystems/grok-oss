@@ -944,6 +944,8 @@ impl SessionActor {
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }
+                    // Cancelled compact must not CompactAndResubmit (that
+                    // re-arms AUTO while the operator is trying to type).
                     return Err(e);
                 }
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
@@ -1732,6 +1734,177 @@ mod ranked_auto_turn_tests {
             "console and personal extras stay off the hop list: {failover:?}"
         );
         assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
+        clear_included_billing_cache();
+    }
+
+    /// False 100% / missing SuperGrok Heavy on both stored logins must not
+    /// flatten Team included remaining to zero and keep the personal SuperGrok
+    /// dollar-credit JWT. SuperGrok Heavy is a distinct weekly pool.
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-team-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-false-100".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-not-win").unwrap());
+
+        // Snapshot shape: both usagePct 100.0, no Heavy field.
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            100.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let mut api_key = Some("tok-personal-false-100".into());
+        let mut failover = vec!["console-must-not-win".into()];
+        let mut session_identity = Some("tok-personal-false-100".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-team-included"),
+            "missing Heavy / false 100% must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+        );
+        assert_eq!(
+            failover,
+            vec!["tok-personal-false-100".to_string()],
+            "personal included remaining is next; console omitted: {failover:?}"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        clear_included_billing_cache();
+    }
+
+    /// Sister snapshot shape: SuperGrok dollar credits remembered on both
+    /// stored logins, `creditUsagePercent` 100.0, SuperGrok Heavy missing.
+    /// Next model turn must hop to Team included remaining, not SuperGrok
+    /// dollar credits.
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-team-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-dollars".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-not-win").unwrap());
+
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            100.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("team-biz", 10_029);
+
+        let mut api_key = Some("tok-personal-dollars".into());
+        let mut failover = vec!["console-must-not-win".into()];
+        let mut session_identity = Some("tok-personal-dollars".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-team-included"),
+            "100% + SuperGrok dollar credits on both + missing Heavy must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+        );
+        assert_eq!(
+            failover,
+            vec!["tok-personal-dollars".to_string()],
+            "personal included remaining is next; SuperGrok dollar credits and console are not primary: {failover:?}"
+        );
+        assert!(
+            !failover.iter().any(|k| k == "console-must-not-win"),
+            "must not hop to console while any stored SuperGrok identity has included remaining"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
         clear_included_billing_cache();
     }
 }

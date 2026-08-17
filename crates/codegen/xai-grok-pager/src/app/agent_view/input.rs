@@ -1,6 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
@@ -707,9 +706,20 @@ impl AgentView {
                         {
                             return outcome;
                         }
+                        if self.plan_approval_view.is_some() && crate::input::key::is_paste_key(key)
+                        {
+                            let clipboard_text =
+                                crate::app::actions::ClipboardTextRead::from_result(
+                                    crate::clipboard::system_clipboard_read_text(),
+                                );
+                            return self.handle_paste_key_deferred(clipboard_text);
+                        }
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
+                        if self.plan_approval_view.is_some() {
+                            return self.route_popup_paste(text);
+                        }
                         self.line_viewer
                             .as_mut()
                             .map_or(InputOutcome::Unchanged, |viewer| {
@@ -944,14 +954,14 @@ impl AgentView {
                                 return InputOutcome::Action(Action::VoiceToggle);
                             }
                             if self.hit_plan_button.contains(mouse.column, mouse.row) {
-                                self.reopen_plan_approval();
+                                self.open_plan_from_view_plan_or_status();
                                 return InputOutcome::Changed;
                             }
                             if self
                                 .hit_plan_approval_status
                                 .contains(mouse.column, mouse.row)
                             {
-                                self.reopen_plan_approval();
+                                self.open_plan_from_view_plan_or_status();
                                 return InputOutcome::Changed;
                             }
                         }
@@ -1103,7 +1113,6 @@ impl AgentView {
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let attachment_change_count = if bracketed_paste_should_probe(text) {
                         crate::clipboard::attachment_probe_gate(Some(text))
                     } else {
@@ -1111,7 +1120,6 @@ impl AgentView {
                     };
                     let (outcome, synchronous_text_insertion) =
                         self.insert_bracketed_prompt_text(text);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if let Some(change_count) = attachment_change_count {
                         self.enqueue_clipboard_attachment_probe(
                             crate::app::actions::ClipboardPasteSource::BracketedInserted {
@@ -1121,8 +1129,6 @@ impl AgentView {
                             change_count,
                         );
                     }
-                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    let _ = synchronous_text_insertion;
                     outcome
                 } else {
                     let consumed = match self.active_pane {

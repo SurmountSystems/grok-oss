@@ -6,9 +6,10 @@
 //! model for compaction, the context bar, and related budgets so turns stay on
 //! the cheap tier.
 //!
-//! **Implement-loop effort** (skill 1–5 reviewer fan-out, not model reasoning
-//! effort) is a separate Token Economy policy under `[token_economy]`: optional
-//! lock and min floor always apply when set; when economic mode is on and
+//! **Implement-loop effort** (skill 1–5 thoroughness, not model reasoning
+//! effort, and not how many Review rows to launch) is a separate Token
+//! Economy policy under `[token_economy]`: optional lock and min floor always
+//! apply when set; when economic mode is on and
 //! `cap_implement_effort_when_economic` is true, the product also applies a hard
 //! ceiling (default 3) and desired inject when missing (default 2). See
 //! [`crate::token_economy`].

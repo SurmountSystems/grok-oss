@@ -55,7 +55,7 @@ async fn plan_revise_empty_enter_does_not_approve() {
     let screen = harness.screen_contents();
 
     assert!(
-        screen.contains("Type revision notes, or press a to approve."),
+        screen.contains("Type revision notes, then press Enter. Click Approve to approve."),
         "empty Enter must toast a nudge, not approve; screen:\n{screen}"
     );
     assert!(

@@ -642,6 +642,7 @@ pub(crate) async fn run_shell_child(
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
+            depth: Some(child_depth),
         },
         ctx.parent_cmd_tx.as_ref(),
     );

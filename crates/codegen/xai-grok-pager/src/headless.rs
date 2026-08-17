@@ -1007,12 +1007,12 @@ pub async fn run_single_turn(
 
     let track_active = std::env::var("GROK_TRACK_HEADLESS").is_ok();
     if track_active {
-        let _ = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
-            session_id: session_id.clone(),
-            pid: std::process::id(),
-            cwd: cwd.display().to_string(),
-            opened_at: chrono::Utc::now(),
-        });
+        let _ = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession::new(
+            session_id.clone(),
+            std::process::id(),
+            cwd.display().to_string(),
+            chrono::Utc::now(),
+        ));
     }
 
     // Seed the reducer's session context BEFORE applying model/effort so a later failure carries it.
@@ -1249,7 +1249,7 @@ pub async fn run_single_turn(
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.grok can't hang exit.
-        let _ = xai_grok_active_sessions::try_unregister(&session_id);
+        let _ = xai_grok_active_sessions::try_unregister(std::process::id(), &session_id);
     }
     // A mid-turn ACP close already reaped above; return that error before the normal outcome.
     if connection_closed {

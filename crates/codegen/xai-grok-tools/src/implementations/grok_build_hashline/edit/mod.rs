@@ -317,6 +317,14 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &joined_path,
+                &ctx,
+                &resources,
+                "hashline_edit",
+            )
+            .await?;
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,

@@ -1,6 +1,36 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
+#[test]
+fn format_restore_elapsed_hour_uses_hours_not_padded_minutes() {
+    let hour = format_restore_elapsed(std::time::Duration::from_secs(3725));
+    assert_eq!(hour, "1h2m");
+    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
+    let mins = format_restore_elapsed(std::time::Duration::from_secs(943));
+    assert_eq!(mins, "15m43s");
+}
+
+#[test]
+fn format_restore_complete_hour_uses_hours_not_padded_minutes() {
+    let hour = format_restore_finalize_status(false, std::time::Duration::from_secs(3725));
+    assert_eq!(hour, "Restore complete (1h2m).");
+    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
+    let incomplete = format_restore_finalize_status(true, std::time::Duration::from_secs(943));
+    assert_eq!(incomplete, "Restore incomplete (15m43s).");
+}
+
+#[test]
+fn session_rpc_timeout_copy_uses_minutes_not_raw_seconds() {
+    let msg = format_session_rpc_timeout("session/new", std::time::Duration::from_secs(180));
+    assert!(
+        msg.contains("timed out after 3m0s"),
+        "180s session RPC floor must print as minutes, got: {msg}"
+    );
+    assert!(
+        !msg.contains("180s") && !msg.contains("180 seconds"),
+        "raw second budget must not leak: {msg}"
+    );
+}
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -659,6 +689,32 @@ fn credit_balance_effective_blends_budget_for_legacy_shape_under_100() {
     assert_eq!(bal.usage_pct, 50.0);
     assert_eq!(bal.effective_usage_pct, 25.0);
 }
+/// Successful TUI `FetchBilling` / `FetchAppBilling` map with a real included
+/// SuperGrok period used percent must paint `N%` on the compact meter, not the
+/// honest-unknown placeholder `...%`. SuperGrok is paid; this is included
+/// SuperGrok period limits, not SuperGrok dollar credits. Chrome must not
+/// invent a percent when usage is actually unknown.
+#[test]
+fn successful_tui_billing_map_paints_included_period_percent_not_ellipsis() {
+    let c = BillingConfig {
+        credit_usage_percent: Some(36.0),
+        ..empty_billing_config()
+    };
+    let bal = credit_balance_from_config(c);
+    assert!(
+        bal.included_usage_known,
+        "TUI billing map must mark included SuperGrok period usage known when credit_usage_percent is present"
+    );
+    assert_eq!(bal.usage_pct, 36.0);
+    let theme = crate::theme::Theme::default();
+    let line = crate::views::credit_bar::credit_bar_line(&bal, false, &theme);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "included SuperGrok period limits · 36%");
+    assert!(
+        !text.contains("...%"),
+        "known included SuperGrok period usage must not paint the unknown placeholder"
+    );
+}
 #[test]
 fn parse_worktree_restore_payload_full() {
     use xai_grok_workspace::session::git::RestoreDegree;
@@ -742,6 +798,57 @@ fn parse_session_load_restore_meta_rejects_unknown_degree() {
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
 }
+/// Changing the Settings "Default reasoning effort" row must write
+/// `[models].default_reasoning_effort` and a live read must see the override.
+#[tokio::test]
+async fn default_reasoning_effort_settings_row_persists_toml_override() {
+    use crate::settings::{current_value_for, PagerLocalSnapshot, SettingValue};
+    use xai_grok_shell::agent::config::UiConfig;
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_shell::util::config::{load_config_from_toml, user_config_path};
+
+    let _home = setup_grok_home_in_tempdir();
+    persist_setting("default_reasoning_effort", SettingValue::Enum("high"))
+        .await
+        .expect("Settings row persist must write [models].default_reasoning_effort");
+
+    let path = user_config_path();
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {} after persist: {e}", path.display()));
+    let root: toml::Value = toml::from_str(&body).expect("config.toml parse");
+    let models = root.get("models").and_then(|v| v.as_table()).unwrap_or_else(|| {
+        panic!("expected [models] table after persist, got:\n{body}")
+    });
+    assert_eq!(
+        models.get("default_reasoning_effort").and_then(|v| v.as_str()),
+        Some("high"),
+        "persist key must be [models].default_reasoning_effort, got:\n{body}"
+    );
+
+    let cfg = load_config_from_toml(&root);
+    assert_eq!(
+        cfg.models.default_reasoning_effort,
+        Some(ReasoningEffort::High),
+        "live config read must see the persisted High override"
+    );
+
+    // Settings modal live-read: seed the snapshot from the loaded config,
+    // same as AppView after startup / setter refresh.
+    let live = cfg
+        .models
+        .default_reasoning_effort
+        .expect("live config read must keep the persist");
+    let snap = PagerLocalSnapshot {
+        default_reasoning_effort: Some(live.to_string().to_ascii_lowercase()),
+        ..Default::default()
+    };
+    assert_eq!(
+        current_value_for("default_reasoning_effort", &UiConfig::default(), &snap),
+        Some(SettingValue::Enum("high")),
+        "live Settings read must show the persisted override, not the baked medium default"
+    );
+}
+
 /// Unknown keys return a descriptive error.
 #[tokio::test]
 async fn persist_setting_unknown_key_returns_err() {
@@ -872,12 +979,12 @@ fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
     let session_id = acp::SessionId::new(id);
     register_in(
             root,
-            ActiveSession {
-                session_id: session_id.clone(),
-                pid: std::process::id(),
-                cwd: "/tmp/test".into(),
-                opened_at: chrono::Utc::now(),
-            },
+            ActiveSession::new(
+                session_id.clone(),
+                std::process::id(),
+                "/tmp/test",
+                chrono::Utc::now(),
+            ),
         )
         .expect("register");
     session_id

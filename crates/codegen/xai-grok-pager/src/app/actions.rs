@@ -582,6 +582,10 @@ pub enum Action {
     /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted
     /// to `[ui].voice_stt_language`. Takes effect for the next voice capture.
     SetVoiceSttLanguage(String),
+    /// Set `[models].default_reasoning_effort` (`low` | `medium` | `high`).
+    /// SHELL-owned; persists via `Effect::PersistSetting`. Live-applied on
+    /// `AppView` so the Settings row reads the override immediately.
+    SetDefaultReasoningEffort(String),
     /// Toggle timestamp display on messages.
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).
@@ -751,6 +755,8 @@ pub enum Action {
     /// tasks as a system block (`/tasks`). The surface minimal mode uses in
     /// place of the `TasksPane`.
     ShowTasks,
+    /// Commit a read-only list of live grok-oss TUI windows (`/running`).
+    ShowRunningSessions,
     /// `/limits` — included SuperGrok period limits, extras, and console meters.
     ShowLimits,
     /// `/spend` — local vs Management spend books.
@@ -772,6 +778,10 @@ pub enum Action {
     CaptureTuiScreenshot,
     /// Interrupt every in-process session and hold queues.
     ToggleGlobalPause,
+    /// Start paused or interrupted work in this process / current session.
+    ///
+    /// `/start` only. Not `/resume` (session picker) and not a pause toggle.
+    StartPausedOrInterruptedWork,
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
@@ -2080,10 +2090,13 @@ pub enum Effect {
     /// Clear the auth copy feedback after a delay if its generation is still current.
     ScheduleClearAuthCopyFeedback { generation: u64 },
     /// Register the current session in the active-sessions crash-recovery
-    /// registry (`~/.grok/active_sessions.json`).
+    /// registry (`~/.grok/active_sessions.json`), then write the first
+    /// heartbeat. Title is read from on-disk summary in the effect handler.
     RegisterActiveSession {
         session_id: acp::SessionId,
         cwd: String,
+        activity: xai_grok_active_sessions::SessionActivity,
+        activity_line: Option<String>,
     },
     /// Unregister a session from the active-sessions registry (clean exit).
     UnregisterActiveSession { session_id: acp::SessionId },

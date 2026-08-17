@@ -42,6 +42,9 @@ use std::io;
 mod child_wait;
 pub use child_wait::{is_child_wait_identity_uncertain, spawn_child_reaper, wait_child_bounded};
 
+mod human_duration;
+pub use human_duration::format_human_duration;
+
 mod process_resources;
 pub use process_resources::{ProcessResources, sample_process_memory, sample_process_resources};
 

@@ -6,7 +6,9 @@
 
 use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
-use crate::app::subagent::format_subagent_label;
+use crate::app::subagent::{
+    format_live_l3_count, format_subagent_label, is_l2_list_row, live_l3_count,
+};
 use crate::util::{format_duration, group_thousands};
 
 /// `/queue` body — a read-only list of the queued prompts.
@@ -82,10 +84,15 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     }
 
     // ── Subagents ──
+    let child_ids: std::collections::HashSet<&str> = agent
+        .subagent_sessions
+        .values()
+        .map(|info| info.child_session_id.as_ref())
+        .collect();
     let mut subs: Vec<_> = agent
         .subagent_sessions
         .values()
-        .filter(|s| s.workflow_run_id.is_none())
+        .filter(|s| s.workflow_run_id.is_none() && is_l2_list_row(s, &child_ids))
         .collect();
     subs.sort_by(|a, b| {
         b.is_running()
@@ -102,10 +109,20 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         } else {
             info.status.as_deref().unwrap_or("done")
         };
-        let label = if desc.is_empty() {
-            type_label
+        let l3 = if info.is_running() {
+            format_live_l3_count(live_l3_count(
+                agent.subagent_sessions.values(),
+                info.child_session_id.as_ref(),
+            ))
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default()
         } else {
-            format!("{type_label} · {desc}")
+            String::new()
+        };
+        let label = if desc.is_empty() {
+            format!("{type_label}{l3}")
+        } else {
+            format!("{type_label} · {desc}{l3}")
         };
         rows.push(format!(
             "  {status:<9}{label}  ({})",

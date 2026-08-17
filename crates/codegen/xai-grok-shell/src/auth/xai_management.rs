@@ -908,7 +908,7 @@ pub fn run_management_key_login(
     let fp = fingerprint_management_key(&key);
     eprintln!("Management API key saved (fingerprint {fp}).");
     eprintln!(
-        "This is for console team prepaid / Business Usage remaining, not SuperGrok $ extras \
+        "This is for console team prepaid / Business Usage remaining, not SuperGrok dollar credits \
          and not the inference XAI_API_KEY."
     );
     // Best-effort live validate on a dedicated runtime (CLI may already be
@@ -968,7 +968,7 @@ pub fn console_team_prepaid_setup_note(
             "Console team prepaid (business credits remaining on console.x.ai) needs a \
              Management API key: Console → Settings → Management Keys, then \
              `grok login --management-key` or [endpoints] management_api_key / \
-             XAI_MANAGEMENT_API_KEY. Not XAI_API_KEY and not SuperGrok $ extras."
+             XAI_MANAGEMENT_API_KEY. Not XAI_API_KEY and not SuperGrok dollar credits."
                 .into(),
         );
     }
@@ -1334,7 +1334,7 @@ pub fn console_team_postpaid_setup_note(
             "Console team postpaid (OAuth vs API Usage dollars on console.x.ai) needs a \
              Management API key: Console → Settings → Management Keys, then \
              `grok login --management-key` or [endpoints] management_api_key / \
-             XAI_MANAGEMENT_API_KEY. Distinct from prepaid remaining and SuperGrok $ extras."
+             XAI_MANAGEMENT_API_KEY. Distinct from prepaid remaining and SuperGrok dollar credits."
                 .into(),
         );
     }
@@ -1998,6 +1998,14 @@ mod tests {
             "{note}"
         );
         assert!(note.contains("not SuperGrok"), "{note}");
+        assert!(
+            note.contains("SuperGrok dollar credits"),
+            "setup note must name SuperGrok dollar credits: {note}"
+        );
+        assert!(
+            !note.to_ascii_lowercase().contains("extras"),
+            "setup note must not teach extras as a nickname: {note}"
+        );
         assert!(
             note.contains("not XAI_API_KEY") || note.contains("Not XAI_API_KEY"),
             "{note}"

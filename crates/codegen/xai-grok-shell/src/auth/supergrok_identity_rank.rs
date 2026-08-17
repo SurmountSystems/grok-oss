@@ -216,11 +216,17 @@ pub fn reset_at_from_period_end(period_end: &str) -> Option<DateTime<Utc>> {
 
 /// Apply included-billing fields onto one headroom row.
 ///
-/// Live billing `usage_pct` is authoritative for included headroom:
-/// - When `usage_pct` is present, remaining always comes from
+/// Live billing `usage_pct` below 100 is authoritative remaining:
+/// - When `usage_pct` is present and below 100, remaining comes from
 ///   [`included_remaining_from_usage_pct`] (period reset / recovery wins over a
 ///   stale out-of-allowance memo so SuperGrok becomes primary again and console
-///   is omitted from the hop chain while free period used percent is below 100).
+///   is omitted from the hop chain while included SuperGrok period used percent
+///   is below 100).
+/// - When `usage_pct` is 100 or above and SuperGrok Heavy is missing, do **not**
+///   invent included SuperGrok period exhaust. SuperGrok Heavy is a distinct
+///   weekly pool; `creditUsagePercent` 100 is not proof that included SuperGrok
+///   period limits are empty. SuperGrok dollar credits on the same row are a
+///   different meter and must not flatten a sibling that still has remaining.
 /// - When `usage_pct` is absent and `memo_exhausted`, force remaining `0`
 ///   (pre-request skip without a fresh poll).
 /// - When `reset_at` is present, it replaces the previous value; missing
@@ -231,8 +237,14 @@ pub fn apply_included_billing_to_headroom(
     memo_exhausted: bool,
 ) {
     if let Some(pct) = fields.usage_pct {
-        // Live included % wins over memo (period reset must put SuperGrok back).
-        headroom.included_remaining = included_remaining_from_usage_pct(pct);
+        if pct < 100.0 {
+            // Live included % below 100 wins over memo (period reset must
+            // put SuperGrok back).
+            headroom.included_remaining = included_remaining_from_usage_pct(pct);
+        }
+        // Else: 100% without SuperGrok Heavy. Keep prior remaining. Do not
+        // flatten on SuperGrok dollar credits; that meter is not included
+        // SuperGrok period limits.
     } else if memo_exhausted {
         headroom.included_remaining = 0;
     }
@@ -1584,6 +1596,519 @@ mod tests {
         assert!(!order.exhausted_all_supergrok_included);
     }
 
+    /// Named contract: rank must not prefer the console key while a stored
+    /// Business login still has included SuperGrok period remaining. Already
+    /// holds in `order_credentials_business_included_before_personal_when_both_have_room`.
+    #[test]
+    fn rank_does_not_prefer_console_while_business_included_period_has_room() {
+        let personal = cand(
+            "personal-1",
+            SupergrokAccountRole::Personal,
+            80,
+            Some(100),
+            "tok-personal-included",
+        );
+        let business = cand(
+            "business-1",
+            SupergrokAccountRole::Business,
+            20,
+            Some(9_000),
+            "tok-business-included",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal, business],
+            &["console-must-wait".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-business-included"),
+            "Business included SuperGrok period limits stay primary while they have remaining: {order:?}"
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-must-wait"),
+            "console omitted while Business included SuperGrok period still has room: {:?}",
+            order.failover
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-wait"),
+            "rank must not prefer console while Business included SuperGrok period has room"
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Named contract: hop list omits console while a stored Business login
+    /// still has included SuperGrok period remaining. Same order as
+    /// `order_credentials_personal_full_with_extras_hops_to_business_included_before_extras`.
+    #[test]
+    fn hop_does_not_switch_to_console_while_stored_business_included_remaining() {
+        let personal_full_with_extras = cand_with_extras(
+            "personal-1",
+            SupergrokAccountRole::Personal,
+            0,
+            Some(1_000),
+            "tok-personal-extras",
+            Some(10_029),
+        );
+        let business_included = cand(
+            "business-1",
+            SupergrokAccountRole::Business,
+            40,
+            Some(2_000),
+            "tok-business-included",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal_full_with_extras, business_included],
+            &["console-after-extras".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-business-included"),
+            "sibling included SuperGrok period limits must beat personal SuperGrok dollar credits: {order:?}"
+        );
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-after-extras" || k == "tok-personal-extras"),
+            "console stays off the hop list while stored Business included remains: {:?}",
+            order.failover
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Team included SuperGrok period remaining + personal exhausted: hop to
+    /// the Team SuperGrok identity. Not personal SuperGrok dollar credits.
+    /// Not console.
+    #[test]
+    fn hop_team_included_remaining_personal_exhausted_not_dollar_credits_or_console() {
+        let personal_exhausted_with_dollars = cand_with_extras(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            0,
+            Some(1_000),
+            "tok-personal-exhausted",
+            Some(10_029),
+        );
+        let team_remaining = cand(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            88,
+            Some(2_000),
+            "tok-team-included",
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[personal_exhausted_with_dollars, team_remaining],
+            &["console-must-wait".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-team-included"),
+            "Team included SuperGrok period remaining must win hop: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-personal-exhausted"),
+            "must not stay on personal SuperGrok dollar credits while Team included remains"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-wait"),
+            "must not hop to console while Team included SuperGrok period remains"
+        );
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-must-wait" || k == "tok-personal-exhausted"),
+            "console and personal dollar credits stay off the hop list: {:?}",
+            order.failover
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Personal included SuperGrok period remaining + Team exhausted: hop to
+    /// the personal SuperGrok identity.
+    #[test]
+    fn hop_personal_included_remaining_team_exhausted_to_personal() {
+        let personal_remaining = cand(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            72,
+            Some(1_000),
+            "tok-personal-included",
+        );
+        let team_exhausted_with_dollars = cand_with_extras(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            0,
+            Some(2_000),
+            "tok-team-exhausted",
+            Some(8_000),
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[team_exhausted_with_dollars, personal_remaining],
+            &["console-must-wait".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-personal-included"),
+            "personal included SuperGrok period remaining must win hop when Team is exhausted: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-team-exhausted"),
+            "must not stay on Team SuperGrok dollar credits while personal included remains"
+        );
+        assert_ne!(order.primary.as_deref(), Some("console-must-wait"));
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-must-wait" || k == "tok-team-exhausted"),
+            "console and Team dollar credits stay off the hop list: {:?}",
+            order.failover
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Both included SuperGrok period pools still have remaining: Team /
+    /// Business first, then personal. Console omitted.
+    #[test]
+    fn hop_both_included_remaining_team_business_first_then_personal() {
+        let personal = cand(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            94,
+            Some(100),
+            "tok-personal-included",
+        );
+        let team = cand(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            12,
+            Some(9_000),
+            "tok-team-included",
+        );
+        let order =
+            order_credentials_for_preferred_auto(&[personal, team], &["console-must-wait".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-team-included"),
+            "Team / Business included SuperGrok period limits first while both have remaining: {order:?}"
+        );
+        assert_eq!(
+            order.failover,
+            vec!["tok-personal-included".to_string()],
+            "personal included is next, not dollar credits or console: {:?}",
+            order.failover
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-must-wait"),
+            "console omitted while any included SuperGrok period pool has remaining"
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(!order.exhausted_all_supergrok_included);
+    }
+
+    /// Both included SuperGrok period pools exhausted: SuperGrok dollar
+    /// credits next, not console primary.
+    #[test]
+    fn hop_both_included_exhausted_supergrok_dollar_credits_before_console() {
+        let personal = cand_with_extras(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            0,
+            Some(1_000),
+            "tok-personal-dollars",
+            Some(10_029),
+        );
+        let team = cand_with_extras(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            0,
+            Some(2_000),
+            "tok-team-no-dollars",
+            Some(0),
+        );
+        let order = order_credentials_for_preferred_auto(
+            &[team, personal],
+            &["console-after-dollars".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-personal-dollars"),
+            "after every included SuperGrok period pool is exhausted, SuperGrok dollar credits stay primary: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-after-dollars"),
+            "console must not lead while SuperGrok dollar credits remain"
+        );
+        assert!(
+            order.failover.iter().any(|k| k == "console-after-dollars"),
+            "console is failover only after SuperGrok dollar credits: {:?}",
+            order.failover
+        );
+        assert!(order.primary_is_supergrok_included);
+        assert!(order.exhausted_all_supergrok_included);
+    }
+
+    /// False 100% / missing SuperGrok Heavy: do not treat
+    /// `creditUsagePercent` 100.0 with no Heavy reading as "no included
+    /// remaining" when a sibling stored SuperGrok login still has remaining.
+    /// SuperGrok Heavy is a distinct weekly pool. Do not flatten Heavy into a
+    /// false 100%. Never invent included SuperGrok period used percent on the
+    /// client.
+    #[test]
+    fn hop_missing_heavy_or_false_100_does_not_exhaust_sibling_with_remaining() {
+        use std::collections::BTreeMap;
+
+        // Honest prior remaining on Team (Usage view / last known included).
+        let team = cand(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            94,
+            Some(1_000),
+            "tok-team-included",
+        );
+        let personal = cand_with_extras(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            1,
+            Some(1_000),
+            "tok-personal-false-100",
+            Some(10_029),
+        );
+        let mut candidates = vec![personal, team];
+        let mut fields = BTreeMap::new();
+        // Snapshot shape: both rows usagePct 100.0, no Heavy field, no
+        // subscriptionTier. That 100% is not proof of included SuperGrok
+        // period exhaust (wrong meter / unknown Heavy).
+        fields.insert(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457".into(),
+            IncludedBillingFields {
+                usage_pct: Some(100.0),
+                reset_at: Some(ts(1_000)),
+                period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                prepaid_balance_cents: Some(10_029),
+                grok_build_usage_pct: None,
+            },
+        );
+        fields.insert(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb".into(),
+            IncludedBillingFields {
+                usage_pct: Some(100.0),
+                reset_at: Some(ts(1_000)),
+                period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                prepaid_balance_cents: None,
+                grok_build_usage_pct: None,
+            },
+        );
+        let _ = enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
+        let team_row = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == "61fab250-b2c1-40cf-b5b8-628e673a2eeb")
+            .expect("team candidate");
+        assert!(
+            team_row.headroom.included_remaining > 0,
+            "must not invent included SuperGrok period used 100% from creditUsagePercent without Heavy; remaining={}",
+            team_row.headroom.included_remaining
+        );
+
+        let order =
+            order_credentials_for_preferred_auto(&candidates, &["console-must-not-win".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-team-included"),
+            "missing Heavy / false 100% must not hop off Team included remaining: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-personal-false-100"),
+            "must not hop to SuperGrok dollar credits on a false 100%"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-not-win"),
+            "must not hop to console on a false 100%"
+        );
+        assert!(
+            !order.exhausted_all_supergrok_included,
+            "a sibling with remaining included SuperGrok period limits is not ExhaustedAll"
+        );
+        assert_eq!(
+            order.failover,
+            vec!["tok-personal-false-100".to_string()],
+            "personal included remaining is next; console omitted: {:?}",
+            order.failover
+        );
+    }
+
+    /// Snapshot shape from sister notes: SuperGrok dollar credits on both
+    /// stored logins, `creditUsagePercent` 100.0 on both, SuperGrok Heavy
+    /// field missing. That must not flatten a sibling that still has included
+    /// SuperGrok period remaining into hop-to-dollar-credits.
+    fn dollar_credits_on_both_missing_heavy_fields(prepaid_cents: i64) -> IncludedBillingFields {
+        IncludedBillingFields {
+            usage_pct: Some(100.0),
+            reset_at: Some(ts(1_000)),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            prepaid_balance_cents: Some(prepaid_cents),
+            grok_build_usage_pct: None,
+        }
+    }
+
+    #[test]
+    fn hop_dollar_credits_on_both_missing_heavy_keeps_team_remaining() {
+        use std::collections::BTreeMap;
+
+        let team = cand_with_extras(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            88,
+            Some(1_000),
+            "tok-team-included",
+            Some(10_029),
+        );
+        let personal = cand_with_extras(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            1,
+            Some(1_000),
+            "tok-personal-dollars",
+            Some(10_029),
+        );
+        let mut candidates = vec![personal, team];
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457".into(),
+            dollar_credits_on_both_missing_heavy_fields(10_029),
+        );
+        fields.insert(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb".into(),
+            dollar_credits_on_both_missing_heavy_fields(10_029),
+        );
+        let _ = enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
+        let team_row = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == "61fab250-b2c1-40cf-b5b8-628e673a2eeb")
+            .expect("team candidate");
+        assert!(
+            team_row.headroom.included_remaining > 0,
+            "100% + SuperGrok dollar credits + missing Heavy must not invent included SuperGrok period exhaust on Team remaining; remaining={}",
+            team_row.headroom.included_remaining
+        );
+
+        let order =
+            order_credentials_for_preferred_auto(&candidates, &["console-must-not-win".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-team-included"),
+            "must hop to stored Team SuperGrok with included remaining, not SuperGrok dollar credits: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-personal-dollars"),
+            "must not hop to SuperGrok dollar credits while Team included remaining stands"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-not-win"),
+            "must not hop to console while any stored SuperGrok identity has included remaining"
+        );
+        assert!(
+            !order.exhausted_all_supergrok_included,
+            "a sibling with remaining included SuperGrok period limits is not ExhaustedAll"
+        );
+        assert_eq!(
+            order.failover,
+            vec!["tok-personal-dollars".to_string()],
+            "personal included remaining is next; SuperGrok dollar credits and console are not primary: {:?}",
+            order.failover
+        );
+        assert!(
+            !order.failover.iter().any(|k| k == "console-must-not-win"),
+            "must not hop to console while any stored SuperGrok identity has included remaining"
+        );
+    }
+
+    #[test]
+    fn hop_dollar_credits_on_both_missing_heavy_keeps_personal_remaining() {
+        use std::collections::BTreeMap;
+
+        // Team prior remaining is already 0 (honest exhaust). Personal still
+        // has remaining. Both rows are the snapshot shape (100%, SuperGrok
+        // dollar credits, missing Heavy). Do not flatten personal remaining.
+        let team = cand_with_extras(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+            SupergrokAccountRole::Business,
+            0,
+            Some(1_000),
+            "tok-team-dollars",
+            Some(8_000),
+        );
+        let personal = cand_with_extras(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457",
+            SupergrokAccountRole::Personal,
+            72,
+            Some(1_000),
+            "tok-personal-included",
+            Some(10_029),
+        );
+        let mut candidates = vec![team, personal];
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "61fab250-b2c1-40cf-b5b8-628e673a2eeb".into(),
+            dollar_credits_on_both_missing_heavy_fields(8_000),
+        );
+        fields.insert(
+            "58c5f686-4270-4d6d-9c3b-df44559f8457".into(),
+            dollar_credits_on_both_missing_heavy_fields(10_029),
+        );
+        let _ = enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
+        let personal_row = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == "58c5f686-4270-4d6d-9c3b-df44559f8457")
+            .expect("personal candidate");
+        assert!(
+            personal_row.headroom.included_remaining > 0,
+            "100% + SuperGrok dollar credits + missing Heavy must not invent included SuperGrok period exhaust on personal remaining; remaining={}",
+            personal_row.headroom.included_remaining
+        );
+
+        let order =
+            order_credentials_for_preferred_auto(&candidates, &["console-must-not-win".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-personal-included"),
+            "must hop to stored personal SuperGrok with included remaining, not SuperGrok dollar credits: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("tok-team-dollars"),
+            "must not hop to Team SuperGrok dollar credits while personal included remaining stands"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-not-win"),
+            "must not hop to console while any stored SuperGrok identity has included remaining"
+        );
+        assert!(!order.exhausted_all_supergrok_included);
+        assert!(
+            !order
+                .failover
+                .iter()
+                .any(|k| k == "console-must-not-win" || k == "tok-team-dollars"),
+            "console and Team SuperGrok dollar credits stay off the hop list: {:?}",
+            order.failover
+        );
+    }
+
     /// Included full but SuperGrok $ extras remain → stay on SuperGrok session;
     /// console only as failover (after-burner).
     #[test]
@@ -1912,7 +2437,10 @@ mod tests {
             },
         );
         let _ = enrich_candidates_with_included_billing(&mut candidates, &fields, |_| false);
-        assert_eq!(candidates[0].headroom.included_remaining, 0);
+        // creditUsagePercent 100 without SuperGrok Heavy is not included
+        // SuperGrok period exhaust. Keep prior remaining (live JWT default 1).
+        assert_eq!(candidates[0].headroom.included_remaining, 1);
+        assert_eq!(candidates[0].headroom.reset_at, Some(ts(9_999)));
 
         // Memo without a live usage reading still forces zero.
         fields.insert(

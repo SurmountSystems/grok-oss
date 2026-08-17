@@ -284,11 +284,28 @@ impl AgentView {
     /// the same prompt widget as the main Prompt pane and need identical
     /// classifier semantics.
     pub(super) fn route_popup_paste(&mut self, text: &str) -> InputOutcome {
+        if let Some(outcome) = self.try_handle_wrap_host_image_paste(text) {
+            return outcome;
+        }
         if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
             return outcome;
         }
-        let _ = self.prompt.handle_paste(text);
-        InputOutcome::Changed
+        let attachment_change_count = if super::bracketed_paste_should_probe(text) {
+            crate::clipboard::attachment_probe_gate(Some(text))
+        } else {
+            None
+        };
+        let (outcome, synchronous_text_insertion) = self.insert_bracketed_prompt_text(text);
+        if let Some(change_count) = attachment_change_count {
+            self.enqueue_clipboard_attachment_probe(
+                crate::app::actions::ClipboardPasteSource::BracketedInserted {
+                    text: text.to_owned(),
+                    insertion: synchronous_text_insertion,
+                },
+                change_count,
+            );
+        }
+        outcome
     }
     /// Returns redraw and completion outcomes only when at least one path resolves.
     ///
@@ -1132,6 +1149,277 @@ pub(super) mod paste_key_tests {
             agent.line_viewer = None;
         });
     }
+    fn park_plan_commenting(agent: &mut AgentView) {
+        let mut view = make_plan_approval_view_state();
+        view.focus = crate::views::plan_approval_view::PlanApprovalFocus::Commenting;
+        view.commenting_range = Some(1..2);
+        agent.plan_approval_view = Some(view);
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(1..2);
+        }
+    }
+
+    fn park_plan_preview(agent: &mut AgentView) {
+        let mut view = make_plan_approval_view_state();
+        view.focus = crate::views::plan_approval_view::PlanApprovalFocus::Preview;
+        agent.plan_approval_view = Some(view);
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Preview;
+        }
+        assert!(
+            agent.line_viewer.is_some(),
+            "default parked plan surface must open the plan preview"
+        );
+    }
+
+    /// Default parked Preview + empty `Event::Paste` + raster hook must
+    /// enqueue the clipboard image probe, same as the typeable composer.
+    #[test]
+    fn event_paste_soft_park_preview_empty_defers_clipboard_image_probe() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_preview(&mut agent);
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect("empty Preview paste with a raster must defer a probe");
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "probe must target the plan composer"
+        );
+    }
+
+    /// Preview-focus Ctrl+V with an image-only clipboard must defer the
+    /// probe, not stop at the line-viewer's text-only ignore.
+    #[test]
+    fn plan_preview_ctrl_v_defers_clipboard_image_probe() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_preview(&mut agent);
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Key(ctrl_v_key()), &ActionRegistry::defaults());
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect("Preview Ctrl+V with a raster must defer a probe");
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "probe must target the plan composer"
+        );
+    }
+
+    /// Commenting + empty `Event::Paste` + raster hook must enqueue the
+    /// clipboard image probe (GNOME screenshot-to-clipboard has no path text).
+    #[test]
+    fn event_paste_plan_commenting_empty_defers_clipboard_image_probe() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_commenting(&mut agent);
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect("empty plan-comment paste with a raster must defer a probe");
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "probe must target the plan composer"
+        );
+    }
+
+    /// Commenting or Notes Ctrl+V with an image-only clipboard must defer
+    /// the probe, not stop at the widget's text-only ignore.
+    #[test]
+    fn plan_feedback_ctrl_v_defers_clipboard_image_probe() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_commenting(&mut agent);
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Key(ctrl_v_key()), &ActionRegistry::defaults());
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect("plan-review Ctrl+V with a raster must defer a probe");
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "probe must target the plan composer"
+        );
+    }
+
+    /// Linux (every OS) empty agent `Event::Paste` + raster must enqueue
+    /// the clipboard image probe. Bracketed Ctrl+V is how many terminals
+    /// deliver a screenshot with no path text.
+    #[test]
+    fn agent_empty_bracketed_paste_defers_probe_for_clipboard_image() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect("empty agent Event::Paste with a raster must defer a probe");
+        assert!(
+            ctx.source.is_bracketed(),
+            "agent Event::Paste must stamp a bracketed probe context"
+        );
+        assert!(matches!(
+            ctx.target,
+            crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+        ));
+    }
+
+    /// Plan composer with a chip: Approve / Revise send those bytes, not
+    /// `images: vec![]`.
+    #[test]
+    fn approve_or_revise_drains_plan_composer_images() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Plan\n\nDrain images\n".into(),
+            )),
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent
+            .prompt
+            .insert_image(pasted)
+            .expect("plan composer must accept the chip");
+        assert_eq!(agent.prompt.images.len(), 1);
+
+        let outcome = agent.request_plan_revise();
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
+                assert_eq!(
+                    images.len(),
+                    1,
+                    "Revise must drain the plan composer chip, not images: vec![]"
+                );
+            }
+            other => panic!("Revise with a chip must Interject the image; got {other:?}"),
+        }
+
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Plan\n\nDrain images\n".into(),
+            )),
+        );
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.comments
+                .push(crate::views::plan_approval_view::PlanComment {
+                    id: 1,
+                    line_range: 1..2,
+                    text: "nit".into(),
+                });
+        }
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent
+            .prompt
+            .insert_image(pasted)
+            .expect("plan composer must accept the chip");
+        let outcome = agent.approve_plan();
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
+                assert_eq!(
+                    images.len(),
+                    1,
+                    "Approve must drain the plan composer chip, not images: vec![]"
+                );
+            }
+            other => panic!("Approve with a chip must Interject the image; got {other:?}"),
+        }
+    }
+
+    /// Clarify must drain composer image chips the same way Approve / Revise
+    /// do, not drop them when restoring the pre-panel stash.
+    #[test]
+    fn clarify_drains_plan_composer_images() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Plan\n\nDrain images on clarify\n".into(),
+            )),
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent
+            .prompt
+            .insert_image(pasted)
+            .expect("plan composer must accept the chip");
+        assert_eq!(agent.prompt.images.len(), 1);
+
+        let outcome = agent.send_plan_questions(Some("what about auth?".into()));
+        match outcome {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
+                assert_eq!(
+                    images.len(),
+                    1,
+                    "Clarify must drain the plan composer chip, not images: vec![]"
+                );
+            }
+            other => panic!("Clarify with a chip must Interject the image; got {other:?}"),
+        }
+    }
+
+    /// Saving a line comment must keep a chip attached during that draft.
+    #[test]
+    fn save_plan_comment_keeps_attached_chip() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_commenting(&mut agent);
+        agent.prompt.set_text("nit on this line");
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent
+            .prompt
+            .insert_image(pasted)
+            .expect("comment draft must accept the chip");
+        assert_eq!(agent.prompt.images.len(), 1);
+
+        let enter = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        let _ = agent.handle_plan_feedback_key(&enter);
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "comment-save must keep the attached chip on the composer"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("comment-save stays on the parked plan");
+        assert_eq!(
+            pav.focus,
+            crate::views::plan_approval_view::PlanApprovalFocus::Preview
+        );
+        assert_eq!(pav.comments.len(), 1);
+    }
+
     #[test]
     fn event_paste_plan_preview_does_not_mutate_hidden_prompt() {
         let mut agent = make_agent();
@@ -2253,7 +2541,6 @@ pub(super) mod paste_key_tests {
     }
     /// Regression: an IME commit delivered as bracketed paste (Otty)
     /// must not attach the unrelated clipboard image.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn agent_bracketed_paste_stamps_ctx_bracketed() {
         let mut agent = make_agent();

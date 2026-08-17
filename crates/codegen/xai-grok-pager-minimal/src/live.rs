@@ -621,7 +621,6 @@ fn render_prompt_info(
     transcript_hint: &str,
     theme: &Theme,
 ) {
-    use xai_grok_pager::views::context_bar::fmt_tokens;
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
@@ -650,19 +649,26 @@ fn render_prompt_info(
             segs.push((label.to_string(), base.fg(color)));
         }
         let used = agent.context_state.as_ref().map(|c| c.used);
-        let total = agent
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or_else(|| agent.session.models.get_context_window());
-        if let (Some(used), Some(total)) = (used, total)
-            && total > 0
+        let catalog = agent.session.models.get_context_window().or_else(|| {
+            agent
+                .context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling = catalog.map(|window| {
+            xai_grok_shell::util::config::apply_economic_context_cap(
+                window,
+                xai_grok_pager::appearance::cache::load_economic_mode(),
+            )
+        });
+        if let Some(used) = used
+            && let Some(chip) =
+                xai_grok_pager::views::context_bar::context_chip_token_text(used, sampling, catalog)
+            && let Some(gate) =
+                xai_grok_pager::views::context_bar::context_chip_gate_window(sampling, catalog)
         {
-            let pct = xai_token_estimation::usage_percentage(used, total);
-            segs.push((
-                format!("{} / {} ({:.0}%)", fmt_tokens(used), fmt_tokens(total), pct),
-                base,
-            ));
+            let pct = xai_token_estimation::usage_percentage(used, gate);
+            segs.push((format!("{chip} ({pct:.0}%)"), base));
         }
     }
     if queued > 0 {

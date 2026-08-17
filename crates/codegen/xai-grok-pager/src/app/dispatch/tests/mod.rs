@@ -11,9 +11,11 @@ mod permissions;
 mod prompt;
 mod rewind;
 mod router;
+mod running;
 mod session;
 mod settings;
 mod soft_stop;
+mod start;
 mod status;
 mod task_result;
 mod transcript;
@@ -181,6 +183,7 @@ fn test_app() -> AppView {
         show_tips: None,
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
+        default_reasoning_effort: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
@@ -398,6 +401,8 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
+        parent_session_id: None,
+        depth: None,
         started_at: std::time::Instant::now(),
         last_progress_at: std::time::Instant::now(),
         finished: false,

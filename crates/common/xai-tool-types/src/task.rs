@@ -470,6 +470,23 @@ pub fn format_subagent_auto_backgrounded(
 /// Render the full model-facing completion block for a finished subagent:
 /// the answer text, a `<subagent_meta>` line carrying run stats, and the
 /// `<subagent_result>` resume footer.
+/// Model-facing `<subagent_meta>` line. Duration is compact human text, not
+/// raw milliseconds, so a model cannot invent a second count from the tag.
+pub fn format_subagent_meta_line(
+    subagent_id: &str,
+    subagent_type: &str,
+    tool_calls: u32,
+    turns: u32,
+    duration_ms: u64,
+) -> String {
+    let duration =
+        xai_tty_utils::format_human_duration(std::time::Duration::from_millis(duration_ms));
+    format!(
+        "<subagent_meta>id={subagent_id}, type={subagent_type}, \
+         tool_calls={tool_calls}, turns={turns}, duration={duration}</subagent_meta>"
+    )
+}
+
 pub fn format_subagent_completed(
     output: &str,
     subagent_id: &str,
@@ -480,11 +497,9 @@ pub fn format_subagent_completed(
     persona: Option<&str>,
 ) -> String {
     let footer = format_resume_footer(subagent_id, subagent_type, persona);
-    format!(
-        "{output}\n\n<subagent_meta>id={subagent_id}, type={subagent_type}, \
-         tool_calls={tool_calls}, turns={turns}, duration_ms={duration_ms}</subagent_meta>\n\n\
-         {footer}"
-    )
+    let meta =
+        format_subagent_meta_line(subagent_id, subagent_type, tool_calls, turns, duration_ms);
+    format!("{output}\n\n{meta}\n\n{footer}")
 }
 
 /// Render a resume footer from bare fields (when [`SubagentCompletedOutput`] is
@@ -1327,6 +1342,27 @@ mod tests {
             status: status.into(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn format_subagent_completed_long_wait_uses_minutes_not_raw_milliseconds() {
+        let text = format_subagent_completed("answer", "sub-1", "explore", 3, 2, 943_000, None);
+        assert!(
+            text.contains("<subagent_meta>"),
+            "expected a meta line, got: {text}"
+        );
+        assert!(
+            text.contains("duration=15m43s"),
+            "943000 ms must print as compact minutes, got: {text}"
+        );
+        assert!(
+            !text.contains("duration_ms="),
+            "raw millisecond field must not leak: {text}"
+        );
+        assert!(
+            !text.contains("943000") && !text.contains("943s") && !text.contains("943 seconds"),
+            "raw millisecond or second count must not leak: {text}"
+        );
     }
 
     #[test]

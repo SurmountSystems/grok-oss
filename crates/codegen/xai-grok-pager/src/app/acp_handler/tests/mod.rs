@@ -88,6 +88,8 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
+        parent_session_id: None,
+        depth: None,
         started_at: Instant::now(),
         last_progress_at: Instant::now(),
         finished: false,
@@ -1315,6 +1317,7 @@ pub(super) fn test_subagent_spawned(
         role: None,
         model: None,
         resumed_from: None,
+        depth: None,
     }
 }
 pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {

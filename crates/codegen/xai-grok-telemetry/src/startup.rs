@@ -593,11 +593,10 @@ impl ReadinessBudget {
 }
 
 pub fn format_duration(d: Duration) -> String {
-    let ms = d.as_millis();
-    if ms < 1000 {
-        format!("{ms}ms")
+    if d.as_millis() < 1000 {
+        format!("{}ms", d.as_millis())
     } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
+        xai_tty_utils::format_human_duration(d)
     }
 }
 

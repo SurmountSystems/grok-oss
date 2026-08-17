@@ -17,11 +17,10 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** — leave plan mode and start implementing
-- **Notes** — approve and send typed notes with the approval
-- **Clarify** — ask a question; do not rewrite the plan
-- **Revise** — send the agent back to rewrite the plan
-- **Quit** — abandon and turn plan mode off
+- **Approve** - leave plan mode and start implementing
+- **Clarify** - ask a question; do not rewrite the plan
+- **Revise** - focus the box and wait for notes, then send the agent back to rewrite the plan
+- **Exit** - abandon and turn plan mode off
 ";
 
 /// Status-line label while plan mode is active without a live reverse-request
@@ -90,9 +89,9 @@ pub enum PlanApprovalFocus {
 
 /// What freeform Enter on the plan-approval prompt means.
 ///
-/// - **Revise** (`s`): ACP `"cancelled"` — rewrite the plan.
-/// - **Questions** (`?` clarify): ACP `"questions"` — answer read-only; do not rewrite.
-/// - **ApproveNotes** (`A`): ACP `"approved"` + notes via approve Interject.
+/// - **Revise**: ACP `"cancelled"` after typed notes (or comments) on Enter.
+/// - **Questions** (`?` clarify): ACP `"questions"`; answer read-only; do not rewrite.
+/// - **ApproveNotes**: ACP `"approved"` + notes via the Approve button or Enter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlanPromptIntent {
     #[default]

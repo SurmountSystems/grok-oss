@@ -203,7 +203,10 @@ fn format_subagent_line(s: &RunningSubagent<'_>) -> String {
         head.push_str(desc);
         head.push('"');
     }
-    format!("- {head} (running for {}s)", s.elapsed_secs)
+    format!(
+        "- {head} (running for {})",
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(s.elapsed_secs))
+    )
 }
 
 /// Common sections in order: Background Tasks → TODO → Subagents.
@@ -351,7 +354,7 @@ mod tests {
         assert!(out.ends_with("</system-reminder>"));
         assert!(out.contains("subagent_id: `019ea7f0-cb66-7aa2-9a09-488a3a795795`"));
         assert!(out.contains("task: \"deploy staging\" (running for 42s)"));
-        assert!(out.contains("subagent_id: `sa-2` (running for 5s)"));
+        assert!(out.contains("subagent_id: `sa-2` (running for 5.0s)"));
         assert!(!out.contains("task-019ea7f0"));
         assert!(!out.contains("type:"));
     }
@@ -370,8 +373,28 @@ mod tests {
         };
         let out = format_active_agent_reminder(&state, Some(&tools_renamed())).expect("reminder");
         assert!(out.contains(
-            "- subagent_id: `sub-1`, type: `explore`, task: \"find files\" (running for 5s)"
+            "- subagent_id: `sub-1`, type: `explore`, task: \"find files\" (running for 5.0s)"
         ));
+    }
+
+    #[test]
+    fn long_running_subagent_uses_minutes_not_raw_seconds() {
+        let agents = [RunningSubagent {
+            subagent_id: "sub-long",
+            subagent_type: Some("explore"),
+            description: Some("compiled from src/systems"),
+            elapsed_secs: 943,
+        }];
+        let state = ActiveAgentReminderState {
+            running_subagents: &agents,
+            ..Default::default()
+        };
+        let out = format_active_agent_reminder(&state, Some(&tools_native())).expect("reminder");
+        assert!(
+            out.contains("(running for 15m43s)"),
+            "943 seconds must read as minutes: {out}"
+        );
+        assert!(!out.contains("943s") && !out.contains("943 seconds"));
     }
 
     #[test]

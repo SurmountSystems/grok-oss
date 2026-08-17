@@ -403,6 +403,26 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub context_window: u64,
     pub percentage: u8,
 }
+
+/// AUTO full-replace must drop at least this many tokens to count as useful.
+/// Same spirit as intra-compaction `min_compactable_tokens`.
+pub(crate) const AUTO_COMPACT_MIN_USEFUL_DROP_TOKENS: u64 = 5_000;
+
+/// After tokens must be at most this fraction of before (20% minimum reduction).
+/// Same spirit as intra-compaction `max_reduction_ratio`.
+pub(crate) const AUTO_COMPACT_MAX_REMAINING_RATIO: f64 = 0.8;
+
+/// Whether an AUTO full-replace drop is large enough to keep compacting.
+pub(crate) fn auto_compact_savings_are_useful(tokens_before: u64, tokens_after: u64) -> bool {
+    if tokens_before == 0 {
+        return false;
+    }
+    let dropped = tokens_before.saturating_sub(tokens_after);
+    if dropped < AUTO_COMPACT_MIN_USEFUL_DROP_TOKENS {
+        return false;
+    }
+    (tokens_after as f64) <= (tokens_before as f64) * AUTO_COMPACT_MAX_REMAINING_RATIO
+}
 /// Why auto-compaction was suppressed after a deterministic failure.
 /// [`SuppressReason::as_str`] is a stable telemetry value (BQ/OTLP/dashboards key
 /// off it) — don't rename the strings.
@@ -603,12 +623,22 @@ impl SessionActor {
             tokens_after,
             elapsed_ms: None,
             summary_preview: None,
+            saved_too_little: false,
         })
         .await;
         Ok(())
     }
     async fn emit_compact_cancelled(&self, auto_trigger: bool) -> Result<(), acp::Error> {
         if auto_trigger {
+            // Hold AUTO for the rest of this turn. A fresh enter after the
+            // cancel scope drops would otherwise start compact again while
+            // usage is still over threshold (cancel / Compacting... loop).
+            let _ = self.compaction.auto_compact_suppressed.compare_exchange(
+                SUPPRESS_NONE,
+                SUPPRESS_TURN,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
             self.send_xai_notification(XaiSessionUpdate::AutoCompactCancelled {
                 reason: crate::extensions::notification::AutoCompactCancelReason::UserCancelled,
@@ -712,6 +742,11 @@ impl SessionActor {
             Self::classify_suppress_reason(&Self::acp_error_message(err)),
             SuppressReason::Auth
         )
+    }
+    /// User/stop cancelled this compact generation (`compact cancelled`).
+    pub(crate) fn is_compact_cancelled_error(err: &acp::Error) -> bool {
+        Self::acp_error_message(err)
+            .contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
     }
     /// Terminal auth compact failure: emit RetryState auth (reauth stash) + auth_required.
     /// Separate from `AutoCompactFailed` (user-facing); this aborts the turn.
@@ -1787,6 +1822,30 @@ impl SessionActor {
         compaction.complete(tokens_after);
         Ok(())
     }
+
+    /// Record AUTO full-replace savings. Keeps the replacement. Tiny savings
+    /// sticky-suppress further AUTO for this session.
+    pub(crate) fn record_auto_compact_savings(
+        &self,
+        tokens_before: u64,
+        tokens_after: u64,
+    ) -> bool {
+        let useful = auto_compact_savings_are_useful(tokens_before, tokens_after);
+        if useful {
+            self.compaction
+                .last_auto_compact_saved_too_little
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        self.compaction
+            .auto_compact_suppressed
+            .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .last_auto_compact_saved_too_little
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        false
+    }
+
     /// Check if auto-compact should be triggered based on context window usage.
     /// Returns Some(AutoCompactTriggerInfo) if threshold is reached, None otherwise.
     pub(crate) fn should_auto_compact(
@@ -1869,6 +1928,19 @@ impl SessionActor {
             .load(std::sync::atomic::Ordering::Relaxed)
             != SUPPRESS_NONE
         {
+            if self
+                .compaction
+                .last_auto_compact_saved_too_little
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && self
+                    .should_auto_compact(estimated_total, context_window)
+                    .is_some()
+            {
+                self.send_xai_notification(
+                    crate::extensions::notification::SessionUpdate::AutoCompactSkippedTinySavings,
+                )
+                .await;
+            }
             return None;
         }
         if self
@@ -1958,6 +2030,9 @@ impl SessionActor {
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .last_auto_compact_saved_too_little
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if prev.context_window <= cfg.context_window.get() {
             return Ok(());
         }
@@ -2064,11 +2139,14 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
+                let useful =
+                    self.record_auto_compact_savings(trigger_info.tokens_used, tokens_after);
                 self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
                     tokens_before: Some(trigger_info.tokens_used),
                     tokens_after,
                     elapsed_ms: Some(elapsed_ms),
                     summary_preview: None,
+                    saved_too_little: !useful,
                 })
                 .await;
                 Ok(())

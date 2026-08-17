@@ -248,12 +248,20 @@ pub(crate) fn resolve_model_catalog(
         }
     }
 
-    if let Some(effort) = cfg.models.default_reasoning_effort
-        && let Some(default_id) = cfg.models.default.as_deref()
-        && let Some(entry) = catalog.get_mut(default_id)
-        && entry.info.supports_reasoning_effort
-    {
-        entry.info.reasoning_effort = Some(effort);
+    // Operator `[models].default_reasoning_effort` stamps the resolved
+    // default model. When `models.default` is unset, that is the baked
+    // catalog default (Grok 4.6). Baked card effort is medium.
+    if let Some(effort) = cfg.models.default_reasoning_effort {
+        let default_id = cfg
+            .models
+            .default
+            .as_deref()
+            .unwrap_or_else(|| crate::models::default_model());
+        if let Some(entry) = catalog.get_mut(default_id)
+            && entry.info.supports_reasoning_effort
+        {
+            entry.info.reasoning_effort = Some(effort);
+        }
     }
 
     if let Some(effort) = cfg.reasoning_effort_override {

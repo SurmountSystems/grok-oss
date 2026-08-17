@@ -631,3 +631,161 @@
         );
     }
 
+    fn assert_exit_plan_approved(
+        rx: tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
+    ) {
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(
+            parsed["outcome"], "approved",
+            "Approve must complete x.ai/exit_plan_mode as approved; got {parsed:?}"
+        );
+    }
+
+    /// `/view-plan` after the live present panel is dismissed must reopen
+    /// that waiter. Approve must complete the reverse-request. Do not invent
+    /// a local idle park whose Approve does nothing to the tool.
+    #[test]
+    fn view_plan_slash_binds_approve_to_live_exit_plan_mode_waiter() {
+        use crate::app::actions::Action;
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "call-view-plan-waiter", "CreatePlan");
+            agent.plan_mode_active = true;
+        }
+        let (ext, rx) =
+            make_exit_plan_ext_with_tool_call_id("call-view-plan-waiter", Some("# Live waiter"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "fixture: live exit_plan_mode waiter is parked"
+            );
+            agent.cancel_line_viewer();
+            assert!(agent.line_viewer.is_none(), "fixture: panel dismissed");
+        }
+
+        let _ = dispatch(Action::ShowPlan, &mut app);
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("/view-plan must reopen the live waiter park");
+        assert!(
+            !pav.is_local_idle_decision,
+            "/view-plan must not replace the live waiter with a local idle park"
+        );
+        assert!(
+            pav.response_tx.is_some(),
+            "/view-plan must keep the live reverse-request channel"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.feedback_active()),
+            "/view-plan must open the live waiter panel with Approve bound"
+        );
+
+        agent.approve_plan();
+        assert_exit_plan_approved(rx);
+    }
+
+    /// Status click uses the same bind as `/view-plan`: reopen the live
+    /// waiter, do not open a second view-only panel.
+    #[test]
+    fn plan_status_click_binds_approve_to_live_exit_plan_mode_waiter() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "call-status-waiter", "CreatePlan");
+            agent.plan_mode_active = true;
+        }
+        let (ext, rx) =
+            make_exit_plan_ext_with_tool_call_id("call-status-waiter", Some("# Status waiter"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.cancel_line_viewer();
+            // Status click / plan-chip path (`open_plan_from_view_plan_or_status`).
+            agent.open_plan_from_view_plan_or_status();
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("status click must reopen the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "status click must open the live waiter panel"
+            );
+            agent.approve_plan();
+        }
+        assert_exit_plan_approved(rx);
+    }
+
+    /// `/view-plan` while a subagent is focused must still bind to the live
+    /// parent `exit_plan_mode` waiter. Do not park a local idle on the child
+    /// whose Approve leaves the tool waiting.
+    #[test]
+    fn view_plan_from_subagent_binds_to_parent_live_waiter() {
+        use crate::app::actions::Action;
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_parent_and_child("sess-1", "child-sess");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "call-parent-waiter", "CreatePlan");
+            agent.plan_mode_active = true;
+        }
+        let (ext, rx) =
+            make_exit_plan_ext_with_tool_call_id("call-parent-waiter", Some("# Parent waiter"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.cancel_line_viewer();
+            agent.active_subagent = Some("child-sess".into());
+        }
+
+        let _ = dispatch(Action::ShowPlan, &mut app);
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_views
+                .get("child-sess")
+                .is_some_and(|c| c.plan_approval_view.is_none()
+                    || c.plan_approval_view
+                        .as_ref()
+                        .is_some_and(|p| !p.is_local_idle_decision)),
+            "/view-plan must not invent a child local-idle park"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("/view-plan must keep the parent live waiter");
+        assert!(!pav.is_local_idle_decision);
+        assert!(pav.response_tx.is_some());
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.feedback_active()),
+            "/view-plan must open the parent live waiter panel"
+        );
+        agent.approve_plan();
+        assert_exit_plan_approved(rx);
+    }
+

@@ -115,7 +115,11 @@ impl AgentView {
 
         // Isolated plan.md / side panel is visual. Printable keys and
         // Backspace stay on the composer so present never steals typing.
-        // Empty-prompt a/A/?/s/q still decide via handle_plan_feedback_key.
+        // Letter CTA keys type. `?` still arms Clarify. `c` is the
+        // explicit line-comment gesture (clicking a row is not).
+        if in_plan_approval && key!('c').matches(key) {
+            return self.enter_plan_commenting();
+        }
         if in_plan_approval && plan_preview_key_is_composer_text(key) {
             return self.handle_plan_feedback_key(key);
         }
@@ -170,32 +174,12 @@ impl AgentView {
             return self.send_casual_plan_comments();
         }
 
-        if in_plan_approval && key!('a').matches(key) {
-            return self.approve_plan();
-        }
-        if in_plan_approval
-            && key.code == KeyCode::Char('A')
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-        {
-            return self.focus_plan_prompt(
-                crate::views::plan_approval_view::PlanPromptIntent::ApproveNotes,
-            );
-        }
         if in_plan_approval
             && key.code == KeyCode::Char('?')
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
         {
             return self
                 .focus_plan_prompt(crate::views::plan_approval_view::PlanPromptIntent::Questions);
-        }
-
-        // Decisive Revise: send cancelled immediately (not a prompt-focus hop).
-        if in_plan_approval && key!('s').matches(key) {
-            return self.request_plan_revise();
-        }
-
-        if in_plan_approval && key!('q').matches(key) {
-            return self.abandon_plan();
         }
 
         if !in_plan_approval
@@ -209,7 +193,9 @@ impl AgentView {
 
         if key!(Enter).matches(key) {
             if in_plan_approval {
-                return self.enter_plan_commenting();
+                // Commenting is explicit `c` only. Empty Enter on Preview
+                // must not steal the parked surface.
+                return InputOutcome::Changed;
             }
             if self.is_plan_viewer() {
                 return self.enter_casual_plan_commenting();
@@ -556,7 +542,9 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.request_plan_revise();
+                        return self.focus_plan_prompt(
+                            crate::views::plan_approval_view::PlanPromptIntent::Revise,
+                        );
                     }
                     return self.send_casual_plan_comments();
                 }
@@ -786,7 +774,6 @@ impl AgentView {
 
         // Forward to ListPaneState if inside the popup area.
         let mut should_enter_commenting = false;
-        let mut should_enter_plan_commenting = false;
         if let Some(area) = popup_area
             && area.contains((mouse.column, mouse.row).into())
         {
@@ -810,11 +797,10 @@ impl AgentView {
 
                 viewer.plan_mut().last_click_at = Some(std::time::Instant::now());
 
-                // A single click on any list row — source line OR
-                // existing comment annotation — enters commenting (or
-                // edit-comment) for that row. Same shortcut as
-                // selecting + pressing `c` / Enter. Works for both
-                // plan-approval and casual plan-preview modes.
+                // A single click on a plan-approval row focuses or
+                // scrolls. It does not enter Commenting (that steals
+                // the composer). Casual preview still uses click-to-
+                // comment. Explicit `c` still comments.
                 // Skip Mermaid affordance rows (button hits handled above).
                 let on_list_row = mouse.row >= area.y && {
                     let ry = (mouse.row - area.y) as usize;
@@ -849,20 +835,14 @@ impl AgentView {
                     && viewer.list_state.input_mode().is_none()
                     && !in_pav_commenting
                     && !in_casual_commenting
+                    && self.plan_approval_view.is_none()
                 {
-                    if self.plan_approval_view.is_some() {
-                        should_enter_plan_commenting = true;
-                    } else {
-                        should_enter_commenting = true;
-                    }
+                    should_enter_commenting = true;
                 }
             }
         }
         if should_enter_commenting {
             return self.enter_casual_plan_commenting();
-        }
-        if should_enter_plan_commenting {
-            return self.enter_plan_commenting();
         }
         InputOutcome::Changed
     }

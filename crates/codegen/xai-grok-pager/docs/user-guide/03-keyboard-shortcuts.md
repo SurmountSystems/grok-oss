@@ -206,11 +206,11 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+M` | Agent screen | Open the model picker / switch model |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
 | `Ctrl+C` | Agent screen | Hard cancel the current turn (or clear a non-empty draft first; see Escape table). Same action as the turn-status **`[stop]`** chip while a turn is running. |
-| `Ctrl+Shift+Space` | Always | Pause or resume **all** in-process agent sessions (not only the focused one). Cancels in-flight turns, holds queues, then resumes unfinished work once. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. Soft-stop paint is not this control. |
+| `Ctrl+Shift+Space` | Always | Pause or resume **all** in-process agent sessions (not only the focused one). Cancels in-flight turns, holds queues, then resumes unfinished work once. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. Soft-stop paint is not this control. `/start` also unpauses or continues interrupted work; it does not toggle pause on. |
 | `Ctrl+Shift+S` | Always | **Soft stop** (chord only): after the current top-level turn finishes, queued work does not start. Does not cancel mid-flight. There is no soft-stop button. |
 | `F9` | Always | Capture the current TUI frame as a PNG (`/screenshot`). When plan approval is open, the PNG auto-attaches to the plan composer. |
 | `Ctrl+O` | Agent screen | Toggle always-approve (YOLO) mode |
-| `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
+| `Ctrl+S` | Agent screen | Open the session picker (same as `/resume`). `/start` does not open this picker. |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
 | `Shift+Tab` | Prompt focused | Cycle mode (Normal → Plan → Always-approve) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
@@ -262,17 +262,16 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 ## Plan approval keys
 
-When plan approval is open and the prompt is empty, the five buttons also have keys. Mouse is the primary path. See [Plan mode](19-plan-mode.md).
+When plan approval is open, letter keys type into the prompt and the plan pane box. Mouse is the primary path for **Approve**, **Clarify**, **Revise**, and **Exit**. See [Plan mode](19-plan-mode.md).
 
 | Key | Action |
 |-----|--------|
-| `a` | Approve |
-| `A` | Approve with notes |
-| `?` | Clarify |
-| `s` | Revise |
-| `q` | Quit |
+| letters | Type (including `a` / `A`). They do not Approve or open notes. |
+| `?` | Clarify (focus the box for a question) |
+| `Tab` | Move focus between the plan preview and the prompt |
+| empty `Ctrl+C` | Exit (abandon the plan) |
 
-Empty `Enter` never approves a plan. Use mouse **Approve** or empty-prompt `a`.
+Empty `Enter` never approves a plan. Use the clickable **Approve** button.
 
 ## During an active turn (agent running)
 

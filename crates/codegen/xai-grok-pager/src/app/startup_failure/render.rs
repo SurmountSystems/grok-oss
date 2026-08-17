@@ -194,5 +194,6 @@ fn agent_name(agent: AgentKind) -> &'static str {
 
 /// Rounded: a truncated total can print smaller than the steps it sums.
 pub(super) fn whole_seconds(wait: Duration) -> String {
-    format!("{}s", (wait.as_millis() + 500) / 1000)
+    let rounded = Duration::from_millis(((wait.as_millis() + 500) / 1000 * 1000) as u64);
+    xai_tty_utils::format_human_duration(rounded)
 }

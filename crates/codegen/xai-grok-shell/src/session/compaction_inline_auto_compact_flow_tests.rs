@@ -123,6 +123,7 @@ async fn create_test_actor(
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: xai_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
@@ -574,6 +575,235 @@ async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
         })
         .await;
 }
+/// A user-cancelled auto-compact must not immediately re-arm AUTO. Context
+/// still over threshold (including "100% full") used to call compact again
+/// on the same turn via pre-sampling and the sampling-error recovery path.
+#[tokio::test(flavor = "current_thread")]
+async fn user_cancelled_auto_compact_does_not_immediately_rearm() {
+    use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_TURN};
+    use crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG;
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+            // Over the 200k window (display 100% full). Threshold 85% still fires.
+            let actor = create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            let overflow = api_error_with_context_window(200_000);
+            assert!(
+                actor.check_auto_compact_needed().await.is_some(),
+                "100% full must still be over the auto-compact threshold"
+            );
+            assert!(
+                actor.should_compact_on_error(&overflow).await,
+                "overflow recovery must be armed before cancel"
+            );
+
+            let err = actor.emit_compact_cancelled(true).await.unwrap_err();
+            let msg = err
+                .data
+                .as_ref()
+                .and_then(|d| d.as_str())
+                .unwrap_or_default();
+            assert!(
+                msg.contains(COMPACT_CANCELLED_MSG),
+                "cancel must return the stable compact-cancelled payload, got {msg:?}"
+            );
+            assert_eq!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_TURN,
+                "user cancel must suppress AUTO for the rest of this turn"
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "cancelled auto-compact must not re-arm pre-sampling compact"
+            );
+            assert!(
+                !actor.should_compact_on_error(&overflow).await,
+                "cancelled auto-compact must not re-arm overflow recovery compact"
+            );
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "cancelled auto-compact must not re-arm preflight overflow compact"
+            );
+
+            let mut saw_cancelled = false;
+            let mut saw_failed = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) =
+                    msg
+                {
+                    match &notif.update {
+                        crate::extensions::notification::SessionUpdate::AutoCompactCancelled {
+                            ..
+                        } => saw_cancelled = true,
+                        crate::extensions::notification::SessionUpdate::AutoCompactFailed {
+                            ..
+                        } => saw_failed = true,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(saw_cancelled, "user cancel must emit AutoCompactCancelled");
+            assert!(!saw_failed, "user cancel must not emit AutoCompactFailed");
+
+            // Next user turn may retry: the per-turn reset is the intended re-arm.
+            let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
+                SUPPRESS_TURN,
+                SUPPRESS_NONE,
+                Relaxed,
+                Relaxed,
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_some(),
+                "a later user turn may auto-compact again after the per-turn reset"
+            );
+        })
+        .await;
+}
+#[test]
+fn auto_compact_198k_to_190k_is_not_useful() {
+    assert!(
+        !super::auto_compact_savings_are_useful(198_300, 190_300),
+        "8k of 198.3k is under 20% and must not count as useful AUTO savings"
+    );
+}
+
+#[test]
+fn auto_compact_200k_to_12k_is_useful() {
+    assert!(
+        super::auto_compact_savings_are_useful(200_000, 12_000),
+        "a 200k to 12k drop must stay on the useful AUTO success path"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compact_tiny_savings_sets_sticky_and_does_not_rearm() {
+    use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_STICKY};
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(198_300, 200_000, 95, gateway_tx, persistence_tx).await;
+            assert!(
+                actor.check_auto_compact_needed().await.is_some(),
+                "198.3k of a 200k sampling window must still arm AUTO"
+            );
+            let useful = actor.record_auto_compact_savings(198_300, 190_300);
+            assert!(!useful, "198.3k to 190.3k must not be useful savings");
+            assert_eq!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_STICKY,
+                "tiny AUTO savings must sticky-suppress further AUTO"
+            );
+            assert_ne!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_NONE
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "tiny-savings sticky must not start another AUTO compact"
+            );
+            assert!(
+                !actor
+                    .should_compact_on_error(&api_error_with_context_window(200_000))
+                    .await,
+                "tiny-savings sticky must not re-arm overflow recovery compact"
+            );
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "tiny-savings sticky must not re-arm preflight overflow compact"
+            );
+
+            let mut saw_skip = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) =
+                    msg
+                {
+                    if matches!(
+                        &notif.update,
+                        crate::extensions::notification::SessionUpdate::AutoCompactSkippedTinySavings
+                    ) {
+                        saw_skip = true;
+                    }
+                    if let crate::extensions::notification::SessionUpdate::AutoCompactStarted {
+                        ..
+                    } = &notif.update
+                    {
+                        panic!("tiny-savings skip must not paint AutoCompactStarted");
+                    }
+                }
+            }
+            assert!(
+                saw_skip,
+                "next AUTO check after tiny savings must say auto-compact is skipped because the last compact saved too little"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compact_useful_savings_does_not_set_tiny_savings_sticky() {
+    use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_STICKY};
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(12_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor
+                .compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_NONE, Relaxed);
+            let useful = actor.record_auto_compact_savings(200_000, 12_000);
+            assert!(useful, "200k to 12k must stay on the useful success path");
+            assert_eq!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_NONE,
+                "useful savings must not set tiny-savings sticky"
+            );
+            assert_ne!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_STICKY,
+                "useful savings must not set sticky just because AUTO finished"
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "12k of 200k is under threshold; AUTO must not fire from useful savings"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inherited_prefix_still_over_sticky_survives_useful_savings() {
+    use crate::session::compaction_config::SUPPRESS_STICKY;
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(12_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor
+                .compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_STICKY, Relaxed);
+            let useful = actor.record_auto_compact_savings(200_000, 12_000);
+            assert!(useful);
+            assert_eq!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_STICKY,
+                "useful savings must not clear inherited-prefix still-over sticky"
+            );
+        })
+        .await;
+}
+
 #[test]
 fn is_auth_compact_error_classifies_401_messages() {
     let auth =

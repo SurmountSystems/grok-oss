@@ -58,6 +58,7 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod running;
 pub mod screen_mode_switch;
 pub mod screenshot;
 pub mod scroll_debug;
@@ -65,6 +66,7 @@ pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
 pub mod spend;
+pub mod start;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -129,6 +131,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(resume::ResumeCommand),
+        Arc::new(start::StartCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
@@ -154,6 +157,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(spend::SpendCommand),
         Arc::new(queue::QueueCommand),
         Arc::new(tasks::TasksCommand),
+        Arc::new(running::RunningCommand),
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
@@ -307,6 +311,21 @@ mod tests {
         let cmd = home::HomeCommand;
         let result = cmd.run(&mut ctx, "");
         assert!(matches!(result, CommandResult::Action(Action::ExitSession)));
+    }
+    #[test]
+    fn start_returns_start_paused_or_interrupted_work_action() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        let result = start::StartCommand.run(&mut ctx, "");
+        assert!(matches!(
+            result,
+            CommandResult::Action(Action::StartPausedOrInterruptedWork)
+        ));
+        let resume = resume::ResumeCommand.run(&mut ctx, "");
+        assert!(
+            matches!(resume, CommandResult::Action(Action::ShowSessionPicker)),
+            "/start must not be an alias of /resume"
+        );
     }
     #[test]
     fn delete_requires_session_and_dispatches() {
@@ -643,6 +662,19 @@ mod tests {
         assert!(
             reg.get("tasks").is_some(),
             "/tasks should be registered in builtins"
+        );
+    }
+    #[test]
+    fn running_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("running").is_some(),
+            "/running should be registered in builtins"
+        );
+        assert_eq!(
+            reg.get("windows").map(|c| c.name()),
+            Some("running"),
+            "/windows should alias /running"
         );
     }
     #[test]

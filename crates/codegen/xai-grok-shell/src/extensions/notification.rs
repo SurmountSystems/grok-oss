@@ -492,7 +492,13 @@ pub enum SessionUpdate {
         elapsed_ms: Option<i64>,
         /// Summary preview (first ~100 chars of summary)
         summary_preview: Option<String>,
+        /// Replacement stayed in history, but the drop was not useful.
+        /// Further AUTO is sticky-suppressed for this session.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saved_too_little: bool,
     },
+    /// AUTO did not start because the last full-replace saved too little.
+    AutoCompactSkippedTinySavings,
     /// Auto-compact failed
     AutoCompactFailed {
         /// Error message
@@ -712,6 +718,9 @@ pub enum SessionUpdate {
         resumed_from: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_run_id: Option<String>,
+        /// Nesting depth from the main thread. `1` is an L2. `2` is an L3 specialist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -1654,6 +1663,7 @@ mod tests {
             model: None,
             resumed_from: None,
             workflow_run_id: None,
+            depth: None,
         })
         .unwrap();
         let progress = serde_json::to_value(SessionUpdate::SubagentProgress {

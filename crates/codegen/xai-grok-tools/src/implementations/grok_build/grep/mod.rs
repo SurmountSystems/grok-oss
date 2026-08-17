@@ -584,9 +584,10 @@ fn grep_progress_stream(
                 let mut output = finalize_grep(stdout_buf, true, Vec::new(), 0, &config);
                 output.stdout.extend_from_slice(
                     format!(
-                        "\nRipgrep search timed out after {secs} seconds; \
+                        "\nRipgrep search timed out after {}; \
                          the matches above are partial. Try searching a more specific \
-                         path or pattern."
+                         path or pattern.",
+                        xai_tty_utils::format_human_duration(timeout)
                     )
                     .as_bytes(),
                 );
@@ -998,9 +999,10 @@ async fn read_rg_stdout_capped(mut stdout_pipe: ChildStdout, max_lines: usize) -
 fn grep_timeout_output(secs: u64) -> GrepSearchOutput {
     GrepSearchOutput {
         stdout: format!(
-            "Ripgrep search timed out after {secs} seconds. \
+            "Ripgrep search timed out after {}. \
              The search may have matched files but did not complete in time. \
-             Try searching a more specific path or pattern."
+             Try searching a more specific path or pattern.",
+            xai_tty_utils::format_human_duration(std::time::Duration::from_secs(secs))
         )
         .into_bytes(),
         stderr: Vec::new(),
@@ -1547,9 +1549,30 @@ mod tests {
         assert_eq!(out.match_count, 0);
         assert!(out.file_matches.is_empty());
         let msg = String::from_utf8_lossy(&out.stdout);
-        assert!(msg.contains("timed out after 20 seconds"), "msg: {msg}");
+        assert!(msg.contains("timed out after 20s"), "msg: {msg}");
         assert!(msg.contains("did not complete in time"), "msg: {msg}");
         assert!(msg.contains("more specific path or pattern"), "msg: {msg}");
+    }
+
+    #[test]
+    fn grep_timeout_output_long_wait_uses_minutes_not_raw_seconds() {
+        let out = grep_timeout_output(90);
+        let msg = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            msg.contains("timed out after 1m30s"),
+            "WSL/minute-plus grep budget must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("90 seconds") && !msg.contains("90s"),
+            "raw second budget must not leak: {msg}"
+        );
+        let hour_out = grep_timeout_output(3725);
+        let hour = String::from_utf8_lossy(&hour_out.stdout);
+        assert!(
+            hour.contains("timed out after 1h2m"),
+            "hour-plus grep budget must print hours, got: {hour}"
+        );
+        assert!(!hour.contains("62m"), "must not print 62m: {hour}");
     }
 
     #[test]

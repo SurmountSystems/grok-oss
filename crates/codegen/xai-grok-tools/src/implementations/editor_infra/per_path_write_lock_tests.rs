@@ -1,8 +1,8 @@
 //! ACP edit-tool contracts for the per-path write lock.
 //!
-//! These tests call `search_replace`, `apply_patch`, and `write`. They are
-//! the product red/green proof. The lock table unit tests live next to the
-//! helper module.
+//! These tests call `search_replace`, `apply_patch`, `write`, and
+//! `hashline_edit`. They are the product red/green proof. The lock table
+//! unit tests live next to the helper module.
 
 use std::sync::Arc;
 
@@ -10,6 +10,9 @@ use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
 use crate::implementations::editor_infra::per_path_write_lock::try_acquire_write;
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
+use crate::implementations::grok_build_hashline::edit::{
+    HashlineEditInput, HashlineEditTool, HashlineOp,
+};
 use crate::implementations::opencode::write::{WriteInput, WriteTool};
 use crate::notification::types::ToolNotificationHandle;
 use crate::types::output::SearchReplaceOutput;
@@ -264,4 +267,74 @@ async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() 
     assert!(err.detail.contains("conflict.txt"), "{}", err.detail);
     assert_no_human_lock_menu(&err.detail);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+}
+
+fn hashline_write_input(file_path: &str, content: &str) -> HashlineEditInput {
+    HashlineEditInput {
+        file_path: file_path.to_string(),
+        edits: vec![HashlineOp::Write {
+            content: content.to_string(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn hashline_edit_refuses_when_another_agent_holds_the_path() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("hashline-held.txt");
+    std::fs::write(&path, "original\n").unwrap();
+    let _held = try_acquire_write(&path, "explore-agent-a").unwrap();
+
+    let err = xai_tool_runtime::Tool::run(
+        &HashlineEditTool,
+        test_ctx(write_resources(tmp.path(), "explore-agent-b")),
+        hashline_write_input("hashline-held.txt", "changed by b\n"),
+    )
+    .await
+    .expect_err("hashline_edit must be a tool error when the path is held");
+
+    assert!(
+        err.detail.contains("explore-agent-a"),
+        "error must name the holder: {}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains("hashline-held.txt"),
+        "error must name the file: {}",
+        err.detail
+    );
+    assert_no_human_lock_menu(&err.detail);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "original\n",
+        "disk must be unchanged when the lock is held"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_happy_path_does_not_mention_the_lock() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("hashline-solo.txt");
+    std::fs::write(&path, "hello\n").unwrap();
+
+    let result = xai_tool_runtime::Tool::run(
+        &HashlineEditTool,
+        test_ctx(write_resources(tmp.path(), "first-writer")),
+        hashline_write_input("hashline-solo.txt", "goodbye\n"),
+    )
+    .await
+    .unwrap();
+
+    match result {
+        SearchReplaceOutput::EditsApplied(applied) => {
+            let text = applied.tool_output_for_prompt.to_ascii_lowercase();
+            assert!(
+                !text.contains("lock") && !text.contains("already writing"),
+                "happy path must stay silent about the lock: {}",
+                applied.tool_output_for_prompt
+            );
+        }
+        other => panic!("expected EditsApplied, got {other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye\n");
 }

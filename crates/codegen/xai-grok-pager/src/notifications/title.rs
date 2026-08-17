@@ -185,12 +185,11 @@ fn write_item(
             let Some(elapsed) = state.turn_elapsed else {
                 return false;
             };
-            let secs = elapsed.as_secs();
-            if secs < 1 {
+            if elapsed.as_secs() < 1 {
                 return false;
             }
             push_separator(buf, has_parts);
-            let _ = write!(buf, "{}s", secs);
+            let _ = write!(buf, "{}", crate::util::format_duration(elapsed));
         }
         TitleItem::ActionRequired => {
             if !state.has_pending_permissions {
@@ -242,7 +241,11 @@ fn write_activity(buf: &mut String, activity: &TurnActivity) {
             max_retries,
             ..
         } => {
-            let _ = write!(buf, "Retrying ({}/{})", attempt, max_retries);
+            if *max_retries == u32::MAX {
+                let _ = write!(buf, "Retrying ({attempt})");
+            } else {
+                let _ = write!(buf, "Retrying ({attempt}/{max_retries})");
+            }
         }
         TurnActivity::WritingToolCall(writing) => buf.push_str(&writing.label()),
         TurnActivity::Waiting(reason) => buf.push_str(&reason.label()),
@@ -726,6 +729,19 @@ mod tests {
         };
         mgr.update(&state);
         assert_eq!(mgr.last_title, format!("42s - {PRODUCT_CLI_NAME}"));
+    }
+
+    #[test]
+    fn turn_timer_long_wait_uses_minutes_not_raw_seconds() {
+        let cfg = config_with_items(vec![TitleItem::TurnTimer, TitleItem::Grok]);
+        let mut mgr = TitleManager::new(&cfg);
+        let state = TitleState {
+            turn_elapsed: Some(std::time::Duration::from_secs(943)),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, format!("15m43s - {PRODUCT_CLI_NAME}"));
+        assert!(!mgr.last_title.contains("943"));
     }
 
     #[test]

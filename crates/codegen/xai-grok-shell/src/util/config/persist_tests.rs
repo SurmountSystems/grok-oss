@@ -1032,6 +1032,88 @@ mod resolve_auto_compact {
     }
 }
 
+/// Fork contract change: the baked catalog default is Grok 4.6 at
+/// medium reasoning effort, enabled (not hidden) by default.
+/// `[models].default_reasoning_effort` remains the operator override.
+/// Upstream grok-4.5 / high must not silently become the product default.
+#[test]
+fn baked_default_is_grok_46_medium_fork_contract() {
+    use crate::agent::config::{EndpointsConfig, ModelsConfig, default_model_entries};
+    use xai_grok_sampling_types::ReasoningEffort;
+
+    assert_eq!(
+        crate::models::default_model(),
+        "grok-4.6",
+        "fork contract: baked default_model() is grok-4.6, not grok-4.5"
+    );
+
+    let root: serde_json::Value =
+        serde_json::from_str(crate::models::DEFAULT_MODELS_JSON).expect("valid JSON");
+    assert_eq!(
+        root.get("default").and_then(|v| v.as_str()),
+        Some("grok-4.6"),
+        "fork contract: default_models.json default id is grok-4.6"
+    );
+
+    let models = root
+        .get("models")
+        .and_then(|v| v.as_array())
+        .expect("models array");
+    let grok46 = models
+        .iter()
+        .find(|m| {
+            m.get("id").and_then(|v| v.as_str()) == Some("grok-4.6")
+                || m.get("model").and_then(|v| v.as_str()) == Some("grok-4.6")
+        })
+        .expect("grok-4.6 entry in default_models.json");
+    assert_ne!(
+        grok46.get("hidden").and_then(|v| v.as_bool()),
+        Some(true),
+        "fork contract: grok-4.6 is enabled by default (not hidden)"
+    );
+    assert_eq!(
+        grok46.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("medium"),
+        "fork contract: baked grok-4.6 reasoning_effort is medium"
+    );
+    assert_eq!(
+        grok46
+            .get("supports_reasoning_effort")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    let efforts = grok46
+        .get("reasoning_efforts")
+        .and_then(|v| v.as_array())
+        .expect("grok-4.6 reasoning_efforts");
+    let medium = efforts
+        .iter()
+        .find(|e| e.get("value").and_then(|v| v.as_str()) == Some("medium"))
+        .expect("medium option on grok-4.6");
+    assert_eq!(
+        medium.get("default").and_then(|v| v.as_bool()),
+        Some(true),
+        "fork contract: medium is the marked default effort on grok-4.6"
+    );
+
+    let entries = default_model_entries(&EndpointsConfig::default());
+    let entry = entries
+        .get("grok-4.6")
+        .expect("baked catalog must include grok-4.6");
+    assert!(
+        !entry.info.hidden,
+        "fork contract: grok-4.6 catalog entry is enabled"
+    );
+    assert_eq!(entry.info.reasoning_effort, Some(ReasoningEffort::Medium));
+
+    let parsed: ModelsConfig = toml::from_str("default_reasoning_effort = \"medium\"")
+        .expect("[models].default_reasoning_effort config option must exist");
+    assert_eq!(
+        parsed.default_reasoning_effort,
+        Some(ReasoningEffort::Medium)
+    );
+}
+
 /// Guard: baked default_models.json must not ship grok-4.5 with an
 /// undercut of the product auto-compact default (95). Catches upstream
 /// catalog re-imports that reintroduce `"auto_compact_threshold_percent": 80`.

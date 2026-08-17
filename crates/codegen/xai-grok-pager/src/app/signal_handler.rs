@@ -266,8 +266,8 @@ fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
     // until all escape sequences and tcsetattr have been written.
     TERMINAL_OWNED.store(false, Ordering::Release);
     // Best-effort unregister (non-blocking flock to avoid hanging).
-    if let Some(ref sid) = *CURRENT_SESSION_ID.lock() {
-        let _ = xai_grok_active_sessions::try_unregister(sid);
+    if CURRENT_SESSION_ID.lock().is_some() {
+        let _ = xai_grok_active_sessions::try_unregister_pid(std::process::id());
     }
     flush_telemetry_and_exit(exit_code);
 }

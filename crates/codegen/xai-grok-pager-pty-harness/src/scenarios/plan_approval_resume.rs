@@ -12,21 +12,19 @@
 //!
 //! ## Named contract (soft-park approve path)
 //!
-//! Soft-park is **non-capturing** for keyboard CTAs when the side panel is
-//! closed (L1 modal-free, 2026-07-29): empty-prompt `a` / `A` / `?` / `s` / `q`
-//! / Enter type into the composer or no-op. Default soft-park **auto-opens**
-//! the plan side panel; soft-park footer CTAs are only painted when the panel
-//! is closed. With the panel open, product approve paths are:
+//! Soft-park is **non-capturing** for letter keys: `a` / `A` / `s` / `q` type
+//! into the composer or the plan pane box. Empty `?` still arms Clarify.
+//! Empty Enter never Approves. Default soft-park **auto-opens** the plan
+//! side panel (right pane; not a 75% overlay). Product approve path:
 //!
-//! 1. **Mouse** side-panel footer CTAs (primary) — full/compact labels when
-//!    width allows, else key-only `a | A | ? | s | q`
-//! 2. Empty-prompt panel accelerators (`a` / Enter on Prompt) while the panel
-//!    owns input
+//! 1. **Mouse** click on the painted footer **Approve** word (primary)
 //!
-//! This scenario uses path (1): click the painted panel Approve CTA (label or
-//! key-only). Do **not** match bare `"approve"` — the transcript card prose
-//! (`PLAN_CARD_CTAS`) and shortcut hint `Enter:approve` both contain that
-//! substring and are not hit targets.
+//! Footer paint is word-only: `approve  |  clarify  |  revise  |  exit`
+//! (narrow docks drop separators to spaces). There is no Notes button, no
+//! Quit label, and no `a approve` / `A notes` / `s revise` / `q quit` prefix.
+//! Do **not** match bare `"approve"` — transcript card prose can contain
+//! that substring and is not a hit target. Do **not** fall back to empty
+//! Enter even if a shortcut bar still says `Enter:approve`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -44,11 +42,13 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
-/// Side-panel footer CTA strip in key-only mode (narrow panel; CI default).
-/// Separator is `"  |  "` from `line_viewer` plan-approval paint.
-const KEY_ONLY_CTA_STRIP: &str = "a  |  A  |  ?";
-/// Labeled Approve button (compact/full label modes when the panel is wide).
-const LABELED_APPROVE_CTA: &str = "a approve";
+/// Word-only approval footer (separator `"  |  "` from `line_viewer` paint).
+/// Unique vs card prose (`to approve,`) and vs a lone `"approve"`.
+const LABELED_APPROVE_CTA: &str = "approve  |  clarify";
+/// Full four-CTA strip when the right pane is wide enough for separators.
+const LABELED_FOOTER_STRIP: &str = "approve  |  clarify  |  revise  |  exit";
+/// Narrow dock drops separators; still word-only, no letter prefixes.
+const NARROW_FOOTER_STRIP: &str = "approve clarify revise exit";
 
 const PLAN_BODY: &str = "\
 # Plan GBT3703Repro
@@ -126,9 +126,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // Markers, any of:
     // - full TUI status (`Plan ready. Side panel open`)
     // - minimal-mode card header (`Plan ready for review`)
-    // - CTA strip: labeled (`a approve` / `s revise`) or key-only
-    //   (`a  |  A  |  ?`) when the ~45% side panel is too narrow for compact
-    //   labels (120-col CI default).
+    // - word-only footer (`approve  |  clarify  |  revise  |  exit`), or
+    //   the same four words with space separators on a narrow dock.
     // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
     // must accept the fullscreen status line. Waiting only for the minimal
     // card header times out even when the side-panel CTAs are already up.
@@ -137,16 +136,20 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         &[
             "Plan ready. Side panel open",
             "Plan ready for review",
+            LABELED_FOOTER_STRIP,
+            NARROW_FOOTER_STRIP,
             LABELED_APPROVE_CTA,
-            "s revise",
-            KEY_ONLY_CTA_STRIP,
         ],
         WELCOME_TIMEOUT,
     )
     .context("restored plan-ready chrome after resume")?;
     wait_for_any_text(
         &mut resumed,
-        &[LABELED_APPROVE_CTA, "s revise", KEY_ONLY_CTA_STRIP],
+        &[
+            LABELED_FOOTER_STRIP,
+            NARROW_FOOTER_STRIP,
+            LABELED_APPROVE_CTA,
+        ],
         WELCOME_TIMEOUT,
     )
     .context("restored approval CTA chrome after --continue")?;
@@ -163,9 +166,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Soft-park without panel is non-capturing for bare `a`. Default park
-    // auto-opens the side panel; click its Approve CTA (not card prose /
-    // "Enter:approve" shortcut text).
+    // Letters type; empty Enter never Approves. Default park auto-opens
+    // the right pane; click the painted Approve word (not card prose).
     click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
@@ -178,34 +180,31 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     Ok(())
 }
 
-/// Click the painted plan-approval Approve control.
+/// Click the painted plan-approval Approve word.
 ///
-/// Prefer labeled `a approve` (unique; card prose is "to approve," without the
-/// leading key). Fall back to key-only strip click at the `a` glyph (hit rect
-/// is one cell — no +1 label inset). Last resort: empty Enter when the
-/// shortcut bar advertises `Enter:approve` (panel Prompt focus).
+/// Prefer the separated strip (`approve  |  clarify`). Fall back to the
+/// narrow four-word strip. Empty Enter is not an Approve path.
 fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
     let screen = harness.screen_contents();
+    if screen.contains("a approve")
+        || screen.contains("A notes")
+        || screen.contains("s revise")
+        || screen.contains("q quit")
+    {
+        bail!("old letter-prefixed plan CTAs must not paint\n{screen}");
+    }
     if screen.contains(LABELED_APPROVE_CTA) {
-        // Inset one cell into the label so the hit lands in the button rect.
+        // Inset one cell into "approve" so the hit lands in the button rect.
         return click_screen_text(harness, LABELED_APPROVE_CTA, 0, 1)
-            .context("click labeled 'a approve' CTA");
+            .context("click labeled Approve word");
     }
-    if screen.contains(KEY_ONLY_CTA_STRIP) {
-        // Key-only approve is a single-cell hit on `a` — click the glyph.
-        return click_screen_text(harness, KEY_ONLY_CTA_STRIP, 0, 0)
-            .context("click key-only panel Approve (`a`)");
-    }
-    if screen.contains("Enter:approve") {
-        harness
-            .inject_keys(b"\r")
-            .context("empty Enter approve (panel Prompt)")?;
-        harness.update(Duration::from_millis(150));
-        return Ok(());
+    if screen.contains(NARROW_FOOTER_STRIP) {
+        return click_screen_text(harness, NARROW_FOOTER_STRIP, 0, 1)
+            .context("click narrow-dock Approve word");
     }
     bail!(
-        "no plan Approve control found (expected '{LABELED_APPROVE_CTA}', \
-         '{KEY_ONLY_CTA_STRIP}', or Enter:approve)\n{screen}"
+        "no plan Approve control found (expected '{LABELED_FOOTER_STRIP}' \
+         or '{NARROW_FOOTER_STRIP}')\n{screen}"
     )
 }
 
@@ -231,8 +230,7 @@ fn wait_for_any_text(harness: &mut PtyHarness, needles: &[&str], timeout: Durati
 ///
 /// Coordinates match scripted runner convention: 0-indexed row/col from the
 /// visible screen text snapshot, converted to 1-indexed SGR in the wire bytes.
-/// `col_offset` shifts right from the match start (1 = into a labeled button;
-/// 0 = key-only single-cell hit).
+/// `col_offset` shifts right from the match start (1 = into the Approve word).
 fn click_screen_text(
     harness: &mut PtyHarness,
     text: &str,

@@ -61,6 +61,7 @@ xai-grok-workspace-types = { workspace = true }
 xai-tool-protocol = { workspace = true }
 xai-tool-runtime = { workspace = true }
 xai-tool-types = { workspace = true }
+xai-tty-utils = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

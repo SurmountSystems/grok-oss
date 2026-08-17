@@ -1272,6 +1272,7 @@
                     tokens_before: Some(100),
                     tokens_after: 10,
                     elapsed_ms: Some(5),
+                    saved_too_little: false,
                 },
             ));
 

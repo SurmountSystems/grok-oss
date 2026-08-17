@@ -49,15 +49,23 @@ pub(crate) fn execute(
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
-        Effect::RegisterActiveSession { session_id, cwd } => {
+        Effect::RegisterActiveSession { session_id, cwd, activity, activity_line } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
-            if let Err(e) = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
+            let heartbeat_sid = session_id.clone();
+            if let Err(e) = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession::new(
                 session_id,
-                pid: std::process::id(),
-                cwd,
-                opened_at: chrono::Utc::now(),
-            }) {
+                std::process::id(),
+                cwd.clone(),
+                chrono::Utc::now(),
+            )) {
                 tracing::warn!(?e, "Failed to register active session");
+            } else {
+                crate::app::active_session_heartbeat::write_blocking(
+                    &heartbeat_sid,
+                    &cwd,
+                    activity,
+                    activity_line,
+                );
             }
         }
         Effect::UnregisterActiveSession { session_id } => {
@@ -978,23 +986,10 @@ pub(crate) fn execute(
                                             .map(|detail| format!("Session state restored ({detail})."))
                                     }
                                     (RestorePhase::Finalize, _) => {
-                                        let elapsed_secs = event.elapsed.as_secs();
-                                        let status = if event.incomplete {
-                                            "Restore incomplete"
-                                        } else {
-                                            "Restore complete"
-                                        };
-                                        if elapsed_secs >= 60 {
-                                            Some(
-                                                format!(
-                                        "{status} ({}m{:02}s).",
-                                        elapsed_secs / 60,
-                                        elapsed_secs % 60
-                                    ),
-                                            )
-                                        } else {
-                                            Some(format!("{status} ({elapsed_secs}s)."))
-                                        }
+                                        Some(format_restore_finalize_status(
+                                            event.incomplete,
+                                            event.elapsed,
+                                        ))
                                     }
                                     _ => None,
                                 };

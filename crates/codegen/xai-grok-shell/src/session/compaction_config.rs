@@ -196,6 +196,9 @@ pub(crate) struct CompactionConfig {
     /// Auto-compaction suppression state (`SUPPRESS_*`) after a deterministic
     /// failure; the gates early-return unless `SUPPRESS_NONE`. Manual `/compact` ignores it.
     pub auto_compact_suppressed: AtomicU8,
+    /// Last AUTO full-replace saved too little. Paired with [`SUPPRESS_STICKY`]
+    /// so the next AUTO check paints an honest skip instead of starting again.
+    pub last_auto_compact_saved_too_little: AtomicBool,
     /// Locks the context window when `GROK_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
     /// Soft-cap effective context at 200K for pricing (see

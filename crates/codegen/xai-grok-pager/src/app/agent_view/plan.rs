@@ -144,7 +144,10 @@ impl AgentView {
             PLAN_IDLE_REVIEW_STATUS, plan_approval_status_label,
         };
         if let Some(ref pav) = self.plan_approval_view {
-            return Some(plan_approval_status_label(pav.has_plan));
+            if self.line_viewer.is_some() {
+                return Some(plan_approval_status_label(pav.has_plan));
+            }
+            return Some(PLAN_IDLE_REVIEW_STATUS);
         }
         if let Some(in_flight) = self.plan_feedback_in_flight {
             if self.session.state.is_turn_running() {
@@ -191,6 +194,28 @@ impl AgentView {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
     }
+    /// `/view-plan` and the plan status / chip click.
+    ///
+    /// Reopens a live `exit_plan_mode` waiter when one is parked. Does not
+    /// invent a second local view-only panel whose Approve leaves the tool
+    /// waiting. With no live park, falls through to the saved preview (and
+    /// may park a local idle decision when chrome should arm).
+    pub(crate) fn open_plan_from_view_plan_or_status(&mut self) {
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.response_tx.is_some() || !p.is_local_idle_decision)
+        {
+            self.reopen_plan_approval();
+            return;
+        }
+        if self.plan_approval_view.is_some() {
+            self.reopen_plan_approval();
+            return;
+        }
+        self.show_plan_preview();
+    }
+
     /// Open the plan preview when content exists, or when plan approval is
     /// parked with an empty body (so the decision surface always pops).
     pub(crate) fn show_plan_preview_if_available(&mut self) {
@@ -346,6 +371,7 @@ impl AgentView {
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
         let notes = self.prompt.text().to_string();
         let notes = notes.trim();
+        let images = self.prompt.drain_images();
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
@@ -364,10 +390,10 @@ impl AgentView {
         };
         pav.send_approved();
         self.close_plan_review(pav, "build");
-        if let Some(text) = review_comments {
+        if review_comments.is_some() || !images.is_empty() {
             return InputOutcome::Action(Action::Interject {
-                text,
-                images: vec![],
+                text: review_comments.unwrap_or_default(),
+                images,
             });
         }
         InputOutcome::Changed
@@ -433,6 +459,9 @@ impl AgentView {
         // Drop pre-panel stash: do not restore ghost draft into the busy
         // composer (Enter:queue with leftover text while rewrite runs).
         let _ = pav.stashed_prompt;
+        // Drain chips before clearing the composer. `set_text("")` drops
+        // the textarea image elements, and a later drain would be empty.
+        let images = self.prompt.drain_images();
         self.prompt.set_text("");
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
@@ -445,10 +474,11 @@ impl AgentView {
         );
         self.show_toast("Plan revision sent.");
         log_plan_submit("revise");
-
         // Local idle or dead reverse-request channel: Interject so the agent
         // rewrites plan.md and calls exit_plan_mode again (never barren wait).
-        if pav.is_local_idle_decision || !sent_acp {
+        // Live ACP still Interjects when the composer holds images so those
+        // bytes are not dropped as `images: vec![]`.
+        if pav.is_local_idle_decision || !sent_acp || !images.is_empty() {
             let feedback_block = to_send
                 .as_deref()
                 .map(str::trim)
@@ -460,10 +490,7 @@ impl AgentView {
                  {feedback_block}\n\nWhen the plan is ready, call exit_plan_mode again to \
                  present it for approval."
             );
-            return InputOutcome::Action(Action::Interject {
-                text,
-                images: vec![],
-            });
+            return InputOutcome::Action(Action::Interject { text, images });
         }
         InputOutcome::Changed
     }
@@ -490,11 +517,14 @@ impl AgentView {
         } else {
             Some(formatted)
         };
-        pav.send_questions(to_send);
+        pav.send_questions(to_send.clone());
         if pav.source == PlanReviewSource::Inline {
             self.latest_inline_plan_content = None;
         }
         self.plan_next_comment_id = pav.next_comment_id;
+        // Drain chips before restoring the pre-panel stash, same as
+        // Approve / Revise: a later drain would be empty.
+        let images = self.prompt.drain_images();
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
@@ -507,6 +537,12 @@ impl AgentView {
         );
         self.show_toast("Clarify sent — answers without rewriting the plan.");
         log_plan_submit("question");
+        if !images.is_empty() {
+            return InputOutcome::Action(Action::Interject {
+                text: to_send.unwrap_or_default(),
+                images,
+            });
+        }
         InputOutcome::Changed
     }
 
@@ -557,6 +593,12 @@ impl AgentView {
         self.prompt.set_text("");
     }
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        if crate::input::key::is_paste_key(key) {
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            return self.handle_paste_key_deferred(clipboard_text);
+        }
         let is_commenting = self
             .plan_approval_view
             .as_ref()
@@ -613,8 +655,8 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        // Empty-composer Ctrl+C quits plan approval (same outcome as panel `q`
-        // / mouse Quit). Non-empty falls through so the composer can clear
+        // Empty-composer Ctrl+C exits plan approval (same outcome as the
+        // Exit button). Non-empty falls through so the composer can clear
         // the draft first; a second empty Ctrl+C then abandons.
         if crate::key!('c', CONTROL).matches(key)
             && self.prompt.text().is_empty()
@@ -622,24 +664,12 @@ impl AgentView {
         {
             return self.abandon_plan();
         }
+        // Letter CTA keys (`a` Approve, `A` Notes, `s` Revise, `q` Exit) must
+        // type. Approve is the clickable button. `?` is not a letter.
         let empty_prompt =
             self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
-        if !is_commenting && empty_prompt {
-            if key.code == KeyCode::Char('a') && key.modifiers.is_empty() {
-                return self.approve_plan();
-            }
-            if matches_shifted_char(key, 'A') {
-                return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
-            }
-            if key.code == KeyCode::Char('s') && key.modifiers.is_empty() {
-                return self.request_plan_revise();
-            }
-            if matches_shifted_char(key, '?') {
-                return self.focus_plan_prompt(PlanPromptIntent::Questions);
-            }
-            if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
-                return self.abandon_plan();
-            }
+        if !is_commenting && empty_prompt && matches_shifted_char(key, '?') {
+            return self.focus_plan_prompt(PlanPromptIntent::Questions);
         }
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
@@ -665,13 +695,13 @@ impl AgentView {
                     if text.trim().is_empty() && !has_comments {
                         let toast = match intent {
                             PlanPromptIntent::Questions => {
-                                "Type a question, or press a to approve."
+                                "Type a question, then press Enter. Click Approve to approve."
                             }
                             PlanPromptIntent::ApproveNotes => {
-                                "Type notes to send with approve, or press a to approve."
+                                "Type notes, then press Enter. Click Approve to approve without notes."
                             }
                             PlanPromptIntent::Revise => {
-                                "Type revision notes, or press a to approve."
+                                "Type revision notes, then press Enter. Click Approve to approve."
                             }
                         };
                         self.show_toast(toast);
@@ -781,10 +811,16 @@ impl AgentView {
         if let Some(ref mut viewer) = self.line_viewer {
             viewer.rebuild_with_comments(&comments);
         }
+        // Keep chips attached during the comment draft. Restore / set_text
+        // would drop them otherwise.
+        let kept_images = self.prompt.drain_images();
         if let Some(stashed) = pav.stashed_feedback_prompt.take() {
             self.prompt.restore(stashed);
         } else {
             self.prompt.set_text("");
+        }
+        for image in kept_images {
+            let _ = self.prompt.insert_image(image);
         }
         InputOutcome::Changed
     }
@@ -1226,7 +1262,7 @@ mod plan_approval_enter_tests {
         );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Type revision notes, or press a to approve.")
+            Some("Type revision notes, then press Enter. Click Approve to approve.")
         );
     }
     #[test]
@@ -1266,10 +1302,11 @@ mod plan_approval_enter_tests {
         let outcome = agent.handle_plan_feedback_key(&s);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(
-            agent.plan_approval_view.is_none(),
-            "`s` revise is decisive: must send cancelled and close the park"
+            agent.plan_approval_view.is_some(),
+            "letter s must type, not submit empty Revise"
         );
-        assert_eq!(
+        assert_eq!(agent.prompt.text(), "s");
+        assert_ne!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
         );
@@ -1298,9 +1335,10 @@ mod plan_approval_enter_tests {
         let pav = agent
             .plan_approval_view
             .as_ref()
-            .expect("notes stays parked for typed input");
+            .expect("capital A must type, not arm Notes");
         assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
-        assert_eq!(pav.prompt_intent, PlanPromptIntent::ApproveNotes);
+        assert_ne!(pav.prompt_intent, PlanPromptIntent::ApproveNotes);
+        assert_eq!(agent.prompt.text(), "A");
     }
 
     #[test]
@@ -1309,7 +1347,11 @@ mod plan_approval_enter_tests {
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
         assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.plan_approval_view.is_none(), "`a` must approve");
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "letter a must type, not Approve"
+        );
+        assert_eq!(agent.prompt.text(), "a");
         assert_ne!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
@@ -1328,13 +1370,11 @@ mod plan_approval_enter_tests {
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
         assert!(
-            agent.plan_approval_view.is_none(),
-            "`a` still Approves when comments exist (notes ride with the approval)"
+            agent.plan_approval_view.is_some(),
+            "letter a must type even when comments exist"
         );
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::Interject { .. }) | InputOutcome::Changed
-        ));
+        assert_eq!(agent.prompt.text(), "a");
+        assert!(matches!(outcome, InputOutcome::Changed));
     }
 }
 /// The mode indicator renders
@@ -1579,6 +1619,326 @@ mod plan_approval_ctrl_c_tests {
             "second Ctrl+C abandon must set the same sticky as q / Quit"
         );
         assert_abandoned(rx);
+    }
+}
+
+/// G1 / plan-pane letter-A: CTA accelerators must not eat letters while the
+/// composer or plan box can receive text. Empty `a` Approves is superseded.
+#[cfg(test)]
+mod plan_pane_letter_a_contract_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    use crate::views::prompt_widget::StashedPrompt;
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
+
+    fn install_parked_plan(agent: &mut AgentView, plan_content: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-letter-a".into(),
+            plan_content: Some(plan_content.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt::default(),
+            tx,
+        ));
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        agent.set_active_pane(ActivePane::Prompt, true);
+    }
+
+    fn type_key(agent: &mut AgentView, key: KeyEvent) -> InputOutcome {
+        agent.handle_input(&Event::Key(key), &ActionRegistry::defaults())
+    }
+
+    fn type_chars(agent: &mut AgentView, text: &str) {
+        for ch in text.chars() {
+            let modifiers = if ch.is_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            let _ = type_key(agent, KeyEvent::new(KeyCode::Char(ch), modifiers));
+        }
+    }
+
+    /// Empty main composer while plan review is parked: `also` must type.
+    /// Empty-prompt `a` must not Approve.
+    #[test]
+    fn plan_prompt_letter_a_inserts_when_composing() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nType also");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.prompt.text().is_empty());
+
+        type_chars(&mut agent, "also");
+
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "letter a must type into the composer, not Approve"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "typing also must not decide the plan"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "also",
+            "the operator must be able to type also into the main prompt, got {:?}",
+            agent.prompt.text()
+        );
+
+        // Same contract in the plan pane box (revise composer).
+        let mut box_agent = make_agent();
+        install_parked_plan(&mut box_agent, "# Plan\n\nType also in box");
+        if let Some(ref mut pav) = box_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        type_chars(&mut box_agent, "also");
+        assert!(
+            box_agent.plan_approval_view.is_some(),
+            "letter a in the plan box must type, not Approve"
+        );
+        assert_eq!(
+            box_agent.prompt.text(),
+            "also",
+            "the operator must be able to type also into the plan pane box, got {:?}",
+            box_agent.prompt.text()
+        );
+    }
+
+    /// Capital A is not Notes. `Also` must type into the main prompt.
+    #[test]
+    fn plan_prompt_capital_a_inserts_also() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nType Also");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        type_chars(&mut agent, "Also");
+
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "capital A must type, not arm Notes"
+        );
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_ne!(
+            pav.prompt_intent,
+            PlanPromptIntent::ApproveNotes,
+            "capital A must not switch the box to Notes"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "Also",
+            "the operator must be able to type Also into the main prompt, got {:?}",
+            agent.prompt.text()
+        );
+
+        let mut box_agent = make_agent();
+        install_parked_plan(&mut box_agent, "# Plan\n\nType Also in box");
+        if let Some(ref mut pav) = box_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        type_chars(&mut box_agent, "Also");
+        assert!(
+            box_agent.plan_approval_view.is_some(),
+            "capital A in the plan box must type, not arm Notes"
+        );
+        assert_eq!(
+            box_agent.prompt.text(),
+            "Also",
+            "the operator must be able to type Also into the plan pane box, got {:?}",
+            box_agent.prompt.text()
+        );
+    }
+
+    /// Plan box (revise composer): Ctrl+Enter must not wipe an unsent buffer
+    /// and must not submit that buffer unless the product gesture is send.
+    /// Ctrl+Enter is not the plan-box send gesture.
+    #[test]
+    fn plan_box_ctrl_enter_does_not_wipe_unsent() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise box");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("unsent notes");
+        agent.prompt.set_cursor(12);
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Ctrl+Enter must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Ctrl+Enter must not submit the unsent revise buffer"
+        );
+        assert!(
+            agent.prompt.text().contains("unsent notes"),
+            "Ctrl+Enter must not wipe the unsent buffer, got {:?}",
+            agent.prompt.text()
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "Ctrl+Enter is not the plan-box send gesture"
+        );
+
+        // Commenting box (Add a comment on this line): same no-wipe rule.
+        let mut comment_agent = make_agent();
+        install_parked_plan(&mut comment_agent, "# Plan\n\nComment box");
+        comment_agent.show_plan_preview();
+        if let Some(ref mut pav) = comment_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(0..1);
+        }
+        comment_agent.prompt.set_text("unsent comment");
+        comment_agent.prompt.set_cursor(14);
+        let _ = type_key(
+            &mut comment_agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
+        assert!(
+            comment_agent.plan_approval_view.is_some(),
+            "Ctrl+Enter must not submit the unsent comment buffer"
+        );
+        assert!(
+            comment_agent.prompt.text().contains("unsent comment"),
+            "Ctrl+Enter must not wipe the comment box, got {:?}",
+            comment_agent.prompt.text()
+        );
+    }
+
+    /// Plan box (revise composer): Shift+Enter must not wipe an unsent buffer.
+    /// Newline is the real gesture; the unsent text stays.
+    #[test]
+    fn plan_box_shift_enter_does_not_wipe_unsent() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise box");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        agent.prompt.set_text("unsent notes");
+        agent.prompt.set_cursor(12);
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Shift+Enter must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Shift+Enter must not submit the unsent revise buffer"
+        );
+        assert!(
+            agent.prompt.text().contains("unsent notes"),
+            "Shift+Enter must not wipe the unsent buffer, got {:?}",
+            agent.prompt.text()
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "Shift+Enter is newline, not send"
+        );
+
+        let mut comment_agent = make_agent();
+        install_parked_plan(&mut comment_agent, "# Plan\n\nComment box");
+        comment_agent.show_plan_preview();
+        if let Some(ref mut pav) = comment_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(0..1);
+        }
+        comment_agent.prompt.set_text("unsent comment");
+        comment_agent.prompt.set_cursor(14);
+        let _ = type_key(
+            &mut comment_agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        );
+        assert!(
+            comment_agent.plan_approval_view.is_some(),
+            "Shift+Enter must not submit the unsent comment buffer"
+        );
+        assert!(
+            comment_agent.prompt.text().contains("unsent comment"),
+            "Shift+Enter must not wipe the comment box, got {:?}",
+            comment_agent.prompt.text()
+        );
+    }
+
+    /// Footer Revise (and `s` if kept) arms the revise box and waits.
+    /// It must not submit empty revise.
+    #[test]
+    fn revise_cta_arms_composer_does_not_submit_empty() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise CTA");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().send_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Revise click must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Revise must not submit empty revise"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "empty Revise must not resolve the plan"
+        );
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(
+            pav.focus,
+            PlanApprovalFocus::Prompt,
+            "Revise must focus the plan box"
+        );
+        assert_eq!(
+            pav.prompt_intent,
+            PlanPromptIntent::Revise,
+            "Revise must arm revise mode and wait"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "empty Revise must not pretend text was sent"
+        );
     }
 }
 
@@ -1943,6 +2303,20 @@ mod plan_sticky_and_revising_chrome_tests {
             agent.plan_loop_status_label(),
             Some("Plan ready. Side panel open"),
             "parked present status must be Plan ready. Side panel open"
+        );
+    }
+
+    /// Status "Side panel open" is only honest when the plan viewer is open.
+    #[test]
+    fn plan_loop_status_does_not_claim_side_panel_when_viewer_closed() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Review me\n\nBody\n");
+        assert!(agent.line_viewer.is_some());
+        agent.line_viewer = None;
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "must not say the side panel is open when the pane is closed"
         );
     }
 }

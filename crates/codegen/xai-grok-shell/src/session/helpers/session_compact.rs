@@ -51,7 +51,9 @@ pub(crate) enum CompactFailure {
     /// Failure may resolve on retry. The caller follows its existing
     /// N-attempt + backoff loop.
     Transient(acp::Error),
-    /// User/stop cancelled the in-flight compact. Do not retry or suppress AUTO.
+    /// User/stop cancelled the in-flight compact. Do not retry. AUTO is
+    /// suppressed for the rest of this turn so cancel cannot immediately
+    /// re-arm while context is still over the threshold.
     Cancelled,
 }
 

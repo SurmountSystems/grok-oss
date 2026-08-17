@@ -196,17 +196,9 @@ impl CategoryStats {
         if self.total_time_ms == 0 {
             return "—".to_string();
         }
-        let secs = self.total_time_ms / 1000;
-        let ms = self.total_time_ms % 1000;
-        if secs == 0 {
-            format!("{}ms", ms)
-        } else if secs < 60 {
-            format!("{}.{:03}s", secs, ms)
-        } else {
-            let mins = secs / 60;
-            let secs = secs % 60;
-            format!("{}m {}s", mins, secs)
-        }
+        xai_tty_utils::format_human_duration(std::time::Duration::from_millis(
+            self.total_time_ms.max(0) as u64,
+        ))
     }
 }
 
@@ -585,6 +577,22 @@ mod tests {
         // Should have aggregated the tool blocks in the turn
         // Verify it computed without panicking
         let _ = stats.total_operations;
+    }
+
+    #[test]
+    fn category_stats_format_time_under_hour_is_compact_minutes() {
+        let stats = CategoryStats {
+            total_time_ms: 943_000,
+            ..Default::default()
+        };
+        let text = stats.format_time();
+        assert_eq!(text, "15m43s");
+        assert!(!text.contains(' '), "must not print Nm Ns: {text}");
+        let hour = CategoryStats {
+            total_time_ms: 3_725_000,
+            ..Default::default()
+        };
+        assert_eq!(hour.format_time(), "1h2m");
     }
 
     #[test]

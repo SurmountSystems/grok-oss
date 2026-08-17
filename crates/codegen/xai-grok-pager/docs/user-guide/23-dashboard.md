@@ -10,6 +10,12 @@ Not the agents modal (`/config-agents` / `/agents` — definitions and
 personas), the session picker (`/resume` / `Ctrl+S` — past conversations on
 disk), or the workflows run UI (`/workflows`).
 
+**Running grok-oss sessions** (`/running`, alias `/windows`, CLI
+`grok-oss running`) is a different feature. It lists live grok-oss TUI
+windows on this machine. It is not the Agent Dashboard and must not merge
+into `/dashboard`. See [Slash Commands](04-slash-commands.md#running) and
+[Session Management](17-sessions.md#running-grok-oss-sessions).
+
 ---
 
 ## Opening the dashboard

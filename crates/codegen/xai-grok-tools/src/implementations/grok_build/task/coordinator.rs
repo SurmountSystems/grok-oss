@@ -30,7 +30,8 @@ use super::coordinator_state::{
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
     SubagentEvent, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
+    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentSnapshot,
+    SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -88,6 +89,19 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     /// reparented to the root. Query/cancel-by-id from the immediate
     /// spawner must still find the live child.
     spawned_by_session: HashMap<String, String>,
+    /// Blocking queries that arrived before any Spawn for that id. Held
+    /// for a short grace so a fire-and-forget spawn's returned id is
+    /// waitable immediately; released as not_found if Spawn never follows.
+    queries_waiting_for_spawn: HashMap<String, Vec<QueryWaitingForSpawn>>,
+}
+
+/// A blocking query that arrived before the coordinator processed Spawn
+/// for this id.
+pub(super) struct QueryWaitingForSpawn {
+    grace_deadline: tokio::time::Instant,
+    block_until: tokio::time::Instant,
+    parent_session_id: Option<String>,
+    respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
 }
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
@@ -151,6 +165,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             list_requests: HashMap::new(),
             next_list_request_id: 0,
             spawned_by_session: HashMap::new(),
+            queries_waiting_for_spawn: HashMap::new(),
         }
     }
 
@@ -1032,6 +1047,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .flatten()
                     .map(|waiter| waiter.deadline),
             )
+            .chain(
+                self.queries_waiting_for_spawn
+                    .values()
+                    .flatten()
+                    .map(|query| query.grace_deadline),
+            )
             .chain(self.teardown_drains.values().map(|drain| drain.deadline))
             .min()
     }
@@ -1057,6 +1078,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn process_deadlines(&mut self) {
         self.reap_abandoned_callers();
+        self.reap_queries_waiting_for_spawn();
         let now = tokio::time::Instant::now();
         // Backstop: a delete-path hold whose drain deadline elapsed force-clears
         // so a child that never finishes cannot block spawns forever.

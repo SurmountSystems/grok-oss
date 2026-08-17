@@ -200,16 +200,81 @@ pub fn context_bar_line_for_session(
     theme: &Theme,
     gateway_chat: bool,
 ) -> Option<Line<'static>> {
+    context_bar_line_with_windows(
+        used_tokens,
+        total_tokens,
+        total_tokens,
+        hovered,
+        theme,
+        gateway_chat,
+    )
+}
+
+/// Footer chip copy for used tokens against sampling and catalog windows.
+///
+/// When the windows differ, names each so catalog size is not implied as the
+/// AUTO compact gate. AUTO gates on the sampling window.
+pub fn context_chip_token_text(
+    used: u64,
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+) -> Option<String> {
+    let sampling = sampling_window.filter(|&t| t > 0);
+    let catalog = catalog_window.filter(|&t| t > 0);
+    match (sampling, catalog) {
+        (Some(sampling), Some(catalog)) if sampling != catalog => Some(format!(
+            "{} / {} sampling · {} catalog",
+            fmt_tokens(used),
+            fmt_tokens(sampling),
+            fmt_tokens(catalog),
+        )),
+        (Some(total), _) | (_, Some(total)) => {
+            Some(format!("{} / {}", fmt_tokens(used), fmt_tokens(total)))
+        }
+        _ => None,
+    }
+}
+
+/// Window AUTO compact actually gates on when both sizes are known.
+///
+/// Percent and urgency follow this window, not the larger catalog total.
+pub fn context_chip_gate_window(
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+) -> Option<u64> {
+    let sampling = sampling_window.filter(|&t| t > 0);
+    let catalog = catalog_window.filter(|&t| t > 0);
+    match (sampling, catalog) {
+        (Some(sampling), Some(catalog)) if sampling != catalog => Some(sampling),
+        (Some(total), _) | (_, Some(total)) => Some(total),
+        _ => None,
+    }
+}
+
+/// Footer context chip with both windows AUTO uses vs what the catalog shows.
+///
+/// When `sampling_window` and `catalog_window` are both set and differ, the
+/// chip names each window. AUTO compact gates on the sampling window. Do not
+/// paint unlabeled `used / catalog` as if catalog were the AUTO gate (same
+/// honesty as the CompactionStarted banner).
+pub fn context_bar_line_with_windows(
+    used_tokens: Option<u64>,
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+) -> Option<Line<'static>> {
     if gateway_chat {
         return None;
     }
     let used = used_tokens?;
-    let total = total_tokens.filter(|&t| t > 0)?;
+    let total = context_chip_gate_window(sampling_window, catalog_window)?;
     let pct = xai_token_estimation::usage_percentage(used, total);
 
-    // Default form drives the line width: `used / total`, right-padded to the
-    // minimum hover width so the two states always render at the same width.
-    let mut token_str = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
+    // Default form drives the line width. Two-meter copy is longer than
+    // unlabeled `used / total`; hover pads to that same width.
+    let mut token_str = context_chip_token_text(used, sampling_window, catalog_window)?;
     let natural_width = token_str.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
     if natural_width < min_width {
@@ -428,5 +493,82 @@ mod tests {
             context_bar_line_for_session(Some(1_000), Some(1_000_000), false, &theme, false)
                 .is_some()
         );
+    }
+
+    /// Named contract: when AUTO gates on the sampling window and the painted
+    /// catalog total is larger, the footer chip must name which window is
+    /// which. Do not imply catalog 500K is the AUTO gate.
+    #[test]
+    fn context_chip_names_sampling_window_when_catalog_differs() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(207_000),
+            Some(200_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        let text = line_text(&line);
+        assert!(
+            text.contains("sampling"),
+            "when the painted catalog total differs from the sampling window, name the sampling window: {text}"
+        );
+        assert!(
+            text.contains("200K"),
+            "must include the 200K sampling window AUTO gates on: {text}"
+        );
+        assert!(
+            text.contains("catalog"),
+            "must name the catalog window when showing the larger total: {text}"
+        );
+        assert!(
+            text.contains("500K"),
+            "must still show the 500K catalog window, labeled: {text}"
+        );
+        assert!(
+            !text.starts_with("207K / 500K"),
+            "must not imply unlabeled catalog 500K is the AUTO gate: {text}"
+        );
+    }
+
+    /// Hover percent is of the sampling window AUTO uses, not of catalog 500K.
+    #[test]
+    fn context_chip_hover_percent_uses_sampling_window_when_catalog_differs() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(160_000),
+            Some(200_000),
+            Some(500_000),
+            true,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        let text = line_text(&line);
+        assert!(
+            text.contains("80.0%"),
+            "hover percent must be of the 200K sampling window (160K/200K), got: {text}"
+        );
+        assert!(
+            !text.contains("32.0%"),
+            "must not paint catalog 160K/500K as 32% when AUTO uses 200K: {text}"
+        );
+    }
+
+    #[test]
+    fn context_chip_keeps_unlabeled_used_over_total_when_windows_match() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(207_000),
+            Some(500_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        assert_eq!(line_text(&line), "207K / 500K");
     }
 }

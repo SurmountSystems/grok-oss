@@ -81,23 +81,9 @@ pub fn is_under_user_grok_home(path: &Path) -> bool {
     path.starts_with(grok_home())
 }
 
-/// Compact duration: `5.2s`, `32s`, `2m5s`, `1h2m`.
+/// Compact duration: `5.2s`, `32s`, `15m43s`, `1h2m`.
 pub fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    if total_secs < 10 {
-        return format!("{:.1}s", d.as_secs_f64());
-    }
-    if total_secs < 60 {
-        return format!("{total_secs}s");
-    }
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    if mins < 60 {
-        return format!("{mins}m{secs}s");
-    }
-    let hours = mins / 60;
-    let remaining_mins = mins % 60;
-    format!("{hours}h{remaining_mins}m")
+    xai_tty_utils::format_human_duration(d)
 }
 
 /// Coarse recency for age columns: `just now`, `5m`, `3h`, `2d`, `1mo`, `1y`.
@@ -307,7 +293,11 @@ mod tests {
             (Duration::from_secs_f64(5.23), "5.2s"),
             (Duration::from_secs(10), "10s"),
             (Duration::from_secs_f64(12.3), "12s"),
+            (Duration::from_secs(59), "59s"),
+            (Duration::from_secs(60), "1m0s"),
+            (Duration::from_secs(943), "15m43s"),
             (Duration::from_secs(125), "2m5s"),
+            (Duration::from_secs(3600), "1h0m"),
             (Duration::from_secs(3725), "1h2m"),
         ];
         for (d, expected) in cases {

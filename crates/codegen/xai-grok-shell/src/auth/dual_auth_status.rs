@@ -161,7 +161,7 @@ impl DualAuthStatus {
         }
         if self.auto_use_included_limits {
             out.push_str(
-                "  Prefer included SuperGrok period limits: yes (default for new installs; included SuperGrok period limits before SuperGrok top-up dollars and the console API key; when those included SuperGrok period limits are full, SuperGrok top-up dollars before console; status compact and limits Active driver follow the same order; run grok limits for Active: included SuperGrok period limits | SuperGrok extras | console key; sticky status must not show console · $ while included SuperGrok period limits still have room; set [auth] auto_use_included_limits = false for classic dual-auth without included-period-first ranking)\n",
+                "  Prefer included SuperGrok period limits: yes (default for new installs; included SuperGrok period limits before SuperGrok top-up dollars and the console API key; when those included SuperGrok period limits are full, SuperGrok top-up dollars before console; status compact and limits Active driver follow the same order; run grok limits for Active: included SuperGrok period limits | SuperGrok dollar credits | console key; sticky status must not show console · $ while included SuperGrok period limits still have room; set [auth] auto_use_included_limits = false for classic dual-auth without included-period-first ranking)\n",
             );
         } else {
             out.push_str(
@@ -608,6 +608,14 @@ mod tests {
                 || text.contains("active driver")
                 || text.contains("grok limits"),
             "doctor must point at Active driver / grok limits: {text}"
+        );
+        assert!(
+            text.contains("SuperGrok dollar credits"),
+            "Active-driver list must name SuperGrok dollar credits: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "dual-auth human text must not teach extras as a nickname: {text}"
         );
         assert!(
             text.contains("console · $")

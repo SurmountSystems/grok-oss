@@ -1500,6 +1500,7 @@ pub(crate) async fn spawn_session_actor(
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
             previous_model: std::cell::Cell::new(None),
             compaction_mode,
             verbatim_input: compaction_verbatim_input,

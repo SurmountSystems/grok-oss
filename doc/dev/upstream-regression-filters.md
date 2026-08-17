@@ -151,7 +151,7 @@ check after these `fn`s exist.
 | `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `included SuperGrok period limits · N%` |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `ShowLimits` |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
-| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Notes / Clarify / Revise / Quit |
+| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Clarify / Revise / Exit |
 | `default_theme_is_doge` | Unset theme resolves to DOGE |
 
 Closest existing spinner/glyph neighbors (not a lower-left magenta throbber
@@ -272,6 +272,22 @@ cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_n
 These are not classes 8 through 14. Land still walks them because this catalog
 lists the named tests. Paint-only bubble copy is already a failed land under
 class 2 (click-to-copy rows).
+
+#### Footer context chip names sampling vs catalog
+
+AUTO compact gates on the sampling window. When that window is smaller than
+the catalog window, the footer chip must name both. Do not paint unlabeled
+catalog 500k as the AUTO gate.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `context_chip_names_sampling_window_when_catalog_differs` | Chip names sampling and catalog when they differ |
+| `xai-grok-pager` `context_chip_hover_percent_uses_sampling_window_when_catalog_differs` | Hover percent is of the sampling window |
+
+```bash
+cargo test -p xai-grok-pager --lib -- context_chip_names_sampling_window_when_catalog_differs \
+  context_chip_hover_percent_uses_sampling_window_when_catalog_differs
+```
 
 #### Plan present is not operator Approve
 
@@ -461,6 +477,88 @@ cargo test -p xai-grok-shell --test test_image_strip_recovery -- \
   poisoned_image_session_recovers_within_the_failing_turn
 ```
 
+#### Baked default is Grok 4.6 at medium
+
+Fork contract change. Upstream baked default is still grok-4.5 plus high.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-shell` `baked_default_is_grok_46_medium_fork_contract` | Baked `default_model()` is `grok-4.6` at medium reasoning effort |
+
+```bash
+cargo test -p xai-grok-shell --lib -- baked_default_is_grok_46_medium_fork_contract
+```
+
+#### Soft plan present is a real right-side pane
+
+A 75% centered overlay is a failed land for default soft park.
+
+| path::test | Contract |
+|------------|----------|
+| `plan_soft_park_docks_right_not_centered_overlay` | Soft park docks on the right, not a 75% centered overlay |
+| `plan_soft_park_draw_right_pane_matches_side_panel_status` | Right-pane geometry matches **Side panel open** |
+| `plan_row_click_does_not_enter_commenting` | A plan row click does not enter Commenting |
+| `plan_loop_status_does_not_claim_side_panel_when_viewer_closed` | Status does not claim Side panel open when the viewer is closed |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  plan_soft_park_docks_right_not_centered_overlay \
+  plan_soft_park_draw_right_pane_matches_side_panel_status \
+  plan_row_click_does_not_enter_commenting \
+  plan_loop_status_does_not_claim_side_panel_when_viewer_closed
+```
+
+#### Plan-review and Linux prompt screenshot paste
+
+| path::test | Contract |
+|------------|----------|
+| `event_paste_plan_commenting_empty_defers_clipboard_image_probe` | Empty plan-comment `Event::Paste` defers a clipboard image probe |
+| `plan_feedback_ctrl_v_defers_clipboard_image_probe` | Plan-review Ctrl+V defers a clipboard image probe |
+| `agent_empty_bracketed_paste_defers_probe_for_clipboard_image` | Empty agent `Event::Paste` defers a probe on every OS |
+| `approve_or_revise_drains_plan_composer_images` | Approve / Revise drain composer image chips |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  event_paste_plan_commenting_empty_defers_clipboard_image_probe \
+  plan_feedback_ctrl_v_defers_clipboard_image_probe \
+  agent_empty_bracketed_paste_defers_probe_for_clipboard_image \
+  approve_or_revise_drains_plan_composer_images
+```
+
+#### Live chrome names SuperGrok dollar credits
+
+Wire JSON field `supergrok_extras` may stay. Human chrome must not nickname SuperGrok dollar credits.
+
+| path::test | Contract |
+|------------|----------|
+| `compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct` | Compact meter paints SuperGrok dollar credits, not a nickname |
+| `format_supergrok_session_with_weekly_and_extras` | `/limits` human text says SuperGrok dollar credits |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct \
+  format_supergrok_session_with_weekly_and_extras
+```
+
+#### No two live same-description Subagent rows
+
+Product spawn rejects a second live same-description Task child. Unlimited retry never paints `4294967295`.
+
+| path::test | Contract |
+|------------|----------|
+| `live_subagent_list_does_not_show_two_rows_with_the_same_description` | Live Subagents list keeps one same-description row |
+| `task_spawn_rejects_or_replaces_second_live_same_description` | Second live same-description spawn is rejected |
+| `format_activity_label_unlimited_retry_has_no_u32_max_fraction` | Unlimited retry paints `Retrying (1)`, not `1/4294967295` |
+| `implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked` | Implement effort 2 is thoroughness, not two Review rows |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  live_subagent_list_does_not_show_two_rows_with_the_same_description \
+  format_activity_label_unlimited_retry_has_no_u32_max_fraction
+cargo test -p xai-grok-tools --lib -- task_spawn_rejects_or_replaces_second_live_same_description
+cargo test -p xai-grok-agent --lib -- implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked
+```
+
 ---
 
 ## Product filter catalog
@@ -644,7 +742,7 @@ Do not call SuperGrok free.
 | `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `included SuperGrok period limits · N%` | **Keep** (`credit_bar` helpers alone do not count) |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
-| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Notes / Clarify / Revise / Quit | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
+| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Clarify / Revise / Exit | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
 | `sampling_config_auto_use_*` | `sampling_config_for_model` / `prepare_sampling_config_for_model` fills console failover when included SuperGrok period limits are full | **Keep** |
 | `sampling_config_hops_to_sibling_included_before_extras` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
 | `limits_snapshot_second_process_reads_file_and_does_not_http` | One grok-oss process fetches SuperGrok billing; others read the flock snapshot | **Keep** |
@@ -842,10 +940,26 @@ cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_
   default_max_allows_l2_to_spawn_l3 rust_edit_verify dangerous_cargo
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
 cargo test -p xai-grok-shell --lib -- from_config_without_prefetch_produces_usable_catalog \
+  baked_default_is_grok_46_medium_fork_contract \
   stream_started_emits_retry_state_stream_resumed \
   keep_unverified_persisted_model_keeps_seeded_custom_slug \
   seeded_test_model_keeps_chat_completions_backend \
   leader_is_older_than_same_semver_git_sha_identity
+cargo test -p xai-grok-pager --lib -- \
+  plan_soft_park_docks_right_not_centered_overlay \
+  plan_soft_park_draw_right_pane_matches_side_panel_status \
+  plan_row_click_does_not_enter_commenting \
+  plan_loop_status_does_not_claim_side_panel_when_viewer_closed \
+  event_paste_plan_commenting_empty_defers_clipboard_image_probe \
+  plan_feedback_ctrl_v_defers_clipboard_image_probe \
+  agent_empty_bracketed_paste_defers_probe_for_clipboard_image \
+  approve_or_revise_drains_plan_composer_images \
+  compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct \
+  format_supergrok_session_with_weekly_and_extras \
+  live_subagent_list_does_not_show_two_rows_with_the_same_description \
+  format_activity_label_unlimited_retry_has_no_u32_max_fraction
+cargo test -p xai-grok-tools --lib -- task_spawn_rejects_or_replaces_second_live_same_description
+cargo test -p xai-grok-agent --lib -- implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked
 cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers \
   build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
   peer_relaunch_accepts_same_semver_different_sha \

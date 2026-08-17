@@ -413,6 +413,15 @@ impl AgentViewLayout {
             timeline_width,
         }
     }
+
+    /// Shrink the transcript so a right-docked soft plan pane does not
+    /// cover wrapped scrollback. Call after [`Self::compute`].
+    pub fn reserve_soft_plan_pane(&mut self, pane_width: u16) {
+        let leave_left = 16.min(self.scrollback.width.saturating_sub(1));
+        let pane_width = pane_width.min(self.scrollback.width.saturating_sub(leave_left));
+        self.scrollback.width = self.scrollback.width.saturating_sub(pane_width);
+        self.scrollback_content.width = self.scrollback_content.width.saturating_sub(pane_width);
+    }
     /// Inner area width (for prompt height computation before full layout).
     ///
     /// This computes just the inner width without the full layout split,

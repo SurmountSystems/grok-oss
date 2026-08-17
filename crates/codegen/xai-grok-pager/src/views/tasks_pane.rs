@@ -18,7 +18,10 @@ use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
-use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
+    is_l2_list_row, live_l3_count, live_subagent_list,
+};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
@@ -358,6 +361,10 @@ impl TaskEntry {
     }
 
     fn from_subagent(info: &SubagentInfo) -> Self {
+        Self::from_subagent_with_l3_count(info, 0)
+    }
+
+    fn from_subagent_with_l3_count(info: &SubagentInfo, live_l3: usize) -> Self {
         let theme = Theme::current();
 
         // Single consolidated label (persona > role > subagent_type > tag >
@@ -426,6 +433,12 @@ impl TaskEntry {
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
         ];
+        if let Some(count) = format_live_l3_count(live_l3) {
+            spans.push(Span::styled(
+                format!(" · {count}"),
+                Style::default().fg(theme.gray),
+            ));
+        }
         if let Some(activity) = activity {
             spans.push(Span::styled(
                 format!(" \u{2014} {activity}"),
@@ -433,11 +446,14 @@ impl TaskEntry {
             ));
         }
 
+        let l3_suffix = format_live_l3_count(live_l3)
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default();
         let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => type_label.clone(),
-            (true, false) => format!("{type_label} {model_suffix}"),
-            (false, true) => format!("{type_label} {description}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}"),
+            (true, true) => format!("{type_label}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
+            (false, true) => format!("{type_label} {description}{l3_suffix}"),
+            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
         };
         let styled = Line::from(spans);
 
@@ -929,11 +945,23 @@ impl TasksPane {
             }
         }
 
-        for info in subagents.values() {
-            if info.workflow_run_id.is_some() {
-                continue;
-            }
-            if self.show_done || info.is_running() {
+        let child_ids: std::collections::HashSet<&str> = subagents
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
+        for info in live_subagent_list(subagents.values()) {
+            let n = live_l3_count(subagents.values(), info.child_session_id.as_ref());
+            self.items
+                .push(TaskEntry::from_subagent_with_l3_count(info, n));
+        }
+        if self.show_done {
+            for info in subagents.values() {
+                if info.workflow_run_id.is_some() || info.is_running() {
+                    continue;
+                }
+                if !is_l2_list_row(info, &child_ids) {
+                    continue;
+                }
                 self.items.push(TaskEntry::from_subagent(info));
             }
         }
@@ -1951,6 +1979,8 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,
@@ -2641,6 +2671,70 @@ mod tests {
     }
 
     #[test]
+    fn tasks_pane_sync_does_not_paint_two_live_same_description_rows() {
+        let mut pane = TasksPane::new();
+        let t0 = Instant::now();
+        let mut a = make_info();
+        a.subagent_id = Arc::from("sa-a");
+        a.child_session_id = Arc::from("cs-a");
+        a.description = Arc::from("[reviewer] Review implementation");
+        a.subagent_type = Arc::from("general-purpose");
+        a.finished = false;
+        a.started_at = t0;
+        let mut b = make_info();
+        b.subagent_id = Arc::from("sa-b");
+        b.child_session_id = Arc::from("cs-b");
+        b.description = Arc::from("[reviewer] Review implementation");
+        b.subagent_type = Arc::from("general-purpose");
+        b.finished = false;
+        b.started_at = t0 + std::time::Duration::from_millis(10);
+        let mut other = make_info();
+        other.subagent_id = Arc::from("sa-other");
+        other.child_session_id = Arc::from("cs-other");
+        other.description = Arc::from("[implementer] Land the slice");
+        other.subagent_type = Arc::from("general-purpose");
+        other.finished = false;
+        other.started_at = t0 + std::time::Duration::from_millis(20);
+
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-a".into(), a);
+        subagents.insert("cs-b".into(), b);
+        subagents.insert("cs-other".into(), other);
+
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+
+        let same: Vec<_> = pane
+            .items
+            .iter()
+            .filter(|entry| match entry {
+                TaskEntry::Agent { label, .. } => label.contains("Review implementation"),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            same.len(),
+            1,
+            "Tasks pane sync must not paint two live same-description rows, got {}",
+            same.len()
+        );
+        let distinct = pane.items.iter().any(|entry| match entry {
+            TaskEntry::Agent { label, .. } => label.contains("Land the slice"),
+            _ => false,
+        });
+        assert!(
+            distinct,
+            "distinct live description must still appear after same-description collapse"
+        );
+    }
+
+    #[test]
     fn sync_sorts_running_before_done() {
         let mut pane = TasksPane::new();
         pane.show_done = true;
@@ -3085,6 +3179,27 @@ mod tests {
             _ => panic!("expected Agent variant"),
         };
         assert_eq!(label, "Explore Find API endpoints");
+    }
+
+    #[test]
+    fn l2_row_shows_live_l3_count_not_specialist_names() {
+        let info = make_info();
+        let entry = TaskEntry::from_subagent_with_l3_count(&info, 2);
+        let (label, styled) = match &entry {
+            TaskEntry::Agent { label, styled, .. } => (label, styled),
+            _ => panic!("expected Agent variant"),
+        };
+        assert!(
+            label.contains(" · 2 specialists"),
+            "L2 row must show a specialist count: {label}"
+        );
+        assert!(
+            styled
+                .spans
+                .iter()
+                .any(|s| s.content.contains("2 specialists")),
+            "styled L2 row must show the count, not L3 names: {styled:?}"
+        );
     }
 
     #[test]

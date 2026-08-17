@@ -40,15 +40,19 @@ where
             Err(
                 acp::Error::new(
                     acp::ErrorCode::InternalError.into(),
-                    format!(
-                "{action} timed out after {}s. It may still finish in the background; \
-                 retrying right away can run into the same delay.",
-                timeout.as_secs()
-            ),
+                    format_session_rpc_timeout(action, timeout),
                 ),
             )
         }
     }
+}
+/// Operator-facing session RPC timeout copy.
+pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "{action} timed out after {}. It may still finish in the background; \
+         retrying right away can run into the same delay.",
+        xai_tty_utils::format_human_duration(timeout)
+    )
 }
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
@@ -162,12 +166,19 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
 }
 /// Format a Duration for user-visible restore progress messages.
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+    xai_tty_utils::format_human_duration(d)
+}
+/// Finalize restore chrome: complete or incomplete plus elapsed wait.
+pub(super) fn format_restore_finalize_status(
+    incomplete: bool,
+    elapsed: std::time::Duration,
+) -> String {
+    let status = if incomplete {
+        "Restore incomplete"
     } else {
-        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
-    }
+        "Restore complete"
+    };
+    format!("{status} ({}).", format_restore_elapsed(elapsed))
 }
 /// CANONICAL wire parser for the worktree resume response. Any other code
 /// consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape
@@ -1661,6 +1672,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "default_reasoning_effort" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("default_reasoning_effort", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_default_reasoning_effort(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }
@@ -1889,14 +1908,15 @@ pub(super) fn persist_hint(
 pub(super) fn credit_balance_from_config(
     c: xai_grok_shell::extensions::billing::BillingConfig,
 ) -> crate::views::credit_bar::CreditBalance {
+    let (included_opt, _) =
+        xai_grok_shell::extensions::billing::included_usage_and_period_end(&c);
+    let included_usage_known = included_opt.is_some();
     let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
     let used = c.used.map(|v| v.val).unwrap_or(0);
     let has_credit_pct = c.credit_usage_percent.is_some();
-    let usage_pct = match c.credit_usage_percent {
-        Some(pct) => pct.clamp(0.0, 100.0),
-        None if limit > 0 => (used as f64 / limit as f64 * 100.0).min(100.0),
-        None => 0.0,
-    };
+    // Same included SuperGrok period used percent as /limits
+    // (`credit_balance_from_billing_config`). Do not invent a second formula.
+    let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
     let period_end_display = c
         .current_period
         .as_ref()
@@ -1943,6 +1963,7 @@ pub(super) fn credit_balance_from_config(
         prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
         period_type,
         is_unified_billing_user: c.is_unified_billing_user,
+        included_usage_known,
         ..Default::default()
     }
 }
@@ -2013,7 +2034,7 @@ pub(super) fn unregister_active_session_best_effort_in(
     root: &Path,
     session_id: &acp::SessionId,
 ) {
-    match xai_grok_active_sessions::try_unregister_in(root, session_id) {
+    match xai_grok_active_sessions::try_unregister_in(root, std::process::id(), session_id) {
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(

@@ -2100,9 +2100,48 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     }]
 }
 
-// `web_search_model`, `session_summary_model`, and
-// `default_reasoning_effort` setters were removed alongside their
-// registry entries. Mirror fields and TOML schema stay for compat.
+// `web_search_model` and `session_summary_model` setters were removed
+// alongside their registry entries. Mirror fields and TOML schema stay
+// for compat.
+//
+// `default_reasoning_effort` is back on the Settings registry
+// (`[models].default_reasoning_effort`).
+
+/// State-only mutation for `[models].default_reasoning_effort`.
+/// Updates the `AppView` mirror so `current_value_for` + snapshot
+/// refresh see the override without a restart.
+pub(super) fn set_default_reasoning_effort_inner(app: &mut AppView, canonical: &str) {
+    app.default_reasoning_effort = Some(canonical.to_string());
+}
+
+/// Persist `[models].default_reasoning_effort` (`low` | `medium` | `high`).
+/// SHELL-owned. Live-applied on `AppView`.
+pub(in crate::app::dispatch) fn set_default_reasoning_effort(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    let canonical = crate::settings::canonical_default_reasoning_effort(Some(&value));
+    let prev = crate::settings::canonical_default_reasoning_effort(
+        app.default_reasoning_effort.as_deref(),
+    );
+    if prev == canonical && app.default_reasoning_effort.as_deref() == Some(canonical) {
+        return vec![];
+    }
+    set_default_reasoning_effort_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "default_reasoning_effort",
+        value = canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Default reasoning effort: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "default_reasoning_effort",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
 
 // ---------------------------------------------------------------------------
 // max_thoughts_width — Int-valued setting. Registry surface is `i64`;

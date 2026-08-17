@@ -472,7 +472,6 @@ const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 const MODE_BANNER_FADE_TICKS: u8 = 9;
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn bracketed_paste_should_probe(text: &str) -> bool {
     crate::clipboard::paste_payload_needs_clipboard_attachment_probe(text)
 }
@@ -2499,6 +2498,8 @@ pub(crate) mod test_fixtures {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,

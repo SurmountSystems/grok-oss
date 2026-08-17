@@ -13610,6 +13610,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -13808,6 +13809,7 @@ dependencies = [
  "xai-tool-protocol",
  "xai-tool-runtime",
  "xai-tool-types",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -14162,6 +14164,7 @@ dependencies = [
  "xai-grok-sampling-types",
  "xai-grok-test-support",
  "xai-grok-version",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -14555,6 +14558,7 @@ dependencies = [
  "xai-grok-session-events",
  "xai-mixpanel",
  "xai-token-estimation",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -15062,6 +15066,7 @@ dependencies = [
  "schemars 1.0.4",
  "serde",
  "serde_json",
+ "xai-tty-utils",
 ]
 
 [[package]]

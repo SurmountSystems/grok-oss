@@ -1905,8 +1905,12 @@ mod tests {
             "included meter: {human}"
         );
         assert!(
-            human.contains("SuperGrok dollar extras: $15"),
-            "extras: {human}"
+            human.contains("SuperGrok dollar credits: $15"),
+            "SuperGrok dollar credits: {human}"
+        );
+        assert!(
+            !human.to_ascii_lowercase().contains("extras"),
+            "/limits human text must not teach extras as a nickname: {human}"
         );
         assert!(human.contains("Console API:"), "console section: {human}");
         assert!(
@@ -2292,8 +2296,12 @@ mod tests {
         assert_eq!(report.active_driver, "supergrok_extras");
         let human = format_limits_human(&snap, &report.notes);
         assert!(
-            human.contains("Active: SuperGrok extras"),
+            human.contains("Active: SuperGrok dollar credits"),
             "after-burner human: {human}"
+        );
+        assert!(
+            !human.contains("Active: SuperGrok extras"),
+            "/limits Active line must not teach extras as a nickname: {human}"
         );
     }
 

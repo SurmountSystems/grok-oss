@@ -1002,6 +1002,12 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
+        "default_reasoning_effort" => match choice {
+            "low" | "medium" | "high" => {
+                Some(Action::SetDefaultReasoningEffort(choice.to_string()))
+            }
+            _ => None,
+        },
         "render_mermaid" => {
             crate::appearance::RenderMermaid::from_canonical(choice).map(Action::SetRenderMermaid)
         }

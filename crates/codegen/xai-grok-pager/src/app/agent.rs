@@ -1026,9 +1026,10 @@ impl AgentSession {
         tokens_before: Option<u64>,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        saved_too_little: bool,
     ) {
         self.tracker
-            .defer_compaction(tokens_before, estimate_after, elapsed_ms);
+            .defer_compaction(tokens_before, estimate_after, elapsed_ms, saved_too_little);
     }
     pub fn note_context_used(&mut self, used: u64) {
         self.tracker.note_context_used(used);

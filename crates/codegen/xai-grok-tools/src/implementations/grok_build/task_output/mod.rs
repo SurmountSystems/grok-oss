@@ -105,11 +105,10 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
 }
 
 fn format_waited_duration(d: Duration) -> String {
-    let ms = d.as_millis();
-    if ms < 1000 {
-        format!("{ms}ms")
+    if d.as_millis() < 1000 {
+        format!("{}ms", d.as_millis())
     } else {
-        format!("{}s", ms / 1000)
+        xai_tty_utils::format_human_duration(d)
     }
 }
 
@@ -626,12 +625,14 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
     match &snap.status {
         SubagentSnapshotStatus::Initializing => {
             let duration_secs = snap.duration_ms as f64 / 1000.0;
+            let elapsed =
+                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is initializing (creating worktree, resolving config).\n\
                  Type: {}\n\
                  Description: {}\n\
-                 Elapsed: {duration_secs:.1}s",
+                 Elapsed: {elapsed}",
                 snap.subagent_type, snap.description,
             );
             let raw_output_bytes = body.len();
@@ -668,18 +669,18 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             let tokens_k = tokens_used / 1000;
             let capacity_k = context_window_tokens / 1000;
             // Measure body only — wait-hint is harness advisory, not task output.
+            let elapsed =
+                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             let body = format!(
                 "Subagent is still running.\n\
                  Type: {}\n\
                  Description: {}\n\
-                 Elapsed: {:.1}s\n\
+                 Elapsed: {elapsed}\n\
                  Progress: turn {turn_count}, {tool_call_count} tool calls, \
                  {tokens_k}K/{capacity_k}K tokens ({context_usage_pct}% context)\n\
                  Tools used: {tools_str}\n\
                  Errors: {error_count}",
-                snap.subagent_type,
-                snap.description,
-                snap.duration_ms as f64 / 1000.0,
+                snap.subagent_type, snap.description,
             );
             let raw_output_bytes = body.len();
             let output = with_still_running_wait_hint(body, wait_hint, WaitSubject::Subagent);
@@ -705,9 +706,14 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             worktree_path,
         } => {
             let mut output = format!(
-                "{output}\n\n<subagent_meta>id={}, type={}, tool_calls={tool_calls}, \
-                 turns={turns}, duration_ms={}</subagent_meta>",
-                snap.subagent_id, snap.subagent_type, snap.duration_ms,
+                "{output}\n\n{}",
+                xai_tool_types::format_subagent_meta_line(
+                    &snap.subagent_id,
+                    &snap.subagent_type,
+                    *tool_calls,
+                    *turns,
+                    snap.duration_ms,
+                ),
             );
             if let Some(wt) = &worktree_path {
                 output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
@@ -1143,13 +1149,13 @@ mod tests {
         };
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Task),
-            "Waited 600s, the per-call maximum, of the 2400s you requested; \
+            "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
              the task is still running. You do not need to call this again. \
              You will be notified automatically when the task completes."
         );
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Subagent),
-            "Waited 600s, the per-call maximum, of the 2400s you requested; \
+            "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
              the subagent is still running. You do not need to call this again. \
              You will be notified automatically when the subagent completes."
         );
@@ -2153,6 +2159,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn format_running_subagent_long_wait_uses_minutes_not_raw_seconds() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-long".to_string(),
+            description: "compiled from src/systems".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 1,
+                tool_call_count: 1,
+                tokens_used: 1_000,
+                context_window_tokens: 128_000,
+                context_usage_pct: 1,
+                tools_used: vec!["bash".to_string()],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 943_000,
+        };
+        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let output = match result {
+            TaskOutputOutput::Result(r) => r.output,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        assert!(
+            output.contains("15m43s"),
+            "943 seconds must read as minutes, not a raw second count: {output}"
+        );
+        assert!(
+            !output.contains("943.0s")
+                && !output.contains("943s")
+                && !output.contains("943 seconds"),
+            "must not paint 943 as a raw second count: {output}"
+        );
+    }
+
     // raw_output_bytes is body-only so identical Running state is stable across WaitHints.
     #[test]
     fn format_running_subagent_raw_output_bytes_stable_across_wait_hints() {
@@ -2177,14 +2219,14 @@ mod tests {
             "Subagent is still running.\n\
              Type: {}\n\
              Description: {}\n\
-             Elapsed: {:.1}s\n\
+             Elapsed: {}\n\
              Progress: turn 1, 2 tool calls, \
              3K/128K tokens (2% context)\n\
              Tools used: bash\n\
              Errors: 0",
             snap.subagent_type,
             snap.description,
-            snap.duration_ms as f64 / 1000.0,
+            xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms)),
         );
         let not_requested = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
             TaskOutputOutput::Result(r) => r,
@@ -2209,6 +2251,43 @@ mod tests {
             not_requested.output.len(),
             clamped.output.len(),
             "hint variants must still produce different formatted output"
+        );
+    }
+
+    #[test]
+    fn format_completed_subagent_meta_long_wait_uses_minutes_not_raw_milliseconds() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-done".to_string(),
+            description: "find files".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Completed {
+                output: "Found 3 files".to_string(),
+                tool_calls: 5,
+                turns: 2,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 943_000,
+        };
+        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let output = match result {
+            TaskOutputOutput::Result(r) => r.output,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        assert!(
+            output.contains("duration=15m43s"),
+            "completed meta must use compact minutes, got: {output}"
+        );
+        assert!(
+            !output.contains("duration_ms="),
+            "raw millisecond field must not leak: {output}"
+        );
+        assert!(
+            !output.contains("943000")
+                && !output.contains("943s")
+                && !output.contains("943 seconds"),
+            "raw millisecond or second count must not leak: {output}"
         );
     }
 

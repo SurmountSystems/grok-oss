@@ -1090,7 +1090,10 @@ pub enum McpError {
     #[error("MCP client error: {0}")]
     ClientError(String),
 
-    #[error("MCP server '{server}' timed out after {timeout_secs}s")]
+    #[error(
+        "MCP server '{server}' timed out after {}",
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(*timeout_secs))
+    )]
     Timeout { server: String, timeout_secs: u64 },
 
     #[error("Failed to spawn MCP server '{server}': {source}")]
@@ -1661,10 +1664,7 @@ impl McpErasedTool {
                 }
                 Err(xai_tool_runtime::ToolError::custom(
                     "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
+                    format_mcp_tool_timeout(&self.tool.name, tool_timeout),
                 ))
             }
         }
@@ -1727,13 +1727,35 @@ impl McpErasedTool {
                 *is_timeout = true;
                 Err(xai_tool_runtime::ToolError::custom(
                     "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
+                    format_mcp_tool_timeout(&self.tool.name, tool_timeout),
                 ))
             }
         }
+    }
+}
+
+fn format_mcp_tool_timeout(name: &str, timeout_secs: u64) -> String {
+    format!(
+        "MCP tool '{name}' timed out after {}",
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(timeout_secs))
+    )
+}
+
+#[cfg(test)]
+mod timeout_copy_tests {
+    use super::format_mcp_tool_timeout;
+
+    #[test]
+    fn mcp_tool_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_mcp_tool_timeout("search", 90);
+        assert!(
+            msg.contains("timed out after 1m30s"),
+            "minute-plus MCP tool budget must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("90 seconds") && !msg.contains("90s"),
+            "raw second budget must not leak: {msg}"
+        );
     }
 }
 

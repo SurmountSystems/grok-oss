@@ -1,14 +1,47 @@
 {
-  "default": "grok-4.5",
-  "web_search": "grok-4.5",
-  "image_description": "grok-4.5",
-  "session_summary": "grok-4.5",
+  "default": "grok-4.6",
+  "web_search": "grok-4.6",
+  "image_description": "grok-4.6",
+  "session_summary": "grok-4.6",
   "models": [
+    {
+      "id": "grok-4.6",
+      "model": "grok-4.6",
+      "name": "Grok 4.6",
+      "description": "SpaceXAI's new frontier model",
+      "context_window": 500000,
+      "api_backend": "responses",
+      "supports_backend_search": false,
+      "system_prompt_label": "Grok 4.6",
+      "show_model_fingerprint": true,
+      "supports_reasoning_effort": true,
+      "reasoning_effort": "medium",
+      "compaction_at_tokens": true,
+      "compactions_remaining": 1,
+      "reasoning_efforts": [
+        {
+          "value": "high",
+          "label": "High Effort",
+          "description": "Highest implementation quality with extensive reasoning"
+        },
+        {
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced effort with standard implementation and testing",
+          "default": true
+        },
+        {
+          "value": "low",
+          "label": "Low Effort",
+          "description": "Quick, fast implementations"
+        }
+      ]
+    },
     {
       "id": "grok-4.5",
       "model": "grok-4.5",
       "name": "Grok 4.5",
-      "description": "SpaceXAI's new frontier model",
+      "description": "SpaceXAI's previous frontier model",
       "context_window": 500000,
       "api_backend": "responses",
       "supports_backend_search": false,

@@ -68,8 +68,8 @@ pub struct OpenRouterCreditBalance {
 /// Which identity is live for sampling (drives meter honesty in the prompt footer).
 ///
 /// After SuperGrok included allowance is full, Build can stay on a **console**
-/// API key while SuperGrok billing still reports personal prepaid extras. The
-/// footer must not present those extras as what Build is burning.
+/// API key while SuperGrok billing still reports personal SuperGrok dollar credits.
+/// The footer must not present those SuperGrok dollar credits as what Build is burning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SamplingIdentityKind {
     /// Live sampling uses the SuperGrok OAuth session (default when unknown).
@@ -204,7 +204,7 @@ pub fn sampling_identity_from_hop_reason(reason: &str) -> Option<SamplingIdentit
 /// Silent sticky prefer_live (and restart while the memo lives) can leave
 /// samples on the **console key** without hop toast chrome. Tracked state may
 /// still default to SuperGrokSession. The footer must follow the **live spend
-/// pool** — never SuperGrok prepaid extras while console is what Build burns.
+/// pool**, never SuperGrok dollar credits while console is what Build burns.
 ///
 /// `supergrok_out_of_allowance_with_console_ready` is true when dual-auth can
 /// use a console key and the SuperGrok session fingerprint is still memoized
@@ -232,7 +232,7 @@ pub fn meter_sampling_identity(
 ///
 /// Same order as Design A compact status and included-period-first token economy:
 /// included SuperGrok period limits while they still have room, then SuperGrok
-/// dollar extras (after-burner), then console key.
+/// dollar credits (after-burner), then console key.
 ///
 /// **Intent chrome, not settlement proof.** Team Grok Build / OAuth class and
 /// console team prepaid remaining can still move under SuperGrok session while
@@ -242,11 +242,12 @@ pub fn meter_sampling_identity(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveSpendDriver {
     /// Included SuperGrok period limits are the client spend-order driver (used
-    /// % &lt; 100, or full with no SuperGrok extras left so chrome shows the
+    /// % &lt; 100, or full with no SuperGrok dollar credits left so chrome shows the
     /// included-period form). Not proof those included SuperGrok period limits
     /// were debited or that team meters did not settle the work.
     SuperGrokFreePeriod,
-    /// Free period full and SuperGrok dollar extras known positive (after-burner).
+    /// Included SuperGrok period limits full and SuperGrok dollar credits known
+    /// positive (after-burner).
     SuperGrokExtras,
     /// Console API key is the live sampling principal.
     ConsoleKey,
@@ -266,7 +267,7 @@ impl ActiveSpendDriver {
     pub fn as_human(self) -> &'static str {
         match self {
             Self::SuperGrokFreePeriod => "included SuperGrok period limits",
-            Self::SuperGrokExtras => "SuperGrok extras",
+            Self::SuperGrokExtras => "SuperGrok dollar credits",
             Self::ConsoleKey => "console key",
         }
     }
@@ -306,11 +307,12 @@ pub fn combined_included_from_active_and_process_cache(
     combined_included_remaining(&readings)
 }
 
-/// Active spend driver from live sampling identity + free-period + extras.
+/// Active spend driver from live sampling identity, included SuperGrok period
+/// limits, and SuperGrok dollar credits.
 ///
-/// Matches Design A compact meter logic. SuperGrok extras balance and team
-/// prepaid on the account do **not** flip the driver while free period has
-/// headroom. Console live always returns [`ActiveSpendDriver::ConsoleKey`].
+/// Matches Design A compact meter logic. SuperGrok dollar credits balance and team
+/// prepaid on the account do **not** flip the driver while included SuperGrok
+/// period limits still have room. Console live always returns [`ActiveSpendDriver::ConsoleKey`].
 pub fn active_spend_driver(
     live: SamplingIdentityKind,
     included_usage_known: bool,
@@ -356,6 +358,32 @@ pub fn status_sampling_identity_for_compact_meter(
         return SamplingIdentityKind::ConsoleKey;
     }
     tracked
+}
+
+/// Compact-meter / `/limits` identity from tracked hop state plus combined
+/// included SuperGrok period remaining.
+///
+/// After a hop toast, `tracked` is the destination (`sampling_identity_from_hop_reason`).
+/// Combined remaining still blocks a stale exhaust memo from painting console
+/// while a sibling included pool has room.
+pub fn compact_meter_identity(
+    tracked: SamplingIdentityKind,
+    balance: Option<&CreditBalance>,
+) -> SamplingIdentityKind {
+    let combined = combined_included_from_active_and_process_cache(balance);
+    let (known, pct) = xai_grok_shell::auth::chrome_included_usage_from_combined(
+        balance.is_some_and(|b| b.included_usage_known),
+        balance.map(|b| b.usage_pct).unwrap_or(0.0),
+        &combined,
+    );
+    status_sampling_identity_for_compact_meter(
+        tracked,
+        known,
+        pct,
+        xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(
+            &xai_grok_config::grok_home(),
+        ),
+    )
 }
 
 /// Tracked identity update after billing allowance-exhaust sync.
@@ -556,9 +584,9 @@ fn fmt_dollars(cents: i64) -> String {
 /// Build the `/usage` summary block shown in scrollback.
 ///
 /// Always shows usage % and (when known) the next reset time. The SuperGrok
-/// extras block is rendered only when the user has a positive prepaid balance
-/// from the grok.com session billing fetch (not console.x.ai team credits):
-/// - no prepaid balance       → extras block omitted entirely
+/// dollar credits block is rendered only when the user has a positive prepaid
+/// balance from the grok.com session billing fetch (not console.x.ai team credits):
+/// - no prepaid balance       → SuperGrok dollar credits block omitted entirely
 /// - auto top-up off/unknown  → `Auto topup: disabled` (no max line)
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
@@ -567,7 +595,7 @@ fn fmt_dollars(cents: i64) -> String {
 /// (branch 2b); never invented when absent.
 ///
 /// SuperGrok-primary path only. When live sampling is a console key, use
-/// [`format_usage_summary_with_live_identity`] so SuperGrok extras are never
+/// [`format_usage_summary_with_live_identity`] so SuperGrok dollar credits are never
 /// sold as the live console spend.
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
     format_usage_summary_with_live(
@@ -614,15 +642,18 @@ pub fn format_usage_summary_with_live(
 
     // Billing stores credit / top-up amounts as negative cents (accounting
     // convention); display the absolute USD value, matching the web clients.
-    // Label as SuperGrok extras so the footer is never mistaken for console
-    // team prepaid credits (those are a different pool on console.x.ai).
+    // Label as SuperGrok dollar credits so the footer is never mistaken for
+    // console team prepaid credits (those are a different pool on console.x.ai).
     if let Some(prepaid) = balance
         .prepaid_balance_cents
         .map(i64::abs)
         .filter(|c| *c > 0)
     {
         lines.push(String::new());
-        lines.push(format!("SuperGrok extras: {}", fmt_dollars(prepaid)));
+        lines.push(format!(
+            "SuperGrok dollar credits: {}",
+            fmt_dollars(prepaid)
+        ));
         match autotopup {
             Some(at) if at.enabled && at.topup_amount_cents.is_some() => {
                 lines.push(format!(
@@ -654,7 +685,7 @@ pub fn format_usage_summary_with_live(
 ///
 /// When live sampling is a **console key**, names **console team prepaid**
 /// (Management API cents) or an honest gap ([`ConsoleTeamPrepaidGap`]). Does
-/// **not** present SuperGrok session billing / SuperGrok $ extras as the live
+/// **not** present SuperGrok session billing / SuperGrok dollar credits as the live
 /// console spend (those are a different pool). SuperGrok-primary keeps
 /// [`format_usage_summary`].
 pub fn format_usage_summary_with_live_identity(
@@ -747,7 +778,7 @@ pub fn format_usage_summary_with_live_identity_gap_and_honesty(
     };
     // SuperGrok live still surfaces team Management prepaid when known (or an
     // honest gap when the Management path is active). Distinct from SuperGrok
-    // extras; never re-labels live sampling as console.
+    // dollar credits; never re-labels live sampling as console.
     match console_team_prepaid_cents {
         Some(cents) => {
             body.push('\n');
@@ -885,14 +916,14 @@ pub fn usage_warning_for_session_with_openrouter(
 /// `OpenRouter credits left: $N` (yellow when ≤ $10). xAI SuperGrok billing is
 /// ignored for that model so the footer matches the provider actually charged.
 ///
-/// When live primary is a **console key**, never presents SuperGrok prepaid
-/// extras as the spend meter (personal SuperGrok $ is a different pool). Shows
+/// When live primary is a **console key**, never presents SuperGrok dollar
+/// credits as the spend meter (personal SuperGrok $ is a different pool). Shows
 /// console team prepaid dollars when Management API cents are known, else an
 /// honest gap (`console key · no management key` / `no management team id` /
 /// loading / unavailable).
 ///
-/// When live primary is SuperGrok, prepaid is labeled **SuperGrok extras left**
-/// — never generic "Credits left".
+/// When live primary is SuperGrok, prepaid is labeled **SuperGrok dollar credits
+/// left**, never generic "Credits left".
 pub fn usage_warning_for_session_with_identity(
     balance: Option<&CreditBalance>,
     autotopup: Option<&AutoTopupInfo>,
@@ -920,7 +951,7 @@ pub fn usage_warning_for_session_with_identity(
 ///
 /// `console_team_prepaid_cents` is Management API team prepaid remaining
 /// (absolute USD cents). Only used when live identity is console; never mixed
-/// with SuperGrok session extras. When cents are `None`, uses
+/// with SuperGrok dollar credits. When cents are `None`, uses
 /// [`ConsoleTeamPrepaidGap::MissingManagementKey`] — prefer
 /// [`usage_warning_for_session_with_identity_principal_and_gap`] when the
 /// caller knows the real gap reason.
@@ -954,8 +985,8 @@ pub fn usage_warning_for_session_with_identity_and_principal(
 ///
 /// When live sampling is **SuperGrok session**, team Management prepaid is
 /// still surfaced when known (or an honest gap when the Management path is
-/// active / dual-auth dogfood expects a team section). SuperGrok % / extras
-/// stay the primary SuperGrok story; team dollars never re-label live sampling
+/// active / dual-auth dogfood expects a team section). SuperGrok % / SuperGrok
+/// dollar credits stay the primary SuperGrok story; team dollars never re-label live sampling
 /// as console. Does not surface team postpaid OAuth / Grok Build class; use
 /// [`usage_warning_for_session_with_identity_principal_gap_and_postpaid`] when
 /// that period class is known.
@@ -989,7 +1020,8 @@ pub fn usage_warning_for_session_with_identity_principal_and_gap(
 /// Like [`usage_warning_for_session_with_identity_principal_and_gap`] with
 /// optional team **postpaid OAuth / Grok Build class** period cents.
 ///
-/// SuperGrok live: free-period / SuperGrok extras stay the SuperGrok story.
+/// SuperGrok live: included SuperGrok period limits / SuperGrok dollar credits
+/// stay the SuperGrok story.
 /// While free SuperGrok period still has room, the prompt footer stays quiet on
 /// team wallets (no long "not the active spend path" team prepaid / Grok Build
 /// class line next to model name). Compact status already names free SuperGrok
@@ -1026,7 +1058,7 @@ pub fn usage_warning_for_session_with_identity_principal_gap_and_postpaid(
         return Some((text, critical));
     }
 
-    // Console / Business API key is live: do not show SuperGrok prepaid extras
+    // Console / Business API key is live: do not show SuperGrok dollar credits
     // or included-% as if they were the pool Build is burning. When Management
     // prepaid cents are known, show plain console team prepaid dollars.
     // Honest gap still beats the wrong SuperGrok number. Optional Grok Build
@@ -1155,7 +1187,7 @@ fn format_team_settlement_footer(
     Some((format!("{TEAM_SECONDARY_METERS_LABEL}: {body}"), critical))
 }
 
-/// SuperGrok-only footer warning (included % / SuperGrok $ extras). No team
+/// SuperGrok-only footer warning (included % / SuperGrok dollar credits). No team
 /// Management dollars here; caller merges via
 /// [`merge_supergrok_warning_with_team_prepaid`].
 fn supergrok_session_usage_warning(
@@ -1171,7 +1203,7 @@ fn supergrok_session_usage_warning(
         .unwrap_or_default();
 
     // A non-zero prepaid balance (stored as signed cents) means SuperGrok
-    // extras / bought credits from the session billing path.
+    // dollar credits from the session billing path.
     let credits = balance
         .prepaid_balance_cents
         .map(i64::abs)
@@ -1211,7 +1243,8 @@ fn supergrok_session_usage_warning(
         return None;
     };
 
-    // Extras are only drawn down at 100% included usage; don't warn before then.
+    // SuperGrok dollar credits are only drawn down at 100% included usage; don't
+    // warn before then.
     if balance.usage_pct < 100.0 {
         return None;
     }
@@ -1219,7 +1252,7 @@ fn supergrok_session_usage_warning(
     let credits_warning = || {
         (
             format!(
-                "SuperGrok extras left{role_suffix}: {}",
+                "SuperGrok dollar credits left{role_suffix}: {}",
                 fmt_dollars(credits_cents)
             ),
             true,
@@ -1253,7 +1286,7 @@ fn supergrok_session_usage_warning(
 /// Compact status already names free SuperGrok period; team wallets stay on
 /// `/limits`. After free SuperGrok period is full, team $ lines carry the
 /// [`TEAM_SECONDARY_METERS_LABEL`] prefix so they are not read as the live
-/// SuperGrok extras path. Zero or missing postpaid class is omitted (no invent).
+/// SuperGrok dollar credits path. Zero or missing postpaid class is omitted (no invent).
 fn merge_supergrok_warning_with_team_meters(
     supergrok: Option<(String, bool)>,
     console_team_prepaid_cents: Option<i64>,
@@ -1298,10 +1331,10 @@ pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) ->
 /// so the status bar never implies Build sampler / coding-credit usage.
 ///
 /// SuperGrok-primary compact meter only (console live uses the console branch
-/// in the status bar). When free SuperGrok period is full and SuperGrok dollar
-/// extras remain, paints extras `$` — not bare free-period `100%` as if included
-/// still drives. When included usage is unknown, paints honest `...%` — never
-/// a silent `0%`.
+/// in the status bar). When included SuperGrok period limits are full and SuperGrok
+/// dollar credits remain, paints SuperGrok dollar credits `$`, not bare included
+/// `100%` as if included still drives. When included usage is unknown, paints
+/// honest `...%`, never a silent `0%`.
 pub fn credit_bar_line_for_session(
     balance: &CreditBalance,
     hovered: bool,
@@ -1334,9 +1367,10 @@ pub fn credit_bar_line_for_session(
         false,
     );
 
-    // Free-period % path may append linear-burn pacing. Extras $ path does not
-    // (period is full; pacing is about included burn).
-    let on_extras = meter.contains("SuperGrok extras");
+    // Included SuperGrok period limits % path may append linear-burn pacing.
+    // SuperGrok dollar credits $ path does not (period is full; pacing is about
+    // included burn).
+    let on_extras = meter.contains("SuperGrok dollar credits");
     let text = if on_extras {
         meter
     } else {
@@ -1430,9 +1464,9 @@ pub fn active_supergrok_poll_auth_failed_from_process() -> bool {
 /// - **SuperGrok live + included period has room** (`included < 100%`) →
 ///   `included SuperGrok period limits · N%`.
 /// - **SuperGrok live + included period full** (`≥ 100%`) + positive SuperGrok
-///   dollar credits → SuperGrok extras `$` (not bare `100%` as if included
+///   dollar credits → SuperGrok dollar credits `$` (not bare `100%` as if included
 ///   period still drives after-burner spend).
-/// - **SuperGrok live + included period full + no extras** →
+/// - **SuperGrok live + included period full + no SuperGrok dollar credits** →
 ///   `included SuperGrok period limits · 100%` (included pool is empty; no
 ///   second meter).
 /// - **SuperGrok live + cold included** → honest
@@ -1444,7 +1478,7 @@ pub fn active_supergrok_poll_auth_failed_from_process() -> bool {
 /// SuperGrok period has room (team wallets stay on `/limits`; after free SuperGrok
 /// period is full they may appear as footer **not the active spend path** chips).
 ///
-/// `supergrok_extras_cents` is session billing prepaid (SuperGrok $ top-ups),
+/// `supergrok_extras_cents` is session billing prepaid (SuperGrok dollar credits),
 /// never console team Management prepaid.
 pub fn compact_meter_text_for_live_identity(
     live: SamplingIdentityKind,
@@ -1504,7 +1538,7 @@ pub fn compact_meter_text_for_live_identity_with_active_poll(
         // $ credits when any remain. Do not paint bare included % as the live
         // driver.
         match supergrok_extras_cents.map(i64::abs).filter(|c| *c > 0) {
-            Some(cents) => format!("SuperGrok extras · {}", fmt_dollars(cents)),
+            Some(cents) => format!("SuperGrok dollar credits · {}", fmt_dollars(cents)),
             None => {
                 included_supergrok_period_limits_compact_meter(&format!("{included_usage_pct:.0}%"))
             }
@@ -1617,12 +1651,12 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, None),
-            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok dollar credits: $100\nAuto topup: disabled"
         );
         // A disabled rule renders the same.
         assert_eq!(
             format_usage_summary(&b, Some(&topup(false, Some(2000), Some(10000)))),
-            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"
+            "Usage: 25%\n\nSuperGrok dollar credits: $100\nAuto topup: disabled"
         );
     }
 
@@ -1634,7 +1668,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), None))),
-            "Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: $20"
+            "Usage: 25%\n\nSuperGrok dollar credits: $100\nAuto topup: $20"
         );
     }
 
@@ -1647,7 +1681,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(2000), Some(10000)))),
-            "Usage: 25%\nNext reset: June 14, 16:00\n\nSuperGrok extras: $100\nAuto topup: $20\nMax monthly topup: $100"
+            "Usage: 25%\nNext reset: June 14, 16:00\n\nSuperGrok dollar credits: $100\nAuto topup: $20\nMax monthly topup: $100"
         );
     }
 
@@ -1659,7 +1693,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(550), None))),
-            "Usage: 25%\n\nSuperGrok extras: $12.50\nAuto topup: $5.50"
+            "Usage: 25%\n\nSuperGrok dollar credits: $12.50\nAuto topup: $5.50"
         );
     }
 
@@ -1673,7 +1707,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_summary(&b, Some(&topup(true, Some(-500), Some(-1000)))),
-            "Usage: 100%\n\nSuperGrok extras: $5\nAuto topup: $5\nMax monthly topup: $10"
+            "Usage: 100%\n\nSuperGrok dollar credits: $5\nAuto topup: $5\nMax monthly topup: $10"
         );
     }
 
@@ -1832,7 +1866,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&exhausted, Some(&disabled), true),
-            Some(("SuperGrok extras left: $4.53".to_string(), true))
+            Some(("SuperGrok dollar credits left: $4.53".to_string(), true))
         );
     }
 
@@ -1846,7 +1880,7 @@ mod tests {
         let disabled = topup(false, None, None);
         assert_eq!(
             usage_warning(&b, Some(&disabled), true),
-            Some(("SuperGrok extras left: $4.53".to_string(), true))
+            Some(("SuperGrok dollar credits left: $4.53".to_string(), true))
         );
     }
 
@@ -1865,7 +1899,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&at_ten, Some(&disabled), true),
-            Some(("SuperGrok extras left: $10".to_string(), true))
+            Some(("SuperGrok dollar credits left: $10".to_string(), true))
         );
     }
 
@@ -1890,7 +1924,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(2000), Some(10000))), true),
-            Some(("SuperGrok extras left: $15".to_string(), true))
+            Some(("SuperGrok dollar credits left: $15".to_string(), true))
         );
         let plenty = CreditBalance {
             prepaid_balance_cents: Some(2500),
@@ -1910,7 +1944,7 @@ mod tests {
         };
         assert_eq!(
             usage_warning(&b, Some(&topup(true, Some(-2000), Some(-10000))), true),
-            Some(("SuperGrok extras left: $4.53".to_string(), true))
+            Some(("SuperGrok dollar credits left: $4.53".to_string(), true))
         );
     }
 
@@ -1957,8 +1991,8 @@ mod tests {
         assert!(text.contains("Live sampling: console key"), "{text}");
         assert!(text.contains("Console team prepaid: $125"), "{text}");
         assert!(
-            !text.contains("SuperGrok extras"),
-            "console live must not sell SuperGrok extras as live: {text}"
+            !text.contains("SuperGrok extras") && !text.contains("SuperGrok dollar credits"),
+            "console live must not sell SuperGrok dollar credits as live: {text}"
         );
         assert!(
             !text.contains("Weekly limit:"),
@@ -2281,16 +2315,16 @@ mod tests {
         );
         // SuperGrok-primary still uses session billing for SuperGrok meters.
         assert!(
-            text.starts_with("Usage: 25%\n\nSuperGrok extras: $100\nAuto topup: disabled"),
+            text.starts_with("Usage: 25%\n\nSuperGrok dollar credits: $100\nAuto topup: disabled"),
             "session billing body: {text}"
         );
-        // Team Management prepaid is a separate line when known (not SuperGrok extras).
+        // Team Management prepaid is a separate line when known (not SuperGrok dollar credits).
         assert!(
             text.contains("Console team prepaid: $125"),
             "SuperGrok live /usage must surface known team prepaid as its own line: {text}"
         );
         assert!(
-            !text.contains("SuperGrok extras: $125"),
+            !text.contains("SuperGrok dollar credits: $125"),
             "must not mash team prepaid into SuperGrok extras: {text}"
         );
         // Branch 2b: SuperGrok live usage surfaces base poll honesty (not burn claim).
@@ -2338,7 +2372,7 @@ mod tests {
             prepaid_balance_cents: Some(10029),
             ..bal(65.0)
         };
-        // Extras observed on balance; Build not on wire this call.
+        // SuperGrok dollar credits observed on balance; Build not on wire this call.
         let expected = flat_poll_unproven_debit_note(false, true);
         let text = format_usage_summary_with_live_identity_gap_and_honesty(
             Some(&b),
@@ -2398,7 +2432,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             false, // flat
             false, // build
-            false, // extras
+            false, // SuperGrok dollar credits not observed
             true,  // oauth
         );
         assert!(
@@ -2471,12 +2505,12 @@ mod tests {
     }
 
     /// Contract: live primary = console after allowance mark → meter must not
-    /// present SuperGrok prepaid extras as bare "Credits left" / SuperGrok
-    /// extras $ without a console active-identity label.
+    /// present SuperGrok dollar credits as bare "Credits left" / SuperGrok
+    /// dollar credits $ without a console active-identity label.
     #[test]
     fn warning_console_primary_does_not_show_supergrok_extras_dollars() {
-        // Dogfood shape: SuperGrok included full + ~$9.96 personal extras still
-        // in billing, but samples run on the console key.
+        // Dogfood shape: SuperGrok included full + ~$9.96 SuperGrok dollar credits
+        // still in billing, but samples run on the console key.
         let b = CreditBalance {
             prepaid_balance_cents: Some(996),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
@@ -2499,17 +2533,17 @@ mod tests {
             "must label active identity as console: {text}"
         );
         assert!(
-            !text.starts_with("SuperGrok extras left:"),
-            "must not lead with SuperGrok extras $ while on console: {text}"
+            !text.starts_with("SuperGrok dollar credits left:"),
+            "must not lead with SuperGrok dollar credits $ while on console: {text}"
         );
         assert!(
             !text.starts_with("Credits left:"),
             "must not use bare Credits left: {text}"
         );
-        // SuperGrok personal extras dollar amount must not be the primary story.
+        // SuperGrok dollar credits amount must not be the primary story.
         assert!(
             !text.contains("$9.96"),
-            "must not show SuperGrok extras dollars as meter primary: {text}"
+            "must not show SuperGrok dollar credits as meter primary: {text}"
         );
         assert!(
             !critical,
@@ -2518,7 +2552,7 @@ mod tests {
     }
 
     /// Named contract: console live + Management prepaid fixture → plain
-    /// **team prepaid** dollars (never SuperGrok extras labels).
+    /// **team prepaid** dollars (never SuperGrok dollar credits labels).
     #[test]
     fn console_live_with_management_fixture_shows_prepaid_balance() {
         let b = CreditBalance {
@@ -2547,7 +2581,7 @@ mod tests {
         assert!(text.contains("$125"), "management prepaid dollars: {text}");
         assert!(
             !text.contains("$9.96") && !text.contains("SuperGrok extras"),
-            "must not show SuperGrok extras while console prepaid present: {text}"
+            "must not show SuperGrok extras nickname while console prepaid present: {text}"
         );
         assert!(
             !text.contains("no $ meter yet"),
@@ -2556,8 +2590,8 @@ mod tests {
         assert!(!critical, "$125 is above low-balance threshold");
     }
 
-    /// Contract: live primary = SuperGrok with prepaid extras → existing extras
-    /// path still works and is labeled SuperGrok.
+    /// Contract: live primary = SuperGrok with SuperGrok dollar credits → the
+    /// SuperGrok dollar credits path still works and is labeled SuperGrok.
     #[test]
     fn warning_supergrok_primary_still_shows_labeled_extras() {
         let b = CreditBalance {
@@ -2575,7 +2609,7 @@ mod tests {
                 false,
                 SamplingIdentityKind::SuperGrokSession,
             ),
-            Some(("SuperGrok extras left: $9.96".to_string(), true))
+            Some(("SuperGrok dollar credits left: $9.96".to_string(), true))
         );
         // Legacy openrouter wrapper defaults to SuperGrok session identity.
         assert_eq!(
@@ -2587,7 +2621,7 @@ mod tests {
                 false,
                 false,
             ),
-            Some(("SuperGrok extras left: $9.96".to_string(), true))
+            Some(("SuperGrok dollar credits left: $9.96".to_string(), true))
         );
     }
 
@@ -2614,7 +2648,7 @@ mod tests {
 
     /// Named contract (`bug:credits-meter-wrong-pool`): silent sticky console
     /// (SuperGrok still memoized out of allowance + dual-auth ready) must not
-    /// present SuperGrok prepaid extras when tracked UI identity is still the
+    /// present SuperGrok dollar credits when tracked UI identity is still the
     /// default SuperGrokSession (no hop toast yet / after restart).
     #[test]
     fn meter_identity_prefers_console_when_supergrok_memo_exhausted() {
@@ -2636,8 +2670,8 @@ mod tests {
 
     #[test]
     fn warning_silent_sticky_console_does_not_show_supergrok_extras() {
-        // Dogfood shape: SuperGrok included full + prepaid extras still in
-        // billing payload, samples already on console via silent prefer_live
+        // Dogfood shape: SuperGrok included full + SuperGrok dollar credits still
+        // in billing payload, samples already on console via silent prefer_live
         // (tracked UI still SuperGrokSession default).
         let b = CreditBalance {
             prepaid_balance_cents: Some(996),
@@ -2664,7 +2698,7 @@ mod tests {
             "must label console live pool: {text}"
         );
         assert!(
-            !text.contains("$9.96") && !text.starts_with("SuperGrok extras left:"),
+            !text.contains("$9.96") && !text.starts_with("SuperGrok dollar credits left:"),
             "must not sell SuperGrok extras as live spend: {text}"
         );
         assert!(
@@ -2991,13 +3025,14 @@ mod tests {
     /// secondary team prepaid under not-active-spend (not Team settlement jargon).
     #[test]
     fn footer_supergrok_live_after_free_period_full_shows_secondary_team_prepaid() {
-        // Free SuperGrok period full with SuperGrok $ credits present and unknown
-        // autotopup → SuperGrok extras warning is silent; secondary team can show alone.
+        // Included SuperGrok period limits full with SuperGrok dollar credits
+        // present and unknown autotopup → SuperGrok dollar credits warning is
+        // silent; secondary team can show alone.
         let mut b = bal_period(100.0, "USAGE_PERIOD_TYPE_WEEKLY");
         b.prepaid_balance_cents = Some(5_00); // SuperGrok dollar credits (not team)
         let w = usage_warning_for_session_with_identity_principal_and_gap(
             Some(&b),
-            None, // unknown autotopup → no SuperGrok extras warning
+            None, // unknown autotopup → no SuperGrok dollar credits warning
             None,
             true,
             false,
@@ -3024,7 +3059,7 @@ mod tests {
         );
         assert!(!critical, "$125 is above low-balance threshold");
         assert!(
-            !text.contains("SuperGrok extras left: $125"),
+            !text.contains("SuperGrok dollar credits left: $125"),
             "must not mash team prepaid into SuperGrok extras: {text}"
         );
     }
@@ -3103,7 +3138,7 @@ mod tests {
             "must not label Grok Build class as prepaid: {text}"
         );
         assert!(
-            !text.contains("SuperGrok extras left: $823.71"),
+            !text.contains("SuperGrok dollar credits left: $823.71"),
             "must not mash class into SuperGrok extras: {text}"
         );
         // Pure chip helper contract (console-live form).
@@ -3119,7 +3154,7 @@ mod tests {
     #[test]
     fn footer_supergrok_live_standalone_grok_build_class_without_prepaid() {
         let mut b = bal_period(100.0, "USAGE_PERIOD_TYPE_WEEKLY");
-        b.prepaid_balance_cents = Some(5_00); // quiet SuperGrok extras path (unknown autotopup)
+        b.prepaid_balance_cents = Some(5_00); // quiet SuperGrok dollar credits path (unknown autotopup)
         let w = usage_warning_for_session_with_identity_principal_gap_and_postpaid(
             Some(&b),
             None,
@@ -3207,7 +3242,7 @@ mod tests {
     #[test]
     fn footer_supergrok_live_mgmt_loading_after_free_period_full() {
         let mut b = bal_period(100.0, "USAGE_PERIOD_TYPE_WEEKLY");
-        b.prepaid_balance_cents = Some(5_00); // quiet SuperGrok extras path
+        b.prepaid_balance_cents = Some(5_00); // quiet SuperGrok dollar credits path
         let w = usage_warning_for_session_with_identity_principal_and_gap(
             Some(&b),
             None,
@@ -3402,7 +3437,7 @@ mod tests {
             0.0,
             Some(77_700),
             ConsoleTeamPrepaidGap::Loading,
-            Some(9900), // SuperGrok extras must not hijack console chrome
+            Some(9900), // SuperGrok dollar credits must not hijack console chrome
         );
         assert!(
             prepaid.contains("console") && prepaid.contains("777"),
@@ -3429,6 +3464,84 @@ mod tests {
         assert_eq!(sg_cold, "included SuperGrok period limits · ...%");
     }
 
+    /// Named contract: hop destination console + SuperGrok dollar credits
+    /// still on the account must not keep the SuperGrok dollar credits chip.
+    #[test]
+    fn active_driver_console_does_not_paint_supergrok_dollar_credits_chip() {
+        let hop = "Switched SuperGrok session → console key (rate limited)";
+        let tracked = SamplingIdentityKind::default();
+        assert_eq!(tracked, SamplingIdentityKind::SuperGrokSession);
+        let dest = sampling_identity_from_hop_reason(hop).unwrap_or(tracked);
+        let bal = CreditBalance {
+            prepaid_balance_cents: Some(26_264),
+            included_usage_known: true,
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            ..CreditBalance::default()
+        };
+        let live = compact_meter_identity(dest, Some(&bal));
+        assert_eq!(live, SamplingIdentityKind::ConsoleKey);
+        assert_eq!(
+            active_spend_driver(live, true, 100.0, Some(26_264)),
+            ActiveSpendDriver::ConsoleKey
+        );
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            Some(&bal),
+            live,
+            Some(22_675),
+            ConsoleTeamPrepaidGap::Loading,
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session paints compact credits");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("SuperGrok dollar credits")
+                && !text.to_ascii_lowercase().contains("extras"),
+            "hop-to-console compact must not keep SuperGrok dollar credits: {text}"
+        );
+    }
+
+    /// Named contract: compact status names console team prepaid when console
+    /// is the live key.
+    #[test]
+    fn compact_status_names_console_team_prepaid_when_console_is_live() {
+        let hop = "Switched SuperGrok session → console key (out of allowance)";
+        let dest = sampling_identity_from_hop_reason(hop)
+            .unwrap_or(SamplingIdentityKind::SuperGrokSession);
+        let bal = CreditBalance {
+            prepaid_balance_cents: Some(26_264),
+            included_usage_known: true,
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            ..CreditBalance::default()
+        };
+        let live = compact_meter_identity(dest, Some(&bal));
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            Some(&bal),
+            live,
+            Some(22_675),
+            ConsoleTeamPrepaidGap::Loading,
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session paints compact credits");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("console") && text.contains("226.75"),
+            "compact must name console team prepaid when console is live: {text}"
+        );
+        assert!(
+            !text.contains("SuperGrok dollar credits")
+                && !text.to_ascii_lowercase().contains("extras"),
+            "console-live compact must not paint SuperGrok dollar credits: {text}"
+        );
+    }
+
     /// Named contract: active SuperGrok poll auth-failed must not paint
     /// free-period % (sibling fill / stale cache must not look like active OK).
     #[test]
@@ -3452,26 +3565,31 @@ mod tests {
         );
     }
 
-    /// Named contract (Design A): SuperGrok live + free period full + dollar
-    /// extras → compact meter shows SuperGrok extras $, not free-period used %
-    /// as if included still drives after-burner spend.
+    /// Named contract (Design A): SuperGrok live + included SuperGrok period
+    /// limits full + SuperGrok dollar credits known positive → compact meter
+    /// shows SuperGrok dollar credits $, not included-period used % as if
+    /// included still drives after-burner spend. Must not teach extras.
     #[test]
     fn compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct() {
-        let on_extras = compact_meter_text_for_live_identity(
+        let on_credits = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,
             100.0,
             None,
             ConsoleTeamPrepaidGap::MissingManagementKey,
-            Some(453), // $4.53 SuperGrok extras
+            Some(453), // $4.53 SuperGrok dollar credits
         );
         assert!(
-            on_extras.to_ascii_lowercase().contains("extras") && on_extras.contains("4.53"),
-            "free period full + extras must show SuperGrok extras $: {on_extras}"
+            on_credits.contains("SuperGrok dollar credits") && on_credits.contains("4.53"),
+            "included period full + SuperGrok dollar credits must show SuperGrok dollar credits $: {on_credits}"
         );
         assert!(
-            !on_extras.contains('%'),
-            "must not paint free-period % while extras drive: {on_extras}"
+            !on_credits.to_ascii_lowercase().contains("extras"),
+            "compact meter must not teach extras as a nickname: {on_credits}"
+        );
+        assert!(
+            !on_credits.contains('%'),
+            "must not paint included-period % while SuperGrok dollar credits drive: {on_credits}"
         );
 
         // Line paint path must match the pure helper.
@@ -3481,14 +3599,14 @@ mod tests {
             ..bal(100.0)
         };
         let line = credit_bar_line_for_session(&bal, false, &theme, false)
-            .expect("SuperGrok extras meter must paint");
+            .expect("SuperGrok dollar credits meter must paint");
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, on_extras);
+        assert_eq!(text, on_credits);
     }
 
-    /// Named contract: SuperGrok live + free period has room → free-period %
-    /// even when SuperGrok $ extras also exist on the account (extras not yet
-    /// the live driver).
+    /// Named contract: SuperGrok live + included SuperGrok period limits have
+    /// room → included-period %. SuperGrok dollar credits on the account are
+    /// not the live driver yet.
     #[test]
     fn compact_status_supergrok_free_period_room_shows_pct_not_extras() {
         let mid = compact_meter_text_for_live_identity(
@@ -3506,8 +3624,9 @@ mod tests {
         );
     }
 
-    /// Free period full with no SuperGrok extras left → free-period-labeled 100%
-    /// is honest (included empty; no second meter).
+    /// Included SuperGrok period limits full with no SuperGrok dollar credits
+    /// left → included-period-labeled 100% is honest (included empty; no
+    /// second meter).
     #[test]
     fn compact_status_supergrok_full_without_extras_shows_100_pct() {
         let full = compact_meter_text_for_live_identity(
@@ -3553,7 +3672,7 @@ mod tests {
             6.0,
             Some(34_000), // team prepaid $340 must not hijack free-period chrome
             ConsoleTeamPrepaidGap::Loading,
-            Some(10_029), // SuperGrok extras on account; not live driver
+            Some(10_029), // SuperGrok dollar credits on account; not live driver
         );
         assert_eq!(text, "included SuperGrok period limits · 6%");
         assert!(
@@ -3614,8 +3733,9 @@ mod tests {
         );
     }
 
-    /// Named contract (P3/P5): free-period headroom → active driver is free SuperGrok
-    /// period even when SuperGrok extras and team prepaid are known on the account.
+    /// Named contract (P3/P5): included SuperGrok period limits still have room
+    /// → active driver is included SuperGrok period limits even when SuperGrok
+    /// dollar credits and team prepaid are known on the account.
     #[test]
     fn active_driver_free_period_headroom_even_with_extras_and_team_prepaid() {
         let d = active_spend_driver(
@@ -3632,9 +3752,10 @@ mod tests {
         assert_ne!(d.as_wire(), "supergrok_extras");
     }
 
-    /// Named contract: personal included SuperGrok period limits full + extras
-    /// must stay on included chrome while a distinct Business pool still has
-    /// remaining. Combined used percent, not SuperGrok extras.
+    /// Named contract: personal included SuperGrok period limits full plus
+    /// SuperGrok dollar credits must stay on included chrome while a distinct
+    /// Business pool still has remaining. Combined used percent, not SuperGrok
+    /// dollar credits as the live driver.
     #[test]
     fn compact_meter_stays_included_while_sibling_pool_has_remaining() {
         use chrono::{TimeZone, Utc};
@@ -3712,7 +3833,9 @@ mod tests {
         assert_ne!(d.as_wire(), "supergrok_extras");
     }
 
-    /// Design A after-burner: free period ≥ 100% + extras → SuperGrok extras driver.
+    /// Design A after-burner: included SuperGrok period limits ≥ 100% plus
+    /// SuperGrok dollar credits → SuperGrok dollar credits driver
+    /// (`ActiveSpendDriver::SuperGrokExtras` / wire `supergrok_extras`).
     #[test]
     fn active_driver_afterburner_extras_when_free_period_full() {
         let d = active_spend_driver(
@@ -3723,13 +3846,19 @@ mod tests {
         );
         assert_eq!(d, ActiveSpendDriver::SuperGrokExtras);
         assert_eq!(d.as_wire(), "supergrok_extras");
-        assert_eq!(d.as_human(), "SuperGrok extras");
+        assert_eq!(d.as_human(), "SuperGrok dollar credits");
+        assert!(
+            !d.as_human().to_ascii_lowercase().contains("extras"),
+            "Active human label must not teach extras as a nickname: {}",
+            d.as_human()
+        );
         // Console live always console_key.
         assert_eq!(
             active_spend_driver(SamplingIdentityKind::ConsoleKey, true, 6.0, Some(9999)),
             ActiveSpendDriver::ConsoleKey
         );
-        // Full free period, no extras → free-period form (100% chrome).
+        // Included SuperGrok period limits full, no SuperGrok dollar credits →
+        // included-period form (100% chrome).
         assert_eq!(
             active_spend_driver(SamplingIdentityKind::SuperGrokSession, true, 100.0, None),
             ActiveSpendDriver::SuperGrokFreePeriod
@@ -3888,7 +4017,7 @@ mod tests {
         );
 
         let mut full = bal_period(100.0, "USAGE_PERIOD_TYPE_WEEKLY");
-        full.prepaid_balance_cents = Some(5_00); // quiet SuperGrok extras path
+        full.prepaid_balance_cents = Some(5_00); // quiet SuperGrok dollar credits path
         let (after_full, _) = usage_warning_for_session_with_identity_principal_gap_and_postpaid(
             Some(&full),
             None,
@@ -3988,6 +4117,90 @@ mod tests {
                 && !compact.to_ascii_lowercase().contains("active spend")
                 && !compact.contains("340"),
             "compact must not carry secondary team dollars: {compact}"
+        );
+    }
+
+    /// Named contract (G5): SuperGrok OIDC is live, included SuperGrok period
+    /// limits are known at 6%, SuperGrok dollar credits and team prepaid exist
+    /// as separate meters, and the console API key is not live. Settlement
+    /// chrome must not name console as the live payer.
+    #[test]
+    fn settlement_chrome_supergrok_oidc_must_not_name_console_as_live_payer() {
+        let live = SamplingIdentityKind::SuperGrokSession;
+        let included_pct = 6.0;
+        let supergrok_dollar_credits = Some(10_029);
+        let team_prepaid = Some(34_000);
+
+        let compact = compact_meter_text_for_live_identity(
+            live,
+            true,
+            included_pct,
+            team_prepaid,
+            ConsoleTeamPrepaidGap::Loading,
+            supergrok_dollar_credits,
+        );
+        assert_eq!(compact, "included SuperGrok period limits · 6%");
+        assert!(
+            !compact.to_ascii_lowercase().contains("console"),
+            "compact must not name console as live payer: {compact}"
+        );
+
+        let driver = active_spend_driver(live, true, included_pct, supergrok_dollar_credits);
+        assert_eq!(driver.as_human(), "included SuperGrok period limits");
+        assert_ne!(driver.as_wire(), "console_key");
+
+        let mut balance = bal(included_pct);
+        balance.prepaid_balance_cents = supergrok_dollar_credits;
+        let theme = Theme::default();
+        let status = credit_status_line_for_live_session(
+            Some(&balance),
+            live,
+            team_prepaid,
+            ConsoleTeamPrepaidGap::Loading,
+            false,
+            &theme,
+            false,
+        )
+        .expect("SuperGrok OIDC Build session paints compact status");
+        let status_text: String = status.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(status_text, "included SuperGrok period limits · 6%");
+        assert!(
+            !status_text.to_ascii_lowercase().contains("console"),
+            "status line must not name console as live payer: {status_text}"
+        );
+
+        let footer = usage_warning_for_session_with_identity_principal_gap_and_postpaid(
+            Some(&balance),
+            None,
+            None,
+            true,
+            false,
+            false,
+            live,
+            None,
+            team_prepaid,
+            ConsoleTeamPrepaidGap::Loading,
+            None,
+        );
+        assert!(
+            footer
+                .as_ref()
+                .is_none_or(|(text, _)| !text.starts_with("Console key")),
+            "footer must not start with Console key when SuperGrok is live: {footer:?}"
+        );
+
+        // This file formats `/usage` SuperGrok-live follow-up, not `/limits`
+        // headers. Ban payer phrases only; a separate team prepaid meter line
+        // may still mention console.
+        let usage =
+            format_usage_summary_with_live_identity(Some(&balance), None, live, team_prepaid);
+        assert!(
+            !usage.contains("Live sampling: console key"),
+            "/usage must not name console as live sampling: {usage}"
+        );
+        assert!(
+            !usage.contains("Active: console key"),
+            "/usage must not name console as Active: {usage}"
         );
     }
 }

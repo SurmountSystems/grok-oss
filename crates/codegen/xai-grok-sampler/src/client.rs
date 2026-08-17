@@ -242,6 +242,13 @@ pub(crate) fn stream_headers_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(stream_headers_timeout_secs(env.as_deref()))
 }
 
+fn format_stream_headers_timeout_message(budget: std::time::Duration) -> String {
+    format!(
+        "timed out waiting for response headers after {}",
+        xai_tty_utils::format_human_duration(budget)
+    )
+}
+
 /// Join `source()` chain — reqwest Display hides hyper causes.
 fn error_cause_chain(err: &dyn std::error::Error) -> String {
     let mut msg = err.to_string();
@@ -281,7 +288,7 @@ async fn execute_streaming(
         }
         Err(_elapsed) => {
             let secs = budget.as_secs();
-            let msg = format!("timed out waiting for response headers after {secs}s");
+            let msg = format_stream_headers_timeout_message(budget);
             tracing::warn!(timeout_secs = secs, "{msg}");
             let span = tracing::Span::current();
             span.record("success", false);
@@ -2243,6 +2250,19 @@ mod tests {
             stream_headers_timeout_secs(Some("1")),
             1,
             "positive override still honored"
+        );
+    }
+
+    #[test]
+    fn stream_headers_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_stream_headers_timeout_message(std::time::Duration::from_secs(120));
+        assert!(
+            msg.contains("after 2m0s"),
+            "default 120s header wait must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("120s") && !msg.contains("120 seconds"),
+            "raw second budget must not leak: {msg}"
         );
     }
 

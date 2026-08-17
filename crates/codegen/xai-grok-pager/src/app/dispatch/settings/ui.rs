@@ -7,15 +7,16 @@ use super::setters::{
     set_auto_run_implement_inner, set_auto_update_inner, set_bubble_copy_buttons_inner,
     set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
     set_compact_mode_inner, set_confirm_before_rewind_inner, set_contextual_hint_inner,
-    set_default_model_inner, set_default_selected_permission_inner,
-    set_display_refresh_auto_cadence_inner, set_economic_mode_inner,
-    set_features_session_recap_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
-    set_hide_header_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
-    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_notifications_session_recap_inner, set_notifications_session_recap_threshold_secs_inner,
-    set_page_flip_on_send_inner, set_plan_approval_park_inner, set_prompt_suggestions_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_default_model_inner, set_default_reasoning_effort_inner,
+    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
+    set_economic_mode_inner, set_features_session_recap_inner, set_fork_secondary_model_inner,
+    set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_notifications_session_recap_inner,
+    set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
+    set_plan_approval_park_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
+    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
+    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
     set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
@@ -69,6 +70,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let default_reasoning_effort_from_app = app.default_reasoning_effort.clone();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -116,6 +118,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 scheduler_background_loops: agent
                     .scheduler_background_loops
                     .unwrap_or(scheduler_background_loops_seed),
+                default_reasoning_effort: default_reasoning_effort_from_app.clone(),
             };
         }
     }
@@ -224,6 +227,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
+    let default_reasoning_effort_from_app = app.default_reasoning_effort.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -279,6 +283,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         scheduler_background_loops: agent
             .scheduler_background_loops
             .unwrap_or(scheduler_background_loops_seed),
+        default_reasoning_effort: default_reasoning_effort_from_app,
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -782,6 +787,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
         scheduler_background_loops: agent_scheduler_background_loops(app),
+        default_reasoning_effort: app.default_reasoning_effort.clone(),
     }
 }
 
@@ -1033,6 +1039,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("voice_stt_language", SettingValue::Enum(s)) => {
             Some(Action::SetVoiceSttLanguage((*s).to_string()))
+        }
+        ("default_reasoning_effort", SettingValue::Enum(s)) => {
+            Some(Action::SetDefaultReasoningEffort((*s).to_string()))
         }
         // fork_secondary_model: empty → Clear, non-empty is skew guard.
         ("fork_secondary_model", SettingValue::String(s)) => {
@@ -1382,6 +1391,12 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_voice_stt_language_inner(
                 app,
                 crate::settings::canonical_voice_stt_language(Some(s)),
+            );
+        }
+        ("default_reasoning_effort", SettingValue::Enum(s)) => {
+            set_default_reasoning_effort_inner(
+                app,
+                crate::settings::canonical_default_reasoning_effort(Some(s)),
             );
         }
         // show_tips / auto_update: if rollback equals the effective

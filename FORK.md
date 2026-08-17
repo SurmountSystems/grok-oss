@@ -190,10 +190,13 @@ identifier that has no matching `fn`.
   spend order: included SuperGrok period limits first, then SuperGrok dollar
   credits, then console team prepaid / console API credits. Compact chrome
   paints `included SuperGrok period limits · N%` for the included-period meter;
-  SuperGrok dollar credits still use the UI copy `SuperGrok extras · $N`;
-  console still `console · $N`. `/limits --json` `activeDriver` wire values
-  (`supergrok_free_period` | `supergrok_extras` | `console_key`) stay intent
-  labels after that plain thought. Land paint: class 4 compact-meter tests.
+  SuperGrok dollar credits paint `SuperGrok dollar credits · $N` (live chrome
+  must not nickname that meter); console still `console · $N`. `/limits --json`
+  `activeDriver` wire values (`supergrok_free_period` | `supergrok_extras` |
+  `console_key`) stay wire labels after that plain thought. Land paint: class
+  4 compact-meter tests plus
+  `compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct` and
+  `format_supergrok_session_with_weekly_and_extras`.
   Dual `/limits` honesty (neighbor, not hop):
   `limits_json_lists_two_supergrok_principals_when_both_slots_exist`,
   `limits_json_honest_single_supergrok_session_cannot_see_team_plan`.
@@ -226,10 +229,21 @@ identifier that has no matching `fn`.
   `show_spend_ingests_usage_jsonl_and_is_not_empty_default`
   (`xai-grok-pager` `app/dispatch/tests/status.rs`). Schema v1 without ingest
   is a failed land.
+- [x] **Baked default is Grok 4.6 at medium reasoning effort** (fork
+  contract change; enabled by default; `[models].default_reasoning_effort`
+  is the operator override). Test:
+  `baked_default_is_grok_46_medium_fork_contract`
+  (`xai-grok-shell` `util/config/persist_tests.rs`).
 - [x] **Auto-compact default 95% + live-apply**: stock Grok 4.5 catalog omits
   a per-model undercut; Settings commit live-applies to open sessions.
   FORK claims; not a land class. Detail:
   `docs/dev/research/rca-auto-compact-early-fire.md`
+- [x] **Footer context chip names sampling vs catalog when they differ**:
+  AUTO compact gates on the sampling window (economic cap 200k). The chip
+  must not paint unlabeled `207K / 500K` as if catalog 500k were that gate.
+  Same honesty as the CompactionStarted banner. Test:
+  `context_chip_names_sampling_window_when_catalog_differs`
+  (`xai-grok-pager` `views/context_bar.rs`).
 - [x] **Auto-run `/implement`**: after a successful turn, queue a follow-up
   implement block when present; **appends** after any already-queued prompts.
   FORK claims; not a land class.
@@ -252,6 +266,23 @@ identifier that has no matching `fn`.
   `peer_relaunch_accepts_deleted_inode_even_when_identity_equal`,
   `leader_is_older_than_same_semver_git_sha_identity`. Fail-does-not-signal
   alone is not this seam.
+- [x] **Running grok-oss sessions**: live TUI windows on this `$GROK_HOME`
+  from `active_sessions.json`. Slash `/running` (alias `/windows`) and CLI
+  `grok-oss running` / `grok-oss running --json`. Not Agent Dashboard, not
+  `/sessions`, not `/tasks`, not `/resume`, not `/start`. Identity is
+  `(pid, session_id)` so two windows on the same conversation both appear.
+  Missing heartbeat is activity `unknown`. Title is the on-disk session
+  summary. Never stores prompts, tool arguments, tokens, JWTs, file
+  contents, or message text. Default headless stays unlisted unless
+  `GROK_TRACK_HEADLESS` is already set. Leader daemons stay on
+  `grok-oss leader list`. `/rebuild` SIGUSR1 still dedupes by PID. Crates:
+  `xai-grok-active-sessions`, `xai-grok-pager`, `xai-grok-pager-bin`,
+  `xai-grok-update`. Tests: `list_live_includes_two_windows_on_the_same_session_id`,
+  `list_live_drops_dead_pid`, `heartbeat_omits_prompt_text`,
+  `running_slash_lists_sibling_fixture_row`,
+  `running_cli_json_omits_prompt_text`,
+  `rebuild_signals_each_pid_after_composite_key`. User-guide
+  `04-slash-commands`, `17-sessions`, `23-dashboard` (cite only).
 - [x] **`from_config` no-prefetch usable catalog**:
   `ModelsManager::from_config` with no prefetch argument is a zero-network
   boot and must produce a usable bundled catalog. Test:
@@ -361,13 +392,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `included SuperGrok period limits · N%`; click opens `/limits`. Tests:
   `status_bar_pushes_credits_compact_included_supergrok_period_limits`,
   `hit_credits_click_dispatches_show_limits` (`app/agent_view/render.rs`).
-- [x] **Five-CTA plan footer**: Approve / Notes / Clarify / Revise / Quit.
-  Test: `plan_approval_footer_paints_five_cta_vocabulary`
-  (`views/file_search/line_viewer.rs`).
+- [x] **Plan footer CTAs**: Approve / Clarify / Revise / Exit. Notes is gone.
+  Letter `a` / `A` type. Empty Enter never Approves. Revise arms the box
+  and waits. Tests: `plan_approval_footer_paints_five_cta_vocabulary`,
+  `plan_footer_exit_not_quit`, `plan_footer_has_no_notes_button`,
+  `plan_prompt_letter_a_inserts_when_composing`
+  (`views/file_search/line_viewer.rs`, `app/agent_view/plan.rs`).
 - [x] **Plan present is not operator Approve + modal-free typing**:
   `exit_plan_mode` presents the plan. It does not click Approve.
   Always-approve permission mode does not auto-click the CTA. Empty Enter
-  never approves. Soft-park must not steal mid-compose keys. Crate:
+  never Approves. Soft-park must not steal mid-compose keys. Crate:
   `xai-grok-pager` `app/agent_view/plan.rs`,
   `app/acp_handler/tests/plan_mode.rs`; `xai-grok-tools`
   `exit_plan_mode/mod.rs`. Tests:
@@ -382,6 +416,33 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   (`plan_approval_park_*`). Prefer these exact names over a vague
   `exit_plan_mode_soft` substring. User-guide `19-plan-mode`,
   `22-permissions-and-safety`.
+- [x] **Soft plan present is a real right-side pane**: default soft park
+  docks the existing plan list plus five CTAs on the right, full overlay
+  height, no dim of the transcript. Status **Plan ready. Side panel open**
+  only when that viewer is actually open. A click on a plan row does not
+  enter Commenting. `c` remains the explicit line-comment gesture. Tests:
+  `plan_soft_park_docks_right_not_centered_overlay`,
+  `plan_soft_park_draw_right_pane_matches_side_panel_status`,
+  `plan_row_click_does_not_enter_commenting`,
+  `plan_loop_status_does_not_claim_side_panel_when_viewer_closed`.
+- [x] **Plan-review and Linux prompt screenshot paste**: `Event::Paste` and
+  plan-review Ctrl+V run the clipboard image probe on every OS. Approve and
+  Revise drain composer image chips. Tests:
+  `event_paste_plan_commenting_empty_defers_clipboard_image_probe`,
+  `plan_feedback_ctrl_v_defers_clipboard_image_probe`,
+  `agent_empty_bracketed_paste_defers_probe_for_clipboard_image`,
+  `approve_or_revise_drains_plan_composer_images`.
+- [x] **No two live same-description Subagent rows**: product spawn
+  **rejects** a second live Task-owned child with the same trimmed
+  description on the same parent. It does not replace the first child.
+  Unlimited retry paints `Retrying (1)`, never `Retrying (1/4294967295)`.
+  Finite `Retrying (2/5)` stays. Token Economy implement-loop effort is
+  thoroughness, not reviewer count (one reviewer unless the operator asked
+  for more). Tests:
+  `live_subagent_list_does_not_show_two_rows_with_the_same_description`,
+  `task_spawn_rejects_or_replaces_second_live_same_description`,
+  `format_activity_label_unlimited_retry_has_no_u32_max_fraction`,
+  `implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked`.
 - [x] **Always-on bubble copy is paint plus click**: flag on paints `⧉`. A
   full-width first line still paints a hit. Click on the human glyph copies
   that prompt. Click on the assistant glyph copies that message. Paint-only
@@ -505,17 +566,22 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `main` with `merge -s ours` so the tip is PR-able
   (`docs/upstream-history.md`, `just upstream-join-main`)
 - [x] **PRs accepted**: CONTRIBUTING / this fork
-- [x] **Parent = HITL only; always three layers (2026-08-15)**: process pin
-  in [`AGENTS.md`](AGENTS.md) and host `~/.grok/AGENTS.md`. Whenever work is
-  to be done and tools are to be called, agents are three layers deep.
-  Always. Including implement loops. Perceived simplicity is not an
-  exception. **L1 main:** status, spawn L2, wait, read short reports, board
-  upsert. **L2:** parallelize, spawn L3s, throw context away after a report.
-  **L3:** all actual tools and work. No L4. The older weaker law (L2 must
-  spawn L3 only when many greps / half the window) is replaced. Product cargo
-  pins for the prompt contract are under Product (`CHILD_TASK_DESCRIPTION`).
-  Assert sniffs that AGENTS still contains the coordinator sentence; that is
-  not the crate seam.
+- [x] **Parent = HITL only; always three layers (2026-08-15) plus
+  Hierarchical fast path (2026-08-16)**: process pin in [`AGENTS.md`](AGENTS.md)
+  and host `~/.grok/AGENTS.md`. Whenever implement work, multi-file diagnosis,
+  CI, or a regression needs tools, agents are three layers deep. Including
+  implement loops. **Hierarchical fast path** (named): the main thread may do
+  a one-command host question, a single known-path read already named, or
+  read and quote the short on-disk report this thread asked for. That is not
+  a license to diagnose or implement in the main thread. **Mention is in
+  scope:** if the operator mentions work, that mention is in scope. **L1
+  main:** status, spawn L2, wait, read short reports, board upsert,
+  Hierarchical fast path. **L2:** parallelize, spawn L3s, throw context away
+  after a report. **L3:** all actual tools and work. No L4. The older weaker
+  law (L2 must spawn L3 only when many greps / half the window) is replaced.
+  Product cargo pins for the prompt contract are under Product
+  (`CHILD_TASK_DESCRIPTION`). Assert sniffs that AGENTS still contains the
+  coordinator sentence; that is not the crate seam.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +
@@ -556,15 +622,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `xai-grok-tools` `util/rust_edit_verify.rs`. Named tests below. A
   restack that drops the helper or those tests is a **failed land**.
 - [x] **ACP per-path write lock** (`search_replace`, `apply_patch`,
-  `write`): each tool takes the path automatically as part of the call.
-  Happy path is silent. A held path is a tool error that names the
-  holder and the file. The tool does not write, wait, or show a human
-  steal, skip, or wait menu. Lock releases when the call finishes.
-  File-level infer-from-path verify still runs under the same hold.
-  Helper: `xai-grok-tools`
+  `write`, OpenCode `edit`, `hashline_edit`): each tool takes the path
+  automatically as part of the call. Happy path is silent. A held path
+  is a tool error that names the holder and the file. The tool does
+  not write, wait, or show a human steal, skip, or wait menu. Lock
+  releases when the call finishes. File-level infer-from-path verify
+  still runs under the same hold. Helper: `xai-grok-tools`
   `implementations/editor_infra/per_path_write_lock.rs`. Named tests
-  below. A restack that drops the helper or those tests is a **failed
-  land**.
+  below. A restack that drops the helper, the OpenCode `edit` lock
+  acquire, the `hashline_edit` lock acquire, or those tests is a
+  **failed land**.
 
 ### File-level infer-from-path verify
 
@@ -611,9 +678,11 @@ one of the seven numbered land classes.
 
 ### ACP per-path write lock
 
-ACP `search_replace`, `apply_patch`, and `write` take a per-path write
-lock automatically as part of the tool call. There is no lock argument
-on the tool schema. A successful write does not mention the lock.
+ACP `search_replace`, `apply_patch`, `write`, OpenCode `edit`, and
+`hashline_edit` (`GrokBuildHashline:hashline_edit`) take a per-path
+write lock automatically as part of the tool call. There is no lock
+argument on the tool schema. A successful write does not mention the
+lock.
 
 When another agent already holds that path, the tool returns an error
 that names the holder and the file. It does not write. It does not
@@ -624,7 +693,14 @@ talking to each other: they can wait, hand off, or pick another path.
 The lock is held through file-level infer-from-path verify on a written
 `.rs` file. `GROK_SKIP_EDIT_VERIFY=1` still skips only that verify.
 
-OpenCode `edit` is not wired yet. It can call the same helper later.
+OpenCode `edit` (tool id `"edit"`) acquires after directory, same-string,
+and bulk-edit checks, and before create or replace. The guard stays in
+`run` so rustfmt and clippy-driver on the same `.rs` path stay under
+the hold.
+
+`hashline_edit` acquires on the joined path after `resolve_model_path`,
+before canonicalize or any write. Existing-file edits and new-file
+`Write` both take the lock. Same helper; no second table; no human menu.
 
 **Named tests** (module filter `per_path_write_lock`):
 
@@ -633,9 +709,19 @@ OpenCode `edit` is not wired yet. It can call the same helper later.
 - `lock_releases_after_the_tool_call_so_a_later_call_can_write`
 - `search_replace_apply_patch_and_write_all_take_the_lock`
 - `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`
+- `hashline_edit_refuses_when_another_agent_holds_the_path`
+- `hashline_edit_happy_path_does_not_mention_the_lock`
 
 ```bash
 cargo test -p xai-grok-tools --lib per_path_write_lock
+```
+
+OpenCode `edit` fixture (not under that module filter):
+
+- `opencode_edit_cannot_write_a_path_another_agent_already_holds`
+
+```bash
+cargo test -p xai-grok-tools --lib opencode_edit_cannot_write_a_path_another_agent_already_holds
 ```
 
 ### Skills (multi-source)
@@ -667,13 +753,15 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. | Plan honesty `fn`s under Chrome. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. | `running_slash_lists_sibling_fixture_row` |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). | `user_guide_skills_are_not_a_python_runtime` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. | Three-layer guide text shipped in code; no dedicated `fn`. |
-| [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `canceled_turn_resume.json`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss` |
+| [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `canceled_turn_resume.json`. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss` |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Five CTAs. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
+| [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. | Cite only. No dedicated user-guide `fn`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
 
 Also: `user_guide_operator_cli_examples_use_grok_oss` (leftover `grok login` /
@@ -877,6 +965,27 @@ that drops them while keeping the seven is still a seam loss):
 - Plan present ≠ Approve + modal-free typing (five-CTA paint is not honesty).
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
 - Nucleo reuse-per-root.
+- Baked default is Grok 4.6 at medium reasoning effort
+  (`baked_default_is_grok_46_medium_fork_contract`). Fork contract change.
+- Soft plan present is a real right-side pane (not a 75% centered overlay).
+  Named tests: `plan_soft_park_docks_right_not_centered_overlay`,
+  `plan_soft_park_draw_right_pane_matches_side_panel_status`,
+  `plan_row_click_does_not_enter_commenting`,
+  `plan_loop_status_does_not_claim_side_panel_when_viewer_closed`.
+- Plan-review and Linux prompt screenshot paste
+  (`event_paste_plan_commenting_empty_defers_clipboard_image_probe`,
+  `plan_feedback_ctrl_v_defers_clipboard_image_probe`,
+  `agent_empty_bracketed_paste_defers_probe_for_clipboard_image`,
+  `approve_or_revise_drains_plan_composer_images`).
+- Live chrome names SuperGrok dollar credits, not a nickname
+  (`compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct`,
+  `format_supergrok_session_with_weekly_and_extras`).
+- No two live same-description Subagent rows; unlimited retry is not a
+  `u32::MAX` fraction
+  (`live_subagent_list_does_not_show_two_rows_with_the_same_description`,
+  `task_spawn_rejects_or_replaces_second_live_same_description`,
+  `format_activity_label_unlimited_retry_has_no_u32_max_fraction`,
+  `implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked`).
 - `from_config` no-prefetch usable catalog
   (`from_config_without_prefetch_produces_usable_catalog`). Empty
   `models_cache.json` miss is **not** cargo-proven.
@@ -896,8 +1005,12 @@ that drops them while keeping the seven is still a seam loss):
 - ACP per-path write lock after structured edits
   (`two_agents_cannot_write_the_same_path_at_once`,
   `search_replace_apply_patch_and_write_all_take_the_lock`,
-  `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`).
-  A restack that drops `per_path_write_lock.rs` or these tests is a
+  `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`,
+  `opencode_edit_cannot_write_a_path_another_agent_already_holds`,
+  `hashline_edit_refuses_when_another_agent_holds_the_path`,
+  `hashline_edit_happy_path_does_not_mention_the_lock`).
+  A restack that drops `per_path_write_lock.rs`, the OpenCode `edit`
+  lock acquire, the `hashline_edit` lock acquire, or these tests is a
   failed land. Not one of the seven numbered classes.
 - Pause / resume chips and Clear finished quiet paint.
 - User-guide cargo pins beyond skills + resume (`user_guide_operator_cli_examples_use_grok_oss`,

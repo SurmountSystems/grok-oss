@@ -36,6 +36,13 @@ const CREDENTIAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// every other session blocked indefinitely on the same server's auth.
 const BROWSER_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+fn format_oauth_consent_timeout(timeout: std::time::Duration) -> String {
+    format!(
+        "OAuth consent timed out after {}; re-run authentication to try again",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+
 /// How long a follower waits for the cross-process auth lock before giving up
 /// on dedup and proceeding with its own flow. Slightly above
 /// [`BROWSER_AUTH_TIMEOUT`] so a legitimately-slow leader (user reading the
@@ -481,10 +488,7 @@ async fn run_browser_auth_flow(
                 timeout_secs = BROWSER_AUTH_TIMEOUT.as_secs(),
                 "OAuth consent timed out (browser flow abandoned?)"
             );
-            return Err(format!(
-                "OAuth consent timed out after {}s; re-run authentication to try again",
-                BROWSER_AUTH_TIMEOUT.as_secs()
-            ));
+            return Err(format_oauth_consent_timeout(BROWSER_AUTH_TIMEOUT));
         }
     }
 
@@ -610,6 +614,19 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn oauth_consent_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_oauth_consent_timeout(BROWSER_AUTH_TIMEOUT);
+        assert!(
+            msg.contains("after 10m0s"),
+            "10-minute consent budget must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("600s") && !msg.contains("600 seconds"),
+            "raw second budget must not leak: {msg}"
+        );
     }
 
     #[test]

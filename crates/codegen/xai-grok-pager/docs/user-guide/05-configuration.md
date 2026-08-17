@@ -76,7 +76,7 @@ cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
 [token_economy]
 cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
 max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active
-min_implement_effort = 1                   # floor always applied. Set 2 for always-a-reviewer.
+min_implement_effort = 1                   # floor always applied. Set 2 to raise thoroughness.
 # lock_implement_effort = 0                # 0 / omit = unlocked; 1–5 forces that effort
 desired_implement_effort = 2               # inject when missing under economic caps
 show_period_pacing = true                  # included SuperGrok period linear-burn chrome
@@ -125,7 +125,7 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[ui] plan_approval_park` | `soft` | Settings → Agent | Soft side panel (default) or `modal` fullscreen. |
 | `cap_implement_effort_when_economic` | true | Settings → Agent | Master for economic ceiling plus desired inject. |
 | `max_implement_effort` | 3 | Settings → Agent | Hard ceiling 1–5 when economic caps are active. |
-| `min_implement_effort` | 1 | Settings → Agent | Floor always applied. Set 2 so every implement run has at least one reviewer. |
+| `min_implement_effort` | 1 | Settings → Agent | Floor always applied. Set 2 to raise thoroughness, not reviewer count. |
 | `desired_implement_effort` | 2 | Settings → Agent | Injected when `--effort` is missing under economic caps. |
 | `lock_implement_effort` | 0 | Settings → Agent | 1–5 forces that effort. 0 is unlocked. |
 | `show_period_pacing` | true | Settings → Agent | Included SuperGrok period linear-burn chrome on status, `/limits`, `/usage`. Never dollar-izes period %. |
@@ -137,7 +137,7 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[session] auto_compact_threshold_percent` | 95 | Settings → Session | Live-applies. Not 85. |
 | `[token_economy] grok_oss_database_path` | empty | **toml only** | Empty means `$GROK_HOME/grok_oss.db`. There is **no** Settings row for this path. |
 
-**Implement effort** here is the implement skill integer 1–5 (reviewer fan-out), not model reasoning effort (`/effort`).
+**Implement effort** here is the implement skill integer 1–5. That number is thoroughness. It is not how many Review rows to launch. It is not model reasoning effort (`/effort`). One reviewer unless you explicitly asked for more.
 
 Application order (product may rewrite the command string and toast):
 

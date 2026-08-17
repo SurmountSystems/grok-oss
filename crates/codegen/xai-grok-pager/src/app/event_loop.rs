@@ -1554,6 +1554,7 @@ pub(crate) async fn run(
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
+    app.default_reasoning_effort = load_initial_default_reasoning_effort();
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
     crate::appearance::cache::set_bubble_copy_buttons(
@@ -3193,6 +3194,18 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
             .and_then(|a| a.get("timeout_enabled"))
             .and_then(|v| v.as_bool()),
     }
+}
+
+/// Seed `[models].default_reasoning_effort` into `AppView` so the Settings
+/// row live-reads the TOML override on first open.
+fn load_initial_default_reasoning_effort() -> Option<String> {
+    let Ok(root) = xai_grok_shell::config::load_effective_config() else {
+        return None;
+    };
+    root.get("models")
+        .and_then(|m| m.get("default_reasoning_effort"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Whether to pre-generate the automatic "return-from-away" recap right now.

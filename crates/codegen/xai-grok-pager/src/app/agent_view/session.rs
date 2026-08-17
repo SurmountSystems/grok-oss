@@ -400,6 +400,7 @@ impl AgentView {
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
         self.last_active_at = Some(Instant::now());
+        crate::app::active_session_heartbeat::write_from_agent(self);
     }
     /// Absorb a closing/replaced question view's open span into the turn's
     /// pause totals, on both clocks — a close site that updated only the
@@ -530,6 +531,7 @@ impl AgentView {
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
         self.session.start_turn(&mut self.scrollback);
+        crate::app::active_session_heartbeat::write_from_agent(self);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the
     /// `session/load` response meta (`x.ai/runningPromptId`): enter
@@ -1931,6 +1933,8 @@ mod resolve_turn_activity_tests {
                 workflow_run_id: None,
                 context_normalized: false,
                 parent_prompt_id: None,
+                parent_session_id: None,
+                depth: None,
                 started_at: now,
                 last_progress_at: now,
                 finished: false,

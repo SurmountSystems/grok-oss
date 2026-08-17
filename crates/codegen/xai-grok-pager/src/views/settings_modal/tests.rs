@@ -694,9 +694,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
             "default_model",
-            // Models category. `default_reasoning_effort`,
-            // `web_search_model`, and `session_summary_model` are
-            // not exposed in the modal.
+            "default_reasoning_effort",
+            // Models category. `web_search_model` and
+            // `session_summary_model` are not exposed in the modal.
             "fork_secondary_model",
             // Session category.
             "resume_canceled_turn_on_restart",

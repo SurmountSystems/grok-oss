@@ -191,6 +191,7 @@ pub(crate) fn test_app() -> AppView {
         show_tips: None,
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
+        default_reasoning_effort: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,

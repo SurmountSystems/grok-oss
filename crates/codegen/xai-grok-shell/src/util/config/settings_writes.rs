@@ -126,6 +126,25 @@ pub async fn set_default_model(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[models].default_reasoning_effort` via `update_config`.
+///
+/// Settings row choices are `low` / `medium` / `high` (Grok 4.6 baked default
+/// is medium). Other `ReasoningEffort` values are rejected here so the modal
+/// cannot write a catalog-only effort as the environment default.
+pub async fn set_default_reasoning_effort(value: String) -> Result<()> {
+    use xai_grok_sampling_types::ReasoningEffort;
+    let effort: ReasoningEffort = value
+        .parse()
+        .map_err(|e| anyhow::anyhow!("default_reasoning_effort: {e}"))?;
+    match effort {
+        ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High => {}
+        other => anyhow::bail!(
+            "default_reasoning_effort {other} is not a Settings row choice (low, medium, high)"
+        ),
+    }
+    update_config(|cfg| cfg.models.default_reasoning_effort = Some(effort)).await
+}
+
 /// Persist `[privacy].privacy_banner_acked` (RFC 3339 UTC dismiss time).
 pub async fn set_privacy_banner_acked(acked_at_rfc3339: String) -> Result<()> {
     update_config(|cfg| {

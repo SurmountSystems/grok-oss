@@ -375,6 +375,7 @@ impl ChannelSpawner {
             await_to_completion: false,
             fork_context: true,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             cancel_token: self.cancel_token.clone(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());

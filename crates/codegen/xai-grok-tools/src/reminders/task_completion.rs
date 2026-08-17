@@ -137,11 +137,14 @@ pub fn format_bash_completion(
         }
     };
     let notice = user_killed_notice(task);
+    let duration = xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+        duration_secs.max(0.0),
+    ));
     let mut msg = format!(
         "Background task \"{}\" completed ({}).\n\
-         Command: {} | Duration: {:.1}s\n\
+         Command: {} | Duration: {duration}\n\
          {notice}",
-        task.task_id, status_str, command, duration_secs,
+        task.task_id, status_str, command,
     );
     if task.signal.is_some() && duration_secs < 1.0 {
         msg.push_str(
@@ -194,12 +197,14 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
         "Monitor \"{id}\" ended: [monitor ended: {reason}].\n\
          Description: {description}\n\
          Command: {cmd}\n\
-         Duration: {dur:.1}s\n\
+         Duration: {dur}\n\
          Use {tool}(\"{id}\") for full output.\n\
          {notice}",
         id = task.task_id,
         cmd = task.command,
-        dur = task.duration_secs(),
+        dur = xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+            task.duration_secs().max(0.0),
+        )),
     )
 }
 /// Warn the model about other background tasks that are still running.
@@ -212,9 +217,11 @@ fn format_running_tasks_warning(running: &[&TaskSnapshot], kill_task_name: Optio
         let cmd = task.display_command.as_deref().unwrap_or(&task.command);
         let _ = writeln!(
             buf,
-            "- \"{}\" (running for {:.0}s): {}",
+            "- \"{}\" (running for {}): {}",
             task.task_id,
-            task.duration_secs(),
+            xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+                task.duration_secs().max(0.0),
+            )),
             cmd,
         );
     }
@@ -430,12 +437,12 @@ pub fn format_subagent_completion(
     };
     let mut out = format!(
         "Background subagent \"{}\" ({}: \"{}\") completed {}.\n\
-         Duration: {:.1}s | Tool calls: {} | Turns: {}",
+         Duration: {} | Tool calls: {} | Turns: {}",
         c.subagent_id,
         c.subagent_type,
         c.description,
         status,
-        c.duration_ms as f64 / 1000.0,
+        xai_tty_utils::format_human_duration(std::time::Duration::from_millis(c.duration_ms)),
         c.tool_calls,
         c.turns,
     );

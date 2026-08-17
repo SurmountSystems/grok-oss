@@ -104,22 +104,14 @@ impl AgentView {
                     return InputOutcome::Action(Action::ShowLimits);
                 }
                 if self.hit_plan_button.contains(mouse.column, mouse.row) {
-                    if self.plan_approval_view.is_some() {
-                        self.reopen_plan_approval();
-                    } else {
-                        self.show_plan_preview();
-                    }
+                    self.open_plan_from_view_plan_or_status();
                     return InputOutcome::Changed;
                 }
                 if self
                     .hit_plan_approval_status
                     .contains(mouse.column, mouse.row)
                 {
-                    if self.plan_approval_view.is_some() {
-                        self.reopen_plan_approval();
-                    } else {
-                        self.show_plan_preview();
-                    }
+                    self.open_plan_from_view_plan_or_status();
                     return InputOutcome::Changed;
                 }
                 if self.hit_catalog_close.contains(mouse.column, mouse.row) {

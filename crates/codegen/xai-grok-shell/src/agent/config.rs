@@ -1079,6 +1079,8 @@ pub struct ModelsConfig {
     #[serde(skip)]
     pub default_is_campaign_driven: bool,
     /// Persisted effort for the default model; applied in `resolve_model_catalog`.
+    /// Fork contract: baked catalog default is Grok 4.6 at medium. Unset
+    /// means use the baked card; operators can override here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]

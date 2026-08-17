@@ -4,7 +4,10 @@ use crate::acp::tracker::TurnActivity;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::roster::{RosterActivity, RosterEntry};
-use crate::app::subagent::{SubagentInfo, format_activity_label, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_activity_label, format_live_l3_count, format_subagent_label,
+    is_l2_list_row, live_l3_count,
+};
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
@@ -196,10 +199,15 @@ fn build_local_rows(
         if !include_subagents {
             continue;
         }
+        let child_ids: std::collections::HashSet<&str> = agent
+            .subagent_sessions
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
         let mut subagents: Vec<&SubagentInfo> = agent
             .subagent_sessions
             .values()
-            .filter(|info| info.workflow_run_id.is_none())
+            .filter(|info| info.workflow_run_id.is_none() && is_l2_list_row(info, &child_ids))
             .collect();
         subagents.sort_by(|a, b| {
             let a_running = !a.finished;
@@ -581,10 +589,20 @@ fn subagent_row(
     let label = {
         let label = sanitize(&label_raw);
         let desc = sanitize(&desc_raw);
-        if desc.trim().is_empty() {
-            label
+        let l3 = if info.is_running() {
+            format_live_l3_count(live_l3_count(
+                parent_view.subagent_sessions.values(),
+                info.child_session_id.as_ref(),
+            ))
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default()
         } else {
-            format!("{label} · {desc}")
+            String::new()
+        };
+        if desc.trim().is_empty() {
+            format!("{label}{l3}")
+        } else {
+            format!("{label} · {desc}{l3}")
         }
     };
     let activity = subagent_activity(info, state);
@@ -1075,6 +1093,8 @@ mod tests {
             context_normalized: false,
             child_updates_replayed: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: now,
             last_progress_at: now,
             finished,

@@ -319,7 +319,7 @@ While running, the block shows a live activity suffix (e.g. "Running: cargo test
 
 Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
 
-For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in Xs: "..."` block is appended.
+For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in 15m43s: "..."` block is appended when the wait is a minute or more. Times under 60 seconds stay in seconds (`11.7s`). Do not write 943 seconds or `943s` in status or agent reports. SuperGrok is a paid product. When the prepaid SuperGrok top-up meter is meant, say SuperGrok dollar credits.
 
 ### Tasks pane (Ctrl+G)
 
@@ -339,15 +339,23 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 
 ## Depth Limits
 
-The default nesting limit is two. The main thread (L1) can spawn subagents (L2). An L2 can spawn specialists (L3). An L3 at that default cannot spawn further (no L4). If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only the main thread should spawn.
+The default nesting limit is two. The main thread (L1) can spawn subagents (L2). An L2 can spawn specialists (L3). An L3 at that default cannot spawn further (no L4). If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only the main thread should spawn. The main-thread Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names.
 
 ## Token efficiency
 
-Whenever work is to be done and tools are to be called, agents are three layers deep. Always. That includes implement loops. Perceived simplicity is not an exception.
+Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, agents are three layers deep. That includes implement loops. A simple implement job is not an exception.
+
+**Hierarchical fast path.** The main thread may do these three things without spawning a subagent:
+
+1. A one-command host question (for example `journalctl` or `last`).
+2. A single known-path read that you or the prompt already named.
+3. Read and quote the short on-disk report that this thread asked for.
+
+That is not a license to diagnose or implement in the main thread.
 
 | Depth | Does | Does not |
 | ----- | ---- | -------- |
-| **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. | Grep, diagnose, implement, multi-file reads, CI logs |
+| **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
 | **L2 subagent** | Parallelize. Spawn L3 specialists. Stay token-efficient. Discard context after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
 | **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (forbidden) |
 
@@ -369,4 +377,4 @@ See [Configuration → Token Economy](05-configuration.md#token-economy) for eco
 **When not to use:**
 
 - Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit (the main thread still does not take over the tools; simple tasks and implement loops still stay three layers deep)
+- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one-command host question, a single known-path read already named, or reading the asked-for report). Implement work, multi-file diagnosis, CI, and regressions still stay three layers deep.

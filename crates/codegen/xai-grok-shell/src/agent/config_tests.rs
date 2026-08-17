@@ -7730,3 +7730,484 @@ fn sampling_config_hops_to_sibling_included_before_extras() {
     );
     clear_all_including_durable();
 }
+
+/// Team remaining + personal exhausted: sampling hop uses Team SuperGrok,
+/// not personal SuperGrok dollar credits, not console.
+#[test]
+#[serial]
+fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-exhausted".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-personal-exhausted".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-remaining".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 88,
+                reset_at: None,
+            },
+            access_token: "tok-team-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+    ];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-team-included"),
+        "sampling hop must use Team included SuperGrok period remaining; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait" || k == "tok-personal-exhausted"),
+        "console and personal dollar credits stay off the hop list: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Personal remaining + Team exhausted: sampling hop uses personal SuperGrok.
+#[test]
+#[serial]
+fn sampling_config_hop_personal_remaining_team_exhausted() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-exhausted".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-team-exhausted".into(),
+            prepaid_balance_cents: Some(8_000),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-remaining".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 72,
+                reset_at: None,
+            },
+            access_token: "tok-personal-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+    ];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-personal-included"),
+        "sampling hop must use personal included SuperGrok period remaining; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait" || k == "tok-team-exhausted"),
+        "console and Team dollar credits stay off the hop list: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Both remaining: Team / Business first, then personal. Console omitted.
+#[test]
+#[serial]
+fn sampling_config_hop_both_remaining_team_first_then_personal() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-remaining".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 94,
+                reset_at: None,
+            },
+            access_token: "tok-personal-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-remaining".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 12,
+                reset_at: None,
+            },
+            access_token: "tok-team-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+    ];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-team-included"),
+        "both remaining: Team / Business included SuperGrok period first; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert_eq!(
+        sampling.failover_api_keys,
+        vec!["tok-personal-included".to_string()],
+        "personal included is next: {:?}",
+        sampling.failover_api_keys
+    );
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait"),
+        "console omitted while included SuperGrok period remains: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Both included SuperGrok period pools exhausted: SuperGrok dollar credits
+/// stay primary; console is failover only.
+#[test]
+#[serial]
+fn sampling_config_hop_both_included_exhausted_dollar_credits_before_console() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-dollars");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-exhausted".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-team-no-dollars".into(),
+            prepaid_balance_cents: Some(0),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-dollars".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 0,
+                reset_at: None,
+            },
+            access_token: "tok-personal-dollars".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+    ];
+    let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-personal-dollars"),
+        "SuperGrok dollar credits stay primary after both included pools are exhausted; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert!(
+        sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-after-dollars"),
+        "console is failover only after SuperGrok dollar credits: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// False 100% / missing SuperGrok Heavy: enrich must not flatten both
+/// identities to remaining 0 and hop to SuperGrok dollar credits.
+#[test]
+#[serial]
+fn sampling_config_hop_missing_heavy_false_100_keeps_sibling_included() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        IncludedBillingFields, PreferredAuthMethod, SupergrokAccountRole,
+        SupergrokIdentityHeadroom, SupergrokSessionCandidate,
+        enrich_candidates_with_included_billing,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let mut sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-false-100".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 1,
+                reset_at: None,
+            },
+            access_token: "tok-personal-false-100".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-had-remaining".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 94,
+                reset_at: None,
+            },
+            access_token: "tok-team-included".into(),
+            prepaid_balance_cents: None,
+            hard_expired: false,
+        },
+    ];
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        "personal-false-100".into(),
+        IncludedBillingFields {
+            usage_pct: Some(100.0),
+            reset_at: None,
+            period_type: None,
+            prepaid_balance_cents: Some(10_029),
+            grok_build_usage_pct: None,
+        },
+    );
+    fields.insert(
+        "team-had-remaining".into(),
+        IncludedBillingFields {
+            usage_pct: Some(100.0),
+            reset_at: None,
+            period_type: None,
+            prepaid_balance_cents: None,
+            grok_build_usage_pct: None,
+        },
+    );
+    let _ = enrich_candidates_with_included_billing(&mut sessions, &fields, |_| false);
+    let team = sessions
+        .iter()
+        .find(|s| s.headroom.identity_id == "team-had-remaining")
+        .expect("team session");
+    assert!(
+        team.headroom.included_remaining > 0,
+        "must not invent included SuperGrok period used 100% from creditUsagePercent without Heavy; remaining={}",
+        team.headroom.included_remaining
+    );
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-team-included"),
+        "missing Heavy / false 100% must keep Team included hop; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert_eq!(
+        sampling.failover_api_keys,
+        vec!["tok-personal-false-100".to_string()],
+        "personal included remaining is next; console omitted: {:?}",
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// SuperGrok dollar credits on both stored logins plus missing SuperGrok
+/// Heavy must not flatten Team remaining and hop to SuperGrok dollar credits.
+#[test]
+#[serial]
+fn sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        IncludedBillingFields, PreferredAuthMethod, SupergrokAccountRole,
+        SupergrokIdentityHeadroom, SupergrokSessionCandidate,
+        enrich_candidates_with_included_billing,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let mut sessions = vec![
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "personal-dollars".into(),
+                role: SupergrokAccountRole::Personal,
+                included_remaining: 1,
+                reset_at: None,
+            },
+            access_token: "tok-personal-dollars".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+        SupergrokSessionCandidate {
+            headroom: SupergrokIdentityHeadroom {
+                identity_id: "team-had-remaining".into(),
+                role: SupergrokAccountRole::Business,
+                included_remaining: 88,
+                reset_at: None,
+            },
+            access_token: "tok-team-included".into(),
+            prepaid_balance_cents: Some(10_029),
+            hard_expired: false,
+        },
+    ];
+    let both = IncludedBillingFields {
+        usage_pct: Some(100.0),
+        reset_at: None,
+        period_type: None,
+        prepaid_balance_cents: Some(10_029),
+        grok_build_usage_pct: None,
+    };
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("personal-dollars".into(), both.clone());
+    fields.insert("team-had-remaining".into(), both);
+    let _ = enrich_candidates_with_included_billing(&mut sessions, &fields, |_| false);
+    let team = sessions
+        .iter()
+        .find(|s| s.headroom.identity_id == "team-had-remaining")
+        .expect("team session");
+    assert!(
+        team.headroom.included_remaining > 0,
+        "must not invent included SuperGrok period exhaust from 100% + SuperGrok dollar credits + missing Heavy; remaining={}",
+        team.headroom.included_remaining
+    );
+
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("tok-team-included"),
+        "100% + SuperGrok dollar credits on both + missing Heavy must keep Team included hop; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert_eq!(
+        sampling.failover_api_keys,
+        vec!["tok-personal-dollars".to_string()],
+        "personal included remaining is next; console omitted: {:?}",
+        sampling.failover_api_keys
+    );
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-not-win"),
+        "must not hop to console while any stored SuperGrok identity has included remaining"
+    );
+    clear_all_including_durable();
+}

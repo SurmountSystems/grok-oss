@@ -2,13 +2,13 @@
 //!
 //! Exact user-facing phrases live here so unit tests can assert them without
 //! scattering string literals. Meters stay distinct: SuperGrok included weekly
-//! % ≠ SuperGrok $ extras ≠ console team prepaid ≠ team postpaid OAuth/API ≠
+//! % ≠ SuperGrok dollar credits ≠ console team prepaid ≠ team postpaid OAuth/API ≠
 //! team default credits (dashboard allotment).
 //!
 //! **Named contracts:**
 //! - Do not present SuperGrok included % as proven included-limit burn.
 //! - Optional flat-poll note only names meters that were **observed** flat
-//!   (never claim Build product % or SuperGrok $ extras stayed flat when those
+//!   (never claim Build product % or SuperGrok dollar credits stayed flat when those
 //!   fields were absent on the poll series).
 //! - C6: when SuperGrok session is live and team postpaid OAuth class dominates,
 //!   plain English that session can still move team Usage dollars.
@@ -33,22 +33,23 @@ poll reading, not proof of included-limit burn.";
 /// Management postpaid preview shows OAuth class strictly above API class
 /// (and &gt; 0). Distinct from console ApiKey live, from prepaid ledger
 /// remaining, and from SuperGrok included weekly debit proof. Does **not**
-/// mean SuperGrok dollar extras are the live driver or that included SuperGrok
+/// mean SuperGrok dollar credits are the live driver or that included SuperGrok
 /// period limits moved.
 pub const NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS: &str = "Note: SuperGrok session can still \
 move team Usage dollars (OAuth / Grok Build class on the team invoice) without proving \
 SuperGrok included weekly moved, even when the console API key is not live. That settlement \
-rise is not included SuperGrok period burn proof and not SuperGrok dollar extras as the live driver.";
+rise is not included SuperGrok period burn proof and not SuperGrok dollar credits as the live driver.";
 
 /// Flat included SuperGrok period limits + rising team OAuth / Grok Build settlement.
 ///
 /// Shown when SuperGrok is live, flat-poll evidence is set, and OAuth postpaid
 /// dominates. Strengthens C6: names that team Grok Build class can climb while
-/// free period stays flat, without calling that class SuperGrok extras.
+/// included SuperGrok period limits stay flat, without calling that class SuperGrok
+/// dollar credits.
 pub const NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS: &str = "Note: included SuperGrok \
 period limits can stay flat across recent polls while team Grok Build / OAuth settlement dollars \
 rise under SuperGrok session; product does not invent included-period debit and does not treat \
-team settlement as SuperGrok dollar extras.";
+team settlement as SuperGrok dollar credits.";
 
 /// Active / `activeDriver` is intent chrome, not settlement proof.
 ///
@@ -110,13 +111,13 @@ wallet, not included SuperGrok period limits, and not SuperGrok prepaid top-up d
 /// Zeros on that license page are **expected** for CLI SuperGrok (this client
 /// does not drive seat message/conversation counters). Real burn shows as
 /// **team Usage** dollars (browser team Usage / spend / Grok Build) and on
-/// SuperGrok included % / extras plus team prepaid / postpaid OAuth / usage
-/// series when a management key is set.
+/// SuperGrok included % / SuperGrok dollar credits plus team prepaid / postpaid
+/// OAuth / usage series when a management key is set.
 pub const NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER: &str = "Note: the console Platforms → Grok \
 Business licenses page (messages / conversations) is not dogfood proof for this product. \
 CLI SuperGrok does not drive seat message/conversation counters; zeros there are expected. \
 Real burn shows as team Usage dollars (browser team Usage / spend / Grok Build) and on \
-SuperGrok included % / extras plus team prepaid / postpaid OAuth / usage series when a \
+included SuperGrok period limits / SuperGrok dollar credits plus console team prepaid / console API credits plus team postpaid OAuth / usage series when a \
 management key is set.";
 
 /// Doctor human block: wrong browser page vs right dogfood proof surfaces.
@@ -159,8 +160,9 @@ SuperGrok account with: grok login"
     )
 }
 
-/// Dual SuperGrok: free-period % (and Extra Usage Credits when filled) on a
-/// row came from the shared SuperGrok pool, not a successful poll of that JWT.
+/// Dual SuperGrok: included SuperGrok period limits % (and SuperGrok dollar
+/// credits when filled) on a row came from the shared SuperGrok pool, not a
+/// successful poll of that JWT.
 pub fn note_shared_pool_fill_not_live_poll(filled_role: &str) -> String {
     let role = filled_role.trim();
     let role = if role.is_empty() {
@@ -185,16 +187,16 @@ pub const FORBIDDEN_INCLUDED_BURN_CLAIMS: &[&str] = &[
 /// Flat-poll honesty note naming only meters that were observed flat.
 ///
 /// Always names SuperGrok included % (required for the detector). Optionally
-/// names Grok Build product % and SuperGrok $ extras when those fields were
+/// names Grok Build product % and SuperGrok dollar credits when those fields were
 /// present on every sample in the flat window. Does **not** claim Build or
-/// extras stayed flat when they were never on the wire.
+/// SuperGrok dollar credits stayed flat when they were never on the wire.
 pub fn flat_poll_unproven_debit_note(observed_build: bool, observed_extras: bool) -> String {
     let mut parts: Vec<&str> = vec!["SuperGrok included %"];
     if observed_build {
         parts.push("Grok Build product %");
     }
     if observed_extras {
-        parts.push("SuperGrok $ extras");
+        parts.push("SuperGrok dollar credits");
     }
     let meters = match parts.as_slice() {
         [a] => (*a).to_string(),
@@ -222,7 +224,7 @@ pub struct LimitsHonestyInput {
     /// (and it stayed flat). Only meaningful when
     /// [`Self::flat_poll_unproven_debit`] is true.
     pub flat_poll_observed_build: bool,
-    /// True when every sample in the flat window carried SuperGrok $ extras
+    /// True when every sample in the flat window carried SuperGrok dollar credits
     /// (and it stayed flat). Only meaningful when
     /// [`Self::flat_poll_unproven_debit`] is true.
     pub flat_poll_observed_extras: bool,
@@ -248,7 +250,7 @@ pub struct LimitsHonestyInput {
 /// - Base note when SuperGrok session is live and included % is shown.
 /// - Flat-poll note only when SuperGrok session is live **and**
 ///   [`LimitsHonestyInput::flat_poll_unproven_debit`]. Meter names come from
-///   observed flags (no invent Build/extras flat claim).
+///   observed flags (no invent Build / SuperGrok dollar credits flat claim).
 /// - Active-is-intent-not-settlement when SuperGrok session is live **and**
 ///   team prepaid remaining is shown and/or OAuth postpaid dominates.
 /// - C6 team Usage note when SuperGrok session is live **and**
@@ -284,8 +286,9 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     if input.oauth_postpaid_dominates {
         notes.push(NOTE_SESSION_CAN_MOVE_TEAM_USAGE_DOLLARS.to_string());
     }
-    // Flat free period + settlement rise: strengthen honesty so operators do
-    // not read team Grok Build $ climb as SuperGrok extras or free-period move.
+    // Flat included SuperGrok period limits + settlement rise: strengthen honesty
+    // so operators do not read team Grok Build $ climb as SuperGrok dollar credits
+    // or included SuperGrok period limits move.
     if input.flat_poll_unproven_debit && input.oauth_postpaid_dominates {
         notes.push(NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS.to_string());
     }
@@ -467,6 +470,14 @@ mod tests {
         assert!(
             lower.contains("dogfood proof") || lower.contains("not dogfood"),
             "must deny license page as dogfood proof: {note}"
+        );
+        assert!(
+            note.contains("SuperGrok dollar credits"),
+            "license note must name SuperGrok dollar credits: {note}"
+        );
+        assert!(
+            !note.to_ascii_lowercase().contains("extras"),
+            "license note must not teach extras as a nickname: {note}"
         );
         assert!(
             !note.contains('\u{2014}') && !note.contains('—') && !note.contains('\u{2026}'),
@@ -790,8 +801,8 @@ mod tests {
             "flat note keeps session path honest: {flat}"
         );
         assert!(
-            flat.contains("SuperGrok $ extras"),
-            "extras observed flat must be named: {flat}"
+            flat.contains("SuperGrok dollar credits"),
+            "SuperGrok dollar credits observed flat must be named: {flat}"
         );
         assert!(
             !contains_forbidden_included_burn_claim(&notes.join("\n")),
@@ -921,8 +932,8 @@ mod tests {
             "must not claim Build flat when never observed: {note}"
         );
         assert!(
-            !note.contains("SuperGrok $ extras"),
-            "must not claim extras flat when never observed: {note}"
+            !note.contains("SuperGrok dollar credits"),
+            "must not claim SuperGrok dollar credits flat when never observed: {note}"
         );
         assert!(
             note.contains("included debit is unproven"),
@@ -945,7 +956,8 @@ mod tests {
         );
     }
 
-    /// Named contract: when Build and extras were observed flat, name them.
+    /// Named contract: when Build and SuperGrok dollar credits were observed
+    /// flat, name them.
     #[test]
     fn flat_poll_note_names_build_and_extras_when_observed() {
         let note = flat_poll_unproven_debit_note(true, true);
@@ -954,8 +966,8 @@ mod tests {
             "must name Build when observed flat: {note}"
         );
         assert!(
-            note.contains("SuperGrok $ extras"),
-            "must name extras when observed flat: {note}"
+            note.contains("SuperGrok dollar credits"),
+            "must name SuperGrok dollar credits when observed flat: {note}"
         );
         assert!(
             note.contains("SuperGrok included %"),
@@ -1004,9 +1016,9 @@ mod tests {
             "branch 2b: OAuth Usage $ must not be sold as SuperGrok included debit: {c6}"
         );
         assert!(
-            c6.contains("not SuperGrok dollar extras")
-                || c6.contains("not SuperGrok dollar extras as the live driver"),
-            "C6 must not sell settlement as SuperGrok extras: {c6}"
+            c6.contains("not SuperGrok dollar credits")
+                || c6.contains("not SuperGrok dollar credits as the live driver"),
+            "C6 must not sell settlement as SuperGrok dollar credits: {c6}"
         );
         assert!(
             c6.contains("not included SuperGrok period burn proof"),
@@ -1057,14 +1069,14 @@ mod tests {
         let settle = NOTE_FLAT_FREE_PERIOD_SETTLEMENT_RISE_NOT_EXTRAS;
         assert!(
             settle.contains("team Grok Build")
-                && (settle.contains("SuperGrok dollar extras")
-                    || settle.contains("as SuperGrok dollar extras")),
-            "settlement rise must name team class and reject SuperGrok extras label: {settle}"
+                && (settle.contains("SuperGrok dollar credits")
+                    || settle.contains("as SuperGrok dollar credits")),
+            "settlement rise must name team class and reject SuperGrok dollar credits as that class: {settle}"
         );
         assert!(
-            settle.contains("does not treat team settlement as SuperGrok dollar extras")
+            settle.contains("does not treat team settlement as SuperGrok dollar credits")
                 || settle.contains("does not treat team settlement"),
-            "must not call team settlement SuperGrok extras: {settle}"
+            "must not call team settlement SuperGrok dollar credits: {settle}"
         );
         // Named contract (C4): do not invent debit. User-facing copy names
         // included SuperGrok period limits (SuperGrok is paid). The older

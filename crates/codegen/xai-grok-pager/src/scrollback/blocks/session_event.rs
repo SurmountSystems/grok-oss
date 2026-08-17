@@ -56,8 +56,12 @@ pub enum SessionEvent {
     },
     /// Auto-compaction started (context window threshold reached).
     CompactionStarted {
-        /// Percentage of context window used (e.g., 85).
+        /// Percentage of the sampling window used (e.g., 85).
         percentage: u8,
+        /// Sampling context window AUTO actually gates on.
+        sampling_window: Option<u64>,
+        /// Catalog / painted chip total when the pager knows it.
+        catalog_window: Option<u64>,
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
@@ -67,7 +71,11 @@ pub enum SessionEvent {
         tokens_after: u64,
         /// How long compaction took (milliseconds).
         elapsed_ms: Option<i64>,
+        /// Replacement kept, but AUTO will not run again this session.
+        saved_too_little: bool,
     },
+    /// AUTO did not start because the last full-replace saved too little.
+    CompactionSkippedTinySavings,
     /// Auto-compaction failed.
     CompactionFailed {
         /// Error description.
@@ -184,13 +192,24 @@ impl SessionEvent {
             } => {
                 format!("Turn failed: {error}")
             }
-            SessionEvent::CompactionStarted { percentage } => {
-                format!("Context {percentage}% full. Compacting…")
-            }
+            SessionEvent::CompactionStarted {
+                percentage,
+                sampling_window,
+                catalog_window,
+            } => match (sampling_window, catalog_window) {
+                (Some(sampling), Some(catalog)) if sampling != catalog => {
+                    format!(
+                        "The {}-token sampling window is {percentage}% full. Compacting...",
+                        format_tokens(*sampling)
+                    )
+                }
+                _ => format!("Context {percentage}% full. Compacting…"),
+            },
             SessionEvent::CompactionCompleted {
                 tokens_before,
                 tokens_after,
                 elapsed_ms,
+                saved_too_little,
             } => {
                 let after = format_tokens(*tokens_after);
                 // Older shells don't send tokens_before — keep the legacy format.
@@ -203,12 +222,21 @@ impl SessionEvent {
                     }
                     _ => format!("Context compacted → {after} tokens"),
                 };
-                if let Some(ms) = elapsed_ms {
-                    let secs = *ms as f64 / 1000.0;
-                    format!("{body} ({secs:.1}s)")
+                let mut msg = if let Some(ms) = elapsed_ms {
+                    format!(
+                        "{body} ({})",
+                        format_duration(Duration::from_millis(*ms as u64))
+                    )
                 } else {
                     body
+                };
+                if *saved_too_little {
+                    msg.push_str(". Auto-compact will not run again because it saved too little.");
                 }
+                msg
+            }
+            SessionEvent::CompactionSkippedTinySavings => {
+                "Auto-compact is skipped because the last compact saved too little.".to_string()
             }
             SessionEvent::CompactionFailed { error } => {
                 if error.trim().is_empty() {
@@ -864,11 +892,105 @@ mod tests {
             tokens_before: Some(48_800),
             tokens_after: 27_100,
             elapsed_ms: Some(21_000),
+            saved_too_little: false,
         };
         assert_eq!(
             event.message(),
-            "Context compacted: 48.8k → 27.1k tokens (21.0s)"
+            "Context compacted: 48.8k → 27.1k tokens (21s)"
         );
+    }
+
+    #[test]
+    fn compaction_completed_long_wait_uses_minutes_not_raw_seconds() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(48_800),
+            tokens_after: 27_100,
+            elapsed_ms: Some(943_000),
+            saved_too_little: false,
+        };
+        assert_eq!(
+            event.message(),
+            "Context compacted: 48.8k → 27.1k tokens (15m43s)"
+        );
+    }
+
+    #[test]
+    fn compaction_completed_68300ms_uses_minutes_not_raw_seconds() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(198_300),
+            tokens_after: 12_000,
+            elapsed_ms: Some(68_300),
+            saved_too_little: false,
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("(1m8s)"),
+            "68_300ms must render as (1m8s), not raw seconds: {msg}"
+        );
+        assert!(
+            !msg.contains("(68.3s)"),
+            "must not print a raw-seconds compact wait: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_completed_tiny_savings_says_will_not_run_again() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(198_300),
+            tokens_after: 190_300,
+            elapsed_ms: Some(68_300),
+            saved_too_little: true,
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("198.3k") && msg.contains("190.3k") && msg.contains("(1m8s)"),
+            "tiny-savings line must keep before, after, and human duration: {msg}"
+        );
+        assert!(
+            msg.contains("will not run again") && msg.contains("saved too little"),
+            "must say auto-compact will not run again because it saved too little: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_started_names_sampling_window_when_catalog_differs() {
+        let event = SessionEvent::CompactionStarted {
+            percentage: 100,
+            sampling_window: Some(200_000),
+            catalog_window: Some(500_000),
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("sampling window"),
+            "when the painted catalog total differs from the sampling window, name the sampling window: {msg}"
+        );
+        assert!(
+            msg.contains("200") && msg.to_ascii_lowercase().contains("token"),
+            "must include the sampling window size in human tokens: {msg}"
+        );
+        assert!(
+            !msg.starts_with("Context 100% full."),
+            "must not say bare Context 100% full when the two windows differ: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_skipped_tiny_savings_is_honest() {
+        let event = SessionEvent::CompactionSkippedTinySavings;
+        assert_eq!(
+            event.message(),
+            "Auto-compact is skipped because the last compact saved too little."
+        );
+    }
+
+    #[test]
+    fn compaction_started_keeps_legacy_copy_when_windows_match() {
+        let event = SessionEvent::CompactionStarted {
+            percentage: 95,
+            sampling_window: Some(500_000),
+            catalog_window: Some(500_000),
+        };
+        assert_eq!(event.message(), "Context 95% full. Compacting…");
     }
 
     #[test]
@@ -877,6 +999,7 @@ mod tests {
             tokens_before: None,
             tokens_after: 27_100,
             elapsed_ms: None,
+            saved_too_little: false,
         };
         assert_eq!(event.message(), "Context compacted → 27.1k tokens");
     }

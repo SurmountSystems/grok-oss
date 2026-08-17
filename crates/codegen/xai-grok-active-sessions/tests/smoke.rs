@@ -5,12 +5,12 @@ use tempfile::TempDir;
 use xai_grok_active_sessions::*;
 
 fn session(id: &str, pid: u32) -> ActiveSession {
-    ActiveSession {
-        session_id: agent_client_protocol::SessionId::new(id),
+    ActiveSession::new(
+        agent_client_protocol::SessionId::new(id),
         pid,
-        cwd: "/tmp/test".into(),
-        opened_at: Utc::now(),
-    }
+        "/tmp/test",
+        Utc::now(),
+    )
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn full_lifecycle() {
     assert_eq!(list_in(r).unwrap().len(), 1);
 
     // Clean exit, verify gone.
-    unregister_in(r, &sid("s1")).unwrap();
+    unregister_in(r, pid, &sid("s1")).unwrap();
     assert!(list_in(r).unwrap().is_empty());
 
     // Simulate crash (dead PID) + live session.

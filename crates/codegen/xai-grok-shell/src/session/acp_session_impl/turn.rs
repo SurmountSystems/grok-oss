@@ -2118,6 +2118,14 @@ impl SessionActor {
                 && let Err(e) = self.run_compact_only(trigger_info).await
             {
                 tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
+                if Self::is_compact_cancelled_error(&e) {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
+                        context: Some(serde_json::json!({
+                            "reason": "auto_compact_cancelled",
+                        })),
+                    });
+                }
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
@@ -2721,6 +2729,16 @@ impl SessionActor {
             {
                 if let Err(e) = self.run_compact_only(trigger_info).await {
                     tracing::error!(error = %e, "Preflight overflow compaction failed");
+                    if Self::is_compact_cancelled_error(&e) {
+                        return Ok(TurnOutcome::Cancelled {
+                            category: Some(
+                                crate::session::events::CancellationCategory::MidTurnAbort,
+                            ),
+                            context: Some(serde_json::json!({
+                                "reason": "auto_compact_cancelled",
+                            })),
+                        });
+                    }
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }

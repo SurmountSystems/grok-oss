@@ -572,6 +572,69 @@ mod tests {
         }
     }
 
+    /// Named contract (G1): user-guide 19 matches Approve / Clarify / Revise /
+    /// Exit. Letter A types. Notes (`A`) is gone. Empty `a` does not Approve.
+    #[test]
+    fn user_guide_plan_mode_ctas_are_approve_clarify_revise_exit() {
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        let content = plan.content;
+        assert!(
+            content.contains("**Approve**")
+                && content.contains("**Clarify**")
+                && content.contains("**Revise**")
+                && content.contains("**Exit**"),
+            "19-plan-mode.md must name Approve, Clarify, Revise, and Exit"
+        );
+        assert!(
+            !content.contains("Approve with notes") && !content.contains("Notes (`A`)"),
+            "19-plan-mode.md must not keep Notes (`A`) as a CTA"
+        );
+        assert!(
+            !content.contains("empty-prompt `a`") && !content.contains("empty-prompt a"),
+            "19-plan-mode.md must not say empty-prompt a Approves"
+        );
+        assert!(
+            content.contains("also") || content.contains("type"),
+            "19-plan-mode.md must say letters type into the prompt while review is open"
+        );
+        assert!(
+            content.contains("--legacy"),
+            "19-plan-mode.md must keep the questionnaire on --legacy only"
+        );
+        assert!(
+            content.contains("Empty `Enter`") || content.contains("Empty Enter"),
+            "19-plan-mode.md must still say empty Enter never Approves"
+        );
+    }
+
+    /// Named contract: implement-loop effort in user-guide `05-configuration`
+    /// is thoroughness. It is not reviewer fan-out and not how many Review
+    /// rows to launch.
+    #[test]
+    fn user_guide_implement_effort_is_thoroughness_not_reviewer_fan_out() {
+        let config = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "05-configuration.md")
+            .expect("05-configuration.md is embedded");
+        assert!(
+            !config.content.contains("reviewer fan-out"),
+            "05-configuration.md must not say reviewer fan-out"
+        );
+        assert!(
+            !config.content.contains("always-a-reviewer"),
+            "05-configuration.md must not say always-a-reviewer"
+        );
+        assert!(
+            config
+                .content
+                .contains("not how many Review rows to launch"),
+            "05-configuration.md must say implement effort is not how many Review rows to launch"
+        );
+    }
+
     /// Named contract: leftover operator-facing CLI examples for this tree
     /// use `grok-oss`, not bare `grok sessions` / `grok login` / `grok mcp add`
     /// and similar operator commands. Official xAI `grok` product mentions and

@@ -295,6 +295,7 @@ pub struct PendingCompaction {
     pub estimate_after: u64,
     pub elapsed_ms: Option<i64>,
     pub last_used: Option<u64>,
+    pub saved_too_little: bool,
 }
 /// Tracks in-flight streaming state for one agent's turn.
 ///
@@ -634,12 +635,14 @@ impl AcpUpdateTracker {
         tokens_before: Option<u64>,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        saved_too_little: bool,
     ) {
         self.pending_compaction = Some(PendingCompaction {
             tokens_before,
             estimate_after,
             elapsed_ms,
             last_used: None,
+            saved_too_little,
         });
     }
     pub fn note_context_used(&mut self, used: u64) {
@@ -1012,6 +1015,7 @@ impl AcpUpdateTracker {
                     tokens_before: pending.tokens_before,
                     tokens_after: pending.last_used.unwrap_or(pending.estimate_after),
                     elapsed_ms: pending.elapsed_ms,
+                    saved_too_little: pending.saved_too_little,
                 },
             ));
         }

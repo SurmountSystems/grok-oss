@@ -4,8 +4,8 @@ use crate::implementations::grok_build::task::backend::{ChannelBackend, Subagent
 use crate::implementations::grok_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
     SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
-    SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentSnapshotStatus,
+    SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentQueryRequest,
+    SubagentRegistryCounts, SubagentRequest, SubagentSnapshotStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -182,6 +182,7 @@ fn request(id: &str, background: bool) -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        implement_loop_effort: None,
         cancel_token: CancellationToken::new(),
     }
 }
@@ -1535,6 +1536,164 @@ async fn spawner_can_wait_on_the_id_it_just_received_while_the_task_is_live() {
     harness.actor.abort();
 }
 
+/// Fire-and-forget spawn returns the id before the coordinator processes
+/// Spawn. A blocking wait on that id must not resolve as not_found in that
+/// window. After Spawn is processed, the wait stays attached through finish.
+#[tokio::test]
+async fn returned_spawn_id_is_waitable_before_coordinator_processes_spawn() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let l2 = request("l2", true);
+    let l2_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(l2).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("l2")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l2"));
+
+    // Production binds ChannelBackend::for_session to the child session.
+    let l2_backend = ChannelBackend::for_session(harness.backend.sender(), "l2");
+
+    // Query is on the mailbox before Spawn is sent.
+    let (respond_to, mut response_rx) = oneshot::channel();
+    l2_backend
+        .sender()
+        .send(SubagentEvent::Query(SubagentQueryRequest {
+            subagent_id: "l3".to_owned(),
+            parent_session_id: Some("l2".to_owned()),
+            block: true,
+            timeout_ms: Some(5_000),
+            respond_to,
+        }))
+        .expect("actor command channel open");
+
+    // FIFO: a counts reply means the query has already been handled.
+    let counts = l2_backend.registry_counts().await;
+    assert_eq!(counts.pending, 0);
+    assert_eq!(counts.active, 1, "l2 is live");
+    assert_eq!(counts.queued, 0);
+
+    match response_rx.try_recv() {
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        Ok(None) => panic!(
+            "blocking wait on the spawn id must not return not_found before Spawn is processed"
+        ),
+        Ok(Some(snapshot)) => {
+            panic!("blocking wait must not resolve before the child exists, got {snapshot:?}")
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            panic!("query responder closed before Spawn")
+        }
+    }
+
+    let l3 = request("l3", true);
+    let l3_spawn = tokio::spawn({
+        let backend = l2_backend.clone();
+        async move { backend.spawn(l3).await }
+    });
+    let observed = harness.requests.recv().await.expect("l3 spawn observed");
+    assert_eq!(
+        observed.parent_session_id, "parent",
+        "nested spawn is reparented to the root session"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
+
+    let _ = harness.finish.send(());
+    let snapshot = response_rx
+        .await
+        .expect("wait must stay attached through Spawn")
+        .expect("wait must receive the child; not_found is wrong");
+    assert!(
+        snapshot.status.is_terminal(),
+        "wait that arrived before Spawn must still see the finished child, got {:?}",
+        snapshot.status
+    );
+
+    assert!(l3_spawn.await.unwrap().unwrap().success);
+    assert!(l2_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// A blocking query for an id that already exists, from a session that
+/// must not see it, is not_found. A later duplicate Spawn from that
+/// foreign session must not attach the waiter to the live child.
+#[tokio::test]
+async fn foreign_blocking_query_of_a_live_id_stays_none_when_that_session_spawns_the_same_id() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let scoped = request("scoped", true);
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(scoped).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("scoped")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("scoped"));
+
+    let foreign = ChannelBackend::for_session(harness.backend.sender(), "foreign-parent");
+    let (respond_to, response_rx) = oneshot::channel();
+    foreign
+        .sender()
+        .send(SubagentEvent::Query(SubagentQueryRequest {
+            subagent_id: "scoped".to_owned(),
+            parent_session_id: Some("foreign-parent".to_owned()),
+            block: true,
+            timeout_ms: Some(5_000),
+            respond_to,
+        }))
+        .expect("actor command channel open");
+
+    // FIFO: a counts reply means the query has already been handled.
+    let counts = foreign.registry_counts().await;
+    assert_eq!(counts.active, 1, "scoped is live");
+    assert_eq!(counts.pending, 0);
+    assert_eq!(counts.queued, 0);
+
+    let started = std::time::Instant::now();
+    let foreign_spawn = tokio::spawn({
+        let backend = foreign.clone();
+        async move { backend.spawn(request("scoped", true)).await }
+    });
+    let foreign_result = foreign_spawn.await.unwrap().unwrap();
+    assert!(
+        !foreign_result.success,
+        "duplicate id must be rejected, got {foreign_result:?}"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+
+    let snapshot = response_rx.await.expect("query responder must resolve");
+    assert!(
+        snapshot.is_none(),
+        "foreign wait must stay not_found; attaching to the live child is wrong, got {snapshot:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "foreign wait must not sit on the live child's budget; elapsed {:?}",
+        started.elapsed()
+    );
+    harness.actor.abort();
+}
+
 #[tokio::test]
 async fn completion_buffer_caps_summary_without_mutating_result() {
     let mut harness = harness_with_config(
@@ -2618,5 +2777,361 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
             .expect("spawn round-trips")
             .success
     );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn task_spawn_rejects_or_replaces_second_live_same_description() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let mut first = request("first", true);
+    first.description = "Review implementation".to_owned();
+    let _first_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(first).await }
+    });
+    for _ in 0..32 {
+        if harness.backend.query("first", false, None).await.is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness
+            .backend
+            .query("first", false, None)
+            .await
+            .is_some_and(|s| s.is_running()),
+        "first same-description child must be live before the second spawn"
+    );
+
+    let mut second = request("second", true);
+    second.description = "Review implementation".to_owned();
+    let second_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(second).await }
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let first_snap = harness.backend.query("first", false, None).await;
+    let second_snap = harness.backend.query("second", false, None).await;
+    let same_live = [&first_snap, &second_snap]
+        .into_iter()
+        .filter(|snap| {
+            snap.as_ref()
+                .is_some_and(|s| s.is_running() && s.description == "Review implementation")
+        })
+        .count();
+    assert_eq!(
+        same_live, 1,
+        "must reject or replace a second live same-description child (first={first_snap:?} second={second_snap:?})"
+    );
+    if second_snap.as_ref().is_some_and(|s| s.is_running()) {
+        assert!(
+            first_snap.as_ref().is_none_or(|s| !s.is_running()),
+            "replace path must drop the earlier same-description child"
+        );
+    } else {
+        assert!(
+            first_snap.as_ref().is_some_and(|s| s.is_running()),
+            "reject path must keep the first live child"
+        );
+        let second_result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), second_spawn)
+                .await
+                .expect("rejected spawn must reply without waiting for the child")
+                .expect("join")
+                .expect("lifecycle result");
+        assert!(!second_result.success);
+        assert!(second_result.error.is_some());
+    }
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
+/// Implement-loop effort 2 without an operator ask admits one Review
+/// description on the coordinator spawn path the TUI Subagent list uses.
+/// Distinct Review text still counts as a second Review row.
+#[tokio::test]
+async fn implement_loop_effort_two_without_operator_ask_admits_one_review_description() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let mut first = request("first-review", true);
+    first.description = "[reviewer] Review implementation".to_owned();
+    let _first_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(first).await }
+    });
+    for _ in 0..32 {
+        if harness
+            .backend
+            .query("first-review", false, None)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness
+            .backend
+            .query("first-review", false, None)
+            .await
+            .is_some_and(|s| s.is_running()),
+        "first Review description must be live before the second spawn"
+    );
+
+    let mut second = request("second-review", true);
+    second.description = "[reviewer] Review implementation (2/2)".to_owned();
+    let second_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(second).await }
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let first_snap = harness.backend.query("first-review", false, None).await;
+    let second_snap = harness.backend.query("second-review", false, None).await;
+    let review_live = [&first_snap, &second_snap]
+        .into_iter()
+        .filter(|snap| {
+            snap.as_ref().is_some_and(|s| {
+                s.is_running() && s.description.to_ascii_lowercase().contains("review")
+            })
+        })
+        .count();
+    assert_eq!(
+        review_live, 1,
+        "implement-loop effort 2 without an operator ask must admit one Review description (first={first_snap:?} second={second_snap:?})"
+    );
+    assert!(
+        first_snap.as_ref().is_some_and(|s| s.is_running()),
+        "the first Review description stays live"
+    );
+    assert!(
+        second_snap.as_ref().is_none_or(|s| !s.is_running()),
+        "the second distinct Review description must not be live"
+    );
+    let second_result = tokio::time::timeout(std::time::Duration::from_millis(200), second_spawn)
+        .await
+        .expect("rejected second Review spawn must reply without waiting for the child")
+        .expect("join")
+        .expect("lifecycle result");
+    assert!(
+        !second_result.success,
+        "coordinator must reject the second Review description at effort 2 without an operator ask"
+    );
+    assert!(
+        second_result.error.is_some(),
+        "rejected second Review spawn must carry an error"
+    );
+
+    let mut implementer = request("implementer", true);
+    implementer.description = "[implementer] Land the slice".to_owned();
+    let implementer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(implementer).await }
+    });
+    for _ in 0..32 {
+        if harness
+            .backend
+            .query("implementer", false, None)
+            .await
+            .is_some_and(|s| s.is_running())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness
+            .backend
+            .query("implementer", false, None)
+            .await
+            .is_some_and(|s| s.is_running()),
+        "a non-Review description must still be admitted next to the one Review row"
+    );
+    let _ = implementer_spawn;
+
+    use crate::implementations::grok_build::task::admission::{
+        ImplementLoopReviewAdmit, admit_implement_loop_review_description,
+    };
+    assert_eq!(
+        admit_implement_loop_review_description(
+            2,
+            false,
+            ["[reviewer] Review implementation"],
+            "[reviewer] Review implementation (2/2)",
+        ),
+        ImplementLoopReviewAdmit::Reject,
+        "planner that feeds spawn must reject a second Review description at effort 2 without an operator ask"
+    );
+    assert_eq!(
+        admit_implement_loop_review_description(
+            2,
+            true,
+            ["[reviewer] Review implementation"],
+            "[reviewer] Review implementation (2/2)",
+        ),
+        ImplementLoopReviewAdmit::Admit,
+        "effort 2 with an operator ask may still admit a second Review description"
+    );
+
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
+/// Implement-loop effort 3 without an operator ask admits one Review
+/// description on the coordinator spawn path. Token Economy `--effort` 3
+/// is thoroughness, not three Review rows.
+#[tokio::test]
+async fn implement_loop_effort_three_without_operator_ask_admits_one_review_description() {
+    spawn_admits_one_review_at_implement_loop_effort(3).await;
+}
+
+/// Other Token Economy implement-loop settings (1, 4, 5) use the same
+/// spawn admit path: without an operator ask, one Review description.
+#[tokio::test]
+async fn implement_loop_effort_one_four_five_without_operator_ask_admit_one_review_description() {
+    for effort in [1_u8, 4, 5] {
+        spawn_admits_one_review_at_implement_loop_effort(effort).await;
+    }
+}
+
+async fn spawn_admits_one_review_at_implement_loop_effort(effort: u8) {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let suffix = effort;
+    let first_id = format!("first-review-e{suffix}");
+    let second_id = format!("second-review-e{suffix}");
+    let implementer_id = format!("implementer-e{suffix}");
+
+    let mut first = request(&first_id, true);
+    first.description = "[reviewer] Review implementation".to_owned();
+    first.implement_loop_effort = Some(effort);
+    assert_eq!(
+        first.implement_loop_effort,
+        Some(effort),
+        "spawn request must carry implement-loop effort {effort} from Token Economy --effort"
+    );
+    let _first_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(first).await }
+    });
+    for _ in 0..32 {
+        if harness
+            .backend
+            .query(&first_id, false, None)
+            .await
+            .is_some()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness
+            .backend
+            .query(&first_id, false, None)
+            .await
+            .is_some_and(|s| s.is_running()),
+        "first Review description must be live before the second spawn at effort {effort}"
+    );
+
+    let mut second = request(&second_id, true);
+    second.description = format!("[reviewer] Review implementation (2/{effort})");
+    second.implement_loop_effort = Some(effort);
+    let second_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(second).await }
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let first_snap = harness.backend.query(&first_id, false, None).await;
+    let second_snap = harness.backend.query(&second_id, false, None).await;
+    let review_live = [&first_snap, &second_snap]
+        .into_iter()
+        .filter(|snap| {
+            snap.as_ref().is_some_and(|s| {
+                s.is_running() && s.description.to_ascii_lowercase().contains("review")
+            })
+        })
+        .count();
+    assert_eq!(
+        review_live, 1,
+        "implement-loop effort {effort} without an operator ask must admit one Review description (first={first_snap:?} second={second_snap:?})"
+    );
+    assert!(
+        first_snap.as_ref().is_some_and(|s| s.is_running()),
+        "the first Review description stays live at effort {effort}"
+    );
+    assert!(
+        second_snap.as_ref().is_none_or(|s| !s.is_running()),
+        "the second distinct Review description must not be live at effort {effort}"
+    );
+    let second_result = tokio::time::timeout(std::time::Duration::from_millis(200), second_spawn)
+        .await
+        .expect("rejected second Review spawn must reply without waiting for the child")
+        .expect("join")
+        .expect("lifecycle result");
+    assert!(
+        !second_result.success,
+        "coordinator must reject the second Review description at effort {effort} without an operator ask"
+    );
+    let error = second_result
+        .error
+        .as_deref()
+        .expect("rejected second Review spawn must carry an error");
+    assert!(
+        error.contains(&format!("effort {effort}")),
+        "admit path must use implement-loop effort {effort} from the request, not a hardcoded 2: {error}"
+    );
+
+    let mut implementer = request(&implementer_id, true);
+    implementer.description = "[implementer] Land the slice".to_owned();
+    implementer.implement_loop_effort = Some(effort);
+    let implementer_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(implementer).await }
+    });
+    for _ in 0..32 {
+        if harness
+            .backend
+            .query(&implementer_id, false, None)
+            .await
+            .is_some_and(|s| s.is_running())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness
+            .backend
+            .query(&implementer_id, false, None)
+            .await
+            .is_some_and(|s| s.is_running()),
+        "a non-Review description must still be admitted next to the one Review row at effort {effort}"
+    );
+    let _ = implementer_spawn;
+
+    use crate::implementations::grok_build::task::admission::{
+        ImplementLoopReviewAdmit, admit_implement_loop_review_description,
+    };
+    assert_eq!(
+        admit_implement_loop_review_description(
+            effort,
+            false,
+            ["[reviewer] Review implementation"],
+            &format!("[reviewer] Review implementation (2/{effort})"),
+        ),
+        ImplementLoopReviewAdmit::Reject,
+        "planner that feeds spawn must reject a second Review description at effort {effort} without an operator ask"
+    );
+
+    let _ = harness.finish.send(());
     harness.actor.abort();
 }

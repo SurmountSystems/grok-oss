@@ -1089,22 +1089,45 @@ pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe
     cur != inst
 }
 
-/// Pure: which active-session PIDs should receive the cooperative relaunch
-/// signal. Excludes `except_pid` (the invoker, which re-execs itself), dead
-/// PIDs, and non-product processes (recycled PID safety).
-pub fn peer_pids_to_signal_for_relaunch(
+/// Pure: PID set rebuild should SIGUSR1 after the composite `(pid, session_id)`
+/// registry key.
+///
+/// Walks every row, then dedupes with a `BTreeSet` of PIDs. Two windows on the
+/// same `session_id` are two rows and both PIDs stay. Duplicate rows for one
+/// PID collapse to one. Skips the invoker, dead PIDs, and non-grok processes.
+/// Does not send a signal.
+pub fn collect_rebuild_signal_pids(
     sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
     except_pid: Option<u32>,
-) -> Vec<(u32, String)> {
-    let mut out = Vec::new();
-    for (pid, session_id, alive, is_grok) in sessions {
+) -> std::collections::BTreeSet<u32> {
+    let mut pids = std::collections::BTreeSet::new();
+    for (pid, _session_id, alive, is_grok) in sessions {
         if except_pid == Some(*pid) {
             continue;
         }
         if !*alive || !*is_grok {
             continue;
         }
-        out.push((*pid, session_id.clone()));
+        pids.insert(*pid);
+    }
+    pids
+}
+
+/// Pure: which active-session PIDs should receive the cooperative relaunch
+/// signal. Excludes `except_pid` (the invoker, which re-execs itself), dead
+/// PIDs, and non-product processes (recycled PID safety). Dedupes by PID
+/// after the composite key, in first-seen order.
+pub fn peer_pids_to_signal_for_relaunch(
+    sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
+    except_pid: Option<u32>,
+) -> Vec<(u32, String)> {
+    let targets = collect_rebuild_signal_pids(sessions, except_pid);
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (pid, session_id, _alive, _is_grok) in sessions {
+        if targets.contains(pid) && seen.insert(*pid) {
+            out.push((*pid, session_id.clone()));
+        }
     }
     out
 }
@@ -1161,12 +1184,35 @@ pub fn signal_active_sessions_to_relaunch(
     }
 
     let sessions = active_sessions::list().unwrap_or_default();
+    let classified: Vec<(u32, String, bool, bool)> = sessions
+        .iter()
+        .map(|s| {
+            let pid = s.pid;
+            (
+                pid,
+                s.session_id.0.to_string(),
+                active_sessions::is_pid_alive(pid),
+                xai_grok_shell::util::is_grok_process(pid),
+            )
+        })
+        .collect();
+    let targets = collect_rebuild_signal_pids(&classified, except_pid);
+
     let mut outcomes = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for s in sessions {
-        let pid = s.pid;
-        let session_id = s.session_id.0.to_string();
+    for (pid, session_id, alive, is_grok) in classified {
         if !seen.insert(pid) {
+            continue;
+        }
+        if targets.contains(&pid) {
+            match xai_grok_shell::util::signal_process_rebuild_relaunch(pid) {
+                Ok(()) => outcomes.push(PeerRelaunchOutcome::Signaled { pid, session_id }),
+                Err(e) => outcomes.push(PeerRelaunchOutcome::Skipped {
+                    pid,
+                    session_id,
+                    reason: format!("signal failed: {e}"),
+                }),
+            }
             continue;
         }
         if except_pid == Some(pid) {
@@ -1177,7 +1223,7 @@ pub fn signal_active_sessions_to_relaunch(
             });
             continue;
         }
-        if !active_sessions::is_pid_alive(pid) {
+        if !alive {
             outcomes.push(PeerRelaunchOutcome::Skipped {
                 pid,
                 session_id,
@@ -1185,21 +1231,12 @@ pub fn signal_active_sessions_to_relaunch(
             });
             continue;
         }
-        if !xai_grok_shell::util::is_grok_process(pid) {
+        if !is_grok {
             outcomes.push(PeerRelaunchOutcome::Skipped {
                 pid,
                 session_id,
                 reason: "not a grok product process".into(),
             });
-            continue;
-        }
-        match xai_grok_shell::util::signal_process_rebuild_relaunch(pid) {
-            Ok(()) => outcomes.push(PeerRelaunchOutcome::Signaled { pid, session_id }),
-            Err(e) => outcomes.push(PeerRelaunchOutcome::Skipped {
-                pid,
-                session_id,
-                reason: format!("signal failed: {e}"),
-            }),
         }
     }
     outcomes
@@ -1724,6 +1761,45 @@ mod tests {
         assert!(a > 0.0 && a < 1.0);
         assert!(b > a);
         assert!(b < 1.0);
+    }
+
+    /// Contract: after register identity is `(pid, session_id)`, two windows
+    /// on the same conversation are two rows. Rebuild must consider both
+    /// PIDs and dedupe by PID, not by session_id. Self, dead, and non-grok
+    /// rows are skipped. This helper never sends SIGUSR1.
+    #[test]
+    fn rebuild_signals_each_pid_after_composite_key() {
+        let session_id = "shared-conversation";
+        let self_pid = 111;
+        let peer_a = 222;
+        let peer_b = 333;
+        let dead_same_session = 444;
+        let non_grok = 555;
+        let sessions = vec![
+            (self_pid, session_id.into(), true, true),
+            (peer_a, session_id.into(), true, true),
+            (peer_b, session_id.into(), true, true),
+            (dead_same_session, session_id.into(), false, true),
+            (non_grok, session_id.into(), true, false),
+            (peer_a, session_id.into(), true, true),
+        ];
+        let targets = collect_rebuild_signal_pids(&sessions, Some(self_pid));
+        assert!(
+            targets.contains(&peer_a),
+            "first window on the shared session must be signaled"
+        );
+        assert!(
+            targets.contains(&peer_b),
+            "second window on the same session_id must also be signaled; dedupe is by PID"
+        );
+        assert_eq!(
+            targets.len(),
+            2,
+            "self, dead, non-grok, and a duplicate pid must not add extra targets: {targets:?}"
+        );
+        assert!(!targets.contains(&self_pid));
+        assert!(!targets.contains(&dead_same_session));
+        assert!(!targets.contains(&non_grok));
     }
 
     /// Contract: rebuild must schedule restart of **all** other live product

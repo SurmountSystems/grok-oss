@@ -471,7 +471,11 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
             .clone()
             .or_else(|| app.credit_balance.clone());
         let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
-        (balance, autotopup, agent.sampling_identity)
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, autotopup, live)
     };
     let snap = crate::views::limits_snapshot::LimitsSnapshot::from_billing(
         balance.as_ref(),
@@ -505,7 +509,11 @@ pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
             .credit_balance
             .clone()
             .or_else(|| app.credit_balance.clone());
-        (balance, agent.sampling_identity)
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, live)
     };
 
     let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
@@ -597,7 +605,11 @@ pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
             .clone()
             .or_else(|| app.credit_balance.clone());
         let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
-        (balance, autotopup, agent.sampling_identity)
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, autotopup, live)
     };
     let snap = crate::views::limits_snapshot::LimitsSnapshot::from_billing(
         balance.as_ref(),

@@ -19,6 +19,7 @@ fn request(parent_session_id: &str) -> SubagentRequest {
         await_to_completion: true,
         fork_context: false,
         owner: SubagentOwner::Task,
+        implement_loop_effort: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
     }
 }
@@ -92,6 +93,39 @@ fn fail_mode_rejects_at_the_concurrent_limit() {
     assert_eq!(
         admission.admit(&request("a"), /*running*/ 0),
         AdmissionDecision::Start
+    );
+}
+
+#[test]
+fn implement_loop_review_planner_allows_second_row_only_when_operator_asked() {
+    use super::{ImplementLoopReviewAdmit, admit_implement_loop_review_description};
+
+    assert_eq!(
+        admit_implement_loop_review_description(
+            2,
+            false,
+            ["[reviewer] Review implementation"],
+            "[reviewer] Review implementation (2/2)",
+        ),
+        ImplementLoopReviewAdmit::Reject,
+    );
+    assert_eq!(
+        admit_implement_loop_review_description(
+            2,
+            true,
+            ["[reviewer] Review implementation"],
+            "[reviewer] Review implementation (2/2)",
+        ),
+        ImplementLoopReviewAdmit::Admit,
+    );
+    assert_eq!(
+        admit_implement_loop_review_description(
+            2,
+            false,
+            ["[reviewer] Review implementation"],
+            "[implementer] Land the slice",
+        ),
+        ImplementLoopReviewAdmit::Admit,
     );
 }
 
