@@ -104,6 +104,7 @@ pub(super) fn open_usage_info_modal(
             agent_id: id,
             silent: true,
             nonce,
+            force_refresh: false,
         });
     }
     agent.active_modal = Some(ActiveModal::UsageInfo {
@@ -399,6 +400,7 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
         agent_id,
         silent: false,
         nonce: 0,
+        force_refresh: false,
     }]
 }
 
@@ -491,6 +493,7 @@ pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
         agent_id: id,
         silent: true,
         nonce: 0,
+        force_refresh: true,
     }]
 }
 
@@ -637,6 +640,7 @@ pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
         agent_id: id,
         silent: true,
         nonce: 0,
+        force_refresh: true,
     }]
 }
 

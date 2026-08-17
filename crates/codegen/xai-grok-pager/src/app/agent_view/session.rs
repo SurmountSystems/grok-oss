@@ -125,6 +125,7 @@ impl AgentView {
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
+            session_sampling_window: None,
             chat_kind: false,
             conversation_entry: false,
             app_chat_mode: false,
@@ -1023,6 +1024,9 @@ impl AgentView {
         if self.chat_kind {
             self.context_state = None;
             return;
+        }
+        if next.total > 0 {
+            self.session_sampling_window = Some(next.total);
         }
         self.context_state = Some(next);
     }

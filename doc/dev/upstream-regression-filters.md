@@ -26,7 +26,7 @@ recon cannot ship a hollow tree without a red test.
 | Process docs / scripts / packaging | `FORK_PATHS` restore + assert (files only) |
 | Seams inside `xai-grok-*` | Cherry-pick + **named cargo tests** (assert does not run them) |
 | **Seven land classes** | CLI identity, `/settings` + unread config, grok-oss ledger `/spend`, DOGE/chrome paint, dual-auth hop after included SuperGrok period limits are full, last-session on start, product skills are not a Python runtime. A chrome-only pass is a failed land. |
-| **Paint / dogfood** | After catalog: named `fn` still exist, then screenshot / draw list (rails, five-CTA, included SuperGrok period limits meter, titled composer white frame, SIGUSR1 after a failed install). Screenshots are an operator check, not the only check. |
+| **Paint / dogfood** | After catalog: named `fn` still exist, then screenshot / draw list (rails, four idle plan CTAs, included SuperGrok period limits meter, titled composer white frame, SIGUSR1 after a failed install). Screenshots are an operator check, not the only check. |
 | Host `~/.agents` / `~/.grok/AGENTS.md` | Outside the tree (untouched by import) |
 | Shared user-guide | Conflict resolve on onto (not frozen wholesale). A guide with zero `/limits` hits is a failed land. |
 
@@ -151,7 +151,7 @@ check after these `fn`s exist.
 | `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `included SuperGrok period limits · N%` |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `ShowLimits` |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
-| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Clarify / Revise / Exit |
+| `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA |
 | `default_theme_is_doge` | Unset theme resolves to DOGE |
 
 Closest existing spinner/glyph neighbors (not a lower-left magenta throbber
@@ -742,7 +742,7 @@ Do not call SuperGrok free.
 | `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `included SuperGrok period limits · N%` | **Keep** (`credit_bar` helpers alone do not count) |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
-| `plan_approval_footer_paints_five_cta_vocabulary` | Plan panel footer paints Approve / Clarify / Revise / Exit | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
+| `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
 | `sampling_config_auto_use_*` | `sampling_config_for_model` / `prepare_sampling_config_for_model` fills console failover when included SuperGrok period limits are full | **Keep** |
 | `sampling_config_hops_to_sibling_included_before_extras` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
 | `limits_snapshot_second_process_reads_file_and_does_not_http` | One grok-oss process fetches SuperGrok billing; others read the flock snapshot | **Keep** |
@@ -987,7 +987,7 @@ just check   # full gate before push/PR; cannot fail a deleted catalog test
 
 **Dogfood screenshot list** (after assert + catalog; operator check, not the
 only check): Human/agent rails, titled composer white frame with yellow title
-only, plan five CTAs, included SuperGrok period limits compact meter (click
+only, plan four idle CTAs (Approve / Comment / Revise / Exit), included SuperGrok period limits compact meter (click
 opens `/limits`), SIGUSR1 fleet still alive after a **failed** install. Do not
 accept "compile mop re-applied seams" without the seven-class cargo list.
 

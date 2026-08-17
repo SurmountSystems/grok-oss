@@ -980,7 +980,9 @@ mod tests {
             ..Default::default()
         });
         let theme = Theme::current();
-        let area = Rect::new(0, 0, 80, 1);
+        // Two-meter chip plus `N queued · /queue` is longer than the old
+        // unlabeled used/total form. 80 columns clipped the trailing hint.
+        let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         render_prompt_info(&mut buf, area, &a, 3, "ctrl+o transcript", &theme);
         let text: String = (0..area.width)
@@ -990,6 +992,7 @@ mod tests {
         assert!(text.contains("2.0M"), "total context window: {text:?}");
         assert!(text.contains('%'), "percentage: {text:?}");
         assert!(text.contains("3 queued"), "queued count: {text:?}");
+        assert!(text.contains("/queue"), "queued inspection cue: {text:?}");
         assert!(
             text.trim_end().ends_with("ctrl+o transcript"),
             "trailing transcript hint: {text:?}"

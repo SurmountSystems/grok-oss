@@ -1689,6 +1689,23 @@ fn show_session_info_opens_modal_on_session_tab() {
 }
 
 #[test]
+fn show_limits_queues_force_refresh_billing() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ShowLimits, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::FetchBilling {
+                silent: true,
+                force_refresh: true,
+                ..
+            }]
+        ),
+        "explicit /limits must ForceRefresh billing, got: {effects:?}"
+    );
+}
+
+#[test]
 fn usage_results_populate_open_modal_not_scrollback() {
     let mut app = test_app_with_agent();
     dispatch(Action::ShowUsage, &mut app);

@@ -164,7 +164,8 @@ pub struct PromptStyle {
     /// of the default `accent_user` / `gray_dim`. Used for plan mode (golden).
     pub accent_color_override: Option<ratatui::style::Color>,
     /// Override the border color (╭─╮│╰─╯). When `Some`, uses this color
-    /// instead of `prompt_border_active` / `prompt_border`. Used for plan mode.
+    /// instead of `prompt_border_active` / `prompt_border`. Plan mode
+    /// passes `prompt_border_active` so the titled frame stays white.
     pub border_color_override: Option<ratatui::style::Color>,
     /// Override the prefix character and its color.
     /// When `Some((str, color))`, replaces the default `❯` prefix.

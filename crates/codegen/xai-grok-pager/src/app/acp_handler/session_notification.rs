@@ -43,6 +43,11 @@ pub(super) fn stash_live_stop_batch(
     }
 }
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
+    // Do not copy `context_state.total` into `session_sampling_window`.
+    // Token refresh totals come from the model-card catalog. Copying that
+    // 500k into the session field makes the chip treat windows as equal
+    // and paint unlabeled `201K / 500K`. Session sampling is set only by
+    // GetSessionInfo (`apply_full_context_info`) or AutoCompactStarted.
     let total = view.session.models.get_context_window().unwrap_or(0);
     view.apply_context_used(used, total);
 }
@@ -215,6 +220,11 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             );
             if let XaiSessionUpdate::RetryState(retry) = update {
                 apply_sampling_identity_from_retry(retry, &mut agent.sampling_identity);
+            }
+            if let XaiSessionUpdate::AutoCompactStarted { context_window, .. } = update
+                && *context_window > 0
+            {
+                agent.session_sampling_window = Some(*context_window);
             }
             if let XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
@@ -1244,6 +1254,11 @@ pub(super) fn handle_child_session_notification(
                 );
                 if let XaiSessionUpdate::RetryState(retry) = &update {
                     apply_sampling_identity_from_retry(retry, &mut child_view.sampling_identity);
+                }
+                if let XaiSessionUpdate::AutoCompactStarted { context_window, .. } = &update
+                    && *context_window > 0
+                {
+                    child_view.session_sampling_window = Some(*context_window);
                 }
                 if let Some(tokens_after) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);

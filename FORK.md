@@ -392,9 +392,12 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `included SuperGrok period limits · N%`; click opens `/limits`. Tests:
   `status_bar_pushes_credits_compact_included_supergrok_period_limits`,
   `hit_credits_click_dispatches_show_limits` (`app/agent_view/render.rs`).
-- [x] **Plan footer CTAs**: Approve / Clarify / Revise / Exit. Notes is gone.
-  Letter `a` / `A` type. Empty Enter never Approves. Revise arms the box
-  and waits. Tests: `plan_approval_footer_paints_five_cta_vocabulary`,
+- [x] **Plan footer CTAs**: idle footer is Approve / Comment / Revise / Exit
+  (four CTAs). Clarify is only in the comment flow after Comment, not an
+  idle top-level notes path. Notes is gone. Letter `a` / `A` type. Empty
+  Enter never Approves. Revise arms the box and waits. The white plan
+  prompt frame uses `theme.prompt_border_active`. Tests:
+  `plan_approval_footer_paints_five_cta_vocabulary`,
   `plan_footer_exit_not_quit`, `plan_footer_has_no_notes_button`,
   `plan_prompt_letter_a_inserts_when_composing`
   (`views/file_search/line_viewer.rs`, `app/agent_view/plan.rs`).
@@ -417,7 +420,8 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `exit_plan_mode_soft` substring. User-guide `19-plan-mode`,
   `22-permissions-and-safety`.
 - [x] **Soft plan present is a real right-side pane**: default soft park
-  docks the existing plan list plus five CTAs on the right, full overlay
+  docks the existing plan list plus four idle CTAs (Approve / Comment /
+  Revise / Exit) on the right, full overlay
   height, no dim of the transcript. Status **Plan ready. Side panel open**
   only when that viewer is actually open. A click on a plan row does not
   enter Commenting. `c` remains the explicit line-comment gesture. Tests:
@@ -581,7 +585,10 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   law (L2 must spawn L3 only when many greps / half the window) is replaced.
   Product cargo pins for the prompt contract are under Product
   (`CHILD_TASK_DESCRIPTION`). Assert sniffs that AGENTS still contains the
-  coordinator sentence; that is not the crate seam.
+  coordinator sentence; that is not the crate seam. Write new short reports
+  under `~/.agents/reports/` on this machine. Do not add report files to the
+  git tree. Historical `.agents/reports/foo.md` citations in this file are
+  finished-note names only.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +
@@ -886,7 +893,7 @@ is quality only. It cannot fail a deleted catalog test.
   `scripts/assert-process-pins.sh` proves files exist. It does not prove
   contracts.
 - **A chrome-only inventory is a failed land.** Paint screenshots of rails
-  and five CTAs do not prove hop keys, `/spend` ingest, unread config,
+  and four idle plan CTAs do not prove hop keys, `/spend` ingest, unread config,
   first-token `grok-oss`, last-session, or skills-not-Python.
 - **Paint-only bubble copy is a failed land.** Click-to-copy tests must
   still exist.
@@ -912,7 +919,7 @@ is quality only. It cannot fail a deleted catalog test.
    without paint; schema-exists without `/spend` ingest; serde `hide_header`
    without a `/settings` row and a runtime reader; rank helpers without
    `sampling_config` hop keys; bundle still has `memory.py`.
-5. Dogfood screenshots (rails, five CTAs, compact included SuperGrok period
+5. Dogfood screenshots (rails, four idle plan CTAs, compact included SuperGrok period
    limits meter, SIGUSR1 after a failed install) stay an operator check
    after those `fn`s exist. They are not the only check. This inventory does
    not claim live TUI dogfood.
@@ -937,7 +944,7 @@ cargo `fn`):
    keep paint/render tests for human green rails plus box caret, magenta
    model / running agent, the compact **included SuperGrok period limits**
    meter, the titled composer frame (`prompt_border_active` white, yellow
-   title only), and the five-CTA plan panel.
+   title only), and the four-CTA idle plan panel (Clarify only after Comment).
 5. **Dual-auth hop after included SuperGrok period limits are full.** Rank
    helpers are not hop. `sampling_config` must fill console failover after
    those included limits are full, and must omit it while they still have
@@ -962,7 +969,7 @@ last-session on start, **and** product skills are not a Python runtime.
 that drops them while keeping the seven is still a seam loss):
 
 - Always-on bubble copy **click + wrap** (paint-only is a failed land).
-- Plan present ≠ Approve + modal-free typing (five-CTA paint is not honesty).
+- Plan present ≠ Approve + modal-free typing (four-CTA idle paint is not honesty).
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
 - Nucleo reuse-per-root.
 - Baked default is Grok 4.6 at medium reasoning effort

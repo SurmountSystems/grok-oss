@@ -40,6 +40,25 @@ fn drop_cli_catchall_allows(
 /// Construction acquires fds (epoll/kqueue, waker) and fails with
 /// `EMFILE`/`EAGAIN` under resource pressure. Cap only — pre-warm is
 /// process-lifetime (`xai_tty_utils::runtime`).
+/// First sampling window for chat-state AUTO compact.
+///
+/// Economic mode caps the catalog window at the 200k price cliff before any
+/// response-header upgrade. `GROK_DEBUG_CONTEXT_WINDOW` still wins.
+pub(crate) fn seed_sampling_context_window(
+    catalog: std::num::NonZeroU64,
+    debug_override: Option<std::num::NonZeroU64>,
+    economic_mode: bool,
+) -> std::num::NonZeroU64 {
+    if let Some(ovr) = debug_override {
+        return ovr;
+    }
+    std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
+        catalog.get(),
+        economic_mode,
+    ))
+    .unwrap_or(catalog)
+}
+
 pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     xai_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
@@ -430,6 +449,7 @@ pub(crate) async fn spawn_session_actor(
             "GROK_DEBUG_CONTEXT_WINDOW override active"
         );
     }
+    let economic_mode = crate::util::config::economic_mode_from_disk();
     let chat_state_sampling_config = xai_grok_sampling_types::SamplingConfig {
         base_url: sampling_config.base_url.clone(),
         model: sampling_config.model.clone(),
@@ -440,7 +460,11 @@ pub(crate) async fn spawn_session_actor(
         extra_headers: sampling_config.extra_headers.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
-        context_window: context_window_override.unwrap_or(baseline_context_window),
+        context_window: seed_sampling_context_window(
+            baseline_context_window,
+            context_window_override,
+            economic_mode,
+        ),
         reasoning_effort: sampling_config.reasoning_effort,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
@@ -1496,7 +1520,7 @@ pub(crate) async fn spawn_session_actor(
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: force_compact.clone(),
             context_window_override,
-            economic_mode: std::cell::Cell::new(crate::util::config::economic_mode_from_disk()),
+            economic_mode: std::cell::Cell::new(economic_mode),
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
@@ -2551,6 +2575,30 @@ mod resumed_prefix_fallback_tests {
         ));
         assert!(resumed_prefix_carries_fallback_date(false, &leading_noise));
         assert!(!resumed_prefix_carries_fallback_date(true, &with_date));
+    }
+}
+
+#[cfg(test)]
+mod seed_sampling_window_tests {
+    use super::seed_sampling_context_window;
+    use crate::util::config::ECONOMIC_CONTEXT_CAP;
+
+    #[test]
+    fn spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on() {
+        let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
+        let seeded = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            seeded.get(),
+            ECONOMIC_CONTEXT_CAP,
+            "first pre-header sampling window must be the economic cap"
+        );
+        assert_eq!(seeded.get(), 200_000);
+        let uncapped = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            uncapped.get(),
+            500_000,
+            "economic off keeps the catalog window"
+        );
     }
 }
 #[cfg(test)]

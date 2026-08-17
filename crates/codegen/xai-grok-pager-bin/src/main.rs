@@ -1802,6 +1802,10 @@ async fn async_main() -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::disk_usage_cmd::run(du_args);
             }
+            Command::Limits(limits_args) => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::limits_cmd::run(limits_args).await;
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;

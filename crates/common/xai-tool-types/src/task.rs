@@ -237,10 +237,14 @@ impl SubagentCompletedOutput {
         )
     }
 
-    /// Render the full model-facing completion block: the answer text, the
+    /// Render the parent-facing completion block: the answer text, the
     /// `<subagent_meta>` line, and the `<subagent_result>` resume footer.
+    ///
+    /// Huge last answers are capped at 40k so ACP ingest does not replay the
+    /// full child transcript into parent context. The stored [`Self::output`]
+    /// field stays the full string for child-session views.
     pub fn to_model_text(&self) -> String {
-        format_subagent_completed(
+        let text = format_subagent_completed(
             &self.output,
             &self.subagent_id,
             &self.subagent_type,
@@ -248,8 +252,31 @@ impl SubagentCompletedOutput {
             self.turns,
             self.duration_ms,
             self.persona.as_deref(),
-        )
+        );
+        cap_parent_subagent_last_answer(&text)
     }
+}
+
+/// Same 40k parent ingest policy as bash / completed-poll ToolResults.
+const PARENT_SUBAGENT_LAST_ANSWER_BYTES: usize = 40_000;
+const PARENT_SUBAGENT_LAST_ANSWER_PREVIEW: usize = 2_000;
+
+fn cap_parent_subagent_last_answer(text: &str) -> String {
+    if text.len() <= PARENT_SUBAGENT_LAST_ANSWER_BYTES {
+        return text.to_string();
+    }
+    let mut end = PARENT_SUBAGENT_LAST_ANSWER_PREVIEW.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[Output truncated: {} of {} bytes shown. \
+         Full last answer is not stored on the parent ToolResult. \
+         Use read_file on the on-disk report if one exists.]",
+        &text[..end],
+        end,
+        text.len()
+    )
 }
 
 /// Plain-text CTA after a background-spawn notice.
@@ -1342,6 +1369,42 @@ mod tests {
             status: status.into(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn to_model_text_caps_huge_last_answer_for_parent_ingest() {
+        let last_answer = "Z".repeat(200_000);
+        let output = SubagentCompletedOutput {
+            output: last_answer.clone(),
+            subagent_id: "sub-huge".into(),
+            subagent_type: "general-purpose".into(),
+            tool_calls: 20,
+            turns: 6,
+            duration_ms: 12_000,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sub-huge".into(),
+            persona_hint: None,
+        };
+        let text = output.to_model_text();
+        assert!(
+            text.len() < 80_000,
+            "parent ACP ingest must not carry a 200k last answer ({} bytes)",
+            text.len()
+        );
+        assert!(
+            !text.contains(&last_answer),
+            "200k-char last answer must not appear verbatim in to_model_text"
+        );
+        assert!(
+            output.output == last_answer,
+            "stored output stays the full child last answer"
+        );
+        assert!(
+            text.to_ascii_lowercase().contains("report")
+                || text.to_ascii_lowercase().contains("truncated"),
+            "capped last answer must mark truncated or point at a report: {text}"
+        );
     }
 
     #[test]

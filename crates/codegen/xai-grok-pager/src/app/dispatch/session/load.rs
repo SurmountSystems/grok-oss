@@ -1176,6 +1176,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent_id,
             silent: true,
             nonce: 0,
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
@@ -1207,17 +1208,50 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     vec![]
 }
 
+/// True when replay shows the last real user turn already finished
+/// successfully (`TurnCompleted` after that prompt). A leftover
+/// `canceled_turn_resume.json` is then stale: drop it, do not re-fire.
+fn primary_user_turn_finished_successfully(scrollback: &ScrollbackState) -> bool {
+    let len = scrollback.len();
+    let mut last_user: Option<usize> = None;
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(block) = &entry.block {
+            if block.is_bash || block.is_cron {
+                continue;
+            }
+            last_user = Some(idx);
+            break;
+        }
+    }
+    let Some(user_idx) = last_user else {
+        return false;
+    };
+    let mut last_terminal: Option<&SessionEvent> = None;
+    for idx in (user_idx + 1)..len {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::SessionEvent(block) = &entry.block
+            && block.event.is_turn_terminal()
+        {
+            last_terminal = Some(&block.event);
+        }
+    }
+    matches!(last_terminal, Some(SessionEvent::TurnCompleted { .. }))
+}
+
 /// Re-queue a canceled mid-turn once when the session marker is present and
 /// continue-interrupted-turn is on. Toast is **Continuing interrupted turn**,
 /// not `/resume` session pick. One-shot: the marker is cleared after enqueue.
+/// A leftover marker after a successful primary-turn finish is dropped.
 fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: bool) {
     use xai_grok_shell::session::canceled_turn_resume::{
         auto_resume_toast, clear_canceled_turn_resume, load_canceled_turn_resume,
         should_auto_resume_on_restart,
     };
-    if !resume_enabled {
-        return;
-    }
     let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
         return;
     };
@@ -1225,6 +1259,13 @@ fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: boo
     let Ok(Some(marker)) = load_canceled_turn_resume(&cwd, &sid) else {
         return;
     };
+    if primary_user_turn_finished_successfully(&agent.scrollback) {
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return;
+    }
+    if !resume_enabled {
+        return;
+    }
     if !should_auto_resume_on_restart(true, Some(&marker)) {
         return;
     }

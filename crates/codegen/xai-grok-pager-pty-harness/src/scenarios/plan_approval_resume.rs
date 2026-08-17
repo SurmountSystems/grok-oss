@@ -19,7 +19,7 @@
 //!
 //! 1. **Mouse** click on the painted footer **Approve** word (primary)
 //!
-//! Footer paint is word-only: `approve  |  clarify  |  revise  |  exit`
+//! Footer paint is word-only: `approve  |  comment  |  revise  |  exit`
 //! (narrow docks drop separators to spaces). There is no Notes button, no
 //! Quit label, and no `a approve` / `A notes` / `s revise` / `q quit` prefix.
 //! Do **not** match bare `"approve"` — transcript card prose can contain
@@ -44,11 +44,11 @@ const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
 /// Word-only approval footer (separator `"  |  "` from `line_viewer` paint).
 /// Unique vs card prose (`to approve,`) and vs a lone `"approve"`.
-const LABELED_APPROVE_CTA: &str = "approve  |  clarify";
+const LABELED_APPROVE_CTA: &str = "approve  |  comment";
 /// Full four-CTA strip when the right pane is wide enough for separators.
-const LABELED_FOOTER_STRIP: &str = "approve  |  clarify  |  revise  |  exit";
+const LABELED_FOOTER_STRIP: &str = "approve  |  comment  |  revise  |  exit";
 /// Narrow dock drops separators; still word-only, no letter prefixes.
-const NARROW_FOOTER_STRIP: &str = "approve clarify revise exit";
+const NARROW_FOOTER_STRIP: &str = "approve comment revise exit";
 
 const PLAN_BODY: &str = "\
 # Plan GBT3703Repro

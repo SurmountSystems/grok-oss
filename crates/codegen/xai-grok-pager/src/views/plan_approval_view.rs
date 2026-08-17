@@ -18,7 +18,8 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 The agent exited plan mode without writing a plan.
 
 - **Approve** - leave plan mode and start implementing
-- **Clarify** - ask a question; do not rewrite the plan
+- **Comment** - type a note, then Approve, Clarify, or Revise
+- **Clarify** - after Comment, ask a question; do not rewrite the plan
 - **Revise** - focus the box and wait for notes, then send the agent back to rewrite the plan
 - **Exit** - abandon and turn plan mode off
 ";
@@ -89,6 +90,8 @@ pub enum PlanApprovalFocus {
 
 /// What freeform Enter on the plan-approval prompt means.
 ///
+/// - **Comment**: comment composer hub. Enter does not decide. Click
+///   Approve, Clarify, or Revise to attach the typed comment.
 /// - **Revise**: ACP `"cancelled"` after typed notes (or comments) on Enter.
 /// - **Questions** (`?` clarify): ACP `"questions"`; answer read-only; do not rewrite.
 /// - **ApproveNotes**: ACP `"approved"` + notes via the Approve button or Enter.
@@ -98,6 +101,7 @@ pub enum PlanPromptIntent {
     Revise,
     Questions,
     ApproveNotes,
+    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +181,8 @@ impl PlanApprovalViewState {
 
     /// Local decision park when plan mode is idle with a plan body but no
     /// live `exit_plan_mode` reverse-request. Same side-panel CTAs; decisions
-    /// leave plan mode / Interject rather than ACP outcomes.
+    /// leave plan mode / Interject rather than ACP outcomes. Starts on
+    /// Preview so first paint is idle Comment, not comment-flow Clarify.
     pub fn for_idle_decision(plan_content: Option<String>) -> Self {
         let plan_content = plan_content.filter(|s| !s.trim().is_empty());
         let has_plan = plan_content.is_some();
@@ -188,7 +193,7 @@ impl PlanApprovalViewState {
             source: PlanReviewSource::FileBacked,
             stashed_prompt: StashedPrompt::default(),
             response_tx: None,
-            focus: PlanApprovalFocus::Prompt,
+            focus: PlanApprovalFocus::Preview,
             prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
             next_comment_id: 0,

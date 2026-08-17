@@ -858,6 +858,50 @@
         }
     }
 
+    /// Token refreshes must not copy the model-card catalog into
+    /// `session_sampling_window`. After that poison the chip treats windows
+    /// as equal and paints unlabeled `201K / 500K`.
+    #[test]
+    fn refresh_context_used_does_not_copy_catalog_into_session_sampling() {
+        let mut agent = make_agent(Some("s1"));
+        agent.session.models.override_context_window(500_000);
+        assert!(
+            agent.session_sampling_window.is_none(),
+            "fixture starts with no GetSessionInfo window"
+        );
+
+        refresh_context_used(&mut agent, 201_000);
+        refresh_context_used(&mut agent, 201_000);
+
+        let window = agent.session_sampling_window;
+        assert!(
+            window.is_none() || window.filter(|&w| w != 500_000).is_some(),
+            "two catalog-only token refreshes must leave session_sampling_window \
+             empty or a real session window, not catalog 500k, got {window:?}"
+        );
+        assert_ne!(
+            window,
+            Some(500_000),
+            "must not copy catalog 500k into session_sampling_window"
+        );
+
+        let sampling = crate::views::context_bar::footer_sampling_window(
+            window,
+            Some(500_000),
+            true,
+        );
+        let text = crate::views::context_bar::context_chip_token_text(
+            201_000,
+            sampling,
+            Some(500_000),
+        )
+        .expect("token data");
+        assert!(
+            !text.starts_with("201K / 500K"),
+            "economic-on chip must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {text}"
+        );
+    }
+
     #[test]
     fn apply_unhandled_event_returns_false() {
         let mut session = make_session(Some("s1"));

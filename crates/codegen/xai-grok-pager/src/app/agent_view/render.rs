@@ -149,6 +149,9 @@ impl AgentView {
                         }
                         crate::views::plan_approval_view::PlanPromptIntent::Questions => "clarify",
                         crate::views::plan_approval_view::PlanPromptIntent::Revise => "revise",
+                        crate::views::plan_approval_view::PlanPromptIntent::Comment => {
+                            "choose Approve, Clarify, or Revise"
+                        }
                     };
                     vec![
                         HintItem::new(key!(Enter), enter_label),
@@ -1024,7 +1027,9 @@ impl AgentView {
                 None
             },
             border_color_override: if effective_plan || casual_commenting {
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
+                // Titled-composer white frame (prompt_border_active on DOGE).
+                // Do not blend accent_plan; that hid the outline.
+                Some(theme.prompt_border_active)
             } else {
                 None
             },
@@ -1054,10 +1059,11 @@ impl AgentView {
             {
                 Some(ph)
             } else if casual_commenting
-                || self
-                    .plan_approval_view
-                    .as_ref()
-                    .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting)
+                || self.plan_approval_view.as_ref().is_some_and(|pav| {
+                    pav.focus == PlanApprovalFocus::Commenting
+                        || pav.prompt_intent
+                            == crate::views::plan_approval_view::PlanPromptIntent::Comment
+                })
             {
                 Some("Type your comment...")
             } else {
@@ -1581,12 +1587,11 @@ impl AgentView {
                 .as_ref()
                 .and_then(|c| (c.total > 0).then_some(c.total))
         });
-        let sampling_window = catalog_window.map(|catalog| {
-            xai_grok_shell::util::config::apply_economic_context_cap(
-                catalog,
-                crate::appearance::cache::load_economic_mode(),
-            )
-        });
+        let sampling_window = context_bar::footer_sampling_window(
+            self.session_sampling_window,
+            catalog_window,
+            crate::appearance::cache::load_economic_mode(),
+        );
         if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
             sampling_window,
@@ -3564,9 +3569,12 @@ impl AgentView {
                 .map(|viewer| {
                     if let Some(ref pav) = self.plan_approval_view {
                         viewer.plan_mut().active_commenting_range = pav.commenting_range.clone();
+                        viewer.plan_mut().comment_flow_active =
+                            pav.focus != PlanApprovalFocus::Preview;
                     } else {
                         viewer.plan_mut().active_commenting_range =
                             self.casual_commenting_range.clone();
+                        viewer.plan_mut().comment_flow_active = false;
                     }
                     render_line_viewer(
                         buf,
@@ -4743,7 +4751,7 @@ mod voice_recording_overlay_tests {
             !lower.contains("request changes"),
             "plan approval must not advertise the 1.0.3 request-changes placeholder:\n{text}"
         );
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "plan approval chrome must name {needle} on the decision surface:\n{text}"
@@ -4779,10 +4787,10 @@ mod voice_recording_overlay_tests {
             "status must match the right-side pane geometry:\n{text}"
         );
         let lower = text.to_ascii_lowercase();
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
-                "right pane must keep the four CTAs; missing {needle}:\n{text}"
+                "right pane must keep the four idle CTAs; missing {needle}:\n{text}"
             );
         }
         assert!(
@@ -4855,7 +4863,7 @@ mod voice_recording_overlay_tests {
             text.contains("Plan ready. Side panel open"),
             "file-backed park must say Plan ready. Side panel open:\n{text}"
         );
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "file-backed plan.md chrome must name {needle}:\n{text}"
@@ -4880,8 +4888,12 @@ mod voice_recording_overlay_tests {
             "Notes must not be a clickable hit target on isolated plan.md"
         );
         assert!(
-            plan.questions_button_area.is_some(),
-            "Clarify must be a clickable hit target on isolated plan.md"
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target on isolated plan.md"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify is comment-flow only on isolated plan.md"
         );
         assert!(
             plan.send_button_area.is_some(),
@@ -4891,9 +4903,138 @@ mod voice_recording_overlay_tests {
             plan.abandon_button_area.is_some(),
             "Exit must be a clickable hit target on isolated plan.md"
         );
+    }
+
+    /// Local idle park (`/view-plan` and other idle parks) first-paints
+    /// Approve / Comment / Revise / Exit. Clarify is comment-flow only.
+    #[test]
+    fn local_idle_decision_park_paints_comment_not_clarify() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_feedback_in_flight = None;
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Idle park\n\nDo the thing\n".into(),
+            )),
+        );
+        agent.show_plan_preview();
+
+        let text = render_text(&mut agent, false);
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .expect("idle park must paint a plan modal");
+        // Modal footer only. The composer hint row may still say `?:clarify`.
+        let footer = text
+            .lines()
+            .nth((modal.y + modal.height.saturating_sub(1)) as usize)
+            .unwrap_or("")
+            .to_string();
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "local idle park footer must name {needle}; got {footer:?}"
+            );
+        }
         assert!(
-            plan.comment_button_area.is_none(),
-            "isolated plan.md approval must not paint casual c-comment as a decision CTA"
+            !lower.contains("clarify"),
+            "local idle park must not first-paint comment-flow Clarify; got {footer:?}"
+        );
+
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("local idle park must stay parked");
+        assert_eq!(
+            pav.focus,
+            crate::views::plan_approval_view::PlanApprovalFocus::Preview,
+            "idle park first paint is Preview until Comment or prompt focus"
+        );
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("idle park must have plan extras after draw");
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify must not be an idle hit target"
+        );
+        assert!(
+            !plan.comment_flow_active,
+            "comment_flow_active stays false until Comment or prompt focus"
+        );
+    }
+
+    /// Plan prompt window uses the titled-composer white frame
+    /// (`prompt_border_active`), not a blended plan-accent outline.
+    #[test]
+    fn plan_prompt_window_paints_white_titled_frame() {
+        use crate::theme::{Theme, cache};
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        assert_eq!(
+            theme.prompt_border_active,
+            ratatui::style::Color::Rgb(255, 255, 255),
+            "DOGE titled frame is white"
+        );
+
+        let mut agent = plan_approval_agent();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+        let _ = render_text(&mut agent, false);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "plan prompt must have a painted area; got {prompt:?}"
+        );
+
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+
+        let white = theme.prompt_border_active;
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("top-left frame");
+        assert_eq!(
+            top_left.symbol(),
+            "\u{256d}",
+            "plan prompt top-left must be ╭; got {:?}",
+            top_left.symbol()
+        );
+        assert_eq!(
+            top_left.fg, white,
+            "plan prompt outline must be titled-composer white, not blended plan accent; got {:?}",
+            top_left.fg
+        );
+        let mid_left = buf.cell((prompt.x, prompt.y + 1)).expect("left side frame");
+        assert_eq!(mid_left.symbol(), "\u{2502}");
+        assert_eq!(
+            mid_left.fg, white,
+            "plan prompt side must stay white; got {:?}",
+            mid_left.fg
         );
     }
 
@@ -5807,6 +5948,9 @@ mod plan_turn_row_revising_copy_tests {
     fn present_new_exit_plan_mode(agent: &mut AgentView, body: &str) {
         agent.clear_plan_loop_flags_for_new_present();
         park_exit_plan_mode(agent, body);
+        // Same as handle_exit_plan_mode: a present docks the review pane.
+        // Status may say "Side panel open" only when that viewer exists.
+        agent.show_plan_preview_if_available();
     }
 
     fn draw_screen(agent: &mut AgentView) -> String {
@@ -5845,7 +5989,7 @@ mod plan_turn_row_revising_copy_tests {
         park_exit_plan_mode(&mut agent, "# Rewrite me\n\nBody\n");
         agent.session.state = AgentState::Idle;
 
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         assert!(agent.plan_approval_view.is_none());
         agent.session.state = AgentState::Idle;
 
@@ -5945,7 +6089,7 @@ mod plan_turn_row_revising_copy_tests {
     fn busy_rewrite_turn_row_yields_to_real_turn_status() {
         let mut agent = make_agent();
         park_exit_plan_mode(&mut agent, "# Rewrite now\n\nBody\n");
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         agent.session.state = AgentState::TurnRunning;
 
         let text = draw_screen(&mut agent);
@@ -5978,6 +6122,13 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !agent.plan_decision_resolved,
             "a present must not set plan_decision_resolved"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
+            "new present must open the review park side panel, not Approve"
         );
         assert!(
             text.contains("Plan ready. Side panel open"),

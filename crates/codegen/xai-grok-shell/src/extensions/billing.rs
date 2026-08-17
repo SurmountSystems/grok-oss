@@ -198,12 +198,41 @@ pub struct GetAutoTopupRuleResponse {
     pub rule: Option<AutoTopupRule>,
 }
 
+/// Optional params for `x.ai/billing`. Empty `{}` is a background poll.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetBillingParams {
+    /// Explicit `grok-oss limits` / TUI `/limits` open: bust a fresh-by-TTL
+    /// disk snapshot so `usagePct` 100 is not applied as included exhaust.
+    #[serde(default)]
+    pub force_refresh: bool,
+}
+
+/// Snapshot hub mode for `x.ai/billing`. Explicit collect/open is ForceRefresh.
+pub fn limits_snapshot_mode_for_get_billing(
+    force_refresh: bool,
+) -> crate::auth::LimitsSnapshotMode {
+    if force_refresh {
+        crate::auth::LimitsSnapshotMode::ForceRefresh
+    } else {
+        crate::auth::LimitsSnapshotMode::HonorTtl
+    }
+}
+
+/// Parse `forceRefresh` from the billing extension params JSON.
+pub fn force_refresh_from_billing_params(params_json: &str) -> bool {
+    serde_json::from_str::<GetBillingParams>(params_json)
+        .map(|p| p.force_refresh)
+        .unwrap_or(false)
+}
+
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/billing" => {
             tracing::info!("handling billing config request");
-            handle_get_billing(agent).await
+            let force_refresh = force_refresh_from_billing_params(args.params.get());
+            handle_get_billing(agent, force_refresh).await
         }
         "x.ai/auto-topup-rule" => {
             tracing::info!("handling auto top-up rule request");
@@ -696,7 +725,7 @@ pub fn billing_log_identity_from_auth(auth: &crate::auth::GrokAuth) -> (String, 
     (identity_id, role)
 }
 
-async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
+async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
         "Authentication required to fetch billing data",
@@ -720,7 +749,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
     // Management meters. Followers apply the snapshot into remember maps.
     let (role, doc) = match collect_billing_via_snapshot_hub(
         &grok_home,
-        crate::auth::LimitsSnapshotMode::HonorTtl,
+        limits_snapshot_mode_for_get_billing(force_refresh),
         now,
         || {
             let live_active = &live_active;
@@ -731,6 +760,9 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             let home_for_fetch = home_for_fetch.clone();
             let base_for_fetch = base_for_fetch.clone();
             async move {
+                if force_refresh && crate::auth::resolve_management_api_key_default().is_some() {
+                    crate::auth::clear_console_team_billing_meter_caches();
+                }
                 fetch_supergrok_credits_snapshot_document(
                     &home_for_fetch,
                     &base_for_fetch,
@@ -986,6 +1018,179 @@ mod tests {
         assert_eq!(
             remembered.get("sibling-biz").and_then(|f| f.usage_pct),
             Some(18.0)
+        );
+    }
+
+    #[test]
+    fn limits_snapshot_mode_for_get_billing_explicit_is_force_refresh() {
+        assert_eq!(
+            limits_snapshot_mode_for_get_billing(true),
+            crate::auth::LimitsSnapshotMode::ForceRefresh
+        );
+        assert_eq!(
+            limits_snapshot_mode_for_get_billing(false),
+            crate::auth::LimitsSnapshotMode::HonorTtl
+        );
+        assert!(force_refresh_from_billing_params(
+            r#"{"forceRefresh":true}"#
+        ));
+        assert!(!force_refresh_from_billing_params("{}"));
+        assert!(!force_refresh_from_billing_params("not-json"));
+    }
+
+    /// Explicit `/limits` collect must ForceRefresh a fresh-by-TTL disk
+    /// snapshot whose `usagePct` is 100. That disk field is not Usage and
+    /// must not fill the remember map as included SuperGrok period exhaust.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // SharedSnapshotEnvGuard serializes GROK_HOME.
+    async fn explicit_limits_force_refresh_does_not_apply_disk_usage_pct_100() {
+        use crate::auth::limits_snapshot_hub::SharedSnapshotEnvGuard;
+        use crate::auth::{
+            LimitsSnapshotDocument, LimitsSnapshotIdentity, LimitsSnapshotMode, LimitsSnapshotRole,
+            POLL_OUTCOME_OK, clear_included_billing_cache, included_billing_fields_snapshot,
+            write_limits_snapshot_file,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = crate::auth::limits_snapshot_hub::now_unix_ms();
+        let mut stale_100 = LimitsSnapshotDocument::empty(now);
+        stale_100.identities.push(LimitsSnapshotIdentity {
+            identity_id: "user-personal".into(),
+            usage_pct: Some(100.0),
+            period_end: Some("2026-09-01T00:00:00Z".into()),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            extras_cents: Some(10_029),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: Some(false),
+            poll_outcome: POLL_OUTCOME_OK.into(),
+        });
+        stale_100.identities.push(LimitsSnapshotIdentity {
+            identity_id: "team-biz".into(),
+            usage_pct: Some(100.0),
+            period_end: Some("2026-09-01T00:00:00Z".into()),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            extras_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: Some(false),
+            poll_outcome: POLL_OUTCOME_OK.into(),
+        });
+        write_limits_snapshot_file(home, &stale_100).expect("seed disk usagePct 100");
+
+        let http = Arc::new(AtomicU32::new(0));
+        let http_cb = Arc::clone(&http);
+        let mode = limits_snapshot_mode_for_get_billing(true);
+        assert_eq!(mode, LimitsSnapshotMode::ForceRefresh);
+        let (role, doc) =
+            collect_billing_via_snapshot_hub(home, mode, now.saturating_add(500), || {
+                let http_cb = Arc::clone(&http_cb);
+                async move {
+                    http_cb.fetch_add(1, Ordering::SeqCst);
+                    let mut live = LimitsSnapshotDocument::empty(now.saturating_add(500));
+                    live.identities.push(LimitsSnapshotIdentity {
+                        identity_id: "user-personal".into(),
+                        usage_pct: Some(100.0),
+                        period_end: Some("2026-09-01T00:00:00Z".into()),
+                        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                        extras_cents: Some(10_029),
+                        grok_build_usage_pct: None,
+                        is_unified_billing_user: Some(false),
+                        poll_outcome: POLL_OUTCOME_OK.into(),
+                    });
+                    live.identities.push(LimitsSnapshotIdentity {
+                        identity_id: "team-biz".into(),
+                        usage_pct: Some(41.0),
+                        period_end: Some("2026-09-01T00:00:00Z".into()),
+                        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+                        extras_cents: None,
+                        grok_build_usage_pct: None,
+                        is_unified_billing_user: Some(false),
+                        poll_outcome: POLL_OUTCOME_OK.into(),
+                    });
+                    live
+                }
+            })
+            .await
+            .expect("explicit collect");
+        assert_eq!(role, LimitsSnapshotRole::LeaderFetched);
+        assert_eq!(
+            http.load(Ordering::SeqCst),
+            1,
+            "explicit ForceRefresh must fetch instead of applying disk usagePct 100"
+        );
+        let team = doc
+            .identities
+            .iter()
+            .find(|i| i.identity_id == "team-biz")
+            .expect("team row");
+        assert_eq!(
+            team.usage_pct,
+            Some(41.0),
+            "live included SuperGrok period used percent must replace disk 100"
+        );
+        let remembered = included_billing_fields_snapshot();
+        assert_eq!(
+            remembered.get("team-biz").and_then(|f| f.usage_pct),
+            Some(41.0),
+            "remember map must fill Team/Business from the live collect"
+        );
+        assert_eq!(
+            remembered.get("user-personal").and_then(|f| f.usage_pct),
+            Some(100.0)
+        );
+
+        use crate::auth::supergrok_identity_rank::{
+            SupergrokAccountRole, SupergrokIdentityHeadroom, SupergrokSessionCandidate,
+            enrich_candidates_with_included_billing, order_credentials_for_preferred_auto,
+        };
+        let mut candidates = vec![
+            SupergrokSessionCandidate {
+                headroom: SupergrokIdentityHeadroom {
+                    identity_id: "user-personal".into(),
+                    role: SupergrokAccountRole::Personal,
+                    included_remaining: 1,
+                    reset_at: None,
+                },
+                access_token: "tok-personal".into(),
+                prepaid_balance_cents: Some(10_029),
+                hard_expired: false,
+            },
+            SupergrokSessionCandidate {
+                headroom: SupergrokIdentityHeadroom {
+                    identity_id: "team-biz".into(),
+                    role: SupergrokAccountRole::Business,
+                    included_remaining: 1,
+                    reset_at: None,
+                },
+                access_token: "tok-team".into(),
+                prepaid_balance_cents: None,
+                hard_expired: false,
+            },
+        ];
+        let _ = enrich_candidates_with_included_billing(&mut candidates, &remembered, |_| false);
+        let team_row = candidates
+            .iter()
+            .find(|c| c.headroom.identity_id == "team-biz")
+            .expect("team candidate");
+        assert!(
+            team_row.headroom.included_remaining > 0,
+            "live 41% must not be treated as included exhaust"
+        );
+        let order =
+            order_credentials_for_preferred_auto(&candidates, &["console-must-wait".into()]);
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-team"),
+            "next-turn rank must hop to Business included remaining: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
+            Some("console-must-wait"),
+            "must not make console primary while Business included remains"
         );
     }
 

@@ -922,6 +922,10 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    /// Live session sampling window AUTO compact gates on. Distinct from the
+    /// model-card catalog total in `context_state.total` after a used-token
+    /// refresh. Set from GetSessionInfo / AutoCompactStarted.
+    pub session_sampling_window: Option<u64>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
     /// resume). Suppresses Build credits / local sampler context telemetry so the
     /// status bar and prompt never imply remote usage from wrong metrics.

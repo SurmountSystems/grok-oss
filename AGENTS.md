@@ -18,6 +18,10 @@ Not the same as session-board L0–L2 (todos / reports). Doc layers:
 use D2 logs. Closed residual history:
 [`doc/dev/campaigns/interject-todos-closed-2026-07.md`](doc/dev/campaigns/interject-todos-closed-2026-07.md).
 
+Write new short reports under `~/.agents/reports/` on this machine. Agent
+reports stay on the local machine. They are not part of the git tree. Session
+board L1 todos stay on the session board; that board is not the reports home.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -75,14 +79,16 @@ less than product code and tests. Do not invent long essays or git nags.
    1. Session board: namespaced item and a **bare remaining-work
       pointer** (one owed outcome). Not a paste of the user message.
       Not a session novel.
-   2. Short report under `.agents/reports/` and/or an Open residual
-      bullet only when the remaining contract must survive a
-      compaction. Keep it a pointer, not a diary.
+   2. Write the short report under `~/.agents/reports/` on this
+      machine and/or an Open residual bullet only when the remaining
+      contract must survive a compaction. Keep it a pointer, not a
+      diary. Agent reports stay on the local machine. They are not
+      part of the git tree.
    3. This file or host `~/.grok/AGENTS.md` when it is process law.
    After a compaction, disk wins. If a job is only in chat, it was
    never documented. Host dual-pin: `~/.grok/AGENTS.md` §
    *Document every live task on disk*. Remaining-work pointer this
-   session: `.agents/reports/remaining-2026-08-17.md`.
+   session: `~/.agents/reports/remaining-2026-08-17.md`.
 3f. **L1 stays lean so we do not compact (pinned 2026-08-17).** Past
    ~200k parent tokens costs about double. Compaction is also
    expensive and slow. Avoid both by keeping L1 memory small: board
@@ -312,12 +318,14 @@ rule: this file § *Agent depth L1 / L2 / L3*; host `~/.grok/AGENTS.md` §
 only when the operator asked for complex git help (see hard constraint
 **Git silence**).
 
-**Reports, not “joins” (pinned 2026-08-03):** On-disk handoff files are
-**reports** (prefer `.agents/reports/`). Do not call them join notes / join
-artifacts. Fork-join parallelism may still be named when explaining
-hierarchically structured subagent work (agent depth L1 main / L2 subagents /
-L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy files may
-remain under `.agents/joins/`; new work uses **reports**.
+**Reports, not “joins” (pinned 2026-08-03; local home 2026-08-17):** On-disk
+handoff files are **reports**. Write new reports under `~/.agents/reports/`
+on this machine. Do not add report files to the git tree. Do not call them
+join notes / join artifacts. Fork-join parallelism may still be named when
+explaining hierarchically structured subagent work (agent depth L1 main / L2
+subagents / L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy
+files may remain under `.agents/joins/`; new work uses **reports** under
+`~/.agents/reports/`.
 
 ### Agent depth L1 / L2 / L3 (pinned 2026-07-29; three layers always 2026-08-15; Hierarchical fast path 2026-08-16)
 
@@ -426,7 +434,7 @@ intent, or recon survival from prose alone.
   out explore + implementer on the same store bug. One implementer owns TDD.
   Pin: `~/.grok/AGENTS.md` § *Product auth / store diagnosis*.
 - **Plan approval:** product CTAs only (`exit_plan_mode` soft-park / side panel
-  → Approve / Clarify / Revise / Exit). Letter `a` / `A` type. `?` still
+  → Approve / Comment / Revise / Exit). After Comment, Clarify is the read-only path. Letter `a` / `A` type. `?` still
   arms Clarify. Approve is the clickable Approve button. **`exit_plan_mode`
   tool success = present for review, not operator Approve.** Always-approve
   permission mode skips tool-permission prompts only; it does not auto-click
@@ -461,6 +469,13 @@ Skills are **not** “off this branch only.”
 Process that must survive recon: pin on **branch** (`AGENTS`, `FORK`,
 `docs/upstream-*`) **and** host when both apply. Detail:
 `doc/dev/research/where-skills-come-from-2026-07-24.md`, user-guide `08-skills.md`.
+
+### Skill maintenance must revise carefully (pinned 2026-08-17)
+
+The next skill-maintenance run must read current `AGENTS.md`, `FORK.md`, and
+product seams, then revise skill bodies. Do not treat copy-sync as enough.
+This wave changed hop honesty, plan pane, L1 lean remaining-work pointers,
+and report location.
 
 ## Survive recon (process pins on the branch)
 
@@ -536,7 +551,7 @@ Session-board layers only (todos / reports). **Do not confuse** with agent depth
 |---------------|--------|
 | **L0** durable residual | `RESIDUAL.md` (D0 open) / campaign docs |
 | **L1** session todos | Namespaced `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` `feat:*` `bug:*` — **never casual wipe**; merge upsert only; product keep-unless-mentioned on `merge: false`. **Fib leaves:** size **1 or 2** only; larger work → split children; **progress = Σ leaf sizes** (phases/containers unsized). Prefer `meta.kind` + `parentId`. See [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md). |
-| **L2** reports | Short on-disk reports under `.agents/reports/` (legacy: `.agents/joins/`) |
+| **L2** reports | Short on-disk reports under `~/.agents/reports/` on this machine (legacy leftover: `.agents/joins/`). Agent reports are not part of the git tree. |
 
 ### Session board: track well and close out (pinned 2026-08-01)
 

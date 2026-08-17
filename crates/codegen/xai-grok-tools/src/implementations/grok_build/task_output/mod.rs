@@ -725,6 +725,27 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 snap.persona.as_deref(),
             ));
             let raw_output_bytes = output.len();
+            let (output, truncated, truncation_hint) =
+                if raw_output_bytes > DEFAULT_TOOL_OUTPUT_BYTES {
+                    let (capped, _) = crate::util::truncate::truncate_with_preview(
+                        crate::util::truncate::PartialOutput::whole(&output),
+                        DEFAULT_TOOL_OUTPUT_BYTES,
+                        crate::util::truncate::PREVIEW_SIZE,
+                        Some(
+                            "Full last answer is not stored on the parent ToolResult. \
+                         Use read_file on the on-disk report if one exists.",
+                        ),
+                    );
+                    (
+                        capped,
+                        true,
+                        "[truncated - last answer is not stored in full on the parent; \
+                     use read_file on the on-disk report if one exists]"
+                            .to_string(),
+                    )
+                } else {
+                    (output, false, String::new())
+                };
             TaskOutputOutput::Result(TaskOutputResult {
                 task_id: snap.subagent_id.clone(),
                 command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
@@ -737,8 +758,8 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 duration_secs: snap.duration_ms as f64 / 1000.0,
                 output,
                 output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
+                truncated,
+                truncation_hint,
                 raw_output_bytes,
             })
         }
@@ -2326,6 +2347,120 @@ mod tests {
             }
             other => panic!("Expected Result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn wait_running_subagent_to_prompt_format_is_status_only() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-run".to_string(),
+            description: "compiled from src/systems".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 4,
+                tool_call_count: 9,
+                tokens_used: 12_000,
+                context_window_tokens: 200_000,
+                context_usage_pct: 6,
+                tools_used: vec!["bash".to_string(), "read_file".to_string()],
+                error_count: 1,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 8_000,
+        };
+        let result = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        let prompt =
+            crate::types::output::ToolOutput::TaskOutput(TaskOutputOutput::Result(result.clone()))
+                .to_prompt_format();
+        for leak in [
+            "stdout",
+            "L3 dump",
+            "fn main",
+            "===== BEGIN TOOL OUTPUT =====",
+            "/tmp/child-tool.log",
+        ] {
+            assert!(
+                !prompt.contains(leak) && !result.output.contains(leak),
+                "running wait must not ingest child tool bodies ({leak}): {prompt}"
+            );
+        }
+        for field in [
+            "still running",
+            "Type:",
+            "Description:",
+            "Elapsed:",
+            "Progress:",
+            "Tools used:",
+            "Errors:",
+        ] {
+            assert!(
+                result.output.contains(field),
+                "running snapshot must keep progress field {field}: {}",
+                result.output
+            );
+        }
+        assert!(
+            prompt.len() < 4_000,
+            "running wait prompt must stay a short status card, got {} bytes",
+            prompt.len()
+        );
+    }
+
+    #[test]
+    fn completed_subagent_task_output_is_capped_or_points_at_report() {
+        let last_answer = "Z".repeat(200_000);
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-huge".to_string(),
+            description: "write report".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Completed {
+                output: last_answer.clone(),
+                tool_calls: 20,
+                turns: 6,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 12_000,
+        };
+        let result = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        let prompt =
+            crate::types::output::ToolOutput::TaskOutput(TaskOutputOutput::Result(result.clone()))
+                .to_prompt_format();
+        assert!(
+            result.output.len() < 80_000,
+            "parent ToolResult must not store a 200k last answer verbatim ({} bytes)",
+            result.output.len()
+        );
+        assert!(
+            prompt.len() < 80_000,
+            "parent prompt_text must not store a 200k last answer verbatim ({} bytes)",
+            prompt.len()
+        );
+        assert!(
+            !result.output.contains(&last_answer) && !prompt.contains(&last_answer),
+            "200k-char last answer must not be stored verbatim on the parent ToolResult"
+        );
+        assert!(
+            result.truncated
+                || !result.output_file.is_empty()
+                || result.output.to_ascii_lowercase().contains("report")
+                || result
+                    .truncation_hint
+                    .to_ascii_lowercase()
+                    .contains("report")
+                || result.truncation_hint.contains("truncated"),
+            "capped last answer must mark truncated or point at a report: truncated={} file={} hint={}",
+            result.truncated,
+            result.output_file,
+            result.truncation_hint
+        );
     }
 
     #[tokio::test]

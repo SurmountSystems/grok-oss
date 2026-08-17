@@ -70,9 +70,9 @@ When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool r
 
 A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve.
 
-The four primary actions are mouse buttons: **Approve**, **Clarify**, **Revise**, **Exit**. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
+The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
 
-If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, revise (type notes, then send the agent back to planning), clarify, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
+If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, comment (then Approve, Clarify, or Revise), revise, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan
 
@@ -80,9 +80,10 @@ Scroll the plan with the arrow keys or `j`/`k`. Clicking a plan row focuses or s
 
 | Control | Action |
 | ------- | ------ |
-| **Approve** | Approve the plan and start building. Typed notes and pending line comments ride with the approval. |
-| **Clarify** (`?`) | Focus the box so you can type a question; the agent answers without rewriting the plan. |
-| **Revise** | Focus the box in revise mode and wait. Type notes, then press `Enter` to send. An empty Revise click does not submit. |
+| **Approve** | Approve the plan and start building. An empty click still implements. Typed comments and pending line comments ride with the approval. |
+| **Comment** | Focus the prompt as the comment composer. After you type (or with an empty box), click **Approve** to implement with notes, **Clarify** for a read-only question, or **Revise** to rewrite the plan. |
+| **Clarify** | Shown after **Comment** (or after focusing the prompt). Sends the current comment as a read-only question. Does not rewrite the plan. `?` still arms this path. |
+| **Revise** | Idle click focuses the box and waits. After a comment is typed, Revise rewrites the plan with that text. An empty Revise click does not submit. |
 | **Exit** | Abandon the plan without approving and turn plan mode off. Empty `Ctrl+C` also exits. |
 | `y` | Copy the full plan to the clipboard. |
 | `Tab` | Move focus between the plan preview and the prompt. |
@@ -95,7 +96,7 @@ You can paste or attach screenshots while plan approval is open, the same way as
 
 **TUI self-screenshot:** `/screenshot` or **F9** captures the current pager frame under `$GROK_HOME/screenshots/tui-*.png`. When plan approval is open, that PNG **auto-attaches** to the plan composer so Approve / Revise / Clarify can send it without a separate paste. Outside plan approval the capture is toast plus path only.
 
-Empty `Enter` with no freeform text, no line comments, and no images is still a no-op. Approve without notes via the clickable **Approve** button. Attached screenshots ride with Approve, Revise, or Clarify when you submit those actions.
+Empty `Enter` with no freeform text, no line comments, and no images is still a no-op. Approve without notes via the clickable **Approve** button. Attached screenshots ride with Approve, Revise, or Clarify when you submit those actions. Comment is the idle entry to that composer.
 
 While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you click **Approve**.
 
@@ -105,9 +106,9 @@ The approval view has three focus states:
 
 - **Preview**: Scroll the plan. A click on a row stays here (or leaves the composer typeable). It does not enter Commenting.
 - **Commenting**: Add an inline comment to the selected line range. Press `c` for that explicit line-comment gesture. Do not use a row click for this.
-- **Prompt**: Type freeform revision notes (Revise and Clarify). You can also type `also` or `Also` here.
+- **Prompt**: Type a comment. Then click **Approve** (implement with notes), **Clarify** (read-only answers), or **Revise** (rewrite). You can also type `also` or `Also` here.
 
-Press `Tab` to switch between the preview and the prompt. When you send feedback (inline comments, freeform notes, or both) the agent receives it and revises the plan. Plan mode stays active so you can iterate.
+Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate.
 
 ### Leaving the Approval View
 

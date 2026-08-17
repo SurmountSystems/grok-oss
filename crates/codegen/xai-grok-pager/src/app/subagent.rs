@@ -515,10 +515,10 @@ pub(crate) fn is_l2_list_row(
     if info.depth.is_some_and(|d| d >= 2) {
         return false;
     }
-    match info.parent_session_id.as_deref() {
-        Some(parent) if child_ids.contains(parent) => false,
-        _ => true,
-    }
+    !matches!(
+        info.parent_session_id.as_deref(),
+        Some(parent) if child_ids.contains(parent)
+    )
 }
 
 /// How many live L3 specialists an L2 is using.

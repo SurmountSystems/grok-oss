@@ -44,10 +44,121 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
             args_preview = truncate_bytes(&arguments, 200),
             "Tool call has invalid JSON arguments; replacing with {{}} to prevent provider 400"
         );
-        Arc::<str>::from("{}")
-    } else {
-        arguments
+        return Arc::<str>::from("{}");
     }
+    match fold_spawn_prompt_arguments(name, &arguments) {
+        Some(folded) => Arc::<str>::from(folded),
+        None => arguments,
+    }
+}
+
+/// Parent-ingest cap for spawn tool-call `prompt` bodies. Same 40k policy as
+/// bash and completed-subagent ToolResults.
+pub const SPAWN_PROMPT_PARENT_INGEST_BYTES: usize = 40_000;
+
+/// Replace a huge spawn `prompt` with a short parent pointer.
+///
+/// Returns `Some` rewritten arguments when the prompt (or unparsed body)
+/// exceeded [`SPAWN_PROMPT_PARENT_INGEST_BYTES`]. The child still receives
+/// the original prompt from the live tool-call used to execute spawn.
+pub fn fold_spawn_prompt_arguments(name: &str, arguments: &str) -> Option<String> {
+    if !xai_grok_tools::is_task_tool_id(name) {
+        return None;
+    }
+    if arguments.len() <= SPAWN_PROMPT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return Some(pointer_arguments(
+            arguments.len(),
+            "",
+            first_report_path(arguments),
+        ));
+    };
+    let obj = value.as_object_mut()?;
+    let prompt = obj.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+    if prompt.len() <= SPAWN_PROMPT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    let description = obj
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let report = first_report_path(prompt);
+    obj.insert(
+        "prompt".into(),
+        serde_json::Value::String(spawn_prompt_parent_pointer(
+            prompt.len(),
+            &description,
+            report,
+        )),
+    );
+    Some(value.to_string())
+}
+
+/// Estimated tokens (bytes/4) omitted when folding spawn prompts on one item.
+pub fn fold_spawn_prompts_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::Assistant(assistant) = item else {
+        return 0;
+    };
+    let mut omitted = 0_u64;
+    for call in &mut assistant.tool_calls {
+        let Some(folded) = fold_spawn_prompt_arguments(&call.name, &call.arguments) else {
+            continue;
+        };
+        omitted += (call.arguments.len().saturating_sub(folded.len()) as u64) / 4;
+        call.arguments = Arc::<str>::from(folded);
+    }
+    omitted
+}
+
+/// Fold spawn prompts on every assistant item. Returns omitted token estimate.
+pub fn fold_spawn_prompts_in_conversation(items: &mut [ConversationItem]) -> u64 {
+    items
+        .iter_mut()
+        .map(fold_spawn_prompts_on_conversation_item)
+        .sum()
+}
+
+fn spawn_prompt_parent_pointer(
+    prompt_chars: usize,
+    description: &str,
+    report: Option<&str>,
+) -> String {
+    let mut pointer = format!("spawned L2 with {prompt_chars}-char prompt");
+    if !description.is_empty() {
+        pointer.push_str("; description: ");
+        pointer.push_str(description);
+    }
+    pointer.push_str("; report path if any: ");
+    pointer.push_str(report.unwrap_or("none"));
+    pointer
+}
+
+fn pointer_arguments(prompt_chars: usize, description: &str, report: Option<&str>) -> String {
+    serde_json::json!({
+        "prompt": spawn_prompt_parent_pointer(prompt_chars, description, report),
+    })
+    .to_string()
+}
+
+fn first_report_path(text: &str) -> Option<&str> {
+    const NEEDLE: &str = ".agents/reports/";
+    let idx = text.find(NEEDLE)?;
+    let start = text[..idx]
+        .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ']' | '>' | ',' | ';')
+        })
+        .unwrap_or(rest.len());
+    let path = rest[..end].trim_end_matches('.');
+    path.contains(NEEDLE).then_some(path)
 }
 
 use serde::{Deserialize, Serialize};
@@ -2257,6 +2368,51 @@ pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) ->
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod fold_spawn_prompt_parent_ingest_tests {
+    use super::*;
+
+    #[test]
+    fn huge_spawn_prompt_becomes_pointer_with_description_and_report() {
+        let huge = "P".repeat(50_000);
+        let prompt = format!("{huge}\nWrite the report to /home/hunter/.agents/reports/impl-l2.md");
+        let args = serde_json::json!({
+            "description": "Implementer Pin",
+            "prompt": prompt,
+            "subagent_type": "general-purpose",
+        })
+        .to_string();
+        let folded =
+            fold_spawn_prompt_arguments("spawn_subagent", &args).expect("fold huge prompt");
+        assert!(!folded.contains(&huge));
+        assert!(
+            folded.contains(&prompt.len().to_string()),
+            "pointer must name omitted prompt size: {folded}"
+        );
+        assert!(folded.contains("Implementer Pin"));
+        assert!(folded.contains("/home/hunter/.agents/reports/impl-l2.md"));
+    }
+
+    #[test]
+    fn small_spawn_prompt_stays() {
+        let args = serde_json::json!({
+            "description": "tiny",
+            "prompt": "do the thing",
+        })
+        .to_string();
+        assert!(fold_spawn_prompt_arguments("spawn_subagent", &args).is_none());
+    }
+
+    #[test]
+    fn read_file_args_are_not_folded() {
+        let args = serde_json::json!({
+            "prompt": "P".repeat(50_000),
+        })
+        .to_string();
+        assert!(fold_spawn_prompt_arguments("read_file", &args).is_none());
+    }
+}
 
 #[cfg(test)]
 mod compaction_item_bridge_tests {

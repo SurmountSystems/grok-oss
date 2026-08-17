@@ -350,8 +350,12 @@ impl ChatStateActor {
                 let _ = reply.send(self.state.session_usage.clone());
             }
             ChatStateCommand::GetEstimatedTotalTokens { reply } => {
-                let _ =
-                    reply.send(self.state.total_tokens + self.state.estimated_tokens_since_model);
+                let _ = reply.send(
+                    self.state
+                        .total_tokens
+                        .saturating_add(self.state.estimated_tokens_since_model)
+                        .saturating_sub(self.state.omitted_spawn_prompt_tokens),
+                );
             }
             ChatStateCommand::GetSamplingConfig { reply } => {
                 let _ = reply.send(self.state.sampling_config.clone());

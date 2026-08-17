@@ -160,6 +160,12 @@ pub(crate) struct ChatState {
     /// Used by `check_preflight_overflow` to detect context window overflows
     /// between model responses.
     pub estimated_tokens_since_model: u64,
+    /// Spawn `prompt` bodies omitted from parent ingest after the last
+    /// `record_token_usage`. The API `total_tokens` still includes the
+    /// generated prompt; the next request will not. Subtracted from
+    /// `get_estimated_total_tokens` so sampling compact does not fire on
+    /// child-owned L2 prompts.
+    pub omitted_spawn_prompt_tokens: u64,
     /// Bytes/4 estimate of the conversation as of the last `record_token_usage`
     /// (or last reseed). `total_tokens − estimate_at_last_response` is the
     /// provider-side overhead carried across compaction.
@@ -242,6 +248,7 @@ impl ChatState {
                 "Repaired dangling tool calls in initial conversation (likely from a previous crash)"
             );
         }
+        xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
 
         let initial_tokens = estimate_conversation_tokens(&conversation);
 
@@ -257,6 +264,7 @@ impl ChatState {
             last_compaction_prompt_index: None,
             credentials: Credentials::default(),
             estimated_tokens_since_model: 0,
+            omitted_spawn_prompt_tokens: 0,
             estimate_at_last_response: initial_tokens,
             last_turn_usage: None,
             prompt_usage: None,

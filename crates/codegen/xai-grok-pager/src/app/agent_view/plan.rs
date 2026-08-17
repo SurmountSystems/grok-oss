@@ -429,7 +429,9 @@ impl AgentView {
         self.casual_editing_comment_id = None;
         log_plan_submit(action);
     }
-    fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
+    /// Live Revise submit (Enter after notes, or a test that needs the same
+    /// path). Footer Revise only arms the box via `focus_plan_prompt`.
+    pub(crate) fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
@@ -493,17 +495,6 @@ impl AgentView {
             return InputOutcome::Action(Action::Interject { text, images });
         }
         InputOutcome::Changed
-    }
-
-    /// Decisive Revise: send ACP `"cancelled"` immediately (empty notes ok).
-    pub(crate) fn request_plan_revise(&mut self) -> InputOutcome {
-        let text = self.prompt.text().to_string();
-        let freeform = if text.trim().is_empty() {
-            None
-        } else {
-            Some(text)
-        };
-        self.send_plan_feedback(freeform)
     }
 
     /// Submit a clarifying question (ACP `"questions"`) — not a plan rewrite.
@@ -620,6 +611,9 @@ impl AgentView {
                 Some(PlanApprovalFocus::Preview) => {
                     if let Some(ref mut pav) = self.plan_approval_view {
                         pav.focus = PlanApprovalFocus::Prompt;
+                        if pav.prompt_intent == PlanPromptIntent::Revise {
+                            pav.prompt_intent = PlanPromptIntent::Comment;
+                        }
                     }
                 }
                 None => {}
@@ -703,6 +697,9 @@ impl AgentView {
                             PlanPromptIntent::Revise => {
                                 "Type revision notes, then press Enter. Click Approve to approve."
                             }
+                            PlanPromptIntent::Comment => {
+                                "Type a comment, then click Approve, Clarify, or Revise."
+                            }
                         };
                         self.show_toast(toast);
                         return InputOutcome::Changed;
@@ -716,6 +713,12 @@ impl AgentView {
                         PlanPromptIntent::Questions => self.send_plan_questions(freeform),
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
                         PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
+                        PlanPromptIntent::Comment => {
+                            self.show_toast(
+                                "Click Approve to implement, Clarify to ask, or Revise to rewrite.",
+                            );
+                            InputOutcome::Changed
+                        }
                     };
                 }
                 return InputOutcome::Changed;
@@ -1940,6 +1943,162 @@ mod plan_pane_letter_a_contract_tests {
             "empty Revise must not pretend text was sent"
         );
     }
+
+    /// Idle Comment focuses the plan prompt as the comment composer.
+    #[test]
+    fn comment_cta_focuses_comment_composer() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nComment CTA");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().comment_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Comment click must be handled; got {outcome:?}"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("Comment must leave review parked");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Comment);
+        assert!(!agent.plan_decision_resolved);
+    }
+
+    /// Comment plus Approve implements and sends the typed notes.
+    #[test]
+    fn comment_plus_approve_implements_with_notes() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nApprove with comment");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Comment;
+        }
+        agent.prompt.set_text("use the existing helper");
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().approve_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "comment plus Approve must decide the plan"
+        );
+        assert!(agent.plan_decision_resolved);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("approved the plan") && text.contains("use the existing helper"),
+                    "Approve with comment must send the notes; got {text:?}"
+                );
+            }
+            other => panic!("comment plus Approve must Interject notes; got {other:?}"),
+        }
+    }
+
+    /// Comment plus Clarify is read-only answers, not a rewrite.
+    #[test]
+    fn comment_plus_clarify_sends_questions_not_rewrite() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nClarify with comment");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Comment;
+        }
+        agent.prompt.set_text("what about auth?");
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().questions_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Clarify click must be handled; got {outcome:?}"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Clarifying)
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Clarify sent — answers without rewriting the plan.")
+        );
+    }
+
+    /// Comment plus Revise rewrites the plan with the typed notes.
+    #[test]
+    fn comment_plus_revise_rewrites_plan() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise with comment");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Comment;
+        }
+        agent.prompt.set_text("split step two");
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().send_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "comment plus Revise must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "comment plus Revise must send the rewrite"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising)
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
 }
 
 /// `/screenshot` / F9 capture auto-attaches the PNG into the plan composer
@@ -2183,7 +2342,7 @@ mod plan_sticky_and_revising_chrome_tests {
         park_exit_plan_mode(&mut agent, "# Revise then re-present\n\nBody\n");
         agent.latest_inline_plan_content = Some("# Revise then re-present\n\nBody\n".into());
 
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         assert!(
             agent.plan_approval_view.is_none(),
             "revise must clear park immediately"
@@ -2206,7 +2365,7 @@ mod plan_sticky_and_revising_chrome_tests {
         let mut agent = make_agent();
         park_exit_plan_mode(&mut agent, "# Rewrite in flight\n\nBody\n");
 
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         assert!(agent.plan_approval_view.is_none());
         assert!(agent.plan_feedback_in_flight.is_some());
         assert_eq!(
@@ -2258,7 +2417,7 @@ mod plan_sticky_and_revising_chrome_tests {
     fn re_present_after_revise_clears_in_flight_and_arms_ctas() {
         let mut agent = make_agent();
         park_exit_plan_mode(&mut agent, "# First draft\n\nA\n");
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         assert!(agent.plan_feedback_in_flight.is_some());
         assert!(agent.plan_approval_view.is_none());
 
@@ -2453,7 +2612,7 @@ mod plan_remaining_chrome_leftover_tests {
     fn in_flight_followup_shows_plan_feedback_queue_toast() {
         let mut agent = make_agent();
         park_exit_plan_mode(&mut agent, "# Queue toast\n\nBody\n");
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
         assert!(agent.plan_feedback_in_flight.is_some());
 
         agent.maybe_toast_plan_feedback_queue();
@@ -2476,7 +2635,7 @@ mod plan_remaining_chrome_leftover_tests {
         park_exit_plan_mode(&mut agent, "# Empty revise line\n\nBody\n");
         agent.prompt.set_text("");
 
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(None);
 
         let human_lines: Vec<String> = agent
             .scrollback
@@ -2513,7 +2672,7 @@ mod plan_remaining_chrome_leftover_tests {
         park_exit_plan_mode(&mut agent, "# Stash ghost\n\nBody\n");
         agent.prompt.set_text("rewrite step 2");
 
-        let _ = agent.request_plan_revise();
+        let _ = agent.send_plan_feedback(Some("rewrite step 2".into()));
 
         assert!(
             agent.prompt.text().trim().is_empty(),

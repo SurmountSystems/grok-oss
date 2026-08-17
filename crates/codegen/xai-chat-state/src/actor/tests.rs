@@ -667,6 +667,64 @@ async fn assistant_response_push_does_not_bump_estimated_delta() {
     );
 }
 
+/// Spawn tool-call arguments carry the full L2 prompt. That body belongs
+/// on the child session, not on the parent assistant item used for
+/// estimated tokens / the 200k sampling compact.
+#[tokio::test]
+async fn parent_estimated_tokens_omit_huge_spawn_prompt() {
+    use xai_grok_sampling_types::ToolCall;
+
+    let h = TestHarness::new();
+    h.handle.record_token_usage(201_000);
+
+    let huge = "P".repeat(200_000);
+    let args = serde_json::json!({
+        "description": "Implementer Pin",
+        "prompt": huge,
+        "subagent_type": "general-purpose",
+    })
+    .to_string();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "spawn-1".into(),
+            name: "spawn_subagent".into(),
+            arguments: args.into(),
+        }]));
+
+    let estimated = h.handle.get_estimated_total_tokens().await;
+    assert!(
+        estimated < 160_000,
+        "huge spawn prompt must not count toward parent estimated tokens \
+         for sampling compact; got {estimated}"
+    );
+
+    let messages = h.handle.get_estimated_messages_tokens().await;
+    assert!(
+        messages < 15_000,
+        "stored parent conversation must not keep the 200k-char spawn prompt; \
+         messages estimate {messages}"
+    );
+
+    let conv = h.handle.get_conversation().await;
+    let ConversationItem::Assistant(a) = &conv[0] else {
+        panic!("expected assistant spawn item");
+    };
+    let stored = a.tool_calls[0].arguments.as_ref();
+    assert!(
+        !stored.contains(&huge),
+        "parent-stored spawn arguments must not keep the 200k-char prompt body"
+    );
+    assert!(
+        stored.contains("200000") || stored.contains("200_000"),
+        "pointer must name the omitted prompt size: {stored}"
+    );
+    assert!(
+        stored.to_ascii_lowercase().contains("implementer pin")
+            || stored.contains("Implementer Pin"),
+        "pointer must keep the short description: {stored}"
+    );
+}
+
 #[tokio::test]
 async fn estimated_tokens_resets_on_truncate() {
     let mut h = TestHarness::new();

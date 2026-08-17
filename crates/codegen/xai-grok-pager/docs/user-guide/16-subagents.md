@@ -351,6 +351,8 @@ Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, 
 2. A single known-path read that you or the prompt already named.
 3. Read and quote the short on-disk report that this thread asked for.
 
+Write the short report under `~/.agents/reports/` on this machine. Do not add report files to the git tree.
+
 That is not a license to diagnose or implement in the main thread.
 
 | Depth | Does | Does not |

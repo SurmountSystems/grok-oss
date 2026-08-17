@@ -216,7 +216,12 @@ impl ChatStateActor {
     }
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
-    pub(super) fn push_message(&mut self, item: ConversationItem) {
+    pub(super) fn push_message(&mut self, mut item: ConversationItem) {
+        let omitted = xai_grok_sampling_types::fold_spawn_prompts_on_conversation_item(&mut item);
+        self.state.omitted_spawn_prompt_tokens = self
+            .state
+            .omitted_spawn_prompt_tokens
+            .saturating_add(omitted);
         let count_in_delta = !matches!(item, ConversationItem::Assistant(_));
         if count_in_delta {
             let estimated_tokens = super::state::estimate_item_tokens(&item);
@@ -417,6 +422,7 @@ impl ChatStateActor {
     /// Record accumulated token usage and emit an event.
     pub(super) fn record_token_usage(&mut self, total_tokens: u64) {
         self.state.estimated_tokens_since_model = 0;
+        self.state.omitted_spawn_prompt_tokens = 0;
         self.state.estimate_at_last_response =
             super::state::estimate_conversation_tokens(&self.state.conversation);
         self.state.total_tokens = total_tokens;
@@ -519,6 +525,8 @@ impl ChatStateActor {
         // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
         // the planner/verifier subagents ran, so their sealed trace turns survive
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
+        let mut items = items;
+        xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut items);
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =
@@ -534,6 +542,7 @@ impl ChatStateActor {
         }
         self.state.conversation = items;
         self.state.estimated_tokens_since_model = 0;
+        self.state.omitted_spawn_prompt_tokens = 0;
         self.state.total_tokens = estimated_tokens;
         self.state.estimate_at_last_response =
             super::state::estimate_conversation_tokens(&self.state.conversation);
@@ -574,12 +583,15 @@ impl ChatStateActor {
         self.snapshot_turn_slice();
         // Harness trace buffers are transient (not part of the snapshot) and
         // intentionally survive a restore — see `replace_conversation`.
-        self.state.conversation = snap.conversation;
+        let mut conversation = snap.conversation;
+        xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        self.state.conversation = conversation;
         self.rebase_turn_capture_offset();
         self.state.sampling_config = snap.sampling_config;
         self.state.prompt_index = snap.prompt_index;
         self.state.total_tokens = snap.total_tokens;
         self.state.estimated_tokens_since_model = 0;
+        self.state.omitted_spawn_prompt_tokens = 0;
         self.state.estimate_at_last_response = if snap.estimate_at_last_response > 0 {
             snap.estimate_at_last_response
         } else {

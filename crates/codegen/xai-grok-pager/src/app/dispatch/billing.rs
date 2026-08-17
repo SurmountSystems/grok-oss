@@ -537,6 +537,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
         agent_id,
         silent: true,
         nonce: 0,
+        force_refresh: false,
     });
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects

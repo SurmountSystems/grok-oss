@@ -2189,6 +2189,9 @@ pub enum Effect {
         /// Usage-modal fetch generation (`0` = background refresh; those
         /// never touch the modal's loading/error flags).
         nonce: u64,
+        /// Explicit `/limits` (or `/limits --json`) collect: ForceRefresh the
+        /// snapshot hub so disk `usagePct` 100 is not applied as exhaust.
+        force_refresh: bool,
     },
     /// Fetch billing data at the app level (no agent required).
     /// Used on startup to populate the welcome-screen credit warning.

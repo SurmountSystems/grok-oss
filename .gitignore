@@ -9,3 +9,6 @@ result
 
 # Free-GHA just ci outer-loop marker (touched mid-recipe; never commit)
 .ci-started
+
+# Agent reports stay on this machine. Do not add them to the git tree.
+.agents/reports/

@@ -1,13 +1,14 @@
 # Legacy: `.agents/joins/`
 
-**Canonical path for new handoff files is `.agents/reports/`.**
+**Write new short reports under `~/.agents/reports/` on this machine.**
+Do not add report files to the git tree. Do not recreate repo
+`.agents/reports/` as the live home.
 
 Older implementer / explore notes live here under the old process name
-("join"). Do not mass-move history unless a human asks. New short reports go
-under:
+("join"). Do not mass-move history unless a human asks.
 
 ```text
-.agents/reports/
+~/.agents/reports/
 ```
 
 Process law (dual-pin): project `AGENTS.md` § *Reports, not "joins"*; host

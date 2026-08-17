@@ -438,8 +438,9 @@ impl ChatStateHandle {
         .ok_or(())
     }
 
-    /// `total_tokens` plus bytes/4 estimate of tool results pushed since the
-    /// last model response. Used by `check_preflight_overflow`.
+    /// `total_tokens` plus bytes/4 of items pushed since the last model
+    /// response, minus spawn-prompt bodies omitted from parent ingest.
+    /// Used by `check_preflight_overflow`.
     pub async fn get_estimated_total_tokens(&self) -> u64 {
         self.query("GetEstimatedTotalTokens", |reply| {
             ChatStateCommand::GetEstimatedTotalTokens { reply }

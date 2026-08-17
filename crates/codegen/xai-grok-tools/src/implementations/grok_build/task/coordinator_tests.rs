@@ -170,7 +170,10 @@ fn request(id: &str, background: bool) -> SubagentRequest {
     SubagentRequest {
         id: id.to_owned(),
         prompt: "work".to_owned(),
-        description: "test child".to_owned(),
+        // Unique per id: a second live child with the same description is
+        // rejected and never reaches the runner, so a shared "test child"
+        // string hung every multi-spawn fixture on `requests.recv()`.
+        description: format!("test child {id}"),
         subagent_type: "explore".to_owned(),
         parent_session_id: "parent".to_owned(),
         parent_prompt_id: Some("prompt".to_owned()),
@@ -1440,7 +1443,7 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
         .spawned_refs_for_prompt("parent", "prompt")
         .await;
     assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].description, "test child");
+    assert_eq!(refs[0].description, "test child outer");
 
     let mut nested_request = request("nested", true);
     nested_request.parent_session_id = "outer".to_owned();

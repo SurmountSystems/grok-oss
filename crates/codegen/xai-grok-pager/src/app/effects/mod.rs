@@ -4163,14 +4163,16 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchBilling { agent_id, silent, nonce } => {
+        Effect::FetchBilling { agent_id, silent, nonce, force_refresh } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::billing::BillingConfigResponse;
                     let req = acp::ExtRequest::new(
                         "x.ai/billing",
-                        serde_json::value::to_raw_value(&serde_json::json!({}))
+                        serde_json::value::to_raw_value(&serde_json::json!({
+                            "forceRefresh": force_refresh,
+                        }))
                             .expect("serialize billing params")
                             .into(),
                     );

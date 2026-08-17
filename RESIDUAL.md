@@ -14,7 +14,7 @@ or code — not only here. Closed campaign history:
 
 - **Workspace fuzzy search reuses one matcher per root (2026-08-12, shipped).** Opening many workspace fuzzy searches without `close` no longer grows a new nucleo worker pair per `open`; `FuzzySearchManager` keeps one live search per cwd/root, and poll-only `get_results` does not reset the stale timer. Restack onto Grok Build 1.0.3 (2026-08-12) kept this contract in `xai-grok-workspace` plus `xai-fuzzy-file-search` `Nucleo::new(..., Some(2), 1)`.
 
-- **Onto restack onto public Grok Build 1.0.3 (2026-08-12).** Product stack replayed onto `e5fd4816`. PR branch `onto-xai/b13fa526f511` joins `origin/main` `f17e84d8`. Shell `--lib` and pager `--lib` compile after the mop. Nucleo reuse-per-root tests are green. History-search lazy spawn tests are green. **Plan panel CTAs (2026-08-17):** Approve / Clarify / Revise / Exit as clickable footer buttons. Notes is gone. Letter `a` / `A` type. Shell `"questions"` for Clarify. Dual-auth hop after included SuperGrok period limits are full is restored in source (`sampling_config_for_model` fills the hop list; SuperGrok dollar credits keep SuperGrok primary). Live TUI stays the old 1.0.3 placeholder until a successful rebuild/install. Do not treat dogfood as done until install plus this PR is pushed.
+- **Onto restack onto public Grok Build 1.0.3 (2026-08-12).** Product stack replayed onto `e5fd4816`. PR branch `onto-xai/b13fa526f511` joins `origin/main` `f17e84d8`. Shell `--lib` and pager `--lib` compile after the mop. Nucleo reuse-per-root tests are green. History-search lazy spawn tests are green. **Plan panel CTAs (2026-08-17):** idle footer is Approve / Comment / Revise / Exit as clickable buttons. Clarify is only in the comment flow after Comment, not an idle top-level notes path. Notes is gone. Letter `a` / `A` type. Shell `"questions"` still arms Clarify after Comment. Dual-auth hop after included SuperGrok period limits are full is restored in source (`sampling_config_for_model` fills the hop list; SuperGrok dollar credits keep SuperGrok primary). Live TUI stays the old 1.0.3 placeholder until a successful rebuild/install. Do not treat dogfood as done until install plus this PR is pushed.
 
 - **Rust 1.97.1 + CI unit mop (2026-08-12, shipped, not open).**
   Project pin is `rust-toolchain.toml` / fenix **1.97.1**. Surmount keeps that
@@ -30,22 +30,32 @@ or code — not only here. Closed campaign history:
 - **Dogfood / next-session gate (2026-08-09; open until install + dogfood done).**
   Tree work for the plan wave (A/B/C/E chrome, plan Revise, stale plan batch,
   OAuth 403 bad-credentials, rewind checkpoints, Ctrl+C rewind) is **in FORK**
-  as shipped product. **Operator still needs** install + full quit of old TUIs
-  + reopen `grok-oss` before treating chrome as live. Checklist:
+  as shipped product. **Operator still needs** one successful `/rebuild` (or
+  install) so live chrome is the new `grok-oss` binary. That path signals
+  each registered live grok-oss pid and peers re-exec onto the new binary.
+  Do not treat leftover as “quit every TUI.” A window that is not a
+  grok-oss product pid, or is missing from `active_sessions.json`, still
+  shows `(deleted)` until that process exits. Checklist:
   [`.agents/reports/d0-dogfood-checklist-2026-08-09.md`](.agents/reports/d0-dogfood-checklist-2026-08-09.md).
   Handoff: [`FORK.md`](FORK.md) § *Dogfood / next session handoff (2026-08-09)*.
-  **Shipped in source (2026-08-16), not live until new binary:** mid-turn
-  `/rebuild` now writes continue-interrupted-turn (`canceled_turn_resume.json`)
-  before re-exec. Session load already applied that marker. Named test:
-  `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`.
-  Report: `.agents/reports/bug-rebuild-no-graceful-resume.md`.
+  **Shipped in source:** mid-turn `/rebuild` writes continue-interrupted-turn
+  (`canceled_turn_resume.json`) before re-exec; session load continues that
+  turn. Idle completed turns do not write a marker and do not re-fire the
+  last prompt. A leftover marker after a successful primary-turn finish is
+  dropped on load. Named tests:
+  `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
+  `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
+  `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`.
+  Report: `/home/hunter/.agents/reports/impl-rebuild-seamless-ready.md`.
   **Still not shipped:** auto-resume after an error-terminal turn with no
   marker (the older rebuild-auto-resume-after-error slice). Soft-stop
   **button** and mid-sample freeze-without-cancel are **not** shipped.
-  Included SuperGrok period C4 stays server ticket (below §4).
-  Post-dogfood process feature still open: thoughtful todos (next Open
-  bullet). Operator dogfood after install stays open in this item. Live
-  windows that already quit without re-exec stay gone until reopen.
+  CLI `grok-oss rebuild` is documented; clap has no `Rebuild` variant.
+  TUI `/rebuild` is the wired operator path. Included SuperGrok period C4
+  stays server ticket (below §4). Post-dogfood process feature still open:
+  thoughtful todos (next Open bullet). Operator dogfood after install stays
+  open in this item until someone actually runs `/rebuild` (this wave did
+  not). Live windows that already quit without re-exec stay gone until reopen.
 
 - **Structured Rust edit format and lint (product shipped 2026-08-15).**
   After ACP `search_replace` / `apply_patch`, a `.rs` write means rustfmt
@@ -1058,8 +1068,10 @@ Report: `/tmp/grok-join-impl-skills-discoverability-6a125de7.md`.
 
 **Compaction honesty:** session `plan.md` is soft. Durable residual is this
 file + short reports + `AGENTS.md` / `FORK.md`. Implement via main-thread (L1)
-coordinator → subagents (L2) → specialists (L3 max); short reports on disk under
-`.agents/reports/` (legacy notes may still live under `.agents/joins/`).
+coordinator → subagents (L2) → specialists (L3 max); write short reports under
+`~/.agents/reports/` on this machine (legacy notes may still live under
+`.agents/joins/`). Agent reports stay on the local machine. They are not part
+of the git tree.
 
 **What unblocks parallelization next:** Soft honesty + bare-resolve dual-auth
 landmines + prepaid TTL + TUI force-refresh + F1b soft product honesty +

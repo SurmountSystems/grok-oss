@@ -235,6 +235,24 @@ pub fn context_chip_token_text(
     }
 }
 
+/// Sampling window the footer chip should paint.
+///
+/// Live session sampling wins over the pager economic-mode cache so a 200k
+/// session window still names sampling when catalog is 500k and the cache is
+/// off.
+pub fn footer_sampling_window(
+    session_sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+    economic_cache_on: bool,
+) -> Option<u64> {
+    if let Some(window) = session_sampling_window.filter(|&w| w > 0) {
+        return Some(window);
+    }
+    catalog_window.map(|catalog| {
+        xai_grok_shell::util::config::apply_economic_context_cap(catalog, economic_cache_on)
+    })
+}
+
 /// Window AUTO compact actually gates on when both sizes are known.
 ///
 /// Percent and urgency follow this window, not the larger catalog total.
@@ -570,5 +588,30 @@ mod tests {
         )
         .expect("token data");
         assert_eq!(line_text(&line), "207K / 500K");
+    }
+
+    /// Session sampling stays the AUTO gate even when the pager economic cache
+    /// is off. Catalog 500K must not paint as the unlabeled total.
+    #[test]
+    fn footer_chip_uses_session_sampling_window_when_economic_cache_is_off() {
+        let sampling = footer_sampling_window(Some(200_000), Some(500_000), false);
+        assert_eq!(
+            sampling,
+            Some(200_000),
+            "session sampling 200k must win when the economic cache is off"
+        );
+        let text = context_chip_token_text(201_000, sampling, Some(500_000)).expect("token data");
+        assert!(
+            text.contains("sampling"),
+            "must name the sampling window: {text}"
+        );
+        assert!(
+            text.contains("200K"),
+            "must show the 200K sampling window: {text}"
+        );
+        assert!(
+            !text.starts_with("201K / 500K"),
+            "must not imply unlabeled catalog 500K is the AUTO gate: {text}"
+        );
     }
 }

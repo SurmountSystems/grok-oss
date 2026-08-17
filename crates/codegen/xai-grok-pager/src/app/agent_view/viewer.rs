@@ -509,6 +509,20 @@ impl AgentView {
                     );
                 }
                 if questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    let has_comment = !self.prompt.text().trim().is_empty()
+                        || self
+                            .plan_approval_view
+                            .as_ref()
+                            .is_some_and(|pav| !pav.comments.is_empty());
+                    if has_comment {
+                        let text = self.prompt.text().to_string();
+                        let freeform = if text.trim().is_empty() {
+                            None
+                        } else {
+                            Some(text)
+                        };
+                        return self.send_plan_questions(freeform);
+                    }
                     return self.focus_plan_prompt(
                         crate::views::plan_approval_view::PlanPromptIntent::Questions,
                     );
@@ -525,7 +539,9 @@ impl AgentView {
                 }
                 if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.enter_plan_commenting();
+                        return self.focus_plan_prompt(
+                            crate::views::plan_approval_view::PlanPromptIntent::Comment,
+                        );
                     }
                     if is_plan_preview {
                         return self.enter_casual_plan_commenting();
@@ -542,6 +558,20 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
+                        let has_comment = !self.prompt.text().trim().is_empty()
+                            || self
+                                .plan_approval_view
+                                .as_ref()
+                                .is_some_and(|pav| !pav.comments.is_empty());
+                        if has_comment {
+                            let text = self.prompt.text().to_string();
+                            let freeform = if text.trim().is_empty() {
+                                None
+                            } else {
+                                Some(text)
+                            };
+                            return self.send_plan_feedback(freeform);
+                        }
                         return self.focus_plan_prompt(
                             crate::views::plan_approval_view::PlanPromptIntent::Revise,
                         );
@@ -570,6 +600,12 @@ impl AgentView {
                     {
                         if let Some(ref mut pav) = self.plan_approval_view {
                             pav.focus = PlanApprovalFocus::Prompt;
+                            if pav.prompt_intent
+                                == crate::views::plan_approval_view::PlanPromptIntent::Revise
+                            {
+                                pav.prompt_intent =
+                                    crate::views::plan_approval_view::PlanPromptIntent::Comment;
+                            }
                         }
                         return InputOutcome::Changed;
                     }

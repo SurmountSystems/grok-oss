@@ -572,8 +572,9 @@ mod tests {
         }
     }
 
-    /// Named contract (G1): user-guide 19 matches Approve / Clarify / Revise /
-    /// Exit. Letter A types. Notes (`A`) is gone. Empty `a` does not Approve.
+    /// Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
+    /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
+    /// Notes (`A`) is gone. Empty `a` does not Approve.
     #[test]
     fn user_guide_plan_mode_ctas_are_approve_clarify_revise_exit() {
         let plan = USER_GUIDE
@@ -583,10 +584,15 @@ mod tests {
         let content = plan.content;
         assert!(
             content.contains("**Approve**")
+                && content.contains("**Comment**")
                 && content.contains("**Clarify**")
                 && content.contains("**Revise**")
                 && content.contains("**Exit**"),
-            "19-plan-mode.md must name Approve, Clarify, Revise, and Exit"
+            "19-plan-mode.md must name Approve, Comment, Clarify, Revise, and Exit"
+        );
+        assert!(
+            content.contains("comment composer") || content.contains("Comment**"),
+            "19-plan-mode.md must teach Comment as the idle notes entry"
         );
         assert!(
             !content.contains("Approve with notes") && !content.contains("Notes (`A`)"),

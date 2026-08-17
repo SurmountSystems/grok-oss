@@ -3059,4 +3059,40 @@ mod tests {
             other => panic!("Expected SubagentCompleted, got {other:?}"),
         }
     }
+
+    /// Blocking spawn last-answer uses the same 40k parent ToolResult policy
+    /// as the completed-poll arm. A 200k body must not land verbatim on
+    /// `to_prompt_format`.
+    #[test]
+    fn blocking_spawn_subagent_completed_to_prompt_format_is_capped() {
+        let last_answer = "Z".repeat(200_000);
+        let output = ToolOutput::SubagentCompleted(SubagentCompletedOutput {
+            output: last_answer.clone(),
+            subagent_id: "sub-huge".into(),
+            subagent_type: "general-purpose".into(),
+            tool_calls: 20,
+            turns: 6,
+            duration_ms: 12_000,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sub-huge".into(),
+            persona_hint: None,
+        });
+        let prompt = output.to_prompt_format();
+        assert!(
+            prompt.len() < 80_000,
+            "parent prompt_text must not store a 200k last answer verbatim ({} bytes)",
+            prompt.len()
+        );
+        assert!(
+            !prompt.contains(&last_answer),
+            "200k-char last answer must not appear verbatim in to_prompt_format"
+        );
+        assert!(
+            prompt.to_ascii_lowercase().contains("report")
+                || prompt.to_ascii_lowercase().contains("truncated")
+                || prompt.contains("read_file"),
+            "capped last answer must mark truncated or point at a report: {prompt}"
+        );
+    }
 }

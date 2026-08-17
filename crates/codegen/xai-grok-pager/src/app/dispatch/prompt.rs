@@ -1601,6 +1601,7 @@ pub(super) fn handle_prompt_response(
             agent_id,
             silent: true,
             nonce: 0,
+            force_refresh: false,
         });
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;

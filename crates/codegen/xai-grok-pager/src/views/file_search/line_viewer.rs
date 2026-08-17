@@ -664,6 +664,9 @@ pub struct PlanViewerExtras {
     pub approve_notes_hovered: bool,
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
+    /// Prompt is the comment composer (Comment CTA or focused plan box).
+    /// Idle present is false. Comment-flow footer paints Clarify.
+    pub comment_flow_active: bool,
     pub abandon_button_area: Option<Rect>,
     pub abandon_hovered: bool,
     pub copy_button_area: Option<Rect>,
@@ -1742,7 +1745,8 @@ pub fn render_line_viewer(
     //    `render_modal_shortcuts`, sit in a single row separated by
     //    `  |  `, centered within the modal frame.
     //
-    //    - Plan-approval:  approve | clarify | revise | exit
+    //    - Plan-approval idle:  approve | comment | revise | exit
+    //    - Plan-approval comment flow:  approve | clarify | revise | exit
     //    - Casual preview: c comment | y copy plan | s send  (no Exit; close-X)
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
@@ -1774,12 +1778,23 @@ pub fn render_line_viewer(
         if is_approval {
             // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
             // prefixes. Narrow docks drop separators, then drop the badge.
+            // Idle: Comment is the notes entry. After Comment / prompt
+            // focus, Clarify replaces it so the typed comment can ride.
+            let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let labels = ["approve", "clarify", "revise", "exit"];
+            let labels = if comment_flow {
+                ["approve", "clarify", "revise", "exit"]
+            } else {
+                ["approve", "comment", "revise", "exit"]
+            };
             let hovers = [
                 approve_hovered,
-                questions_hovered,
+                if comment_flow {
+                    questions_hovered
+                } else {
+                    comment_hovered
+                },
                 send_hovered,
                 abandon_hovered,
             ];
@@ -1825,11 +1840,16 @@ pub fn render_line_viewer(
 
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = areas[0];
-                plan.questions_button_area = areas[1];
+                if comment_flow {
+                    plan.questions_button_area = areas[1];
+                    plan.comment_button_area = None;
+                } else {
+                    plan.comment_button_area = areas[1];
+                    plan.questions_button_area = None;
+                }
                 plan.send_button_area = areas[2];
                 plan.abandon_button_area = areas[3];
                 plan.approve_notes_button_area = None;
-                plan.comment_button_area = None;
                 plan.copy_button_area = None;
                 painted = true;
                 break;
@@ -2189,10 +2209,10 @@ mod tests {
         );
 
         let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 footer.to_ascii_lowercase().contains(needle),
-                "right pane must keep the four CTAs; missing {needle} in {footer:?}"
+                "right pane must keep the four idle CTAs; missing {needle} in {footer:?}"
             );
         }
         let lower = footer.to_ascii_lowercase();
@@ -2202,8 +2222,8 @@ mod tests {
         );
     }
 
-    /// Named contract: plan-approval footer is four clickable CTAs
-    /// (Approve / Clarify / Revise / Exit), not the 1.0.3
+    /// Named contract: idle plan-approval footer is four clickable CTAs
+    /// (Approve / Comment / Revise / Exit), not the 1.0.3
     /// `request changes` + `c comment` placeholder row, and not Notes / Quit.
     #[test]
     fn plan_approval_footer_paints_five_cta_vocabulary() {
@@ -2231,7 +2251,7 @@ mod tests {
             !footer.contains("request changes"),
             "approval footer must not use the 1.0.3 request-changes placeholder; got {footer:?}"
         );
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 footer.to_ascii_lowercase().contains(needle),
                 "approval footer must name {needle}; got {footer:?}"
@@ -2246,6 +2266,10 @@ mod tests {
             !lower.contains("quit"),
             "approval footer must not paint Quit; got {footer:?}"
         );
+        assert!(
+            !lower.contains("clarify"),
+            "idle approval footer must not paint standalone Clarify; got {footer:?}"
+        );
         let plan = viewer.plan_ref().expect("plan extras");
         assert!(
             plan.approve_button_area.is_some(),
@@ -2256,8 +2280,12 @@ mod tests {
             "Notes must not be a clickable hit target"
         );
         assert!(
-            plan.questions_button_area.is_some(),
-            "Clarify must be a clickable hit target"
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify is comment-flow only, not idle"
         );
         assert!(
             plan.send_button_area.is_some(),
@@ -2266,10 +2294,6 @@ mod tests {
         assert!(
             plan.abandon_button_area.is_some(),
             "Exit must be a clickable hit target"
-        );
-        assert!(
-            plan.comment_button_area.is_none(),
-            "approval footer must not paint casual c-comment as a decision CTA"
         );
     }
 
@@ -2345,12 +2369,110 @@ mod tests {
             plan.approve_notes_button_area.is_none(),
             "Notes must not be a clickable hit target"
         );
-        for needle in ["approve", "clarify", "revise", "exit"] {
+        for needle in ["approve", "comment", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "approval footer must name {needle}; got {footer:?}"
             );
         }
+        assert!(
+            !lower.contains("clarify"),
+            "idle footer must not paint standalone Clarify; got {footer:?}"
+        );
+    }
+
+    /// Idle present footer is Approve / Comment / Revise / Exit.
+    /// Standalone Clarify is not an idle decision CTA.
+    #[test]
+    fn plan_approval_idle_footer_paints_comment_not_clarify() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().comment_flow_active = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "idle footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("clarify"),
+            "idle footer must not paint standalone Clarify; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify must not be an idle hit target"
+        );
+        assert!(plan.approve_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// After Comment (or focusing the plan prompt), footer is
+    /// Approve / Clarify / Revise / Exit so the typed comment can ride
+    /// with implement, read-only questions, or rewrite.
+    #[test]
+    fn plan_approval_comment_flow_footer_paints_clarify() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().comment_flow_active = true;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "comment-flow footer must name {needle}; got {footer:?}"
+            );
+        }
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.questions_button_area.is_some(),
+            "Clarify must be a clickable comment-flow hit target"
+        );
+        assert!(
+            plan.comment_button_area.is_none(),
+            "Comment is the entry; comment-flow replaces it with Clarify"
+        );
     }
 
     #[test]

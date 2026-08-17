@@ -1727,11 +1727,10 @@ mod ranked_auto_turn_tests {
             Some("tok-business-included"),
             "per-turn reconstruct must hop to Business included SuperGrok period limits"
         );
-        assert!(
-            !failover
-                .iter()
-                .any(|k| k == "console-must-wait" || k == "tok-personal-full-extras"),
-            "console and personal extras stay off the hop list: {failover:?}"
+        assert_eq!(
+            failover,
+            vec!["tok-personal-full-extras".to_string()],
+            "personal usagePct 100 without SuperGrok Heavy keeps included remaining; console omitted: {failover:?}"
         );
         assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
         clear_included_billing_cache();

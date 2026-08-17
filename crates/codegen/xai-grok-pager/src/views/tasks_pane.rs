@@ -3104,16 +3104,27 @@ mod tests {
     fn subagents_ordered_by_agent_type() {
         let mut pane = TasksPane::new();
         let mut subagents = HashMap::new();
-        // Two running subagents of different types; both running so the
-        // running-first key ties and the type order decides.
+        // Two running L2s of different types; both running so the
+        // running-first key ties and the type order decides. Distinct
+        // descriptions: same-trim collapse keeps only the earliest row.
         let mut plan = make_info();
         plan.child_session_id = "cs-plan".into();
         plan.subagent_type = "plan".into();
+        plan.description = "Write the implementation plan".into();
         let mut explore = make_info();
         explore.child_session_id = "cs-explore".into();
         explore.subagent_type = "explore".into();
+        explore.description = "Find API endpoints".into();
+        // L3 under the plan L2 must not appear as its own list row.
+        let mut specialist = make_info();
+        specialist.child_session_id = "cs-l3".into();
+        specialist.subagent_type = "general-purpose".into();
+        specialist.description = "Read the tasks pane sort".into();
+        specialist.parent_session_id = Some(Arc::from("cs-plan"));
+        specialist.depth = Some(2);
         subagents.insert("cs-plan".into(), plan);
         subagents.insert("cs-explore".into(), explore);
+        subagents.insert("cs-l3".into(), specialist);
 
         pane.sync(
             &std::collections::BTreeMap::new(),
@@ -3124,7 +3135,7 @@ mod tests {
             &[],
         );
 
-        // Ordered by agent type alphabetically: Explore before Plan.
+        // L2 rows only, ordered by agent type alphabetically: Explore before Plan.
         let types: Vec<&str> = pane
             .items
             .iter()

@@ -912,7 +912,20 @@ impl ToolOutput {
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
-                text
+                if text.len() > crate::DEFAULT_TOOL_OUTPUT_BYTES {
+                    let (capped, _) = crate::util::truncate::truncate_with_preview(
+                        crate::util::truncate::PartialOutput::whole(&text),
+                        crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                        crate::util::truncate::PREVIEW_SIZE,
+                        Some(
+                            "Full last answer is not stored on the parent ToolResult. \
+                             Use read_file on the on-disk report if one exists.",
+                        ),
+                    );
+                    capped
+                } else {
+                    text
+                }
             }
             ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
                 message,

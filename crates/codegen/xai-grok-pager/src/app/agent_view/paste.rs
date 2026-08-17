@@ -1311,7 +1311,7 @@ pub(super) mod paste_key_tests {
             .expect("plan composer must accept the chip");
         assert_eq!(agent.prompt.images.len(), 1);
 
-        let outcome = agent.request_plan_revise();
+        let outcome = agent.send_plan_feedback(None);
         match outcome {
             InputOutcome::Action(Action::Interject { images, .. }) => {
                 assert_eq!(

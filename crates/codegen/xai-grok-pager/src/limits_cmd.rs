@@ -42,7 +42,7 @@ pub enum LimitsCommand {
     /// Sample live limits N times and classify path (P1) vs free-period series (P2).
     ///
     /// Writes JSONL samples plus a summary under `--out-dir` (default
-    /// `.agents/reports/limits-multipoll-<utc>/`). Exit **0** when the
+    /// `~/.agents/reports/limits-multipoll-<utc>/`). Exit **0** when the
     /// limits-first path is OK or skipped; exit **non-zero only** on path
     /// failure (console live while free SuperGrok period limits still have
     /// room). Free SuperGrok period staying flat is measurement only and does
@@ -61,8 +61,8 @@ pub struct MultipollArgs {
     #[arg(long, default_value_t = 30)]
     pub sleep_secs: u64,
     /// Directory for `samples.jsonl` + `summary.json` (created if missing).
-    /// Default: `.agents/reports/limits-multipoll-<utc>/` when a repo
-    /// `.agents` tree is present, else under the process temp dir.
+    /// Default: `~/.agents/reports/limits-multipoll-<utc>/` when HOME is set,
+    /// else under the process temp dir.
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
 }
@@ -1512,16 +1512,11 @@ pub fn extract_multipoll_sample_fields(
 /// Default multipoll output directory with UTC timestamp.
 pub fn default_multipoll_out_dir() -> PathBuf {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    // Prefer repo `.agents/reports/` when we look like a checkout (`.agents`
-    // or workspace `crates/`); otherwise write under the process temp dir.
-    let in_repo = Path::new(".agents").is_dir()
-        || Path::new(".agents/reports").is_dir()
-        || Path::new("crates").is_dir();
-    let base = if in_repo {
-        PathBuf::from(".agents/reports")
-    } else {
-        std::env::temp_dir().join("grok-limits-multipoll")
-    };
+    let base = std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|home| PathBuf::from(home).join(".agents/reports"))
+        .unwrap_or_else(|| std::env::temp_dir().join("grok-limits-multipoll"));
     base.join(format!("limits-multipoll-{stamp}"))
 }
 

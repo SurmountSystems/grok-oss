@@ -17,6 +17,8 @@ pub enum Command {
     },
     /// Check terminal, clipboard, color, and input support without starting Grok
     Doctor(crate::doctor_cmd::DoctorArgs),
+    /// Show SuperGrok included period limits, SuperGrok dollar credits, and console team meters
+    Limits(crate::limits_cmd::LimitsArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
@@ -1170,6 +1172,47 @@ mod tests {
                 .expect_err("unsupported doctor form must fail");
             assert_eq!(error.exit_code(), 2);
         }
+    }
+    #[test]
+    fn limits_subcommand_parses_bare_json_and_multipoll() {
+        let bare = PagerArgs::try_parse_from(["grok", "limits"]).expect("bare limits parses");
+        assert!(
+            matches!(
+                bare.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: false,
+                    command: None,
+                }))
+            ),
+            "grok limits must be Command::Limits, got {:?}",
+            bare.command
+        );
+        let json =
+            PagerArgs::try_parse_from(["grok", "limits", "--json"]).expect("limits --json parses");
+        assert!(
+            matches!(
+                json.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: true,
+                    command: None,
+                }))
+            ),
+            "grok limits --json must be Command::Limits, got {:?}",
+            json.command
+        );
+        let multipoll = PagerArgs::try_parse_from(["grok", "limits", "multipoll"])
+            .expect("limits multipoll parses");
+        assert!(
+            matches!(
+                multipoll.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: false,
+                    command: Some(crate::limits_cmd::LimitsCommand::Multipoll(_)),
+                }))
+            ),
+            "grok limits multipoll must be Command::Limits, got {:?}",
+            multipoll.command
+        );
     }
     #[test]
     fn resume_target_classifies_flags() {

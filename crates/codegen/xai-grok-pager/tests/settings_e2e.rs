@@ -47,6 +47,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "multiline_mode",
     "permission_mode",
     "default_model",
+    "default_reasoning_effort",
     "max_thoughts_width",
     "scroll_speed",
     "scroll_mode",
@@ -2033,6 +2034,7 @@ fn registry_kind_membership_through_pr_14() {
             "auto_light_theme",
             "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
+            "default_reasoning_effort",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -2114,6 +2116,7 @@ fn enum_settings_membership_through_pr_14() {
             "auto_light_theme",
             "cancel_subagents_on_turn_cancel",
             "coding_data_sharing",
+            "default_reasoning_effort",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -2192,6 +2195,7 @@ fn defaults_round_trip_through_registry() {
             "multiline_mode" => SettingValue::Bool(false),
             "permission_mode" => SettingValue::Enum("ask"),
             "default_model" => SettingValue::String(String::new()),
+            "default_reasoning_effort" => SettingValue::Enum("medium"),
             "max_thoughts_width" => SettingValue::Int(120),
             "scroll_speed" => SettingValue::Int(50),
             "scroll_mode" => SettingValue::Enum("auto"),
@@ -6468,6 +6472,135 @@ fn mouse_click_on_hunk_tracker_mode_indicator_opens_picker_in_one_click() {
     match &s.mode() {
         SettingsModalMode::PickingEnum { key, .. } => assert_eq!(*key, "hunk_tracker_mode"),
         _ => panic!("value click on hunk_tracker_mode must enter PickingEnum"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// default_reasoning_effort (SHELL Enum, Models, no preview).
+// Catalog [low, medium, high]. Unset snapshot folds to baked medium.
+// ---------------------------------------------------------------------------
+
+/// Enter on the `default_reasoning_effort` row opens the picker seeded at
+/// the baked default `medium`.
+#[test]
+fn enter_on_default_reasoning_effort_row_enters_picking_enum() {
+    let mut s = make_state();
+    navigate_to(&mut s, "default_reasoning_effort");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter on default_reasoning_effort row must transition to PickingEnum, got {outcome:?}"
+    );
+    match &s.mode() {
+        SettingsModalMode::PickingEnum {
+            key,
+            original_value,
+            ..
+        } => {
+            assert_eq!(*key, "default_reasoning_effort");
+            assert_eq!(
+                original_value,
+                &SettingValue::Enum("medium"),
+                "unset snapshot default_reasoning_effort → original 'medium'"
+            );
+        }
+        other => panic!("expected PickingEnum mode, got {other:?}"),
+    }
+}
+
+/// Up/Down/j/k nav in the `default_reasoning_effort` picker MUST NOT
+/// dispatch a preview Action (`supports_preview: false`).
+#[test]
+fn default_reasoning_effort_picker_nav_does_not_dispatch_preview() {
+    for nav_key in &[
+        KeyCode::Down,
+        KeyCode::Char('j'),
+        KeyCode::Up,
+        KeyCode::Char('k'),
+    ] {
+        let mut s = make_state();
+        navigate_to(&mut s, "default_reasoning_effort");
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
+            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+        }
+
+        let outcome = handle_settings_key(&mut s, &press(*nav_key));
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Changed),
+            "Nav key {nav_key:?} in default_reasoning_effort picker MUST NOT dispatch a preview \
+             Action. Got {outcome:?}",
+        );
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+    }
+}
+
+/// Enter on the focused picker choice commits via
+/// `Action::SetDefaultReasoningEffort(String)`. Seed is `medium` (index 1);
+/// one Down moves to `high` (index 2).
+#[test]
+fn default_reasoning_effort_picker_enter_dispatches_set_commit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "default_reasoning_effort");
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetDefaultReasoningEffort(effort)) => {
+            assert_eq!(
+                effort, "high",
+                "Enter must commit `high` → SetDefaultReasoningEffort(\"high\")"
+            );
+        }
+        other => panic!("expected Action::SetDefaultReasoningEffort commit, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "Enter commit must return to Browse"
+    );
+}
+
+/// The choices catalog is exactly {low, medium, high} in order.
+#[test]
+fn default_reasoning_effort_choices_use_canonical_strings() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("default_reasoning_effort").unwrap();
+    let canonicals: Vec<&str> = match &meta.kind {
+        SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
+        _ => panic!("default_reasoning_effort must be Enum"),
+    };
+    assert_eq!(
+        canonicals,
+        vec!["low", "medium", "high"],
+        "default_reasoning_effort catalog must be exactly [low, medium, high] in order",
+    );
+}
+
+/// Value-column click on the default_reasoning_effort row opens the picker
+/// in one click (mouse ↔ keyboard parity).
+#[test]
+fn mouse_click_on_default_reasoning_effort_indicator_opens_picker_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "default_reasoning_effort") as u16;
+
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "value click must open picker in one click, got: {outcome:?}",
+    );
+    match &s.mode() {
+        SettingsModalMode::PickingEnum { key, .. } => {
+            assert_eq!(*key, "default_reasoning_effort")
+        }
+        _ => panic!("value click on default_reasoning_effort must enter PickingEnum"),
     }
 }
 

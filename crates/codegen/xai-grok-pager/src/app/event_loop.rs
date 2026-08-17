@@ -2599,6 +2599,7 @@ pub(crate) async fn run(
                         agent_id: id,
                         silent: true,
                         nonce: 0,
+                        force_refresh: false,
                     }];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;

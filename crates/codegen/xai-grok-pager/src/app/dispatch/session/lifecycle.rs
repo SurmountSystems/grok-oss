@@ -1113,6 +1113,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent_id,
             silent: true,
             nonce: 0,
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
@@ -1220,6 +1221,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             agent_id,
             silent: true,
             nonce: 0,
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
