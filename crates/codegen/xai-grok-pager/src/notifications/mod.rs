@@ -17,15 +17,7 @@ pub use config::{
     NotificationCondition, NotificationConfig, NotificationEventKind, NotificationHook,
     NotificationMethod, TitleConfig, TitleItem,
 };
-pub use title::{TitleState, format_busy_agents_title_part, resolve_session_title_name};
-
-/// Pure gate: dynamic title OSC only when `[ui.notifications.title].enabled`.
-///
-/// Window titles are always product-managed on the startup/`set_terminal_title`
-/// path. This gate is the sole opt-out for TitleManager tick updates.
-pub(crate) fn title_updates_should_run(title_enabled: bool) -> bool {
-    title_enabled
-}
+pub use title::TitleState;
 
 pub struct NotificationEvent {
     pub kind: NotificationEventKind,
@@ -148,7 +140,7 @@ impl NotificationService {
     pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
         let mut buf = String::new();
 
-        if self.title_updates_active()
+        if self.config.title.enabled
             && let Some(esc) = self.title_manager.update(state)
         {
             buf.push_str(&esc);
@@ -175,7 +167,7 @@ impl NotificationService {
     pub fn build_idle_escapes(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.title_updates_active()
+        if self.config.title.enabled
             && let Some(esc) = self.title_manager.update(state)
         {
             buf.push_str(&esc);
@@ -196,18 +188,9 @@ impl NotificationService {
     pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
         let mut buf = String::new();
 
-        if self.title_updates_active()
+        if self.config.title.enabled
             && let Some(title_esc) = self.title_manager.update(state)
         {
-            // Apply OSC 0 immediately on the TTY (same path as shutdown /
-            // set_terminal_title). Window titles must not depend only on
-            // draw post_flush: deferred ACP presents and idle frames can
-            // skip or delay pending_notification_escapes.
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write as _;
-                let _ = stderr.write_all(title_esc.as_bytes());
-                let _ = stderr.flush();
-            });
             buf.push_str(&title_esc);
         }
 
@@ -239,17 +222,14 @@ impl NotificationService {
     }
 
     pub fn shutdown(&mut self) {
-        // Reset the tab title back to the product brand so it doesn't linger
-        // on the last activity label after exit. Skip when title.enabled is
-        // off so we never wrote a dynamic Grok title to begin with.
-        if self.title_updates_active() {
-            let title_esc = self.title_manager.reset();
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write as _;
-                let _ = stderr.write_all(title_esc.as_bytes());
-                let _ = stderr.flush();
-            });
-        }
+        // Reset the tab title back to "grok" so it doesn't linger on the
+        // last activity label after exit.
+        let title_esc = self.title_manager.reset();
+        xai_grok_shell::util::with_locked_stderr(|stderr| {
+            use std::io::Write as _;
+            let _ = stderr.write_all(title_esc.as_bytes());
+            let _ = stderr.flush();
+        });
 
         let mut buf = String::new();
         self.clear_progress_into(&mut buf);
@@ -260,11 +240,6 @@ impl NotificationService {
                 let _ = stderr.flush();
             });
         }
-    }
-
-    /// Dynamic title OSC updates require `[ui.notifications.title].enabled`.
-    fn title_updates_active(&self) -> bool {
-        title_updates_should_run(self.config.title.enabled)
     }
 
     /// Returns `true` if a terminal notification for `ApprovalRequired` has
@@ -600,23 +575,8 @@ mod tests {
             cwd: None,
             turn_elapsed: None,
             is_busy,
-            busy_agent_count: 0,
             focused: true,
         }
-    }
-
-    #[test]
-    fn title_updates_gated_only_by_title_enabled() {
-        // Named contract: dynamic TitleManager OSC is gated solely by
-        // [ui.notifications.title].enabled. There is no hide_title_bar gate.
-        assert!(
-            title_updates_should_run(true),
-            "title.enabled true must allow dynamic title updates"
-        );
-        assert!(
-            !title_updates_should_run(false),
-            "title.enabled false is the opt-out for dynamic titles"
-        );
     }
 
     #[test]

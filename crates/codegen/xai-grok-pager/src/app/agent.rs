@@ -29,38 +29,16 @@ pub enum QueueEntryKind {
     /// Scheduled (cron) prompt -- injected by the scheduler via ACP notification.
     Cron,
 }
-impl QueueEntryKind {
-    /// Short, stable label for telemetry / profiling logs.
-    pub fn as_label(&self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Command => "command",
-            Self::BashCommand => "bash_command",
-            Self::Cron => "cron",
-        }
-    }
-}
-/// Operator mid-session annotation — **not** a pending main-turn prompt.
-///
-/// Stored session-locally so the operator can leave notes while a turn,
-/// plan approval, or background subagent is running without hijacking the
-/// agent queue. Does not replace short on-disk L2 reports for agents.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One operator mid-session note (`/note`). Never sent to the model.
+#[derive(Debug, Clone)]
 pub struct SessionNote {
-    /// Monotonic ID unique within this session. Never reused.
     pub id: u64,
-    /// When the note was added (local clock).
     pub created_at: SystemTime,
-    /// Note body (trimmed; non-empty).
     pub text: String,
-    /// Optional freeform tags (without the leading `#`).
     pub tags: Vec<String>,
 }
 
 /// Session-scoped store of operator notes ([`SessionNote`]).
-///
-/// Lives on [`AgentSession`]; cleared when the agent view is dropped.
-/// Never serialized into the prompt queue or sent to the model.
 #[derive(Debug, Clone, Default)]
 pub struct SessionNotes {
     notes: Vec<SessionNote>,
@@ -70,8 +48,6 @@ pub struct SessionNotes {
 impl SessionNotes {
     /// Append a note. Returns a reference to the stored note, or `None` if
     /// `text` is empty after trim.
-    ///
-    /// Tags are stored as-is (caller strips leading `#` if desired).
     pub fn add(&mut self, text: impl Into<String>, tags: Vec<String>) -> Option<&SessionNote> {
         let text = text.into().trim().to_string();
         if text.is_empty() {
@@ -88,7 +64,6 @@ impl SessionNotes {
         self.notes.last()
     }
 
-    /// All notes in insertion order (oldest first).
     pub fn list(&self) -> &[SessionNote] {
         &self.notes
     }
@@ -103,15 +78,6 @@ impl SessionNotes {
 }
 
 /// Parse `/note` args into body + optional trailing `#tag` tokens.
-///
-/// Trailing tokens that look like tags (`#word`, alphanumeric/`_`/`-`) are
-/// peeled off as tags; everything before them is the body.
-///
-/// ```text
-/// "check queue hold #queue #hold" → ("check queue hold", ["queue", "hold"])
-/// "#only-tag"                     → ("", ["only-tag"])  // empty body
-/// "plain note"                    → ("plain note", [])
-/// ```
 pub fn parse_note_input(input: &str) -> (String, Vec<String>) {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -139,6 +105,17 @@ pub fn parse_note_input(input: &str) -> (String, Vec<String>) {
     (body, tags)
 }
 
+impl QueueEntryKind {
+    /// Short, stable label for telemetry / profiling logs.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Command => "command",
+            Self::BashCommand => "bash_command",
+            Self::Cron => "cron",
+        }
+    }
+}
 /// An entry waiting in the queue to be sent to the agent.
 ///
 /// Each entry gets a monotonically increasing `id` for stable tracking
@@ -176,11 +153,6 @@ pub struct QueuedPrompt {
     pub chip_elements: Vec<ChipElement>,
     /// Combined-turn display segments (len ≥ 2); drain paints one bubble each.
     pub combined_texts: Vec<String>,
-    /// When true, draining this row must enter plan mode *with* the prompt
-    /// (`SetModeThenPrompt`) rather than sending a bare agent-mode prompt.
-    /// Used for deferred `/plan <desc>` submissions that must not hijack an
-    /// in-flight turn or plan-approval wait.
-    pub enter_plan_mode: bool,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default. Sites needing
@@ -200,7 +172,6 @@ impl QueuedPrompt {
             human_schedule: None,
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
-            enter_plan_mode: false,
         }
     }
     /// Whether the wire payload is exactly the display text.
@@ -271,6 +242,10 @@ pub const BG_TASK_MAX_STDOUT: usize = 10 * 1024 * 1024;
 /// How long to wait for a kill response before auto-clearing `pending_kill`
 /// so the user can retry. Applied to both bg tasks and subagents.
 pub const PENDING_KILL_TIMEOUT_SECS: u64 = 10;
+/// Prefix baked into monitor commands by backends predating the structured
+/// `monitor_description` field (and by reparented monitors). Shared
+/// convention with the shell's task notifications.
+pub const MONITOR_PREFIX: &str = "[monitor] ";
 /// Status of a background task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgTaskStatus {
@@ -381,6 +356,82 @@ impl BgTaskState {
             self.truncated = true;
         }
         self.stdout_line_count = self.stdout.lines().count();
+    }
+    /// Terminal state recorded when a `TaskCompleted` arrives for a task with
+    /// no `bg_tasks` entry (its `TaskBackgrounded` hasn't arrived yet — short
+    /// bg shells can exit on the terminal's first poll). Keeps the late
+    /// `TaskBackgrounded` from inserting a fresh Running entry that nothing
+    /// would ever complete; see [`Self::absorb_late_backgrounded`].
+    pub fn tombstone_from_snapshot(
+        snapshot: &xai_grok_tools::types::TaskSnapshot,
+        status: BgTaskStatus,
+        description: Option<String>,
+        restored_from_replay: bool,
+    ) -> Self {
+        let is_monitor = matches!(
+            snapshot.kind,
+            xai_grok_tools::computer::types::TaskKind::Monitor
+        ) || snapshot
+            .display_command
+            .as_deref()
+            .is_some_and(|d| d.starts_with(MONITOR_PREFIX));
+        let mut tombstone = Self {
+            task_id: snapshot.task_id.clone(),
+            tool_call_id: String::new(),
+            command: snapshot.command.clone(),
+            description,
+            cwd: snapshot.cwd.clone(),
+            output_file: snapshot.output_file.to_string_lossy().into_owned(),
+            status,
+            start_time: snapshot.start_time,
+            end_time: Some(snapshot.end_time.unwrap_or_else(SystemTime::now)),
+            exit_code: snapshot.exit_code,
+            signal: snapshot.signal.clone(),
+            stdout: String::new(),
+            stdout_line_count: 0,
+            truncated: snapshot.truncated,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            is_monitor,
+            restored_from_replay,
+        };
+        if !snapshot.output.is_empty() {
+            let end = crate::render::line_utils::floor_char_boundary(
+                &snapshot.output,
+                BG_TASK_MAX_STDOUT,
+            );
+            tombstone.set_stdout(snapshot.output[..end].to_string());
+            if end < snapshot.output.len() {
+                tombstone.truncated = true;
+            }
+        }
+        tombstone
+    }
+    /// Fold a late `TaskBackgrounded` into an already-terminal entry: keep the
+    /// terminal status/exit/timing, backfill only what the completion snapshot
+    /// couldn't know (blank fields, demoted-Execute stdout, scrollback entry).
+    pub fn absorb_late_backgrounded(&mut self, fresh: BgTaskState, entry_id: Option<EntryId>) {
+        self.tool_call_id = fresh.tool_call_id;
+        if self.command.trim().is_empty() {
+            self.command = fresh.command;
+        }
+        if self
+            .description
+            .as_ref()
+            .is_none_or(|d| d.trim().is_empty())
+        {
+            self.description = fresh.description;
+        }
+        self.is_monitor |= fresh.is_monitor;
+        if self.stdout.is_empty() && !fresh.stdout.is_empty() {
+            self.stdout = fresh.stdout;
+            self.stdout_line_count = fresh.stdout_line_count;
+            self.truncated |= fresh.truncated;
+        }
+        if self.scrollback_entry_id.is_none() {
+            self.scrollback_entry_id = entry_id;
+        }
     }
 }
 /// State for a scheduled (loop) task, displayed in the tasks pane.
@@ -685,6 +736,16 @@ impl AgentState {
     pub fn is_turn_running(&self) -> bool {
         matches!(self, Self::TurnRunning)
     }
+    /// Manual `/compact` is in flight (stoppable via session/cancel).
+    pub fn is_compact_running(&self) -> bool {
+        matches!(
+            self,
+            Self::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            }
+        )
+    }
     /// Either a turn or command cancel is in progress.
     pub fn is_cancelling(&self) -> bool {
         matches!(self, Self::TurnCancelling | Self::CommandCancelling { .. })
@@ -702,6 +763,16 @@ impl AgentState {
             _ => None,
         }
     }
+}
+/// A model switch stashed while no session exists, applied once the session
+/// id materialises (`apply_deferred_model_switch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredModelSwitch {
+    pub model_id: acp::ModelId,
+    pub effort: Option<ReasoningEffort>,
+    /// Displayed model at stash time — the rollback target
+    /// (`Effect::SwitchModel.prev_model_id`) if the switch fails.
+    pub prev_model_id: Option<acp::ModelId>,
 }
 /// Per-agent business logic (ACP session, models, state).
 ///
@@ -804,7 +875,7 @@ pub struct AgentSession {
     /// applies live remote switches and updates this field to match.
     pub user_model_preference: Option<acp::ModelId>,
     /// `/model X [effort]` issued before the session was ready, applied on SessionCreated.
-    pub deferred_model_switch: Option<(acp::ModelId, Option<ReasoningEffort>)>,
+    pub deferred_model_switch: Option<DeferredModelSwitch>,
     /// Central bg task state, keyed by task_id.
     pub bg_tasks: BTreeMap<String, BgTaskState>,
     /// Correlation map: tool_call_id → task_id.
@@ -819,14 +890,6 @@ pub struct AgentSession {
     /// the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
-    /// User prompt text for durable cancel-resume across the **whole** turn.
-    ///
-    /// Set at send/drain time (including skill display text). Survives the
-    /// first-activity clear of [`Self::in_flight_prompt`] (that field is only
-    /// for pristine composer rewind). Cleared on turn start/finish. Used by
-    /// graceful Quit / SIGTERM / `killall` and Esc cancel so mid-tool or
-    /// mid-subagent death still leaves `canceled_turn_resume.json`.
-    pub cancel_resume_prompt_text: Option<String>,
     /// Prompt held across auto-compact for reauth resubmit after `/login`.
     /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
@@ -845,8 +908,7 @@ pub struct AgentSession {
     /// the `/dashboard` discoverability tip. `false` for sessions created
     /// by `/resume`, welcome-screen picker, `/fork`, or worktree flows.
     pub created_via_new: bool,
-    /// Operator mid-session notes (`/note`). Not pending prompts; not sent
-    /// to the model. Session-local only.
+    /// Operator mid-session notes (`/note`). Not a prompt queue.
     pub session_notes: SessionNotes,
 }
 /// Captured state for a prompt that has been sent but not yet acknowledged
@@ -910,8 +972,6 @@ impl AgentSession {
     pub fn start_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.tracker.finish_turn(scrollback);
         self.compact_held_prompt = None;
-        self.cancel_resume_prompt_text = None;
-        self.clear_process_shutdown_cancel_resume_arm_if_ours();
         self.tracker.set_session_cwd(&self.cwd);
         self.tracker.expect_user_echo();
         self.state = AgentState::TurnRunning;
@@ -928,80 +988,8 @@ impl AgentSession {
         self.credit_limit_blocked = false;
         self.free_usage_blocked = false;
         self.in_flight_prompt = None;
-        self.cancel_resume_prompt_text = None;
         self.compact_held_prompt = None;
         self.current_prompt_id = None;
-        self.clear_process_shutdown_cancel_resume_arm_if_ours();
-    }
-    /// Record non-empty user/display text for cancel-resume on process death
-    /// or Esc cancel after first activity. Empty / whitespace is ignored.
-    ///
-    /// Also **persists** `canceled_turn_resume.json` immediately (eager active
-    /// turn sidecar) so `killall` / SIGTERM races that never run the async
-    /// signal task still leave a resumeable prompt for the next session open.
-    pub fn note_cancel_resume_prompt_text(&mut self, text: &str) {
-        let t = text.trim();
-        if t.is_empty() {
-            return;
-        }
-        self.cancel_resume_prompt_text = Some(t.to_string());
-        self.publish_process_shutdown_cancel_resume_arm();
-    }
-    /// Best-effort prompt text for durable cancel-resume: whole-turn stash,
-    /// then rewind stash, then compact-held (auto-compact window).
-    pub fn prompt_text_for_cancel_resume(&self) -> Option<&str> {
-        self.cancel_resume_prompt_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                self.in_flight_prompt
-                    .as_ref()
-                    .map(|p| p.text.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-            })
-            .or_else(|| {
-                self.compact_held_prompt
-                    .as_ref()
-                    .map(|p| p.text.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-            })
-    }
-    /// Publish this session's cancel-resume payload for signal hard-exit paths
-    /// **and** write the durable marker now. No-op without session id or prompt.
-    ///
-    /// Eager disk write is required for dogfood `killall grok-oss`: both the
-    /// TUI client and the leader binary share the name; SIGTERM can race the
-    /// async signal task / event loop. A marker written at turn start still
-    /// auto-resumes on next open when config allows.
-    pub fn publish_process_shutdown_cancel_resume_arm(&self) {
-        let Some(text) = self.prompt_text_for_cancel_resume() else {
-            return;
-        };
-        let Some(sid) = self.session_id.as_ref().map(|s| s.0.to_string()) else {
-            return;
-        };
-        xai_grok_shell::session::canceled_turn_resume::arm_and_persist_process_shutdown_cancel_resume(
-            xai_grok_shell::session::canceled_turn_resume::ProcessShutdownResumeArm {
-                cwd: self.cwd.to_string_lossy().into_owned(),
-                session_id: sid,
-                prompt_text: text.to_string(),
-                prompt_id: self.current_prompt_id.clone(),
-            },
-        );
-    }
-    /// Clear process-level signal arm when this session leaves a resumable turn.
-    pub fn clear_process_shutdown_cancel_resume_arm_if_ours(&self) {
-        let Some(sid) = self.session_id.as_ref().map(|s| s.0.as_ref()) else {
-            return;
-        };
-        if xai_grok_shell::session::canceled_turn_resume::process_shutdown_cancel_resume_arm()
-            .is_some_and(|a| a.session_id == sid)
-        {
-            xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
-        }
     }
     /// Whether any background task is still running (vs. completed/failed).
     /// Used to defer the automatic away-recap: a running task can wake the
@@ -1038,9 +1026,10 @@ impl AgentSession {
         tokens_before: Option<u64>,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        saved_too_little: bool,
     ) {
         self.tracker
-            .defer_compaction(tokens_before, estimate_after, elapsed_ms);
+            .defer_compaction(tokens_before, estimate_after, elapsed_ms, saved_too_little);
     }
     pub fn note_context_used(&mut self, used: u64) {
         self.tracker.note_context_used(used);
@@ -1063,6 +1052,18 @@ impl AgentSession {
     pub fn finish_command(&mut self) {
         self.state = AgentState::Idle;
     }
+    /// Mark an in-flight `/compact` as cancelling (waiting for CompactComplete).
+    pub fn cancel_compact_command(&mut self) {
+        if let AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            ..
+        } = &self.state
+        {
+            self.state = AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            };
+        }
+    }
     /// Push a prompt onto the back of the queue. Returns the assigned ID.
     pub fn enqueue_prompt(&mut self, text: String) -> u64 {
         self.enqueue_entry(text, QueueEntryKind::Prompt)
@@ -1075,21 +1076,6 @@ impl AgentSession {
         skill_token_ranges: Vec<std::ops::Range<usize>>,
     ) -> u64 {
         self.enqueue_entry_at(text, QueueEntryKind::Prompt, false, skill_token_ranges)
-    }
-    /// Push a deferred `/plan <desc>` row: drains as enter-plan + prompt
-    /// (see [`QueuedPrompt::enter_plan_mode`]).
-    pub fn enqueue_enter_plan_prompt(
-        &mut self,
-        text: String,
-        skill_token_ranges: Vec<std::ops::Range<usize>>,
-    ) -> u64 {
-        let id = self.enqueue_entry_at(text, QueueEntryKind::Prompt, false, skill_token_ranges);
-        if let Some(entry) = self.pending_prompts.back_mut()
-            && entry.id == id
-        {
-            entry.enter_plan_mode = true;
-        }
-        id
     }
     /// Push a prompt onto the **front** of the queue. Returns the assigned ID.
     ///
@@ -1187,11 +1173,9 @@ impl AgentSession {
             .zip(id_strings.iter())
             .map(|(p, id)| CombineGate {
                 id: id.as_str(),
-                // Deferred enter-plan rows must not merge with neighbors —
-                // combining would drop the plan-mode switch.
-                is_plain_prompt: p.kind == QueueEntryKind::Prompt && !p.enter_plan_mode,
+                is_plain_prompt: p.kind == QueueEntryKind::Prompt,
                 is_synthetic: false,
-                is_expanded_skill: !p.wire_matches_display() || p.enter_plan_mode,
+                is_expanded_skill: !p.wire_matches_display(),
                 is_bash: p.kind == QueueEntryKind::BashCommand,
                 has_images: !p.images.is_empty(),
                 text: p.text.as_str(),
@@ -1290,56 +1274,12 @@ mod tests {
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
             session_notes: SessionNotes::default(),
         }
     }
-
-    #[test]
-    fn session_notes_add_and_list() {
-        let mut notes = SessionNotes::default();
-        assert!(notes.is_empty());
-        let n = notes
-            .add("check hold gate", vec!["queue".into()])
-            .expect("non-empty");
-        assert_eq!(n.id, 0);
-        assert_eq!(n.text, "check hold gate");
-        assert_eq!(n.tags, vec!["queue"]);
-        assert!(notes.add("  ", vec![]).is_none());
-        notes.add("second", vec![]).unwrap();
-        assert_eq!(notes.len(), 2);
-        assert_eq!(notes.list()[1].id, 1);
-        assert_eq!(notes.list()[1].text, "second");
-    }
-
-    #[test]
-    fn parse_note_input_trailing_tags() {
-        assert_eq!(
-            parse_note_input("check queue hold #queue #hold"),
-            (
-                "check queue hold".into(),
-                vec!["queue".into(), "hold".into()]
-            )
-        );
-        assert_eq!(
-            parse_note_input("plain note"),
-            ("plain note".into(), vec![])
-        );
-        assert_eq!(parse_note_input("  "), (String::new(), vec![]));
-        assert_eq!(
-            parse_note_input("#only"),
-            (String::new(), vec!["only".into()])
-        );
-        // Mid-body #hash stays in body (only trailing tags peel).
-        assert_eq!(
-            parse_note_input("see #hash mid #tag"),
-            ("see #hash mid".into(), vec!["tag".into()])
-        );
-    }
-
     #[test]
     fn goal_display_status_parse_known_values() {
         assert_eq!(
@@ -2008,5 +1948,50 @@ mod tests {
             merged.combined_texts,
             vec!["hi /commit".to_string(), "go /push now".to_string()]
         );
+    }
+    /// Folding a late `TaskBackgrounded` into a terminal tombstone keeps the
+    /// terminal state and backfills only what the snapshot couldn't know —
+    /// including a blank command (gateway-bridge completions synthesize one).
+    #[test]
+    fn absorb_late_backgrounded_backfills_without_resurrecting() {
+        let snapshot = xai_grok_tools::types::TaskSnapshot {
+            task_id: "t1".into(),
+            command: String::new(),
+            display_command: None,
+            cwd: "/tmp".into(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            output: String::new(),
+            output_file: "/tmp/out.log".into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+            completed: true,
+            kind: Default::default(),
+            block_waited: false,
+            explicitly_killed: false,
+            kill_result_delivered: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let mut tombstone =
+            BgTaskState::tombstone_from_snapshot(&snapshot, BgTaskStatus::Done, None, false);
+        assert_eq!(tombstone.status, BgTaskStatus::Done);
+        assert!(tombstone.end_time.is_some(), "end_time falls back to now");
+        let mut fresh =
+            BgTaskState::tombstone_from_snapshot(&snapshot, BgTaskStatus::Running, None, false);
+        fresh.tool_call_id = "tc-1".into();
+        fresh.command = "echo hi".into();
+        fresh.description = Some("say hi".into());
+        fresh.set_stdout("demoted output".into());
+        tombstone.absorb_late_backgrounded(fresh, None);
+        assert_eq!(tombstone.status, BgTaskStatus::Done, "terminal status kept");
+        assert_eq!(tombstone.tool_call_id, "tc-1");
+        assert_eq!(tombstone.command, "echo hi", "blank command backfilled");
+        assert_eq!(tombstone.description.as_deref(), Some("say hi"));
+        assert_eq!(tombstone.stdout, "demoted output");
+        assert_eq!(tombstone.stdout_line_count, 1);
     }
 }

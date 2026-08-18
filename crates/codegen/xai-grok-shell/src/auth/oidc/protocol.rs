@@ -94,7 +94,7 @@ pub(crate) fn with_alpha_test_key(
     let _ = url;
     builder
 }
-pub fn is_configured(config: &GrokComConfig) -> bool {
+pub(crate) fn is_configured(config: &GrokComConfig) -> bool {
     config.oidc.is_some()
 }
 /// Peek at the unverified access token JWT to extract the `principal_type`
@@ -464,12 +464,18 @@ fn refresh_retry_policy() -> backon::ExponentialBuilder {
         .with_max_delay(StdDuration::from_secs(2))
         .with_jitter()
 }
+/// `exchange_probe` is the caller's [`ProbeScope::Exchange`] suspend probe,
+/// shared with its possibly-consumed-RT decision so the in-call retry
+/// suppression and the sentinel gate cannot drift.
+///
+/// [`ProbeScope::Exchange`]: super::refresh::ProbeScope::Exchange
 pub(super) async fn refresh_tokens(
     token_endpoint: &str,
     refresh_token: &str,
     client_id: &str,
     principal_type: Option<&str>,
     principal_id: Option<&str>,
+    exchange_probe: &super::refresh::SuspendProbe,
 ) -> anyhow::Result<TokenResponse> {
     use backon::Retryable;
     tracing::debug!(
@@ -478,6 +484,7 @@ pub(super) async fn refresh_tokens(
         principal_id = ?principal_id,
         "OIDC: refreshing token"
     );
+    let probe = exchange_probe;
     (|| {
         refresh_tokens_once(
             token_endpoint,
@@ -488,7 +495,23 @@ pub(super) async fn refresh_tokens(
         )
     })
     .retry(refresh_retry_policy())
-    .when(is_transient_refresh_error)
+    .when(move |err: &anyhow::Error| {
+        if !is_transient_refresh_error(err) {
+            return false;
+        }
+        if probe.straddled_past_grace() {
+            crate::unified_log::warn(
+                "auth.refresh.retry_suppressed_suspend",
+                None,
+                Some(serde_json::json!({
+                    "suspended_ms": probe.suspended_ms(),
+                    "error": err.to_string(),
+                })),
+            );
+            return false;
+        }
+        true
+    })
     .await
 }
 /// One unretried POST to `token_endpoint`. Errors carry the typed
@@ -530,7 +553,7 @@ async fn refresh_tokens_once(
         tracing::warn!(
             http_status = status,
             oauth2_error = ?error_code,
-            rt_prefix = crate::auth::token_suffix(refresh_token),
+            rt_prefix = xai_grok_auth::bearer_suffix(refresh_token),
             client_id = %client_id,
             principal_type = ?principal_type,
             "OIDC: token refresh HTTP error"
@@ -1175,7 +1198,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("transient 5xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1213,7 +1239,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect_err("invalid_grant is terminal");
         assert!(
@@ -1260,7 +1289,10 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let probe = crate::auth::oidc::refresh::SuspendProbe::start(
+            crate::auth::oidc::refresh::ProbeScope::Exchange,
+        );
+        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None, &probe)
             .await
             .expect("a non-terminal coded 4xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");

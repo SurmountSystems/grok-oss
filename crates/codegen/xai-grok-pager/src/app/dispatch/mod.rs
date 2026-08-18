@@ -31,34 +31,36 @@ mod queue;
 pub(crate) mod rebuild;
 mod rewind;
 mod router;
+mod running;
 mod session;
 mod settings;
 mod soft_stop;
+mod start;
 mod status;
 mod task_result;
 mod transcript;
 mod turn;
 mod voice;
 
+pub(crate) use auth::scrollback_has_recent_disk_full;
+pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
+#[cfg(test)]
+pub(crate) use notes::FEEDBACK_QUESTION_LABEL;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{
-    apply_turn_start_shim, maybe_drain_queue_and_note_peek, note_peek_page_flip,
-    shim_renders_own_user_block,
+    apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
+    note_peek_page_flip, shim_renders_own_user_block,
 };
-// Soft interject no longer cancel-and-sends; this helper remains for residual
-// cancel-and-send paths + unit tests (painted-pending row contracts).
-#[cfg(test)]
-pub(crate) use queue::arm_send_now_and_paint;
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;
 pub(crate) use settings::ui::refresh_open_settings_modals;
 pub(crate) use status::commit_minimal_update_notice;
-pub(crate) use turn::reconcile_overdue_turn_ends;
+pub(crate) use turn::{reconcile_overdue_cancels, reconcile_overdue_turn_ends};
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.
@@ -67,7 +69,7 @@ pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]
 pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
 #[cfg(test)]
-pub(crate) use turn::TURN_END_RECONCILE_GRACE;
+pub(crate) use turn::{CANCEL_RESEND_GRACE, TURN_END_RECONCILE_GRACE};
 
 #[cfg(test)]
 mod tests;

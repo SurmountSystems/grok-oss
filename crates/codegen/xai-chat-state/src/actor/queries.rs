@@ -71,6 +71,7 @@ impl ChatStateActor {
         self.state.total_tokens =
             super::state::estimate_conversation_tokens(&self.state.conversation);
         self.state.estimated_tokens_since_model = 0;
+        self.state.omitted_spawn_prompt_tokens = 0;
         self.state.estimate_at_last_response = self.state.total_tokens;
 
         self.persistence.replace_history(&self.state.conversation);

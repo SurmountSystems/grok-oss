@@ -11,11 +11,12 @@ pub use oss_update::{
 };
 pub use rebuild::{
     InstallBackend, InstallStdioPolicy, PeerRelaunchOutcome, REBUILD_PROGRESS_LINE_MAX_CHARS,
-    RebuildProgressEngine, RebuildProgressEvent, RebuildRelaunchRequest, RebuildReport,
-    cargo_sub_fraction, clamp_rebuild_fraction, format_rebuild_cli_progress, install_stdio_policy,
-    is_cargo_json_build_finished, is_rebuild_progress_stage_line, is_stable_height_progress_line,
-    make_rebuild_relaunch_request, overall_fraction_in_cargo, parse_cargo_json_artifact_package,
-    parse_compiling_crate, peer_pids_to_signal_for_relaunch, peer_rebuild_request_is_actionable,
+    RebuildFleetPlan, RebuildProgressEngine, RebuildProgressEvent, RebuildRelaunchRequest,
+    RebuildReport, cargo_sub_fraction, clamp_rebuild_fraction, collect_rebuild_signal_pids,
+    format_rebuild_cli_progress, install_stdio_policy, is_cargo_json_build_finished,
+    is_rebuild_progress_stage_line, is_stable_height_progress_line, make_rebuild_relaunch_request,
+    overall_fraction_in_cargo, parse_cargo_json_artifact_package, parse_compiling_crate,
+    peer_pids_to_signal_for_relaunch, peer_rebuild_request_is_actionable,
     read_rebuild_relaunch_request, read_rebuild_relaunch_request_in, rebuild_and_relaunch,
     rebuild_and_relaunch_with_progress, rebuild_progress_bar_chars, rebuild_progress_weights,
     rebuild_relaunch_request_path, resolve_source_root, run_install, run_install_with_progress,

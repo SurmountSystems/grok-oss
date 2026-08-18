@@ -9,8 +9,8 @@
 use super::actions::Action;
 use super::agent_view::{
     AgentPane, AgentView, CONTEXT_CLICK_DEBOUNCE_MS, CtaPhase, MULTI_CLICK_TIMEOUT_MS,
-    PromptInputMode, PromptMode, TextClickState, app_should_open_link_on_click,
-    has_native_link_hover, is_link_modifier_held, is_text_selection_on_double_click,
+    PromptInputMode, PromptMode, TextClickState, is_link_modifier_held,
+    is_text_selection_on_double_click,
 };
 use super::app_view::InputOutcome;
 use crate::scrollback::block::BlockContent;
@@ -19,6 +19,17 @@ use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 impl AgentView {
+    /// Time-paired multi-click check for the prompt textarea. Pairing is
+    /// time-only (no coordinates); a mispaired action is one undo step.
+    /// Records the click for the next pairing.
+    pub(super) fn prompt_click_is_double(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let is_double = self
+            .last_prompt_click_ms
+            .is_some_and(|last| now.duration_since(last).as_millis() < MULTI_CLICK_TIMEOUT_MS);
+        self.last_prompt_click_ms = Some(now);
+        is_double
+    }
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
     ///
     /// Scroll events are handled at app level (not here).
@@ -35,10 +46,6 @@ impl AgentView {
                 // (finished rows + board visible). Slash / focused X remain.
                 if self.hit_todo_clear_done.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::ClearCompletedTodos);
-                }
-                // Compact status-bar limits meter → multi-line /limits detail.
-                if self.hit_credits.contains(mouse.column, mouse.row) {
-                    return InputOutcome::Action(Action::ShowLimits);
                 }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
@@ -93,23 +100,18 @@ impl AgentView {
                     self.last_context_click_at = Some(now);
                     return InputOutcome::Action(Action::ShowContextInfo);
                 }
+                if self.hit_credits.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ShowLimits);
+                }
                 if self.hit_plan_button.contains(mouse.column, mouse.row) {
-                    if self.plan_approval_view.is_some() {
-                        self.reopen_plan_approval();
-                    } else {
-                        self.show_plan_preview();
-                    }
+                    self.open_plan_from_view_plan_or_status();
                     return InputOutcome::Changed;
                 }
                 if self
                     .hit_plan_approval_status
                     .contains(mouse.column, mouse.row)
                 {
-                    if self.plan_approval_view.is_some() {
-                        self.reopen_plan_approval();
-                    } else {
-                        self.show_plan_preview();
-                    }
+                    self.open_plan_from_view_plan_or_status();
                     return InputOutcome::Changed;
                 }
                 if self.hit_catalog_close.contains(mouse.column, mouse.row) {
@@ -147,28 +149,38 @@ impl AgentView {
                 }
                 if self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerAccept);
+                    return InputOutcome::Action(Action::PrivacyBannerOptIn);
                 }
                 if self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
-                    return InputOutcome::Action(Action::PrivacyBannerCustomize);
+                    return InputOutcome::Action(Action::PrivacyBannerOptOut);
                 }
                 if self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
                     .contains(mouse.column, mouse.row)
                     && !self.pos_occluded(mouse.column, mouse.row)
                 {
                     return InputOutcome::Action(Action::OpenUrl(
-                        crate::views::privacy_banner::PRIVACY_BANNER_LEGAL_URL.to_string(),
+                        crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL.to_string(),
+                    ));
+                }
+                if self
+                    .privacy_banner
+                    .hit_policy
+                    .contains(mouse.column, mouse.row)
+                    && !self.pos_occluded(mouse.column, mouse.row)
+                {
+                    return InputOutcome::Action(Action::OpenUrl(
+                        crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL.to_string(),
                     ));
                 }
                 if self.hit_watching_cue.contains(mouse.column, mouse.row)
@@ -258,9 +270,6 @@ impl AgentView {
                     self.copy_to_clipboard(&path);
                     return InputOutcome::Changed;
                 }
-                if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
-                    return InputOutcome::Changed;
-                }
                 if self.hit_badge.contains(mouse.column, mouse.row) {
                     self.todo.overlay.toggle();
                     self.todo.on_state_change();
@@ -273,6 +282,13 @@ impl AgentView {
                 }
                 if self.hit_follow_indicator.contains(mouse.column, mouse.row) {
                     self.scrollback.goto_bottom();
+                    return InputOutcome::Changed;
+                }
+                if self
+                    .hit_response_top_indicator
+                    .contains(mouse.column, mouse.row)
+                {
+                    self.scrollback.prev_response();
                     return InputOutcome::Changed;
                 }
                 if let Some(hd_area) = self.history_dropdown_area
@@ -297,8 +313,7 @@ impl AgentView {
                             .map(str::to_owned)
                     {
                         self.prompt.history_search.deactivate();
-                        if self.prompt_input_mode != PromptInputMode::Feedback
-                            && self.prompt_input_mode != PromptInputMode::Remember
+                        if self.prompt_input_mode != PromptInputMode::Remember
                             && let Some(cmd) = text.strip_prefix("! ")
                         {
                             self.prompt_input_mode = PromptInputMode::Bash;
@@ -420,16 +435,18 @@ impl AgentView {
                     }
                     return InputOutcome::Unchanged;
                 }
-                if self.hit_sb_copy.contains(mouse.column, mouse.row) {
+                if let Some((_, entry_idx)) = self
+                    .hit_bubble_copy
+                    .iter()
+                    .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                {
+                    let entry_idx = *entry_idx;
+                    self.set_active_pane(AgentPane::Scrollback, false);
+                    self.scrollback.set_selected(Some(entry_idx));
                     return InputOutcome::Action(Action::CopyBlockContent);
                 }
-                // Always-on bubble ⧉: before drag/select arm (same tier as selection ⧉).
-                if let Some(&(idx, _)) = self
-                    .bubble_copy_hits
-                    .iter()
-                    .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
-                {
-                    return InputOutcome::Action(Action::CopyEntryContent { idx });
+                if self.hit_sb_copy.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::CopyBlockContent);
                 }
                 if self.hit_sb_view.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::OpenBlockViewer);
@@ -442,13 +459,9 @@ impl AgentView {
                 {
                     self.set_active_pane(AgentPane::Prompt, false);
                     self.btw_focused = true;
-                    if !has_native_link_hover()
-                        && is_link_modifier_held(mouse.modifiers)
-                        && !self.pos_occluded(mouse.column, mouse.row)
-                        && let Some(link) = self.visible_link_map.link_at(mouse.column, mouse.row)
+                    if is_link_modifier_held(mouse.modifiers)
+                        && self.try_arm_link_click(mouse.column, mouse.row)
                     {
-                        self.pending_link_click = app_should_open_link_on_click(link)
-                            .then(|| (mouse.column, mouse.row, link.target.clone()));
                         self.pending_scrollback_click = None;
                         return InputOutcome::Changed;
                     }
@@ -485,7 +498,6 @@ impl AgentView {
                                     if self.visible_queue_is_empty() {
                                         self.hide_queue_pane();
                                     }
-                                    self.maybe_push_parked_marker();
                                     return InputOutcome::Action(Action::QueueRemoveShared {
                                         id: server_id,
                                         expected_version: row.version,
@@ -495,21 +507,16 @@ impl AgentView {
                             }
                             let was_drain_blocked = self.drain_blocked();
                             self.remove_local_queue_row(id);
-                            self.maybe_push_parked_marker();
                             if was_drain_blocked {
                                 return InputOutcome::Action(Action::DrainQueue);
                             }
                             return InputOutcome::Changed;
                         }
-                        // Always route through force_interject so dead ends
-                        // toast (race: turn ended after button was drawn).
-                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row) {
-                            let outcome = self.force_interject_queue_row(id);
-                            if matches!(outcome, InputOutcome::Action(_)) {
-                                return outcome;
-                            }
-                            // Reject/defer already toasted — still redraw.
-                            return InputOutcome::Changed;
+                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row)
+                            && self.session.state.is_turn_running()
+                            && let InputOutcome::Action(action) = self.force_interject_queue_row(id)
+                        {
+                            return InputOutcome::Action(action);
                         }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
                             && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
@@ -544,10 +551,7 @@ impl AgentView {
                                     self.pending_effects.push(eff);
                                 }
                             }
-                            let now = std::time::Instant::now();
-                            if let Some(last) = self.last_prompt_click_ms
-                                && now.duration_since(last).as_millis() < MULTI_CLICK_TIMEOUT_MS
-                            {
+                            if self.prompt_click_is_double() {
                                 if self.prompt.file_ref_near_cursor()
                                     && let Some((path, initial_range)) =
                                         self.prompt.file_ref_element_at_cursor()
@@ -561,14 +565,11 @@ impl AgentView {
                                     self.prompt.refresh_slash(&self.session.models);
                                 }
                             }
-                            self.last_prompt_click_ms = Some(now);
                         }
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Tasks) => {
                         self.set_active_pane(AgentPane::Tasks, false);
-                        // Kill / open already handled early (before Clear). Re-check
-                        // here only if rects were empty on the early pass (shouldn't).
                         if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
                             return out;
                         }
@@ -646,14 +647,9 @@ impl AgentView {
                         self.persistent_text_selection = None;
                         self.table_selection_geometry = None;
                         self.selection_created_at = None;
-                        if !has_native_link_hover()
-                            && is_link_modifier_held(mouse.modifiers)
-                            && !self.pos_occluded(mouse.column, mouse.row)
-                            && let Some(link) =
-                                self.visible_link_map.link_at(mouse.column, mouse.row)
+                        if is_link_modifier_held(mouse.modifiers)
+                            && self.try_arm_link_click(mouse.column, mouse.row)
                         {
-                            self.pending_link_click = app_should_open_link_on_click(link)
-                                .then(|| (mouse.column, mouse.row, link.target.clone()));
                             self.pending_scrollback_click = None;
                             return InputOutcome::Changed;
                         }
@@ -851,9 +847,9 @@ impl AgentView {
                                     .scrollback
                                     .get_cached_entry_layouts()
                                     .and_then(|l| l.get(idx))
-                                    .is_some_and(|i| {
-                                        i.verb_group_header && i.group_collapse_header
-                                    })
+                                    .is_some_and(
+                                        crate::scrollback::EntryLayoutInfo::is_expanded_verb_header,
+                                    )
                                     && self
                                         .scrollback
                                         .entry_screen_area(idx, self.pane_areas.scrollback)
@@ -899,10 +895,6 @@ impl AgentView {
                     );
                 }
                 if self.active_pane == AgentPane::Prompt {
-                    // Top-bar ⧉ is chrome, not textarea — handle before TextArea.
-                    if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
-                        return InputOutcome::Changed;
-                    }
                     let event = self.prompt.handle_mouse(mouse);
                     if matches!(event, PromptEvent::Edited)
                         && let Some(eff) = self.notify_suggestion_text_changed()
@@ -924,19 +916,6 @@ impl AgentView {
                     left_mouse_down = self.left_mouse_down,
                     "scrollback mouse moved"
                 );
-                if self.left_mouse_down
-                    && (self.pending_text_drag.is_some()
-                        || self.drag_selection.is_some()
-                        || self.pending_block_drag.is_some()
-                        || self.block_drag_selection.is_some()
-                        || self.deferred_text_press.is_some())
-                {
-                    self.pending_link_click = None;
-                    let outcome = self.handle_scrollback_drag_motion(mouse);
-                    if !matches!(outcome, InputOutcome::Unchanged) {
-                        return outcome;
-                    }
-                }
                 let suppress_scrollback_hover = self.pending_text_drag.is_some()
                     || self.drag_selection.is_some()
                     || self.pending_block_drag.is_some()
@@ -1032,6 +1011,9 @@ impl AgentView {
                 changed |= self
                     .hit_follow_indicator
                     .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_response_top_indicator
+                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_pause_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
@@ -1044,15 +1026,19 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_accept
+                    .hit_opt_in
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_customize
+                    .hit_opt_out
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .privacy_banner
-                    .hit_legal
+                    .hit_terms
+                    .update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .privacy_banner
+                    .hit_policy
                     .update_hover(mouse.column, mouse.row);
                 changed |= self
                     .plugin_cta
@@ -1070,7 +1056,6 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
-                changed |= self.prompt.update_copy_hover(mouse.column, mouse.row);
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
@@ -1096,16 +1081,13 @@ impl AgentView {
                 }
                 changed |= self.hit_sb_copy.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_sb_view.update_hover(mouse.column, mouse.row);
-                {
-                    let new_bubble = self
-                        .bubble_copy_hits
-                        .iter()
-                        .find(|(_, r)| r.contains((mouse.column, mouse.row).into()))
-                        .map(|&(idx, _)| idx);
-                    if new_bubble != self.hovered_bubble_copy {
-                        self.hovered_bubble_copy = new_bubble;
-                        changed = true;
-                    }
+                let bubble_hover = self
+                    .hit_bubble_copy
+                    .iter()
+                    .any(|(rect, _)| rect.contains((mouse.column, mouse.row).into()));
+                if bubble_hover != self.hovered_bubble_copy {
+                    self.hovered_bubble_copy = bubble_hover;
+                    changed = true;
                 }
                 if let Some(hd_area) = self.history_dropdown_area {
                     let hs_count = self.prompt.history_search.result_count();
@@ -1277,7 +1259,6 @@ impl AgentView {
         }
         None
     }
-
     /// Apply a scrollbar click/drag at the given screen row.
     ///
     /// Uses [`scrollbar_click_to_offset`] (same math as the thumb renderer)
@@ -1338,10 +1319,10 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        let show_interject = agent.session.state.is_turn_running();
+        let running = agent.session.state.is_turn_running();
         agent
             .queue
-            .render(area, &mut buf, true, &layout_cfg, None, show_interject);
+            .render(area, &mut buf, true, &layout_cfg, None, running);
         agent.pane_areas.queue = area;
         let mut found = None;
         'find: for row in area.y..area.y + area.height {
@@ -1384,11 +1365,11 @@ mod tests {
         let ids = agent.queue.entry_ids();
         let outcome = click_send_now(&mut agent, ids[1]);
         match outcome {
-            InputOutcome::Action(Action::Interject { text, images }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
                 assert_eq!(text, "local one");
-                assert_eq!(images.len(), 1, "row image must ride the interject");
+                assert_eq!(images.len(), 1, "row image must ride the send-now");
             }
-            other => panic!("expected Interject action, got {other:?}"),
+            other => panic!("expected SendPromptNow action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -1405,103 +1386,15 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected Interject action, got {other:?}"),
+            other => panic!("expected SendPromptNow action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
         assert!(!agent.queue.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
-    }
-
-    /// Clicking Interject after the turn has already gone idle (no background
-    /// hold) must toast, not silently no-op (race: button drawn while running,
-    /// click arrives late).
-    #[test]
-    fn mouse_send_now_when_idle_toasts_instead_of_silent_noop() {
-        let mut agent = running_agent_local_only();
-        let ids = agent.queue.entry_ids();
-        // Render buttons while "running", then flip idle before click path
-        // (force_interject still reached — outer mouse gate no longer drops).
-        agent.queue.list_state.select_by_id(ids[0]);
-        let area = Rect::new(0, 0, 80, 6);
-        let mut buf = Buffer::empty(area);
-        agent.queue.render(
-            area,
-            &mut buf,
-            true,
-            &crate::appearance::LayoutConfig::default(),
-            None,
-            true, // was running when painted
-        );
-        agent.pane_areas.queue = area;
-        let mut found = None;
-        'find: for row in area.y..area.y + area.height {
-            for col in area.x..area.x + area.width {
-                if agent.queue.send_now_click(col, row) == Some(ids[0]) {
-                    found = Some((col, row));
-                    break 'find;
-                }
-            }
-        }
-        let (col, row) = found.expect("Interject was painted while running");
-        agent.session.state = AgentState::Idle;
-        let outcome = agent.handle_mouse(&MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row,
-            modifiers: KeyModifiers::empty(),
-        });
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "idle Interject click must not emit an action, got {outcome:?}"
-        );
-        let toast = agent.toast.as_ref().map(|(m, _)| m.as_str());
-        assert_eq!(
-            toast,
-            Some("No turn running — prompt will send when ready"),
-            "must toast why Interject did nothing"
-        );
-    }
-
-    /// Idle + live background subagents: `[Interject]` is not painted (children
-    /// no longer hold the main queue; Interject is mid-turn only).
-    #[test]
-    fn mouse_interject_not_painted_when_idle_with_live_subagents() {
-        use crate::app::agent_view::test_fixtures;
-        let mut agent = running_agent_local_only();
-        agent.session.state = AgentState::Idle;
-        agent.subagent_sessions.insert(
-            "bg-child".into(),
-            test_fixtures::running_subagent_info("bg-child"),
-        );
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let area = Rect::new(0, 0, 80, 6);
-        let mut buf = Buffer::empty(area);
-        let layout_cfg = crate::appearance::LayoutConfig::default();
-        let show_interject = agent.session.state.is_turn_running();
-        assert!(
-            !show_interject,
-            "precondition: idle primary does not show Interject"
-        );
-        agent
-            .queue
-            .render(area, &mut buf, true, &layout_cfg, None, show_interject);
-        let mut hit_any = false;
-        for row in area.y..area.y + area.height {
-            for col in area.x..area.x + area.width {
-                if agent.queue.send_now_click(col, row).is_some() {
-                    hit_any = true;
-                }
-            }
-        }
-        assert!(
-            !hit_any,
-            "idle + live children must not paint [Interject] hit targets"
-        );
     }
     /// Send-now `[Interject]` on the lone local row while it is being
     /// DIRTY-edited: the removal must discard the edit via the canonical
@@ -1528,10 +1421,10 @@ mod tests {
         agent.prompt.set_text("local one EDITED");
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected Interject action, got {other:?}"),
+            other => panic!("expected SendPromptNow action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
@@ -1835,5 +1728,230 @@ mod tests {
             "double-click must expand the chip"
         );
         assert_eq!(agent.prompt.textarea.text(), text);
+    }
+
+    /// Draw one 80x30 frame so scrollback pane areas and the bubble ⧉ exist.
+    fn draw_agent_frame(agent: &mut AgentView) -> Buffer {
+        use crate::actions::ActionRegistry;
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+        let registry = ActionRegistry::defaults();
+        let bundle = crate::app::bundle::BundleState::default();
+        agent.last_terminal_size = (80, 30);
+        agent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &bundle,
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    fn find_copy_icon(buf: &Buffer, area: Rect) -> Option<(u16, u16)> {
+        let icon = crate::glyphs::copy_icon();
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                if buf.cell((x, y)).is_some_and(|c| c.symbol() == icon) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    /// Clicking the always-on bubble copy control on a human message copies
+    /// that prompt's text through the existing block-copy action.
+    #[test]
+    fn clicking_human_bubble_copy_copies_the_prompt() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        const PROMPT: &str = "COPY-HUMAN-MSG-CONTRACT";
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(PROMPT));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "bubble copy icon must paint on the human message when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the human-message copy control must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the human message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected human message must exist");
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("user prompts support copy");
+        assert_eq!(copied, PROMPT);
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the prompt text, not the painted ⧉"
+        );
+    }
+
+    /// A user prompt whose first line already fills the content width must
+    /// still paint `copy_icon()` and still copy on click of that cell.
+    #[test]
+    fn clicking_wide_human_bubble_copy_still_paints_and_copies() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        // One unbreakable word so wrap fills the first line. Hyphens would
+        // wrap early and leave room for the icon (a false green).
+        let prompt = format!("WIDEFIRSTLINECOPYCONTRACT{}", "W".repeat(200));
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(prompt.clone()));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "a full-width first line must still paint the bubble copy icon when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the copy control on a full-width first line must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the human message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected human message must exist");
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("user prompts support copy");
+        assert_eq!(copied, prompt);
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the prompt text, not the painted ⧉"
+        );
+    }
+
+    /// Clicking the always-on bubble copy control on an assistant message
+    /// copies that message through the existing block-copy action.
+    #[test]
+    fn clicking_assistant_bubble_copy_copies_the_message() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_bubble_copy_buttons(true);
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        agent.scrollback.set_appearance(appearance);
+
+        const MSG: &str = "COPY-ASSISTANT-MSG-CONTRACT";
+        agent.scrollback.push_block(RenderBlock::agent_message(MSG));
+
+        let buf = draw_agent_frame(&mut agent);
+        let scrollback = agent.pane_areas.scrollback;
+        assert!(
+            scrollback.area() > 0,
+            "draw must publish a scrollback pane so the bubble copy control can paint"
+        );
+        let (col, row) = find_copy_icon(&buf, scrollback).unwrap_or_else(|| {
+            panic!(
+                "bubble copy icon must paint on the assistant message when bubble_copy_buttons is on"
+            )
+        });
+
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyBlockContent)),
+            "clicking the assistant-message copy control must copy via CopyBlockContent, got {outcome:?}"
+        );
+
+        let idx = agent
+            .scrollback
+            .selected()
+            .expect("the click must select the assistant message so block copy has a target");
+        let entry = agent
+            .scrollback
+            .entry(idx)
+            .expect("selected assistant message must exist");
+        assert!(
+            matches!(entry.block, RenderBlock::AgentMessage(_)),
+            "the click must select the assistant entry, not a neighboring block"
+        );
+        let copied = entry
+            .block
+            .copy_text(entry.raw)
+            .expect("assistant messages support copy");
+        assert!(
+            copied.contains(MSG),
+            "payload is the assistant copy_text, got {copied:?}"
+        );
+        assert!(
+            !copied.contains(crate::glyphs::copy_icon()),
+            "copied payload is the assistant text, not the painted ⧉"
+        );
     }
 }

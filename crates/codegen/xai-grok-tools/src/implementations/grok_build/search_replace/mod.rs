@@ -50,7 +50,7 @@ impl SearchReplaceVersion {
         self == Self::Legacy0_4_10
     }
 }
-/// Full description with read-before-edit guidance (for non-concise toolset).
+/// Full description (for the non-concise toolset).
 ///
 /// Uses MiniJinja template placeholders with ToolKind-based keys:
 /// - `${{ tools.by_kind.read }}` — client-facing name for the Read tool
@@ -58,10 +58,17 @@ impl SearchReplaceVersion {
 /// - `${{ params.edit.replace_all }}` — client-facing param name
 pub(crate) const DESCRIPTION_FULL: &str = r#"Replace an exact string in a file.
 
-- Read the file with `${{ tools.by_kind.read }}` before editing it.
+${% if tools.by_kind.read -%}
 - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
+${% endif -%}
 - `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
-- After a successful edit, trailing spaces/tabs on each line are stripped by default (disable with env `GROK_STRIP_TRAILING_WHITESPACE=0`)."#;
+- To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
+/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
+/// `empty_old_string_does_not_override` is enabled (opt-in; the default is the
+/// legacy overwrite behavior); `versioned_definition` strips it unless a
+/// config enables the guard.
+pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
+    " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 /// Input for the search_replace tool.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchReplaceInput {
@@ -90,15 +97,19 @@ fn default_true() -> bool {
 /// Configuration for the search_replace tool, stored as `Params<SearchReplaceParams>` in Resources.
 ///
 /// Replaces the old `SearchReplaceOptions` that was stored via `tool_options_as()`.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReplaceParams {
     /// Deprecated runtime no-op, kept so configs still sending it deserialize under
     /// `deny_unknown_fields`. Still gates the config-time Read-tool requirement (`requires_expr`).
     #[serde(default)]
     pub skip_read_before_edit: bool,
-    /// Empty old string DOES not override the file unless its empty, by default we allow
-    /// empty old string to override the file content completely``
+    /// When true (opt-in), an empty `old_string` may only create a new file
+    /// or fill an empty one — it never silently overwrites an existing
+    /// non-empty file. Defaults to false (the legacy behavior): an empty
+    /// `old_string` replaces the file's entire contents. The served
+    /// description includes the guard sentence only when this is enabled
+    /// (see `versioned_definition`).
     #[serde(default)]
     pub empty_old_string_does_not_override: bool,
     /// When true, enable normalized-fallback matching for Unicode confusable
@@ -116,6 +127,16 @@ pub struct SearchReplaceParams {
     /// Default: `true`.
     #[serde(default = "default_true")]
     pub include_user_edit_hint: bool,
+}
+impl Default for SearchReplaceParams {
+    fn default() -> Self {
+        Self {
+            skip_read_before_edit: false,
+            empty_old_string_does_not_override: false,
+            unicode_normalized_fallback: false,
+            include_user_edit_hint: true,
+        }
+    }
 }
 register_resource!("grok_build", "SearchReplace", SearchReplaceParams);
 /// SearchReplace tool — new architecture.
@@ -190,27 +211,13 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
-    // In-process bulk-edit policy (host C3 port). Deny reckless replace_all
-    // when GROK_DENY_REPLACE_ALL=1 and multi-file same-hunk storms. Fail-open.
-    // Missing OwnerSessionId → storm skipped (no shared "unknown" bucket).
-    {
-        let session_id = {
-            let res = resources.lock().await;
-            res.get::<crate::types::resources::OwnerSessionId>()
-                .map(|s| s.0.clone())
-        };
-        if let Some(deny) = crate::util::bulk_edit_policy::evaluate(
-            &crate::util::bulk_edit_policy::BulkEditRequest {
-                session_id: session_id.as_deref(),
-                file_path: &input.file_path,
-                old_string: &input.old_string,
-                new_string: &input.new_string,
-                replace_all: input.replace_all,
-            },
-        ) {
-            return Ok(SearchReplaceOutput::InvalidInput(deny.reason));
-        }
-    }
+    let _write_lock = crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+        &path,
+        ctx,
+        &resources,
+        "search_replace",
+    )
+    .await?;
     let (empty_old_string_does_not_override, include_user_edit_hint);
     {
         let res = resources.lock().await;
@@ -326,9 +333,7 @@ async fn handle_new_file_creation(
             old_string_name
         )));
     }
-    // Post-edit trailing-whitespace strip (default ON; env override).
-    let write_content = crate::util::trailing_ws::prepare_for_write(input.new_string.clone());
-    if let Err(e) = fs.write_file(path, write_content.as_bytes()).await {
+    if let Err(e) = fs.write_file(path, input.new_string.as_bytes()).await {
         return Ok(match e.io_error_kind() {
             Some(std::io::ErrorKind::NotFound) => {
                 let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
@@ -359,14 +364,25 @@ async fn handle_new_file_creation(
             )),
         });
     }
+    let written =
+        crate::util::rust_edit_verify::after_structured_rust_write(path, &input.new_string);
+    if written != input.new_string
+        && let Err(e) = fs.write_file(path, written.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
     if let Some(old_text) = old_text
         && file_exists
-        && empty_old_string_does_not_override
+        && !empty_old_string_does_not_override
     {
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: write_content.clone(),
+            content: written,
             previous_content: Some(old_text.clone()),
             is_new_file: false,
         });
@@ -374,20 +390,20 @@ async fn handle_new_file_creation(
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
             absolute_path: path.to_path_buf(),
-            content: write_content.clone(),
+            content: written,
             previous_content: None,
             is_new_file: true,
         });
     }
     let tool_output_for_prompt = format!(
         "The file {} has been created successfully.",
-        &input.file_path
+        input.file_path
     );
-    let tool_output_for_prompt_concise = format!("The file {} has been created.", &input.file_path);
+    let tool_output_for_prompt_concise = format!("The file {} has been created.", input.file_path);
     let edits = vec![SearchReplaceEditDetail {
         old_string: input.old_string.clone(),
         old_line: 1,
-        new_string: write_content.clone(),
+        new_string: input.new_string.clone(),
         new_line: 1,
         context_before: String::new(),
         context_after: String::new(),
@@ -396,7 +412,7 @@ async fn handle_new_file_creation(
     Ok(SearchReplaceOutput::EditsApplied(
         SearchReplaceEditsApplied {
             old_string: input.old_string.clone(),
-            new_string: write_content,
+            new_string: input.new_string.clone(),
             tool_output_for_prompt,
             tool_output_for_prompt_concise: Some(tool_output_for_prompt_concise),
             absolute_path: path.to_path_buf(),
@@ -699,8 +715,6 @@ async fn handle_replacement(
     } else {
         new_text.clone()
     };
-    // Post-edit trailing-whitespace strip (default ON; env override).
-    let write_text = crate::util::trailing_ws::prepare_for_write(write_text);
     if let Err(e) = fs.write_file(path, write_text.as_bytes()).await {
         return Ok(match e.io_error_kind() {
             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
@@ -718,14 +732,23 @@ async fn handle_replacement(
             )),
         });
     }
+    let written = crate::util::rust_edit_verify::after_structured_rust_write(path, &write_text);
+    if written != write_text
+        && let Err(e) = fs.write_file(path, written.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
         absolute_path: path.to_path_buf(),
-        content: write_text.clone(),
+        content: written,
         previous_content: Some(old_text.clone()),
         is_new_file: false,
     });
-    // Edit details use pre-CRLF/pre-strip `new_text` so byte positions remain valid.
     let edits = build_edit_details(
         &new_text,
         &input.old_string,
@@ -736,18 +759,18 @@ async fn handle_replacement(
     let (tool_output_for_prompt, tool_output_for_prompt_concise) = if new_positions.len() == 1 {
         let default_msg = format!(
             "The file {} has been updated successfully.",
-            &input.file_path
+            input.file_path
         );
-        let concise_msg = format!("The file {} has been updated.", &input.file_path);
+        let concise_msg = format!("The file {} has been updated.", input.file_path);
         (default_msg, concise_msg)
     } else {
         let default_msg = format!(
             "The file {} has been updated. All occurrences were successfully replaced.",
-            &input.file_path
+            input.file_path
         );
         let concise_msg = format!(
             "The file {} has been updated. All occurrences were replaced.",
-            &input.file_path,
+            input.file_path,
         );
         (default_msg, concise_msg)
     };
@@ -773,6 +796,45 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
     }
     fn description_template(&self) -> &str {
         DESCRIPTION_FULL
+    }
+    /// Params-aware description: the "cannot overwrite" sentence in
+    /// [`DESCRIPTION_FULL`] only holds while `empty_old_string_does_not_override`
+    /// is enabled, so it is served only for configs that opt into the guard and
+    /// stripped by default (legacy overwrite behavior).
+    fn versioned_definition(
+        &self,
+        _contract_version: Option<&str>,
+        client_name: &str,
+        description_override: Option<&str>,
+        renderer: &TemplateRenderer,
+        param_map: &std::collections::HashMap<String, String>,
+        input_schema: &serde_json::Value,
+        effective_params: &serde_json::Value,
+    ) -> crate::types::definition::ToolDefinition {
+        let params: SearchReplaceParams =
+            serde_json::from_value(effective_params.clone()).unwrap_or_default();
+        let raw_desc = match description_override {
+            Some(d) => d.to_string(),
+            None if params.empty_old_string_does_not_override => {
+                self.description_template().to_string()
+            }
+            None => self
+                .description_template()
+                .replace(EMPTY_OLD_STRING_GUARD_SENTENCE, ""),
+        };
+        let description = renderer.render(&raw_desc).unwrap_or_else(|e| {
+            crate::types::template_renderer::strip_markers_on_render_failure(&raw_desc, &e)
+        });
+        let remapped_schema = if param_map.is_empty() {
+            input_schema.clone()
+        } else {
+            crate::util::remap::remap_schema_properties(input_schema, param_map)
+        };
+        crate::types::definition::ToolDefinition::function(
+            client_name,
+            Some(&description),
+            remapped_schema,
+        )
     }
     fn emitted_notifications(&self) -> &'static [&'static str] {
         &["FileWritten"]
@@ -812,7 +874,7 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "search_replace",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
@@ -881,6 +943,94 @@ mod tests {
             replace_all: false,
         }
     }
+    fn description_renderer() -> TemplateRenderer {
+        let edit_params = std::collections::HashMap::from([
+            ("old_string".to_string(), "old_string".to_string()),
+            ("new_string".to_string(), "new_string".to_string()),
+            ("replace_all".to_string(), "replace_all".to_string()),
+        ]);
+        TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
+        )
+    }
+    /// The strip in `versioned_definition` matches the template verbatim, so
+    /// the sentence must stay in sync with `DESCRIPTION_FULL`.
+    #[test]
+    fn overwrite_guard_sentence_stays_in_sync_with_template() {
+        assert!(DESCRIPTION_FULL.contains(EMPTY_OLD_STRING_GUARD_SENTENCE));
+    }
+    #[test]
+    fn overwrite_guard_sentence_is_conditional_on_param() {
+        use crate::types::tool_metadata::ToolMetadata;
+        let renderer = description_renderer();
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let param_map = std::collections::HashMap::new();
+        let default_def = ToolMetadata::versioned_definition(
+            &SearchReplaceTool,
+            None,
+            "search_replace",
+            None,
+            &renderer,
+            &param_map,
+            &schema,
+            &serde_json::json!({}),
+        );
+        let default_desc = default_def.function.description.unwrap();
+        assert!(
+            !default_desc.contains("cannot overwrite"),
+            "guard sentence must be absent by default (legacy overwrite behavior):\n{default_desc}"
+        );
+        assert!(
+            default_desc.contains("To create a new file"),
+            "create-file guidance must remain:\n{default_desc}"
+        );
+        let opt_in_def = ToolMetadata::versioned_definition(
+            &SearchReplaceTool,
+            None,
+            "search_replace",
+            None,
+            &renderer,
+            &param_map,
+            &schema,
+            &serde_json::json!({"empty_old_string_does_not_override": true}),
+        );
+        let opt_in_desc = opt_in_def.function.description.unwrap();
+        assert!(
+            opt_in_desc.contains("cannot overwrite an existing non-empty file"),
+            "guard sentence must appear when the guard is enabled:\n{opt_in_desc}"
+        );
+    }
+    #[test]
+    fn description_read_bullet_guarded_on_read_tool() {
+        use crate::types::tool_metadata::ToolMetadata;
+        let rendered = description_renderer()
+            .render(ToolMetadata::description_template(&SearchReplaceTool))
+            .unwrap();
+        assert!(
+            rendered.contains("read_file` prefixes each line") && !rendered.contains("${%"),
+            "read bullet must render with the resolved name:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("before editing it"),
+            "read-before-edit guidance must be gone:\n{rendered}"
+        );
+        let edit_params = std::collections::HashMap::from([
+            ("old_string".to_string(), "old_string".to_string()),
+            ("new_string".to_string(), "new_string".to_string()),
+            ("replace_all".to_string(), "replace_all".to_string()),
+        ]);
+        let no_read = TemplateRenderer::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
+        )
+        .render(ToolMetadata::description_template(&SearchReplaceTool))
+        .unwrap();
+        assert!(
+            !no_read.contains("prefixes each line") && !no_read.contains("- \n"),
+            "read bullet must vanish cleanly without a Read tool:\n{no_read}"
+        );
+    }
     #[tokio::test]
     async fn basic_replacement() {
         let tmp = TempDir::new().unwrap();
@@ -900,94 +1050,6 @@ mod tests {
                 assert_eq!(content, "goodbye world\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
-        }
-    }
-
-    /// A3 gate: `GROK_DENY_REPLACE_ALL=1` → InvalidInput, file unchanged.
-    #[tokio::test]
-    async fn bulk_policy_denies_replace_all_when_env_set() {
-        use crate::types::resources::OwnerSessionId;
-        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
-        use crate::util::bulk_edit_policy::{ENV_BULK_EDIT_DIR, ENV_DENY_REPLACE_ALL};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let state = TempDir::new().unwrap();
-        let _env = EnvGuard::set(&[
-            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
-            (ENV_DENY_REPLACE_ALL, Some("1")),
-        ]);
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("ra.txt");
-        std::fs::write(&path, "foo foo\n").unwrap();
-        let mut resources = test_resources(tmp.path());
-        resources.insert(OwnerSessionId("sr-deny-ra".into()));
-        let mut input = make_input("ra.txt", "foo", "bar");
-        input.replace_all = true;
-        let result = xai_tool_runtime::Tool::run(
-            &SearchReplaceTool,
-            test_ctx(resources.into_shared()),
-            input,
-        )
-        .await
-        .unwrap();
-        match result {
-            SearchReplaceOutput::InvalidInput(msg) => {
-                assert!(msg.contains("replace_all"), "msg={msg}");
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo foo\n");
-    }
-
-    /// A3 gate: same old→new storm across N files → InvalidInput on Nth; last file unchanged.
-    #[tokio::test]
-    async fn bulk_policy_storm_denies_and_leaves_file_unchanged() {
-        use crate::types::resources::OwnerSessionId;
-        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
-        use crate::util::bulk_edit_policy::{
-            ENV_BULK_EDIT_DIR, ENV_BULK_EDIT_N, ENV_DENY_REPLACE_ALL,
-        };
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let state = TempDir::new().unwrap();
-        let _env = EnvGuard::set(&[
-            (ENV_BULK_EDIT_DIR, Some(state.path().to_str().unwrap())),
-            (ENV_BULK_EDIT_N, Some("3")),
-            (ENV_DENY_REPLACE_ALL, None),
-        ]);
-        let tmp = TempDir::new().unwrap();
-        for i in 0..3 {
-            let name = format!("s{i}.txt");
-            let p = tmp.path().join(&name);
-            std::fs::write(&p, "FOO_RENAME here\n").unwrap();
-            let mut resources = test_resources(tmp.path());
-            resources.insert(OwnerSessionId("sr-storm".into()));
-            let input = make_input(&name, "FOO_RENAME", "BAR_RENAME");
-            let result = xai_tool_runtime::Tool::run(
-                &SearchReplaceTool,
-                test_ctx(resources.into_shared()),
-                input,
-            )
-            .await
-            .unwrap();
-            if i < 2 {
-                assert!(
-                    matches!(result, SearchReplaceOutput::EditsApplied(_)),
-                    "path {i} should apply: {result:?}"
-                );
-            } else {
-                match result {
-                    SearchReplaceOutput::InvalidInput(msg) => {
-                        assert!(msg.contains("storm"), "msg={msg}");
-                    }
-                    other => panic!("expected storm InvalidInput, got {other:?}"),
-                }
-                assert_eq!(
-                    std::fs::read_to_string(&p).unwrap(),
-                    "FOO_RENAME here\n",
-                    "denied path must not be modified"
-                );
-            }
         }
     }
     #[tokio::test]
@@ -1201,12 +1263,6 @@ mod tests {
     }
     #[tokio::test]
     async fn replace_all_mode() {
-        // Serialize with bulk-policy env tests; ensure DENY is not set.
-        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
-        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
-
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "aaa bbb aaa bbb aaa\n").unwrap();
         let tool = SearchReplaceTool;
@@ -1376,11 +1432,34 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overrides_existing_file_by_default() {
+    async fn empty_old_string_overwrites_existing_file_by_default() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
         let resources = test_resources(tmp.path());
+        let input = make_input("existing.txt", "", "completely new content\n");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(applied) => {
+                assert!(applied.tool_output_for_prompt.contains("has been created"));
+                let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
+                assert_eq!(content, "completely new content\n");
+            }
+            other => panic!("Expected EditsApplied, got {:?}", other),
+        }
+    }
+    #[tokio::test]
+    async fn empty_old_string_overrides_with_explicit_false() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(SearchReplaceParams {
+            empty_old_string_does_not_override: false,
+            ..Default::default()
+        }));
         let input = make_input("existing.txt", "", "completely new content\n");
         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1605,6 +1684,139 @@ mod tests {
             other => panic!("Expected FileWritten notification, got {:?}", other),
         }
     }
+
+    /// Legal but unformatted Rust must be rustfmt'd before the tool returns.
+    /// FileWritten.content must be the formatted bytes on disk.
+    #[tokio::test]
+    async fn search_replace_formats_rust_file_after_write() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_test_command_runner();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"edit_verify_fmt\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("rustfmt.toml"),
+            "use_field_init_shorthand = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let unformatted = "fn  foo( ){1+2}\n";
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let tool = SearchReplaceTool;
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(FileSystem(Arc::new(LocalFs)));
+        resources.insert(NotificationHandle(handle));
+        let input = make_input("src/lib.rs", "", unformatted);
+        xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx_with_call_id(resources.into_shared(), "call-fmt"),
+            input,
+        )
+        .await
+        .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert_ne!(
+            on_disk, unformatted,
+            "structured edit of a .rs file must rustfmt the file before return"
+        );
+        assert_eq!(
+            on_disk, "fn foo() {\n    1 + 2\n}\n",
+            "rustfmt edition 2024 output"
+        );
+        let notification = rx.try_recv().unwrap();
+        match notification {
+            crate::notification::types::ToolNotification::FileWritten(fw) => {
+                assert_eq!(
+                    fw.content, on_disk,
+                    "FileWritten.content must be the formatted bytes"
+                );
+                assert!(fw.is_new_file);
+            }
+            other => panic!("Expected FileWritten notification, got {:?}", other),
+        }
+    }
+
+    /// Clippy findings after a structured write stay in the verify report.
+    /// The write is not rolled back.
+    #[tokio::test]
+    async fn search_replace_clippy_findings_do_not_rollback_write() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_test_command_runner();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"edit_verify_lint\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("rustfmt.toml"),
+            "use_field_init_shorthand = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "pub fn n() {}\n").unwrap();
+        let status = std::process::Command::new("cargo")
+            .args(["generate-lockfile"])
+            .current_dir(tmp.path())
+            .status()
+            .expect("cargo generate-lockfile");
+        assert!(status.success(), "fixture lockfile");
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input(
+            "src/lib.rs",
+            "pub fn n() {}\n",
+            "pub fn n() { let dead = 1; }\n",
+        );
+        xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert!(
+            on_disk.contains("dead"),
+            "write must remain on disk before clippy: {on_disk}"
+        );
+        let report = crate::util::rust_edit_verify::flush_batch_clippy_and_tests();
+        let after = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+        assert_eq!(after, on_disk, "clippy failure must not undo the write");
+        assert!(
+            report.contains("dead") || report.contains("unused"),
+            "clippy findings must appear in the verify block appended to tool output: {report}"
+        );
+        assert!(
+            report.contains("failed") || report.contains("clippy"),
+            "verify block must name clippy: {report}"
+        );
+    }
+
+    /// Session plan.md is not Rust. rustfmt / clippy must not run.
+    #[tokio::test]
+    async fn search_replace_skips_verify_on_session_plan_file() {
+        let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
+        crate::util::rust_edit_verify::clear_pending_verify_paths();
+        let tmp = TempDir::new().unwrap();
+        let plan_body = "# Plan\n\nDo the thing.\n";
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("plan.md", "", plan_body);
+        xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join("plan.md")).unwrap();
+        assert_eq!(on_disk, plan_body);
+        let report = crate::util::rust_edit_verify::flush_batch_clippy_and_tests();
+        assert!(
+            report.is_empty(),
+            "plan.md must not queue clippy or tests: {report}"
+        );
+    }
+
     fn build_gitignore(root: &std::path::Path, patterns: &[&str]) -> ignore::gitignore::Gitignore {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
         for pattern in patterns {
@@ -1858,7 +2070,7 @@ gamma delta";
     fn hint_empty_when_old_string_has_no_tokens() {
         let hint = build_nearest_match_hint(
             "some content",
-            "   	  
+            "
   ",
         );
         assert!(hint.is_empty());
@@ -2267,11 +2479,6 @@ neutTest_set);
     /// Multi-match + replace_all=true replaces all occurrences.
     #[tokio::test]
     async fn fallback_multi_match_with_replace_all() {
-        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
-        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
-
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("f.txt"),
@@ -2457,11 +2664,6 @@ neutTest_set);
     /// Replace-all mode works correctly with CRLF files.
     #[tokio::test]
     async fn crlf_replace_all() {
-        use crate::util::bulk_edit_policy::ENV_DENY_REPLACE_ALL;
-        use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_DENY_REPLACE_ALL, None)]);
-
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), b"foo\r\nbar\r\nfoo\r\nbaz\r\n").unwrap();
         let tool = SearchReplaceTool;
@@ -2514,87 +2716,6 @@ neutTest_set);
                 assert_eq!(written, b"line1\r\nREPLACED\r\nline4\r\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
-        }
-    }
-
-    /// Default ON: trailing spaces/tabs on lines are stripped before disk write.
-    #[tokio::test]
-    async fn strips_trailing_whitespace_by_default() {
-        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
-        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        // Explicit on (and clear any prior off) for isolation.
-        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
-
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("ws.txt"), "keep me\n").unwrap();
-        let tool = SearchReplaceTool;
-        let resources = test_resources(tmp.path());
-        // new_string has trailing spaces and a tab-terminated line.
-        let input = make_input("ws.txt", "keep me\n", "line one  \nline two\t\n");
-        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(_) => {
-                let content = std::fs::read_to_string(tmp.path().join("ws.txt")).unwrap();
-                assert_eq!(content, "line one\nline two\n");
-            }
-            other => panic!("Expected EditsApplied, got {other:?}"),
-        }
-    }
-
-    /// Env off: trailing whitespace preserved on disk.
-    #[tokio::test]
-    async fn preserves_trailing_whitespace_when_env_off() {
-        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
-        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("0"))]);
-
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("ws.txt"), "keep me\n").unwrap();
-        let tool = SearchReplaceTool;
-        let resources = test_resources(tmp.path());
-        let input = make_input("ws.txt", "keep me\n", "line one  \nline two\t\n");
-        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(_) => {
-                let content = std::fs::read_to_string(tmp.path().join("ws.txt")).unwrap();
-                assert_eq!(content, "line one  \nline two\t\n");
-            }
-            other => panic!("Expected EditsApplied, got {other:?}"),
-        }
-    }
-
-    /// CRLF file: strip EOL spaces/tabs but keep `\r\n`.
-    /// Match/replace use LF (read_file strips `\r`); write re-encodes CRLF.
-    #[tokio::test]
-    async fn strips_trailing_ws_preserves_crlf() {
-        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
-        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
-
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("crlf.txt"), b"old\r\n").unwrap();
-        let tool = SearchReplaceTool;
-        let resources = test_resources(tmp.path());
-        let input = make_input("crlf.txt", "old\n", "a  \nb\t\n");
-        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        match result {
-            SearchReplaceOutput::EditsApplied(_) => {
-                let content = std::fs::read(tmp.path().join("crlf.txt")).unwrap();
-                assert_eq!(content, b"a\r\nb\r\n");
-            }
-            other => panic!("Expected EditsApplied, got {other:?}"),
         }
     }
 }

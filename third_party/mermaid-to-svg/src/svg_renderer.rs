@@ -144,7 +144,7 @@ impl<'a> SvgRenderer<'a> {
         }
 
         let mut nodes: Vec<&LayoutNode> = layout.nodes.values().collect();
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes.sort_by_key(|a| a.id.clone());
         for node in nodes {
             self.render_node(node);
         }

@@ -1,5 +1,7 @@
 //! EntryRenderer - renders a ScrollbackEntry using composed wrappers.
 
+use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::path::Path;
 
 use ratatui::buffer::Buffer;
@@ -20,60 +22,13 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a nice smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
-/// Columns reserved for the short timestamp overlay (`  12:30 PM` max).
-pub const TIMESTAMP_SHORT_RESERVE: u16 = 10;
-
-/// Extra right-edge columns when always-on bubble ⧉ shares a message row
-/// with the timestamp: one gap cell + one ⧉ cell. Keeps short and expanded
-/// timestamps fully readable (⧉ stays at the content right edge).
-pub const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
-
-/// Whether this block type shows a right-edge timestamp overlay.
-pub fn block_shows_timestamp(block: &RenderBlock) -> bool {
-    matches!(
-        block,
-        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-    )
-}
-
-/// Whether this block type gets always-on bubble ⧉ chrome.
-pub fn block_shows_bubble_copy(block: &RenderBlock) -> bool {
-    matches!(
-        block,
-        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_)
-    )
-}
-
-/// Columns from the content right edge reserved for bubble ⧉ (+ gap) when
-/// both timestamp and bubble copy paint on the same row. Zero otherwise.
-///
-/// Layout when non-zero (right edge of content):
-/// `[timestamp zone (TIMESTAMP_SHORT_RESERVE)][gap][⧉]`
-pub fn bubble_copy_trailing_inset(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if appearance.show_timestamps
-        && appearance.scrollback.display.bubble_copy_buttons
-        && block_shows_timestamp(block)
-        && block_shows_bubble_copy(block)
-    {
-        BUBBLE_COPY_TRAILING_INSET
-    } else {
-        0
-    }
-}
-
-/// Right-side content columns reserved so message text does not wrap under
-/// the timestamp overlay (and, when bubble ⧉ is also on, under that chrome).
-pub fn message_right_chrome_reserve(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if !appearance.show_timestamps || !block_shows_timestamp(block) {
-        return 0;
-    }
-    TIMESTAMP_SHORT_RESERVE + bubble_copy_trailing_inset(block, appearance)
-}
-
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
-    appearance: AppearanceConfig,
+    /// Deliberately NOT eagerly `AppearanceConfig::default()`: that conversion
+    /// reads `Theme::current()` and quantizes every color, and profiling a
+    /// resize showed it running once per entry only to be overwritten.
+    appearance: OnceCell<Cow<'a, AppearanceConfig>>,
     tick: u64,
     /// Number of rows to skip from the top of the entry.
     ///
@@ -119,6 +74,10 @@ pub struct EntryRenderer<'a> {
     /// `block_pad_{left,right}` in minimal's `committed_appearance`, content
     /// starts at column 0 (aligned with the welcome card).
     hide_accent: bool,
+    /// Paint the accent bar with [`Modifier::DIM`] on top of its color, so a
+    /// rail that resolved to `Color::Reset` reads as chrome rather than
+    /// full-brightness content.
+    dim_accent: bool,
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<&'a Path>,
 }
@@ -128,7 +87,7 @@ impl<'a> EntryRenderer<'a> {
         Self {
             entry,
             theme,
-            appearance: AppearanceConfig::default(),
+            appearance: OnceCell::new(),
             tick: 0,
             skip_rows: 0,
             groupable: false,
@@ -139,6 +98,7 @@ impl<'a> EntryRenderer<'a> {
             group_header_label: None,
             flat_background: false,
             hide_accent: false,
+            dim_accent: false,
             cwd: None,
         }
     }
@@ -162,6 +122,12 @@ impl<'a> EntryRenderer<'a> {
         self
     }
 
+    /// See [`Self::dim_accent`]. Height-neutral — `chrome_width` is unchanged.
+    pub fn with_dim_accent(mut self, dim: bool) -> Self {
+        self.dim_accent = dim;
+        self
+    }
+
     /// Background to paint where the block itself has none (accent column,
     /// gutter, bullets). In flat mode this is `Color::Reset` — the terminal's
     /// own default background — so the entry inherits terminal transparency
@@ -174,9 +140,33 @@ impl<'a> EntryRenderer<'a> {
         }
     }
 
+    /// Shared by every accent branch so the rail cannot be dim in one running
+    /// state and bright in another.
+    fn accent_paint_style(&self, color: ratatui::style::Color) -> Style {
+        let style = Style::default().fg(color);
+        if self.dim_accent {
+            style.add_modifier(ratatui::style::Modifier::DIM)
+        } else {
+            style
+        }
+    }
+
     pub fn with_appearance(mut self, appearance: AppearanceConfig) -> Self {
-        self.appearance = appearance;
+        self.appearance = OnceCell::from(Cow::Owned(appearance));
         self
+    }
+
+    ///
+    /// Preferred inside the O(history) layout loops, which would otherwise
+    /// clone the config once per entry.
+    pub fn with_appearance_ref(mut self, appearance: &'a AppearanceConfig) -> Self {
+        self.appearance = OnceCell::from(Cow::Borrowed(appearance));
+        self
+    }
+
+    fn appearance(&self) -> &AppearanceConfig {
+        self.appearance
+            .get_or_init(|| Cow::Owned(AppearanceConfig::default()))
     }
 
     pub fn with_tick(mut self, tick: u64) -> Self {
@@ -247,7 +237,7 @@ impl<'a> EntryRenderer<'a> {
     fn render_group_header(&self, area: Rect, buf: &mut Buffer) {
         use crate::scrollback::state::verb_group::GroupHeaderLabel;
 
-        let layout_cfg = &self.appearance.scrollback.layout;
+        let layout_cfg = &self.appearance().scrollback.layout;
         let accent_w = if self.hide_accent {
             0
         } else {
@@ -261,7 +251,7 @@ impl<'a> EntryRenderer<'a> {
         ])
         .areas(area);
 
-        let display_cfg = &self.appearance.scrollback.display;
+        let display_cfg = &self.appearance().scrollback.display;
         let bg = self.theme.bg_base;
 
         // Verb-group header: aggregated "Verb N noun" label with run-state
@@ -269,6 +259,8 @@ impl<'a> EntryRenderer<'a> {
         // shares the accent color, so an active group's glyph animates with
         // the same wave as a running tool row's bullet.
         if let Some(GroupHeaderLabel::VerbRun(vg)) = self.group_header_label {
+            use unicode_width::UnicodeWidthStr;
+
             let glyph_color = if vg.failed {
                 let style = Style::default().fg(self.theme.accent_error);
                 buf.set_string_safe(
@@ -282,7 +274,7 @@ impl<'a> EntryRenderer<'a> {
                 let brightness = theme::wave_brightness(
                     self.tick,
                     self.skip_rows,
-                    self.appearance.animation.wave_rows,
+                    self.appearance().animation.wave_rows,
                     WAVE_SPEED,
                 );
                 let color = blend_color(bg, self.theme.accent_tool, brightness)
@@ -309,11 +301,30 @@ impl<'a> EntryRenderer<'a> {
             // headers. The selection caret (the expandable indicator in
             // scrollback_pane.rs) overdraws the diamond on the selected row
             // and flips `›`/`⌄` with the group's fold state.
+            let prefix = group_header_chrome_prefix();
             let mut spans = vec![ratatui::text::Span::styled(
-                group_header_chrome_prefix(),
+                prefix.clone(),
                 Style::default().fg(glyph_color),
             )];
-            spans.extend(vg.line.spans.iter().cloned());
+            let hook_start = vg
+                .line
+                .spans
+                .iter()
+                .position(|span| span.content.starts_with("  [hooks: "));
+            if let Some(hook_start) = hook_start {
+                let suffix_width: usize = vg.line.spans[hook_start..]
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum();
+                let label_budget = usize::from(content_area.width)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                    .saturating_sub(suffix_width);
+                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
+                spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
+                spans.extend(vg.line.spans[hook_start..].iter().cloned());
+            } else {
+                spans.extend(vg.line.spans.iter().cloned());
+            }
             let line = ratatui::text::Line::from(spans);
             buf.set_line_safe(content_area.x, content_area.y, &line, content_area.width);
             return;
@@ -365,8 +376,8 @@ impl<'a> EntryRenderer<'a> {
     /// When [`Self::hide_accent`] is set the accent column is reclaimed, so
     /// chrome is just the block pads (typically zeroed in minimal mode).
     pub fn chrome_width(&self) -> u16 {
-        let pads = self.appearance.scrollback.layout.block_pad_left
-            + self.appearance.scrollback.layout.block_pad_right;
+        let pads = self.appearance().scrollback.layout.block_pad_left
+            + self.appearance().scrollback.layout.block_pad_right;
         if self.hide_accent {
             pads
         } else {
@@ -384,22 +395,28 @@ impl<'a> EntryRenderer<'a> {
     /// and mid-turn interjections) but NOT for thinking traces, tool calls, or
     /// system messages.
     fn should_show_timestamp(&self) -> bool {
-        block_shows_timestamp(&self.entry.block)
+        matches!(
+            self.entry.block,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+        )
     }
 
     /// Width reserved for the timestamp on the right side of content lines.
     ///
     /// When > 0, content is wrapped at `content_width - reserved` so text
-    /// never collides with the timestamp overlay (or always-on bubble ⧉ when
-    /// that chrome shares the row).
+    /// never collides with the timestamp overlay.
     fn timestamp_reserved(&self) -> u16 {
-        message_right_chrome_reserve(&self.entry.block, &self.appearance)
+        if self.appearance().show_timestamps && self.should_show_timestamp() {
+            10 // max short format: "  12:30 PM"
+        } else {
+            0
+        }
     }
 
     fn accent(&self, content_width: u16) -> Option<AccentStyle> {
         let mut ctx = self
             .entry
-            .context(content_width, &self.appearance, self.cwd);
+            .context(content_width, self.appearance(), self.cwd);
         ctx.is_selected = self.is_selected;
         self.entry.block.accent(&ctx)
     }
@@ -426,7 +443,7 @@ impl<'a> EntryRenderer<'a> {
             .saturating_sub(self.chrome_width())
             .saturating_sub(self.timestamp_reserved());
         self.entry
-            .ensure_truncated_height_cached(content_width, &self.appearance, self.cwd)
+            .ensure_truncated_height_cached(content_width, self.appearance(), self.cwd)
     }
 
     /// Extra rows to reserve for inline media preview (images/video poster).
@@ -487,10 +504,7 @@ impl<'a> EntryRenderer<'a> {
         {
             1
         } else {
-            match self.entry.block.searchable_text() {
-                Some(text) => estimate_wrapped_line_count(&text, content_width),
-                None => 1,
-            }
+            self.entry.estimate_source_lines(content_width)
         };
         self.entry.store_estimate_lines(content_width, lines);
         lines
@@ -501,10 +515,7 @@ impl<'a> EntryRenderer<'a> {
     /// ceiling can't overflow and corrupt `virtual_y` / `total_height`. Shared by
     /// `desired_height` and `estimate_height` so the assembly stays canonical.
     fn assemble_height(&self, content_width: u16, content_lines: u16) -> u16 {
-        let ctx = self
-            .entry
-            .context(content_width, &self.appearance, self.cwd);
-        let vpad: u16 = if self.entry.block.has_vpad(&ctx) {
+        let vpad: u16 = if self.entry.block.has_vpad_for(self.appearance()) {
             2
         } else {
             0
@@ -540,14 +551,14 @@ impl<'a> EntryRenderer<'a> {
         // `cached_output_ref` must come after it.
         let ctx = self
             .entry
-            .context(content_width, &self.appearance, self.cwd);
+            .context(content_width, self.appearance(), self.cwd);
         let vpad_top: u16 = if self.entry.block.has_vpad(&ctx) {
             1
         } else {
             0
         };
         self.entry
-            .ensure_cached(content_width, &self.appearance, false, self.cwd);
+            .ensure_cached(content_width, self.appearance(), false, self.cwd);
         let output = self.entry.cached_output_ref();
         let starts = output
             .lines
@@ -627,32 +638,6 @@ fn fill_bg_spaces(buf: &mut Buffer, rect: Rect, bg: ratatui::style::Color) {
     }
 }
 
-/// Estimate the wrapped line count for raw `text` at a given content width.
-///
-/// Uses DISPLAY width (`unicode_width`), not byte length. A deliberately cheap
-/// approximation: it ignores word boundaries and works from RAW source, so it may
-/// be larger or smaller than the exact rendered height. Correctness never relies
-/// on it — on-screen entries are always measured exactly.
-fn estimate_wrapped_line_count(text: &str, content_width: u16) -> u16 {
-    let cw = content_width.max(1) as usize;
-    // Renderers drop a single trailing newline; match that so trailing-`\n`
-    // source doesn't estimate one row too many.
-    let text = text.strip_suffix('\n').unwrap_or(text);
-    let mut total: usize = 0;
-    for line in text.split('\n') {
-        let display_width = unicode_width::UnicodeWidthStr::width(line);
-        total += if display_width == 0 {
-            1
-        } else {
-            display_width.div_ceil(cw)
-        };
-        if total >= u16::MAX as usize {
-            return u16::MAX;
-        }
-    }
-    total.max(1) as u16
-}
-
 impl Renderable for EntryRenderer<'_> {
     fn desired_height(&self, width: u16) -> u16 {
         if self.thinking_hidden() {
@@ -665,7 +650,7 @@ impl Renderable for EntryRenderer<'_> {
         // affects styling (e.g., UserPrompt prefix color), not line count, so
         // the non-selected cached output gives the correct height.
         self.entry
-            .ensure_cached(content_width, &self.appearance, false, self.cwd);
+            .ensure_cached(content_width, self.appearance(), false, self.cwd);
         // Clamp the line count: a pathologically large block could exceed u16.
         let content_lines = self.entry.cached_output_ref().len().min(u16::MAX as usize) as u16;
         self.assemble_height(content_width, content_lines)
@@ -707,7 +692,7 @@ impl Renderable for EntryRenderer<'_> {
             (area, self.skip_rows)
         };
 
-        let layout_cfg = &self.appearance.scrollback.layout;
+        let layout_cfg = &self.appearance().scrollback.layout;
         // Minimal (`hide_accent`): reclaim the accent column so content is
         // flush-left. Fullscreen keeps the 1-col gutter even when a block has
         // no painted accent (so columns stay aligned across entry types).
@@ -730,7 +715,7 @@ impl Renderable for EntryRenderer<'_> {
         // for edit blocks) that was previously thrown away.
         let mut ctx = self
             .entry
-            .context(content_area.width, &self.appearance, self.cwd);
+            .context(content_area.width, self.appearance(), self.cwd);
         ctx.is_selected = self.is_selected;
         // Minimal mode blends committed/tail blocks with the real terminal
         // background; suppress the block's own band (keeps accents + per-line
@@ -833,7 +818,7 @@ impl Renderable for EntryRenderer<'_> {
             .is_some_and(|hd| hd.has_content());
         let use_collapsed_accent =
             self.groupable && self.entry.display_mode == DisplayMode::Collapsed && !has_hook_lines;
-        let display_cfg = &self.appearance.scrollback.display;
+        let display_cfg = &self.appearance().scrollback.display;
 
         if accent.is_none() {
             // No accent: clear the accent column so stale content from
@@ -846,33 +831,18 @@ impl Renderable for EntryRenderer<'_> {
             let color = accent_style.color;
             let is_pending = self.entry.is_pending_user_input;
 
-            if accent_style.striped {
-                // Yellow context/time rails: dashed/striped verticals, not solid ┃.
-                // Animated → DOGE striped-down marquee; static → fixed dashed bar.
-                // Pending freezes the marquee on the static dashed glyph.
-                let style = Style::default().fg(color);
-                for row in 0..accent_area.height {
-                    let y = accent_area.y + row;
-                    let glyph = if accent_style.animated && !is_pending {
-                        let logical_row = skip_rows + row;
-                        crate::glyphs::striped_accent_bar_frame(self.tick, logical_row)
-                    } else {
-                        crate::glyphs::striped_accent_bar()
-                    };
-                    buf.set_string_safe(accent_area.x, y, glyph, style);
-                }
-            } else if is_pending && accent_style.animated {
+            if is_pending && accent_style.animated {
                 // Pending user input: freeze the running wave. A solid
                 // accent at full color reads as "paused on you" without
                 // the loading-spinner motion.
-                let style = Style::default().fg(color);
+                let style = self.accent_paint_style(color);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
             } else if accent_style.animated {
                 // Animated accents: wave effect (running blocks)
                 let bg = bg_color.unwrap_or(self.fallback_bg());
-                let wave_rows = self.appearance.animation.wave_rows;
+                let wave_rows = self.appearance().animation.wave_rows;
 
                 for row in 0..accent_area.height {
                     let y = accent_area.y + row;
@@ -880,7 +850,7 @@ impl Renderable for EntryRenderer<'_> {
                     let brightness =
                         theme::wave_brightness(self.tick, logical_row, wave_rows, WAVE_SPEED);
                     let animated_color = blend_color(bg, color, brightness).unwrap_or(color);
-                    let style = Style::default().fg(animated_color);
+                    let style = self.accent_paint_style(animated_color);
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
             } else if use_collapsed_accent && !self.is_selected {
@@ -889,7 +859,7 @@ impl Renderable for EntryRenderer<'_> {
                 // full-color branch so the selection reads as undimmed.
                 let bg = bg_color.unwrap_or(self.fallback_bg());
                 let dimmed = blend_color(bg, color, display_cfg.dim_accent).unwrap_or(color);
-                let style = Style::default().fg(dimmed);
+                let style = self.accent_paint_style(dimmed);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(
                         accent_area.x,
@@ -900,7 +870,7 @@ impl Renderable for EntryRenderer<'_> {
                 }
             } else {
                 // Static accent: full color
-                let style = Style::default().fg(color);
+                let style = self.accent_paint_style(color);
                 for y in accent_area.y..accent_area.y + accent_area.height {
                     buf.set_string_safe(accent_area.x, y, crate::glyphs::accent_bar(), style);
                 }
@@ -914,7 +884,7 @@ impl Renderable for EntryRenderer<'_> {
         let ts_reserved = self.timestamp_reserved();
         let text_width = content_area.width.saturating_sub(ts_reserved);
         self.entry
-            .ensure_cached(text_width, &self.appearance, self.is_selected, self.cwd);
+            .ensure_cached(text_width, self.appearance(), self.is_selected, self.cwd);
         let cached_ref = self.entry.cached_output_ref();
         let output: &BlockOutput = &cached_ref;
         let has_vpad = self.entry.block.has_vpad(&ctx);
@@ -962,7 +932,14 @@ impl Renderable for EntryRenderer<'_> {
             };
             if let Some(line_bg) = line_bg {
                 let bg_x = content_area.x + line.bg_start_col;
-                let bg_width = content_area.width.saturating_sub(line.bg_start_col);
+                // Background blocks already own the timestamp gutter via the
+                // full-area fill. A per-line band (UserPrompt reads
+                // `Theme::current()`, which may not be the renderer theme)
+                // must not punch a different color into that gutter.
+                let bg_width = content_area
+                    .width
+                    .saturating_sub(line.bg_start_col)
+                    .saturating_sub(if bg_color.is_some() { ts_reserved } else { 0 });
                 if bg_width > 0 {
                     let line_rect = Rect::new(bg_x, row, bg_width, 1);
                     buf.set_style(line_rect, Style::default().bg(line_bg));
@@ -983,28 +960,19 @@ impl Renderable for EntryRenderer<'_> {
         // Short format (h:mm AM/PM) by default; expands to full format
         // (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area.
         // Gated on appearance.show_timestamps (toggled via /timestamps).
-        //
-        // When always-on bubble ⧉ is also on for this block, leave
-        // BUBBLE_COPY_TRAILING_INSET columns at the absolute right edge so
-        // the copy control does not paint over the time/date (overlap, not
-        // truncation).
-        if self.appearance.show_timestamps
+        if self.appearance().show_timestamps
             && content_skip == 0
             && !output.is_empty()
             && self.should_show_timestamp()
             && let Some(ts) = self.entry.created_at
         {
             let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
-            let copy_inset = bubble_copy_trailing_inset(&self.entry.block, &self.appearance);
-            let content_right = content_area.x + content_area.width;
-            // Timestamp zone is the short-reserve band immediately left of any
-            // bubble-copy inset (not the ⧉ / gap cells themselves).
-            let ts_zone_right = content_right.saturating_sub(copy_inset);
-            let ts_zone_left = ts_zone_right.saturating_sub(TIMESTAMP_SHORT_RESERVE);
-            // Check if mouse is hovering the timestamp zone on the first
-            // content row.
+            // Check if mouse is hovering the timestamp zone (rightmost 10 cols
+            // of the first content row).
             let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
+                my == first_content_y
+                    && mx >= content_area.x + content_area.width.saturating_sub(10)
+                    && mx < content_area.x + content_area.width
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -1012,12 +980,23 @@ impl Renderable for EntryRenderer<'_> {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 + copy_inset && first_content_y < max_row {
-                // Right-align to the end of the timestamp zone (left of ⧉).
-                let ts_x = ts_zone_right.saturating_sub(ts_width);
+            if content_area.width > ts_width + 1 && first_content_y < max_row {
+                let ts_x = content_area.x + content_area.width - ts_width;
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
+        }
+
+        // Always-on bubble copy: paint into slack / timestamp gutter / right
+        // pad. The glyph is not in BlockLine spans (those stay wrap geometry).
+        let icon_style = self.theme.dim();
+        for (paint_row, line) in (content_area.y + if vpad_top_visible { 1 } else { 0 }..)
+            .zip(output.lines.iter().skip(content_skip as usize))
+        {
+            if paint_row >= max_row {
+                break;
+            }
+            line.paint_bubble_copy_button(buf, content_area.x, paint_row, icon_style);
         }
 
         // Post-pass: adjust bullet color based on block state.
@@ -1055,7 +1034,7 @@ impl Renderable for EntryRenderer<'_> {
                 if style.animated {
                     // Animated bullet: wave effect synced with accent
                     let bg = bg_color.unwrap_or(self.fallback_bg());
-                    let wave_rows = self.appearance.animation.wave_rows;
+                    let wave_rows = self.appearance().animation.wave_rows;
                     let brightness = theme::wave_brightness(self.tick, 0, wave_rows, WAVE_SPEED);
                     let animated_color =
                         blend_color(bg, style.color, brightness).unwrap_or(style.color);
@@ -1235,7 +1214,7 @@ mod tests {
     /// for `width`, derived from the renderer geometry so tests self-adjust to
     /// the default layout padding instead of hard-coding column numbers.
     fn gutter_band(renderer: &EntryRenderer, width: u16) -> std::ops::Range<u16> {
-        let content_right = width - renderer.appearance.scrollback.layout.block_pad_right;
+        let content_right = width - renderer.appearance().scrollback.layout.block_pad_right;
         (content_right - renderer.timestamp_reserved())..content_right
     }
 
@@ -1245,24 +1224,6 @@ mod tests {
         let x_start = x_end.saturating_sub(16);
         let text = collect_row_symbols(buf, y, x_start, x_end);
         text.contains("AM") || text.contains("PM")
-    }
-
-    /// Content exclusive right edge for default layout (pad_right=2 → last
-    /// content cell at width-3; exclusive end width-2).
-    fn content_right_exclusive(width: u16) -> u16 {
-        width - 2
-    }
-
-    /// Expected left x of a right-aligned timestamp string under default
-    /// appearance (timestamps + bubble_copy both on → trailing inset).
-    fn expected_ts_x(
-        width: u16,
-        ts_width: u16,
-        appearance: &AppearanceConfig,
-        block: &RenderBlock,
-    ) -> u16 {
-        let copy_inset = bubble_copy_trailing_inset(block, appearance);
-        content_right_exclusive(width).saturating_sub(copy_inset + ts_width)
     }
 
     #[test]
@@ -1281,7 +1242,7 @@ mod tests {
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
         let content_row = 1u16;
 
         let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
@@ -1306,7 +1267,7 @@ mod tests {
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1322,8 +1283,8 @@ mod tests {
         let width: u16 = 80;
 
         // AgentMessage has no vpad → first content row at y=0.
-        // Hover inside the timestamp zone (left of bubble-copy trailing inset).
-        let hover_x = width - 2 - 5; // still inside ts zone with default inset
+        // Hover the rightmost 10 cols of that row to trigger expansion.
+        let hover_x = width - 2 - 5; // inside the timestamp zone
         let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
 
         let height = renderer.desired_height(width);
@@ -1340,7 +1301,7 @@ mod tests {
             .format("%H:%M:%S | %b %d")
             .to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1567,7 +1528,7 @@ mod tests {
         // AgentMessage has no vpad → first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,
@@ -1578,12 +1539,9 @@ mod tests {
     #[test]
     fn background_block_gutter_uses_block_background_fill() {
         // Background blocks own the gutter via the existing full-area fill, so
-        // the no-bg clear must not run for them. Pin GrokNight: UserPrompt
-        // line bands read `Theme::current()` (not the EntryRenderer theme
-        // handle), and under nextest a fresh process otherwise seeds from the
-        // developer's `~/.grok/config.toml` (e.g. oscura-midnight).
-        let _pin = pin_theme();
-        let theme = Theme::current();
+        // the no-bg clear must not run for them. Concrete theme so bg_light !=
+        // bg_base (Theme::current() quantizes both to Reset in the test env).
+        let theme = Theme::groknight();
         assert_ne!(
             theme.bg_light, theme.bg_base,
             "test premise: block bg must differ from base bg"
@@ -1597,16 +1555,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
-        // Sample the trailing gap cell left of the bubble-copy edge (never
-        // overwritten by the right-aligned timestamp string). UserPrompt has
-        // vpad → content on row 1.
-        let content_right = gutter_band(&renderer, width).end;
-        let inset = bubble_copy_trailing_inset(&entry.block, &renderer.appearance);
-        let gutter_x = if inset > 0 {
-            content_right - inset // gap cell; ⧉ is content_right - 1
-        } else {
-            gutter_band(&renderer, width).start
-        };
+        // Gutter cell carries the block background, proving the block fill
+        // (not the bg_base clear) owns it. UserPrompt has vpad → content on row 1.
+        let gutter_x = gutter_band(&renderer, width).start + 2;
         let gutter_cell = buf.cell((gutter_x, 1)).unwrap();
         assert_eq!(
             gutter_cell.bg, theme.bg_light,
@@ -1643,7 +1594,7 @@ mod tests {
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         let content_left =
-            HorizontalLayout::ACCENT + renderer.appearance.scrollback.layout.block_pad_left;
+            HorizontalLayout::ACCENT + renderer.appearance().scrollback.layout.block_pad_left;
         let ghost_x = gutter_band(&renderer, width).start + 2;
 
         // Clean render: find the code row by its token, capture its background.
@@ -1834,8 +1785,8 @@ mod tests {
     #[test]
     fn estimate_wrapped_line_count_saturates_at_u16_max() {
         // > u16::MAX source lines must cap, not overflow the running total.
-        let many = "\n".repeat(70_000);
-        assert_eq!(estimate_wrapped_line_count(&many, 80), u16::MAX);
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt("\n".repeat(70_000)));
+        assert_eq!(entry.estimate_source_lines(80), u16::MAX);
     }
 
     #[test]

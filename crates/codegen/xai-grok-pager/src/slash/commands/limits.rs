@@ -1,4 +1,5 @@
-//! `/limits` — SuperGrok included / dollar extras / console path detail.
+//! `/limits`. SuperGrok included period limits, SuperGrok dollar credits, and
+//! console path detail.
 //!
 //! Multi-line detail for spend meters. Session token/cost stays on `/usage`
 //! (`/cost`). Footer stays one-line; this is the full snapshot.
@@ -19,7 +20,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn description(&self) -> &str {
-        "View SuperGrok included, dollar extras, and console limits"
+        "View included SuperGrok period limits, SuperGrok dollar credits, and console limits"
     }
 
     fn usage(&self) -> &str {
@@ -82,6 +83,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }
@@ -135,6 +137,23 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "usage"),
             "/usage must remain for session tokens"
+        );
+    }
+
+    #[test]
+    fn limits_description_names_supergrok_dollar_credits_not_extras() {
+        let desc = LimitsCommand.description();
+        assert!(
+            desc.contains("SuperGrok dollar credits"),
+            "slash picker must name SuperGrok dollar credits: {desc}"
+        );
+        assert!(
+            desc.contains("included SuperGrok period limits"),
+            "slash picker must name included SuperGrok period limits: {desc}"
+        );
+        assert!(
+            !desc.to_ascii_lowercase().contains("extras"),
+            "slash picker must not teach extras as a nickname: {desc}"
         );
     }
 }

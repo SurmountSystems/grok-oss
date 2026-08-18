@@ -12,11 +12,23 @@ use crate::app::agent_view::{AgentView, PromptMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
 
 fn page_flip_on_send() -> bool {
     crate::appearance::cache::load_page_flip_on_send()
+}
+
+/// Slash output skips the prompt drain; pin it at the top when page-flip is on.
+pub(super) fn push_and_page_flip(scrollback: &mut ScrollbackState, block: RenderBlock) {
+    scrollback.push_block(block);
+    if !page_flip_on_send() {
+        return;
+    }
+    let idx = scrollback.len() - 1;
+    scrollback.scroll_to_entry_top(idx);
+    scrollback.enable_follow_with_preserve();
 }
 
 fn combine_queued_prompts_enabled() -> bool {
@@ -59,9 +71,15 @@ fn combine_queued_prompts_enabled() -> bool {
 /// (e.g. `[2, 3]` shown/run as `[3, 2]`). Requiring an empty local queue keeps
 /// later prompts behind the older ones (they join the local queue and drain in
 /// order), preserving FIFO.
-pub(super) fn immediate_server_send_eligible(agent: &AgentView) -> bool {
+///
+/// **Leader gate (`leader_mode`):** the shared queue exists to hold every
+/// attached client to one order. With no leader there is one client, and the
+/// two queues merge as *server rows first, then local rows*, so a local row
+/// (slash command, image prompt, scheduled prompt) can never move above them.
+pub(super) fn immediate_server_send_eligible(agent: &AgentView, leader_mode: bool) -> bool {
     let server_busy = agent.session.state.is_turn_running() || !agent.shared_queue.is_empty();
-    server_busy
+    leader_mode
+        && server_busy
         && agent.session.session_id.is_some()
         && agent.session.pending_prompts.is_empty()
         && !matches!(agent.prompt_mode, PromptMode::EditingQueued { .. })
@@ -187,7 +205,7 @@ pub(super) struct QueueDrain {
 }
 
 impl QueueDrain {
-    pub(crate) fn blocked() -> Self {
+    fn blocked() -> Self {
         Self {
             effects: Vec::new(),
             page_flip_entry: None,
@@ -196,16 +214,6 @@ impl QueueDrain {
 }
 
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
-    maybe_drain_queue_with(agent, false)
-}
-
-/// Drain the next queued prompt even when background subagents would hold the
-/// queue. Used by send-now while the parent is idle with live children.
-pub(super) fn force_drain_queue_past_background(agent: &mut AgentView) -> QueueDrain {
-    maybe_drain_queue_with(agent, true)
-}
-
-fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -226,14 +234,6 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
         log_blocked("turn_running", sid);
         return QueueDrain::blocked();
     }
-    // Hold the drain while plan approval is open. A pending follow-up (including
-    // a deferred `/plan <desc>`) must not start a new turn that would cancel or
-    // corrupt the in-flight exit_plan_mode decision — it waits for a clean
-    // independent next turn after the user approves, revises, or quits.
-    if agent.plan_approval_view.is_some() {
-        log_blocked("plan_approval_open", sid);
-        return QueueDrain::blocked();
-    }
     // Hold the drain during an in-flight model switch. See the
     // `model_switch_pending` field doc for why a reconnect must clear it.
     if agent.session.model_switch_pending {
@@ -244,10 +244,6 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
         log_blocked("loading_replay", sid);
         return QueueDrain::blocked();
     }
-    // Background subagents alone do not hold drain (operator 2026-08-09):
-    // primary idle → queue may start a normal main turn while children run.
-    // `bypass_background_hold` remains for ForceDrainQueue / legacy call sites.
-    let _ = bypass_background_hold;
     // Server-owned next turn: a non-running server row (including this
     // client's own in-flight send-now echo) drains shell-side — the
     // `queue/changed(running_prompt_id)` adoption starts it. Draining a LOCAL
@@ -384,9 +380,6 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
-            // Whole-turn cancel-resume text (SIGTERM / killall / Esc after first
-            // activity). Skill display text counts; rewind stash below does not.
-            agent.session.note_cancel_resume_prompt_text(&queued.text);
             // Stash for cancel-with-restore. Only plain (non-skill) prompts
             // can be reversed back into the input box.
             if queued.wire_blocks.is_none() {
@@ -408,31 +401,7 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
             agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
 
             let combined_segs = queued.combined_texts.clone();
-            // Deferred enter-plan is checked first so wire/images/combined arms
-            // cannot drop the mode switch. Slash `/plan <desc>` only stamps
-            // plain text today; non-plain enter-plan rows fail closed to
-            // `SetModeThenPrompt` (display text + skill ranges) rather than
-            // sending agent-mode blocks.
-            let effects = if queued.enter_plan_mode {
-                if queued.wire_blocks.is_some() || !queued.images.is_empty() || multi {
-                    tracing::warn!(
-                        target: "qtrace",
-                        has_wire = queued.wire_blocks.is_some(),
-                        image_count = queued.images.len(),
-                        multi,
-                        "enter_plan_mode row had non-plain payload; draining as plain SetModeThenPrompt"
-                    );
-                }
-                agent.plan_mode_pending = Some(true);
-                vec![Effect::SetModeThenPrompt {
-                    session_id,
-                    mode_id: acp::SessionModeId::new("plan"),
-                    agent_id,
-                    text: queued.text,
-                    prompt_id,
-                    skill_token_ranges: queued.skill_token_ranges,
-                }]
-            } else if let Some(mut blocks) = queued.wire_blocks {
+            let effects = if let Some(mut blocks) = queued.wire_blocks {
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
                 // so the pager can reconstruct the clean prompt on session
@@ -515,6 +484,8 @@ fn maybe_drain_queue_with(agent: &mut AgentView, bypass_background_hold: bool) -
         QueueEntryKind::Command => {
             // Currently only `/compact` — future slash commands will branch here.
             agent.session.start_command(AgentCommand::Compact);
+            // Compact owns the pane; a leftover wake marker must not shadow stop.
+            agent.running_wake_turn = None;
             agent.turn_started_at = Some(Instant::now());
 
             QueueDrain {
@@ -603,50 +574,38 @@ pub(crate) fn shim_renders_own_user_block(kind: &str, text: Option<&str>) -> boo
 }
 
 /// Trailing turn-starting `UserPrompt` matching `text`, scanning back past
-/// turn-boundary chrome (`SessionEvent`/`System`); any content block ends the
-/// scan. Interjection bubbles are never claimable here (see
-/// [`trailing_interjection_matching`] for interject-fallback adoption).
+/// turn-boundary chrome. `claim_interjection` skips other interjections and
+/// keeps the oldest match.
 fn trailing_user_prompt_matching(
     agent: &AgentView,
     text: &str,
+    claim_interjection: bool,
 ) -> Option<(usize, crate::scrollback::EntryId)> {
+    let mut found = None;
     for idx in (0..agent.scrollback.len()).rev() {
-        let entry = agent.scrollback.entry(idx)?;
-        match &entry.block {
-            RenderBlock::UserPrompt(ub) if ub.text == text && !ub.is_interjection => {
-                return Some((idx, entry.id));
-            }
-            RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Prompt-id prefix the shell uses when a mid-turn interjection misses its
-/// turn and is converted into a standalone prompt (see shell
-/// `INTERJECT_FALLBACK_PROMPT_PREFIX`). Every pane already painted the text
-/// from `x.ai/session/interjection`; the turn-start shim must reuse that
-/// bubble rather than push a second green human rail.
-const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
-
-/// Trailing interjection bubble matching `text` (same scan rules as
-/// [`trailing_user_prompt_matching`], but only `is_interjection` blocks).
-fn trailing_interjection_matching(
-    agent: &AgentView,
-    text: &str,
-) -> Option<(usize, crate::scrollback::EntryId)> {
-    for idx in (0..agent.scrollback.len()).rev() {
-        let entry = agent.scrollback.entry(idx)?;
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            break;
+        };
         match &entry.block {
             RenderBlock::UserPrompt(ub) if ub.text == text && ub.is_interjection => {
-                return Some((idx, entry.id));
+                if claim_interjection {
+                    found = Some((idx, entry.id));
+                    continue;
+                }
+                break;
             }
+            RenderBlock::UserPrompt(ub) if ub.text == text && !ub.is_interjection => {
+                if !claim_interjection {
+                    return Some((idx, entry.id));
+                }
+                break;
+            }
+            RenderBlock::UserPrompt(ub) if claim_interjection && ub.is_interjection => continue,
             RenderBlock::SessionEvent(_) | RenderBlock::System(_) => continue,
-            _ => return None,
+            _ => break,
         }
     }
-    None
+    found
 }
 
 /// Last `n` non-interjection user prompts (oldest → newest), scanning back past
@@ -701,7 +660,7 @@ fn paint_or_reuse_combined_user_bubbles(
     }
 
     let joined = xai_prompt_queue::join_texts(segments.iter().map(String::as_str));
-    if let Some((_, id)) = trailing_user_prompt_matching(agent, &joined) {
+    if let Some((_, id)) = trailing_user_prompt_matching(agent, &joined, false) {
         agent.scrollback.remove_entry(id);
     }
 
@@ -777,19 +736,46 @@ pub(super) fn push_send_now_user_block(
         .insert(prompt_id.to_string(), (entry_id, edited));
 }
 
-/// Arm the send-now cancel expectation for queue row `id` and paint its user
-/// block — the arm hides the row, so the paint must accompany it. No-op when
-/// the shell won't cancel-and-send (idle / goal turn); no paint for kinds the
-/// adoption renders no block for (bash). `new_text` = edit-interject override.
-///
-/// Soft mid-turn Interject no longer uses cancel-and-send; this remains for
-/// residual blocked-wait `SendPromptNow` paths and painted-pending unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: Option<&str>) {
-    if !agent.expects_send_now_cancel() {
+/// Whether a Send Now row should paint an optimistic block. Returns `false`
+/// unless the client expects a Send Now cancel, or the row belongs to an active
+/// goal on a committed, running turn. Arms the cancel expectation only on the
+/// expects-cancel path; an active goal paints WITHOUT arming so its interjection
+/// notification can claim the block. Bash rows and idle sessions do neither.
+fn paint_send_now_and_maybe_arm(agent: &mut AgentView, id: &str) -> bool {
+    let expects_cancel = agent.expects_send_now_cancel();
+    let goal_active = agent
+        .goal_state
+        .as_ref()
+        .is_some_and(|goal| matches!(goal.status, crate::app::agent::GoalDisplayStatus::Active));
+    if !(expects_cancel
+        || (goal_active && agent.session.state.is_turn_running() && agent.front_message_committed))
+    {
+        return false;
+    }
+    if expects_cancel {
+        agent.arm_send_now_expectation(id.to_string());
+    }
+    true
+}
+
+/// Active goals paint without arming cancellation so their authoritative
+/// interjection notification can claim the block.
+pub(super) fn arm_send_now_and_paint_dispatched(
+    agent: &mut AgentView,
+    prompt_id: &str,
+    text: &str,
+) {
+    if !paint_send_now_and_maybe_arm(agent, prompt_id) {
         return;
     }
-    agent.arm_send_now_expectation(id.to_string());
+    push_send_now_user_block(agent, prompt_id, "prompt", text, /* edited */ false);
+}
+
+/// Active-goal rows paint without arming cancellation; bash rows remain queued.
+pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: Option<&str>) {
+    if !paint_send_now_and_maybe_arm(agent, id) {
+        return;
+    }
     let row = agent
         .shared_queue
         .iter()
@@ -897,11 +883,10 @@ pub(crate) fn apply_turn_start_shim(
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
             paint_or_reuse_combined_user_bubbles(agent, &segments);
-        let restore = text
-            .clone()
-            .unwrap_or_else(|| xai_prompt_queue::join_texts(segments.iter().map(String::as_str)));
-        agent.session.note_cancel_resume_prompt_text(&restore);
         if rewindable {
+            let restore = text.clone().unwrap_or_else(|| {
+                xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
+            });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
             // An adopted turn arrives with text only, never the original
             // attachments, so a Ctrl+C rewind restores just the joined text.
@@ -927,6 +912,7 @@ pub(crate) fn apply_turn_start_shim(
         // The block may already be painted: consume the send-now paint's
         // id-keyed entry, else reuse a trailing echo block by text — never
         // double-push the user-prompt row.
+        let claim_interjection = prompt_id.starts_with("interject-fallback-");
         let map_painted = agent.send_now_painted_blocks.remove(&prompt_id).and_then(
             |(id, edited)| -> Option<(usize, crate::scrollback::EntryId)> {
                 let idx = agent.scrollback.index_of_id(id)?;
@@ -945,7 +931,7 @@ pub(crate) fn apply_turn_start_shim(
                 // (identical stacked texts).
                 if let Some((_, dup)) = text
                     .as_deref()
-                    .and_then(|t| trailing_user_prompt_matching(agent, t))
+                    .and_then(|t| trailing_user_prompt_matching(agent, t, claim_interjection))
                     && dup != id
                     && !agent
                         .send_now_painted_blocks
@@ -957,58 +943,38 @@ pub(crate) fn apply_turn_start_shim(
                 Some((agent.scrollback.index_of_id(id)?, id))
             },
         );
-        let already_painted = map_painted
-            .or_else(|| {
-                text.as_deref()
-                    .and_then(|t| trailing_user_prompt_matching(agent, t))
-                    // Never claim a block owned by another pending send-now.
-                    .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
-            })
-            .or_else(|| {
-                // Stranded / idle interjections become `interject-fallback-*` turns.
-                // Live paint already happened via optimistic local push and/or
-                // `x.ai/session/interjection` (flagged `is_interjection`). The
-                // normal trailing match skips those on purpose (so a mid-turn
-                // steer is not stolen by the next real turn). Claim them only for
-                // this shell prefix so we do not paint a second identical green
-                // human rail when the fallback turn starts.
-                if !prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
-                    return None;
-                }
-                text.as_deref()
-                    .and_then(|t| trailing_interjection_matching(agent, t))
-                    .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
-            });
+        let already_painted = map_painted.or_else(|| {
+            text.as_deref()
+                .and_then(|t| trailing_user_prompt_matching(agent, t, claim_interjection))
+                // Never claim a block owned by another pending send-now.
+                .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
+        });
         let (prompt_idx, prompt_entry_id) = if let Some(found) = already_painted {
+            if claim_interjection
+                && let Some(RenderBlock::UserPrompt(ub)) =
+                    agent.scrollback.entry_mut(found.0).map(|e| &mut e.block)
+            {
+                ub.is_interjection = false;
+            }
             found
         } else {
             let id = agent.scrollback.push_block(block);
             (agent.scrollback.len().saturating_sub(1), id)
         };
-        if let Some(text) = text {
+        if rewindable && let Some(text) = text {
             // The rewind restore must match the on-screen (possibly edited)
             // block text, not the adoption's stale mirror text.
             let restore_text = match agent.scrollback.entry(prompt_idx).map(|e| &e.block) {
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
-            agent.session.note_cancel_resume_prompt_text(&restore_text);
-            if rewindable {
-                agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                    text: restore_text,
-                    images: Vec::new(),
-                    scrollback_entry: prompt_entry_id,
-                    combined_scrollback_entries: Vec::new(),
-                    chip_elements: Vec::new(),
-                });
-            }
-        }
-        // Interject-fallback turns persist the user echo without a live
-        // broadcast (shell `UserEchoMode::PersistOnly`). `start_turn` armed
-        // `expect_user_echo`; clear it so a stuck skip does not swallow the
-        // next real turn's echo.
-        if prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
-            agent.session.tracker.clear_user_echo_skip();
+            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                text: restore_text,
+                images: Vec::new(),
+                scrollback_entry: prompt_entry_id,
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
         }
         if skip_entry_top {
             // Send-now: follow at the tail; never entry-top jump.
@@ -1067,12 +1033,7 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
-    // Fearless global pause: hold every session's queue until resume.
-    if app.global_work_pause.is_active() {
-        return vec![];
-    }
-    // Soft stop holding: current turn finished; do not start further queue items.
-    if app.soft_stop.blocks_drain() {
+    if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
     }
     let drain = {
@@ -1085,36 +1046,9 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
     drain.effects
 }
 
-/// Force-drain past background-subagent hold; same page-flip bookkeeping.
-pub(crate) fn force_drain_queue_past_background_and_note_peek(
-    app: &mut AppView,
-    agent_id: AgentId,
-) -> Vec<Effect> {
-    if app.global_work_pause.is_active() {
-        return vec![];
-    }
-    // Explicit send-now while soft-stop holds: release the hold (user intent
-    // to start work) then drain.
-    if app.soft_stop.is_holding() {
-        let _ = app.soft_stop.toggle();
-        app.show_toast("Soft stop cleared for send-now");
-    }
-    let drain = {
-        let Some(agent) = app.agents.get_mut(&agent_id) else {
-            return vec![];
-        };
-        force_drain_queue_past_background(agent)
-    };
-    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
-    drain.effects
-}
-
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
-        return vec![];
-    }
-    if app.global_work_pause.is_active() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -1123,42 +1057,9 @@ pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     maybe_drain_queue_and_note_peek(app, id)
 }
 
-/// Drain past a background-subagent hold (send-now while parent idle + children live).
-///
-/// Toast is applied here (not at the key handler) so we only claim "starting
-/// despite background subagents" when the force path actually drained. Hard
-/// gates that force cannot bypass (plan approval, model switch, …) get an
-/// accurate message instead of a misleading success toast.
-pub(super) fn dispatch_force_drain_queue(app: &mut AppView) -> Vec<Effect> {
-    if app.reconnect_pending {
-        return vec![];
-    }
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let plan_approval_open = app
-        .agents
-        .get(&id)
-        .is_some_and(|a| a.plan_approval_view.is_some());
-    let effects = force_drain_queue_past_background_and_note_peek(app, id);
-    if let Some(agent) = app.agents.get_mut(&id) {
-        if effects.is_empty() {
-            if plan_approval_open {
-                agent.show_toast("Still waiting on plan approval");
-            }
-            // Other hard gates (model switch, server queue owns next, …): leave
-            // the queue held without a false "starting despite…" toast.
-        } else {
-            agent.show_toast("Interject — starting despite background subagents");
-        }
-    }
-    effects
-}
-
 /// `Action::QueueInterjectShared` arm: map the (possibly edited) queue
 /// interject to a fire-and-forget effect scoped to the active agent's
-/// session. Soft only — no send-now cancel arming; the shell buffers into
-/// the running turn and broadcasts `x.ai/session/interjection` for paint.
+/// session.
 pub(super) fn dispatch_queue_interject_shared(
     app: &mut AppView,
     id: String,
@@ -1172,22 +1073,8 @@ pub(super) fn dispatch_queue_interject_shared(
                 if let Some(text) = &new_text {
                     record_interject_prompt_history(agent, text);
                 }
-                // Soft: never arm send-now cancel. Multi-client paint comes from
-                // the shell's interjection broadcast (no optimistic block —
-                // matches `Action::QueueInterjectShared` docs).
-                agent.suppress_parked_marker_on_interject();
-                // Success toast only when the client preconditions match what
-                // the shell will buffer (turn running + plain prompt). Idle /
-                // non-plain no-ops must not claim "Interjection sent".
-                let turn_running = agent.session.state.is_turn_running();
-                let plain_prompt = agent
-                    .shared_queue
-                    .iter()
-                    .find(|e| e.id == id)
-                    .is_some_and(|e| e.kind == "prompt");
-                if turn_running && plain_prompt {
-                    agent.show_toast("Interjection sent");
-                }
+                agent.note_self_originated_prompt(&id);
+                arm_send_now_and_paint(agent, &id, new_text.as_deref());
             });
             vec![Effect::QueueInterject {
                 session_id,
@@ -1206,7 +1093,7 @@ mod tests {
     use crate::app::actions::Action;
     use crate::app::agent::AgentState;
     use crate::app::agent_view::test_fixtures::{
-        complete_task_output_wait_call, count_parked, running_subagent_info,
+        complete_task_output_wait_call, count_turn_markers, running_subagent_info,
         simulate_subagent_wait, simulate_task_output_wait, simulate_task_output_wait_call,
     };
     use crate::app::dispatch::router::dispatch;
@@ -1536,6 +1423,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn arm_send_now_skips_paint_while_front_uncommitted() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.start_turn_boundary(Some("p-front"));
+        agent.session.current_prompt_id = Some("p-front".into());
+        agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            id: "p-next".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "flush me".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+        let before = agent.scrollback.len();
+        arm_send_now_and_paint(agent, "p-next", None);
+        assert!(agent.expect_send_now_cancel.is_none());
+        assert_eq!(agent.scrollback.len(), before);
+        assert!(!agent.send_now_painted_blocks.contains_key("p-next"));
+
+        agent.front_message_committed = true;
+        arm_send_now_and_paint(agent, "p-next", None);
+        assert_eq!(agent.expect_send_now_cancel.as_deref(), Some("p-next"));
+        assert!(agent.send_now_painted_blocks.contains_key("p-next"));
+    }
+
     /// The turn-start shim sets `bash_turn` and pushes NO user block for
     /// an adopted `bash` entry.
     #[test]
@@ -1560,6 +1476,48 @@ mod tests {
         // No user/display block is pushed (the shell's execute block IS the entry).
         assert_eq!(agent.scrollback.len(), before);
         assert!(agent.session.in_flight_prompt.is_none());
+    }
+
+    #[test]
+    fn shim_interject_fallback_reuses_interjection_bubble() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt("steer-a"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt("steer-b"));
+        let before = agent.scrollback.len();
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-a".into(),
+            Some("steer-a".into()),
+            "prompt",
+            None,
+        );
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-b".into(),
+            Some("steer-b".into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(agent.scrollback.len(), before);
+        match &agent.scrollback.entry(0).unwrap().block {
+            RenderBlock::UserPrompt(ub) => {
+                assert!(!ub.is_interjection);
+                assert_eq!(ub.text, "steer-a");
+            }
+            other => panic!("expected user bubble, got {other:?}"),
+        }
+        match &agent.scrollback.entry(1).unwrap().block {
+            RenderBlock::UserPrompt(ub) => {
+                assert!(!ub.is_interjection);
+                assert_eq!(ub.text, "steer-b");
+            }
+            other => panic!("expected user bubble, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1829,83 +1787,6 @@ mod tests {
         }
     }
 
-    /// Regression (dogfood): soft interject / queue interject paints once via
-    /// `x.ai/session/interjection` (or optimistic local push). When the
-    /// interjection misses the running turn and the shell converts it to an
-    /// `interject-fallback-*` prompt, the turn-start shim must reuse that
-    /// interjection bubble — not push a second identical green human rail.
-    #[test]
-    fn shim_reuses_interjection_bubble_for_interject_fallback_turn() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let text = "Also it appears we've had a regression [Image #1]";
-        // Live paint already happened (dispatch_interject and/or broadcast).
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(text));
-        let before = agent.scrollback.len();
-        agent.note_self_originated_prompt("interject-fallback-019e24b7-test");
-        apply_turn_start_shim(
-            agent,
-            "interject-fallback-019e24b7-test".into(),
-            Some(text.into()),
-            "prompt",
-            None,
-        );
-        assert_eq!(
-            agent.scrollback.len(),
-            before,
-            "interject-fallback adoption must not paint a second user bubble"
-        );
-        assert_eq!(
-            user_prompt_count(agent, text),
-            1,
-            "exactly one human rail for the interjected text"
-        );
-        assert!(
-            !agent.session.tracker.expects_user_echo(),
-            "fallback has no live user-echo; skip must not stick for the next turn"
-        );
-        let last = agent.scrollback.entry(before - 1).expect("trailing entry");
-        match &last.block {
-            RenderBlock::UserPrompt(ub) => {
-                assert_eq!(ub.text, text);
-                assert!(
-                    ub.is_interjection,
-                    "reused bubble keeps interjection flag (shell numbering)"
-                );
-            }
-            other => panic!("expected user prompt, got {other:?}"),
-        }
-    }
-
-    /// A normal (non-fallback) turn must not steal a trailing mid-turn
-    /// interjection bubble that happens to share the same text.
-    #[test]
-    fn shim_does_not_claim_interjection_for_ordinary_prompt_id() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let text = "same text";
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(text));
-        let before = agent.scrollback.len();
-        agent.note_self_originated_prompt("ordinary-prompt-id");
-        apply_turn_start_shim(
-            agent,
-            "ordinary-prompt-id".into(),
-            Some(text.into()),
-            "prompt",
-            None,
-        );
-        assert_eq!(
-            agent.scrollback.len(),
-            before + 1,
-            "ordinary adoption must still paint its own turn-start bubble"
-        );
-        assert_eq!(user_prompt_count(agent, text), 2);
-    }
-
     #[test]
     fn shim_paints_one_bubble_per_combined_segment() {
         let mut app = test_app_with_agent();
@@ -1981,11 +1862,9 @@ mod tests {
             .count()
     }
 
-    /// Soft queue interject never paints at dispatch — multi-client paint is
-    /// the shell's `x.ai/session/interjection` broadcast (see
-    /// `dispatch_queue_interject_shared`). Cancel-and-send paint is gone.
+    /// Queue-row send-now paints at dispatch; the adoption reuses the block.
     #[test]
-    fn interject_contract_queue_shared_no_paint_at_dispatch() {
+    fn queue_interject_shared_paints_user_block_at_arm() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         {
@@ -2017,21 +1896,20 @@ mod tests {
         let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
             user_prompt_count(agent, "ty"),
-            0,
-            "soft queue interject must not paint a user block at dispatch"
+            1,
+            "send-now must paint the user block at dispatch"
         );
-        assert!(
-            agent.expect_send_now_cancel.is_none(),
-            "soft queue interject must not arm send-now cancel"
-        );
+        // The adoption shim reuses the painted block instead of double-pushing.
+        agent.note_self_originated_prompt("p-ty");
+        apply_turn_start_shim(agent, "p-ty".into(), Some("ty".into()), "prompt", None);
         assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Interjection sent"),
+            user_prompt_count(agent, "ty"),
+            1,
+            "turn-start adoption must reuse the dispatch-painted block"
         );
     }
 
-    /// No paint when idle (adoption renders the drain) or for bash rows;
-    /// no false "Interjection sent" toast either (shell would no-op).
+    /// No paint when idle (adoption renders the drain) or for bash rows.
     #[test]
     fn queue_interject_shared_skips_paint_when_not_arming_or_bash() {
         let mut app = test_app_with_agent();
@@ -2047,7 +1925,7 @@ mod tests {
                 position: 0,
                 combined_texts: None,
             }];
-        // Idle (no running turn): no arm, no paint, no success toast.
+        // Idle (no running turn): expects_send_now_cancel is false — no arm, no paint.
         let _ = dispatch(
             Action::QueueInterjectShared {
                 id: "p-idle".into(),
@@ -2057,21 +1935,11 @@ mod tests {
             &mut app,
         );
         assert_eq!(user_prompt_count(&app.agents[&id], "idle row"), 0);
-        assert!(
-            app.agents[&id].toast.is_none()
-                || !app.agents[&id]
-                    .toast
-                    .as_ref()
-                    .is_some_and(|(m, _)| m == "Interjection sent"),
-            "idle soft interject must not claim success"
-        );
 
-        // Bash row mid-turn: effect may still fire (legacy callers), but no
-        // paint and no success toast (UI refuses bash before dispatch).
+        // Bash row mid-turn: armed, but its adoption paints no user block.
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
-            agent.toast = None;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
                 id: "p-bash".into(),
                 version: 1,
@@ -2092,11 +1960,6 @@ mod tests {
             &mut app,
         );
         assert_eq!(user_prompt_count(&app.agents[&id], "ls -la"), 0);
-        assert!(
-            app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()) != Some("Interjection sent"),
-            "bash soft interject must not claim success"
-        );
-        assert!(app.agents[&id].expect_send_now_cancel.is_none());
     }
 
     /// Composer/local-row send-now paints at dispatch too.
@@ -2238,24 +2101,40 @@ mod tests {
     }
 
     /// Edited paint outranks the adoption's stale mirror text.
-    ///
-    /// Soft `QueueInterjectShared` no longer paints optimistically (shell
-    /// broadcast owns multi-client paint). Set up an edited painted block the
-    /// same way other shim paint tests do (`push_send_now_user_block` with
-    /// `edited = true`) so this asserts adoption-shim law only.
     #[test]
     fn shim_keeps_edited_paint_over_stale_adoption_text() {
         let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.note_self_originated_prompt("p-ed");
-        // Edited override: paint carries fresher text than the mirror adoption.
-        push_send_now_user_block(agent, "p-ed", "prompt", "edited body", true);
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+                id: "p-ed".into(),
+                version: 1,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: "original".into(),
+                position: 0,
+                combined_texts: None,
+            }];
+        }
+        let _ = dispatch(
+            Action::QueueInterjectShared {
+                id: "p-ed".into(),
+                expected_version: 1,
+                new_text: Some("edited body".into()),
+            },
+            &mut app,
+        );
+        let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
             user_prompt_count(agent, "edited body"),
             1,
             "the paint must show the edited text the shell will run"
         );
         // Adoption captures the pre-edit mirror text; the edited paint wins.
+        agent.note_self_originated_prompt("p-ed");
         apply_turn_start_shim(
             agent,
             "p-ed".into(),
@@ -2568,142 +2447,59 @@ mod tests {
     }
 
     #[test]
-    fn parked_marker_fires_once_on_empty_queue_park() {
+    fn parked_wait_renders_parked_without_markers() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
-        assert!(agent.renders_parked(), "marker + live wait = parked look");
-
-        // Idempotent within the same park.
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "one marker per park");
+        assert!(agent.renders_parked(), "live wait = parked look");
+        assert_eq!(count_turn_markers(agent), 0, "a park writes no marker");
     }
 
-    /// A re-park after new parent output keeps a **single** parked marker for
-    /// the prompt turn. Epoch bumps must not stack another "Worked for" row
-    /// (regression: append-per-tick spam while subagents/waits run).
     #[test]
-    fn parked_marker_stays_single_on_repark_after_new_parent_output() {
+    fn sibling_batch_park_writes_no_markers() {
         use crate::acp::meta::NotificationMeta;
+        use std::sync::Arc;
 
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
         let agent = app.agents.get_mut(&id).unwrap();
 
-        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 30_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "same episode must dedupe");
+        // Blocking get_task_output registers first; anchor still running.
+        simulate_task_output_wait_call(agent, "wait-1", "bg-anchor", 120_000);
+        agent
+            .session
+            .bg_tasks
+            .insert("bg-anchor".into(), running_bg_task("bg-anchor"));
+        assert_eq!(count_turn_markers(agent), 0);
 
-        complete_task_output_wait_call(agent, "wait-1");
-        assert!(!agent.renders_parked(), "no parked look between parks");
-        // Between-parks content streams through the tracker (the production
-        // path), bumping the agent-output epoch.
-        assert!(agent.session.tracker.handle_update(
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new("between-parks content")
-            ),)),
-            &NotificationMeta::default(),
-            &mut agent.scrollback,
-        ));
-
-        simulate_task_output_wait_call(agent, "wait-2", "bg-1", 600_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(
-            count_parked(agent),
-            1,
-            "re-park must not stack a second Worked-for row"
-        );
-        assert!(agent.renders_parked());
-    }
-
-    /// Named contract: N mid-park agent-output epoch ticks (same-stream
-    /// thoughts while still waiting) must not append N "Worked for" transcript
-    /// rows. One parked marker; elapsed refreshes in place.
-    #[test]
-    fn parked_marker_not_stacked_on_epoch_ticks_mid_park() {
-        use crate::acp::meta::NotificationMeta;
-        use crate::scrollback::block::RenderBlock;
-        use crate::scrollback::blocks::SessionEvent;
-
-        crate::appearance::cache::set_show_thinking_blocks(true);
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        let agent = app.agents.get_mut(&id).unwrap();
-        // Back-date turn start so elapsed advances across refreshes.
-        agent.turn_started_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(90));
-
-        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 600_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
-
-        let first_msg = (0..agent.scrollback.len())
-            .rev()
-            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-                Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.event.message()),
-                _ => None,
-            })
-            .expect("parked marker message");
-        assert!(
-            first_msg.starts_with("Worked for"),
-            "expected Worked for marker, got {first_msg:?}"
-        );
-
-        // Simulate the ACP path: each thought bumps agent_output_epoch, then
-        // maybe_push_parked_marker re-evaluates (was: append another row).
-        for i in 0..8 {
-            assert!(
-                agent.session.tracker.handle_update(
-                    acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
-                        acp::ContentBlock::Text(acp::TextContent::new(format!("tick-{i}"))),
-                    )),
-                    &NotificationMeta::default(),
-                    &mut agent.scrollback,
+        for i in 2..=5 {
+            let tc_id = format!("wait-batch-tc{i}");
+            agent.session.handle_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(
+                        acp::ToolCallId::new(Arc::from(tc_id.as_str())),
+                        "run_terminal_command",
+                    )
+                    .kind(acp::ToolKind::Execute)
+                    .status(acp::ToolCallStatus::Pending),
                 ),
-                "thought {i} should apply"
-            );
-            agent.maybe_push_parked_marker();
-            assert_eq!(
-                count_parked(agent),
-                1,
-                "epoch tick {i} must not stack another Worked-for row"
+                &NotificationMeta::default(),
+                &mut agent.scrollback,
             );
         }
-
-        let last = (0..agent.scrollback.len())
-            .rev()
-            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-                Some(RenderBlock::SessionEvent(b)) if b.parked => Some(&b.event),
-                _ => None,
-            })
-            .expect("single parked marker still present");
-        match last {
-            SessionEvent::TurnCompleted { elapsed: Some(e) } => {
-                assert!(
-                    e.as_secs() >= 90,
-                    "in-place refresh should keep live elapsed, got {e:?}"
-                );
-            }
-            other => panic!("expected parked TurnCompleted, got {other:?}"),
-        }
+        assert_eq!(
+            count_turn_markers(agent),
+            0,
+            "a sibling-batch park must write zero markers"
+        );
     }
 
-    /// Rows landing during a park WITHOUT parent output (chips and other
-    /// direct scrollback pushes) stay in the same park episode — the marker
-    /// is never re-pushed under them; the "… still running" status row carries
-    /// the ongoing-work story instead.
     #[test]
-    fn parked_marker_stays_single_when_rows_land_mid_park() {
+    fn chips_and_completions_mid_park_add_no_markers() {
         use crate::scrollback::block::RenderBlock;
 
         let mut app = test_app_with_agent();
@@ -2712,170 +2508,69 @@ mod tests {
         let agent = app.agents.get_mut(&id).unwrap();
 
         simulate_task_output_wait_call(agent, "wait-1", "bg-1", 30_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
+        assert_eq!(count_turn_markers(agent), 0);
 
         agent.scrollback.push_block(RenderBlock::bg_task_completed(
             "sleep 5",
             "bg-2",
             std::time::Duration::from_secs(5),
         ));
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "chips never re-push the marker");
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "still the same park episode");
+        assert_eq!(count_turn_markers(agent), 0, "chips add no markers");
+        assert!(agent.renders_parked(), "chips keep the parked look");
     }
 
-    /// A re-park whose previous marker is still the transcript tail pushes
-    /// nothing (poll loop: wait expiry → immediate re-issue).
     #[test]
-    fn parked_marker_not_repushed_when_marker_still_tail() {
+    fn wait_completion_clears_parked_look() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
         let agent = app.agents.get_mut(&id).unwrap();
 
         simulate_task_output_wait_call(agent, "wait-1", "bg-1", 15_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
+        assert!(agent.renders_parked());
 
-        // Wait tools render no blocks, so the marker stays the tail.
         complete_task_output_wait_call(agent, "wait-1");
+        assert!(!agent.renders_parked(), "no parked look between parks");
+        assert_eq!(count_turn_markers(agent), 0);
+
         simulate_task_output_wait_call(agent, "wait-2", "bg-1", 15_000);
-        agent.maybe_push_parked_marker();
+        assert!(agent.renders_parked(), "a re-park flips the look back on");
+        assert_eq!(count_turn_markers(agent), 0, "re-parks stay markerless");
+    }
+
+    #[test]
+    fn interjection_during_park_adds_no_marker() {
+        use crate::scrollback::block::RenderBlock;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        dispatch(Action::SendPrompt("first".into()), &mut app);
+        simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
+        assert!(app.agents[&id].renders_parked());
+
+        let _ = dispatch(
+            Action::Interject {
+                text: "hurry up".into(),
+                images: Vec::new(),
+            },
+            &mut app,
+        );
+
+        let agent = &app.agents[&id];
         assert_eq!(
-            count_parked(agent),
-            1,
-            "marker still at the tail: a re-push would be a duplicate line"
+            count_turn_markers(agent),
+            0,
+            "no marker around the interjection"
         );
         assert!(
-            agent.renders_parked(),
-            "the park itself still renders parked"
+            matches!(
+                agent.scrollback.last().map(|e| &e.block),
+                Some(RenderBlock::UserPrompt(_))
+            ),
+            "the user prompt row lands with nothing under it"
         );
     }
 
-    /// An interjection below an already-pushed marker must not trigger a
-    /// restate beneath the user's message (the queue-emptying re-evaluation
-    /// fires before the wait-abort lands).
-    #[test]
-    fn rendered_slot_stays_quiet_under_tail_interjection() {
-        use crate::scrollback::block::RenderBlock;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        let agent = app.agents.get_mut(&id).unwrap();
-
-        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 30_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
-
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt("hurry up"));
-        agent.suppress_parked_marker_on_interject();
-        agent.maybe_push_parked_marker();
-        assert_eq!(
-            count_parked(agent),
-            1,
-            "no marker may render beneath the interjected message"
-        );
-    }
-
-    /// `Forgone` is final for the turn: even a genuine re-park with buried
-    /// content must not resurrect the marker.
-    #[test]
-    fn forgone_slot_blocks_repark_repush() {
-        use crate::scrollback::block::RenderBlock;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        let agent = app.agents.get_mut(&id).unwrap();
-
-        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 30_000);
-        agent.suppress_parked_marker_on_interject();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "forgone park renders no marker");
-
-        complete_task_output_wait_call(agent, "wait-1");
-        agent
-            .scrollback
-            .push_block(RenderBlock::agent_message("continued below interject"));
-        simulate_task_output_wait_call(agent, "wait-2", "bg-1", 30_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "forgone stays silent all turn");
-    }
-
-    /// A work-count change never touches the marker — the counts live on the
-    /// status row's "… still running" cue, so the transcript stays quiet while
-    /// work finishes mid-park.
-    #[test]
-    fn count_change_never_restates_marker() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .session
-            .bg_tasks
-            .insert("bg-1".into(), running_bg_task("bg-1"));
-        agent
-            .session
-            .bg_tasks
-            .insert("bg-2".into(), running_bg_task("bg-2"));
-
-        simulate_task_output_wait_call(agent, "wait-1", "bg-1", 30_000);
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1);
-        assert_eq!(agent.watchers().commands, 2);
-
-        agent.session.bg_tasks.remove("bg-2");
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "count changes never restate");
-        assert_eq!(agent.watchers().commands, 1, "the cue counts down instead");
-    }
-
-    #[test]
-    fn parked_marker_not_pushed_while_send_now_echo_is_only_row() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        enqueue_local(&mut app, id, "held then send-now'd");
-        simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "held row withholds the marker");
-
-        agent.session.pending_prompts.clear();
-        agent.expect_send_now_cancel = Some("send-now-echo".into());
-        agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
-            id: "send-now-echo".into(),
-            version: 0,
-            owner: None,
-            last_editor: None,
-            kind: "prompt".into(),
-            text: "send now payload".into(),
-            position: 0,
-            combined_texts: None,
-        }];
-        assert!(agent.visible_queue_is_empty());
-        assert!(agent.has_held_user_queue());
-
-        agent.maybe_push_parked_marker();
-        assert_eq!(
-            count_parked(agent),
-            0,
-            "send-now occupancy must block the parked marker"
-        );
-
-        agent.suppress_parked_marker_on_interject();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "forgone slot stays silent");
-    }
-
-    /// Queued rows HOLD during a parked/blocking wait; nothing drains on its own.
     #[test]
     fn parked_wait_holds_queue_and_explains_itself() {
         let mut app = test_app_with_agent();
@@ -2885,9 +2580,11 @@ mod tests {
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "queued row must hold the marker");
-        assert!(!agent.renders_parked());
+        assert_eq!(count_turn_markers(agent), 0);
+        assert!(
+            agent.renders_parked(),
+            "the parked look is queue-occupancy-independent"
+        );
         assert_eq!(
             agent.held_queue_count(),
             1,
@@ -2912,12 +2609,7 @@ mod tests {
             1,
             "held row feeds the inline status hint"
         );
-        agent.maybe_push_parked_marker();
-        assert_eq!(
-            count_parked(agent),
-            0,
-            "queued row holds the (excluded) marker"
-        );
+        assert_eq!(count_turn_markers(agent), 0);
         assert!(!agent.renders_parked());
 
         // Even with an empty queue + live subagent, a subagent wait never parks.
@@ -2925,287 +2617,19 @@ mod tests {
             .subagent_sessions
             .insert("child-1".into(), running_subagent_info("child-1"));
         agent.session.pending_prompts.clear();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "subagent wait must never park");
+        assert_eq!(
+            count_turn_markers(agent),
+            0,
+            "subagent wait must never park"
+        );
         assert!(
             !agent.renders_parked(),
             "subagent wait keeps running chrome"
         );
     }
 
-    /// Idle agent with plan approval open: pending rows must not drain into a
-    /// competing turn (would hijack / stale-cancel the in-flight approval).
-    #[test]
-    fn drain_blocked_when_plan_approval_open() {
-        use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
-        use crate::views::prompt_widget::StashedPrompt;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "follow-up during approval");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        assert!(agent.session.state.is_idle());
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        agent.plan_approval_view = Some(PlanApprovalViewState::new(
-            ExitPlanModeExtRequest {
-                session_id: "s".into(),
-                tool_call_id: "tc".into(),
-                plan_content: Some("# Plan".into()),
-            },
-            StashedPrompt {
-                text: String::new(),
-                cursor: 0,
-                images: Vec::new(),
-                chip_elements: Vec::new(),
-                image_counter: 0,
-                image_undo_stash: Vec::new(),
-            },
-            tx,
-        ));
-
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            effects.is_empty(),
-            "drain must hold while plan approval is open, got {effects:?}"
-        );
-        assert_eq!(
-            agent.session.pending_prompts.len(),
-            1,
-            "follow-up stays queued until approval settles"
-        );
-        assert!(agent.plan_approval_view.is_some());
-    }
-
-    /// Deferred `/plan <desc>` row drains as SetModeThenPrompt when idle.
-    #[test]
-    fn deferred_enter_plan_row_drains_as_set_mode_then_prompt() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .session
-            .enqueue_enter_plan_prompt("design the API".into(), Vec::new());
-        assert!(agent.session.pending_prompts[0].enter_plan_mode);
-
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [Effect::SetModeThenPrompt {
-                    mode_id,
-                    text,
-                    ..
-                }] if &*mode_id.0 == "plan" && text == "design the API"
-            ),
-            "expected SetModeThenPrompt, got {effects:?}"
-        );
-        assert_eq!(agent.plan_mode_pending, Some(true));
-        assert!(agent.session.pending_prompts.is_empty());
-    }
-
-    /// enter_plan_mode is honored even when a future path stamps the flag onto
-    /// a non-plain row (images / wire / combined) — fail closed to
-    /// SetModeThenPrompt rather than dropping the mode switch.
-    #[test]
-    fn enter_plan_mode_non_plain_row_still_sets_mode() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        let agent = app.agents.get_mut(&id).unwrap();
-        let queue_id = agent.session.next_queue_id;
-        agent.session.next_queue_id += 1;
-        agent
-            .session
-            .pending_prompts
-            .push_back(crate::app::agent::QueuedPrompt {
-                images: vec![crate::app::agent_view::test_fixtures::test_pasted_image()],
-                enter_plan_mode: true,
-                ..crate::app::agent::QueuedPrompt::plain(
-                    queue_id,
-                    "plan with image",
-                    crate::app::agent::QueueEntryKind::Prompt,
-                )
-            });
-
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [Effect::SetModeThenPrompt {
-                    mode_id,
-                    text,
-                    ..
-                }] if &*mode_id.0 == "plan" && text == "plan with image"
-            ),
-            "enter_plan_mode must win over the images arm, got {effects:?}"
-        );
-        assert_eq!(agent.plan_mode_pending, Some(true));
-    }
-
-    /// Force-drain while plan approval is open must not claim "starting despite
-    /// background subagents" — toast reports the hard gate instead.
-    #[test]
-    fn force_drain_while_plan_approval_toasts_waiting_not_starting() {
-        use crate::views::plan_approval_view::{ExitPlanModeExtRequest, PlanApprovalViewState};
-        use crate::views::prompt_widget::StashedPrompt;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "follow-up");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        let mut info = running_subagent_info("bg-child");
-        info.is_background = true;
-        agent.subagent_sessions.insert("bg-child".into(), info);
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        agent.plan_approval_view = Some(PlanApprovalViewState::new(
-            ExitPlanModeExtRequest {
-                session_id: "s".into(),
-                tool_call_id: "tc".into(),
-                plan_content: Some("# Plan".into()),
-            },
-            StashedPrompt {
-                text: String::new(),
-                cursor: 0,
-                images: Vec::new(),
-                chip_elements: Vec::new(),
-                image_counter: 0,
-                image_undo_stash: Vec::new(),
-            },
-            tx,
-        ));
-        assert!(agent.has_live_background_subagents());
-        assert!(agent.plan_approval_view.is_some());
-
-        let effects = dispatch(Action::ForceDrainQueue, &mut app);
-        assert!(
-            effects.is_empty(),
-            "force drain cannot bypass plan approval, got {effects:?}"
-        );
-        let agent = app.agents.get(&id).unwrap();
-        assert_eq!(agent.session.pending_prompts.len(), 1);
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Still waiting on plan approval"),
-            "must not toast success when approval still blocks"
-        );
-    }
-
-    /// Named contract: primary idle + live background subagent does **not**
-    /// hold the local queue. Drain starts a normal main turn; children run
-    /// in parallel (operator 2026-08-09).
-    #[test]
-    fn background_subagents_do_not_hold_queue_while_parent_idle() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "follow-up while children run");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        assert!(agent.session.state.is_idle());
-        assert!(
-            !agent.has_live_background_subagents(),
-            "predicate false with no live children"
-        );
-
-        agent.subagent_sessions.insert("bg-child".into(), {
-            let mut info = running_subagent_info("bg-child");
-            info.is_background = true;
-            info
-        });
-        assert!(
-            agent.has_live_background_subagents(),
-            "live standalone subagent is still detected"
-        );
-        assert_eq!(
-            agent.held_queue_count(),
-            0,
-            "idle + children is not a held-queue status state"
-        );
-
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
-            "auto drain must start the turn while background subagents live, got {effects:?}"
-        );
-        assert!(agent.session.pending_prompts.is_empty());
-    }
-
-    /// ForceDrainQueue still drains when idle + children (legacy force path;
-    /// same outcome as normal drain now that children do not hold).
-    #[test]
-    fn force_drain_dispatch_starts_while_subagents_live() {
-        use crate::app::agent::AgentState;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "follow-up while children run");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        let mut info = running_subagent_info("bg-child");
-        info.is_background = true;
-        agent.subagent_sessions.insert("bg-child".into(), info);
-        assert!(matches!(agent.session.state, AgentState::Idle));
-        assert!(agent.has_live_background_subagents());
-
-        let effects = dispatch(Action::ForceDrainQueue, &mut app);
-        assert!(
-            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
-            "expected SendPrompt, got {effects:?}"
-        );
-        let agent = app.agents.get(&id).unwrap();
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Interject — starting despite background subagents"),
-        );
-    }
-
-    /// Running monitors alone never held the queue (they can run forever).
-    #[test]
-    fn monitors_alone_do_not_hold_queue() {
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        enqueue_local(&mut app, id, "should drain");
-
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.bg_tasks.insert(
-            "mon-1".into(),
-            crate::app::agent::BgTaskState {
-                task_id: "mon-1".into(),
-                tool_call_id: "call-mon-1".into(),
-                command: "tail -f log".into(),
-                description: Some("watch log".into()),
-                cwd: "/tmp".into(),
-                output_file: "/tmp/out".into(),
-                status: crate::app::agent::BgTaskStatus::Running,
-                start_time: std::time::SystemTime::now(),
-                end_time: None,
-                exit_code: None,
-                signal: None,
-                stdout: String::new(),
-                stdout_line_count: 0,
-                truncated: false,
-                pending_kill: false,
-                kill_requested_at: None,
-                scrollback_entry_id: None,
-                is_monitor: true,
-                restored_from_replay: false,
-            },
-        );
-        assert!(
-            !agent.has_live_background_subagents(),
-            "monitors are not background subagents"
-        );
-        let effects = maybe_drain_queue(agent).effects;
-        assert!(
-            matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
-            "monitor-only session must not hold the queue, got {effects:?}"
-        );
-    }
-
-    /// T1 regression: once the model resumes streaming in the SAME turn, the
-    /// parked/stopped look must flip off (the running chrome returns) even if
-    /// the wait tool's terminal ToolCallUpdate never reached this client —
-    /// a live chunk proves the turn is no longer parked in the wait.
+    /// T1 regression: a live chunk must un-park even when the wait's terminal
+    /// ToolCallUpdate never reached this client.
     #[test]
     fn parked_look_clears_when_model_resumes_streaming() {
         let mut app = test_app_with_agent();
@@ -3214,7 +2638,6 @@ mod tests {
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
         assert!(agent.renders_parked(), "parked look active during the wait");
 
         // The model resumes with a message chunk (no Completed for the wait).
@@ -3240,8 +2663,7 @@ mod tests {
             "the stale wait must not survive a resumed stream"
         );
 
-        // A new-stream thought also un-parks; same-stream thoughts must not.
-        // Establish the wait under stream_start=1, then thought under 9001.
+        // A new-stream thought (different stream_start_ms) also un-parks; same-stream must not.
         {
             let wait_meta = crate::acp::meta::NotificationMeta {
                 stream_start_ms: Some(1),
@@ -3295,9 +2717,8 @@ mod tests {
         );
     }
 
-    /// T4 regression: the inline hint only advertises "Enter to interject"
-    /// when the TOP held row would actually soft-interject (plain prompts only —
-    /// bash / enter-plan refuse with a toast).
+    /// T4 regression: the hint must only advertise "Enter to send now" when
+    /// the TOP held row would actually send (a bash top row no-ops).
     #[test]
     fn held_hint_advertises_send_now_only_for_sendable_top() {
         let mut app = test_app_with_agent();
@@ -3305,32 +2726,19 @@ mod tests {
         dispatch(Action::SendPrompt("first".into()), &mut app);
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
-        // Local bash row on top: counted, but Enter would no-op.
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.enqueue_bash_command("git status".into());
         assert_eq!(agent.held_queue_count(), 1);
         assert!(
             !agent.held_queue_top_sendable(),
-            "a bash top row must not advertise Enter-to-interject"
+            "a bash top row must not advertise Enter-send-now"
         );
 
-        // A plain local prompt on top instead: sendable.
         agent.session.pending_prompts.clear();
         agent.session.enqueue_prompt("plain follow-up".into());
         assert!(agent.held_queue_top_sendable());
 
-        // Deferred enter-plan is prompt-like for display but refuses force —
-        // do not advertise "Enter to interject".
-        agent.session.pending_prompts.clear();
-        agent
-            .session
-            .enqueue_enter_plan_prompt("plan follow-up".into(), Vec::new());
-        assert!(
-            !agent.held_queue_top_sendable(),
-            "enter-plan top row must not advertise interject"
-        );
-
-        // Server bash top: refuse soft interject (same as local bash).
+        // A server row (renders first in the merge) is always sendable.
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
             id: "srv-1".into(),
             version: 0,
@@ -3344,16 +2752,8 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.session.enqueue_bash_command("still bash".into());
         assert!(
-            !agent.held_queue_top_sendable(),
-            "server bash top must not advertise Enter-to-interject"
-        );
-
-        // Server plain prompt top: advertise.
-        agent.shared_queue[0].kind = "prompt".into();
-        agent.shared_queue[0].text = "server follow-up".into();
-        assert!(
             agent.held_queue_top_sendable(),
-            "server plain prompt top must advertise Enter-to-interject"
+            "a server top row sends now regardless of kind"
         );
     }
 
@@ -3416,11 +2816,8 @@ mod tests {
         );
         assert!(agent.held_queue_top_sendable());
         assert_eq!(
-            format!(
-                " · {} queued — Enter to interject",
-                agent.held_queue_count()
-            ),
-            " · 1 queued — Enter to interject"
+            format!(" · {} queued — Enter to send now", agent.held_queue_count()),
+            " · 1 queued — Enter to send now"
         );
 
         agent
@@ -3441,11 +2838,8 @@ mod tests {
         assert_eq!(pane_len, 2);
         assert_eq!(agent.held_queue_count(), pane_len);
         assert_eq!(
-            format!(
-                " · {} queued — Enter to interject",
-                agent.held_queue_count()
-            ),
-            " · 2 queued — Enter to interject"
+            format!(" · {} queued — Enter to send now", agent.held_queue_count()),
+            " · 2 queued — Enter to send now"
         );
     }
 
@@ -3487,10 +2881,8 @@ mod tests {
         assert_eq!(agent.held_queue_count(), 0);
     }
 
-    /// The armed send-now cancel does NOT count as held occupancy once it is
-    /// the running turn (arm id == current_prompt_id) — otherwise the parked
-    /// marker is suppressed and a new prompt is wrongly held behind an empty
-    /// queue after a send-now adopts.
+    /// An arm that became the running turn is not held occupancy — otherwise a
+    /// new prompt is wrongly held behind an empty queue after a send-now adopts.
     #[test]
     fn has_held_user_queue_excludes_arm_that_is_running() {
         let mut app = test_app_with_agent();
@@ -3499,7 +2891,6 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.shared_queue.clear();
 
-        // Matching send-now adopt: the armed id became the running turn.
         agent.expect_send_now_cancel = Some("p-run".into());
         agent.session.current_prompt_id = Some("p-run".into());
         assert!(
@@ -3507,7 +2898,6 @@ mod tests {
             "an arm for the running turn is not held occupancy"
         );
 
-        // A stale arm for a different (not-running) prompt still occupies hold.
         agent.session.current_prompt_id = Some("p-other".into());
         assert!(
             agent.has_held_user_queue(),
@@ -3515,10 +2905,8 @@ mod tests {
         );
     }
 
-    /// T2 regression: deleting the LAST held local row re-evaluates the
-    /// parked look immediately (no waiting for an unrelated notification).
     #[test]
-    fn local_delete_of_last_held_row_flips_parked_look_on() {
+    fn local_delete_of_last_held_row_adds_no_marker() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = test_app_with_agent();
@@ -3528,9 +2916,11 @@ mod tests {
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 0, "held row holds the marker");
-        assert!(!agent.renders_parked());
+        assert_eq!(count_turn_markers(agent), 0);
+        assert!(
+            agent.renders_parked(),
+            "parked look on even with a held row"
+        );
 
         // Delete the row through the queue-pane key path.
         agent.queue.sync_from_merged(
@@ -3551,14 +2941,11 @@ mod tests {
 
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(
-            count_parked(agent),
-            1,
-            "deleting the last held row must push the parked marker now"
+            count_turn_markers(agent),
+            0,
+            "deleting the last held row must not write a marker"
         );
-        assert!(
-            agent.renders_parked(),
-            "the stopped look must flip on immediately after the local delete"
-        );
+        assert!(agent.renders_parked(), "the stopped look stays on");
     }
 
     /// T3 regression: a task-tool refinement that OMITS `run_in_background`
@@ -3594,7 +2981,7 @@ mod tests {
         assert!(
             matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "the meta-less spawn starts with a provisional foreground wait"
         );
@@ -3619,22 +3006,21 @@ mod tests {
         assert!(
             !matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "an omitted run_in_background field means background: the provisional \
              foreground wait must clear"
         );
     }
 
-    /// A plain mid-turn interjection (no wait) must NOT consume the marker
-    /// slot: a later park in the same turn still deserves its marker.
+    /// A plain mid-turn interjection needs no suppression state for a later
+    /// park in the same turn.
     #[test]
-    fn non_parked_interjection_keeps_later_park_marker() {
+    fn interjection_then_later_park_still_renders_parked() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
 
-        // Mid-turn interjection while streaming (no wait advertised).
         let _ = dispatch(
             Action::Interject {
                 text: "heads up".into(),
@@ -3643,37 +3029,32 @@ mod tests {
             &mut app,
         );
         assert!(
-            app.agents[&id].parked_wait_marker_for.is_none(),
-            "no wait → slot must stay free"
+            !app.agents[&id].renders_parked(),
+            "no wait → no parked look"
         );
 
-        // The turn later parks: the marker still fires.
         simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
-        assert_eq!(count_parked(agent), 1, "later park keeps its marker");
+        assert!(agent.renders_parked(), "later park renders parked");
+        assert_eq!(count_turn_markers(agent), 0, "and stays markerless");
     }
 
     /// Parked chrome must clear OSC 9;4 (and treat the tab title as idle) so
     /// Ghostty/WezTerm drop the progress bar while the session looks stopped.
-    /// The turn is still `TurnRunning` server-side — only `renders_parked`
-    /// flips the notification busy bit.
     #[test]
     fn parked_wait_clears_progress_bar_notification() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         dispatch(Action::SendPrompt("first".into()), &mut app);
-        simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
 
-        // Running wait, no parked marker yet → still busy chrome / progress on.
         app.update_notifications();
         assert!(
             app.notification_service.is_progress_active(),
             "live turn must keep the OSC 9;4 progress indicator active"
         );
 
+        simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.maybe_push_parked_marker();
         assert!(agent.renders_parked());
         assert!(
             agent.session.state.is_busy(),
@@ -3686,47 +3067,5 @@ mod tests {
             !app.notification_service.is_progress_active(),
             "parked look must clear OSC 9;4 so the terminal progress bar stops"
         );
-    }
-
-    /// The parked push is the unified marker: a static `TurnCompleted` event
-    /// block flagged `parked`, stamped with the turn's pid. It carries no
-    /// work counts — the persistent "… still running" status row above the
-    /// prompt tracks the still-running work. The real final marker later
-    /// pushes separately (two static lines — main's park shape).
-    #[test]
-    fn parked_marker_is_static_completed_snapshot() {
-        use crate::scrollback::block::RenderBlock;
-        use crate::scrollback::blocks::SessionEvent;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        dispatch(Action::SendPrompt("first".into()), &mut app);
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .session
-            .bg_tasks
-            .insert("bg-1".into(), running_bg_task("bg-1"));
-        simulate_task_output_wait(agent, "bg-1");
-        agent.maybe_push_parked_marker();
-
-        let block = (0..agent.scrollback.len())
-            .rev()
-            .find_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-                Some(RenderBlock::SessionEvent(b)) => Some(b),
-                _ => None,
-            })
-            .expect("the park must push a marker block");
-        assert!(matches!(block.event, SessionEvent::TurnCompleted { .. }));
-        assert!(block.parked);
-        assert_eq!(
-            block.prompt_id, agent.session.current_prompt_id,
-            "the park stamps the marker with its turn's pid"
-        );
-        assert!(
-            block.stop_hooks.is_empty(),
-            "a parked marker carries no hooks"
-        );
-        // The running bg command shows in the watchers cue, not the marker.
-        assert_eq!(agent.watchers().commands, 1);
     }
 }

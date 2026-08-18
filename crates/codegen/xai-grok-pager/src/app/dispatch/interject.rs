@@ -53,9 +53,6 @@ pub(super) fn dispatch_interject(
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
-    // Interjecting into a parked wait continues the turn below this block —
-    // the withheld "Worked for …" marker must not fire late beneath it.
-    agent.suppress_parked_marker_on_interject();
 
     // The composer is NOT touched here: the producer that consumed composer
     // text (the InterjectPrompt registry arm) clears it at the call site;
@@ -138,21 +135,8 @@ pub(super) fn dispatch_send_prompt_now(
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
     agent.note_self_originated_prompt(&prompt_id);
     // Expect the shell's send-now cancel so the turn-end rails suppress its
-    // marker — only when the shell will actually cancel (goal turns promote
-    // without cancelling; a stale arm would mute a later real cancel marker).
-    if agent.expects_send_now_cancel() {
-        agent.arm_send_now_expectation(prompt_id.clone());
-        // The arm hides the queue echo pushed below — paint the block now.
-        super::queue::push_send_now_user_block(agent, &prompt_id, "prompt", &text, false);
-        // Soft interject toasts; send-now used to clear the composer with no
-        // chrome — say what happened so the draft vanishing doesn't feel like
-        // a black hole.
-        agent.show_toast("Send now — interrupting current turn");
-    } else {
-        // Goal turn (or other no-cancel promote): still confirm the chord fired.
-        agent.show_toast("Send now");
-    }
-    agent.suppress_parked_marker_on_interject();
+    // marker.
+    super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
     let blocks = crate::prompt_images::build_content_blocks_with_workspace(
         text.clone(),
@@ -321,29 +305,6 @@ mod tests {
             agent.toast.as_ref().map(|(m, _)| m.as_str()),
             Some("No active session"),
             "no-session interject takes the 'No active session' path"
-        );
-    }
-
-    /// Send-now must toast on dispatch (composer already cleared at the key
-    /// handler) so cancel-and-send never feels like a silent black hole.
-    #[test]
-    fn send_prompt_now_toasts_on_dispatch() {
-        use crate::app::agent::AgentState;
-
-        let mut app = test_app_with_agent();
-        let id = AgentId(0);
-        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
-
-        let _ = dispatch(
-            Action::SendPromptNow {
-                text: "steer left".into(),
-                images: vec![],
-            },
-            &mut app,
-        );
-        assert_eq!(
-            app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Send now — interrupting current turn")
         );
     }
 

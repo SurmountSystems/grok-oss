@@ -1,6 +1,6 @@
 # Keyboard Shortcuts
 
-Reference for key bindings in the Grok Build TUI. Bindings are built in and cannot currently be remapped.
+Reference for key bindings in the Grok OSS TUI. Bindings are built in and cannot currently be remapped.
 
 ---
 
@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+E` | | Expand/collapse all thinking blocks (hidden from the footer when `[ui] always_expand_thinking = true`) |
+| `Ctrl+E` | | Expand/collapse all thinking blocks |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -78,7 +78,7 @@ prompt. `⇧E` clears all pins, and `Ctrl+E` clears pins on thinking blocks.
 
 | Key | Action |
 |-----|--------|
-| `y` | Copy block content to clipboard (also: selection-box **`⧉`** when a copyable block is selected; default on via `selection_buttons`. Mouse: click always-on **`⧉`** on a user or assistant message bubble to copy that bubble without selecting first; `bubble_copy_buttons`, default on) |
+| `y` | Copy block content to clipboard |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
 | `Enter` | Open block content in fullscreen viewer |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
@@ -93,27 +93,105 @@ Switch between the prompt input and scrollback pane.
 |-----|---------|---------|--------|
 | `Tab` | `Space` (and `i` in vim mode) | Scrollback focused | Focus the prompt input |
 | `Tab` | | Prompt focused | Focus the scrollback (both simple and vim scrollback modes) |
-| `Enter` | | Prompt focused | Submit the current prompt: **send** when idle and nothing holds the queue; **queue** while a turn is running or background subagents hold drain; **soft-interject** the top queued follow-up when the composer is empty mid-turn. The footer label (`Enter: send` / `queue` / `interject`) always matches this outcome. |
+| `Tab` | `Shift+Tab` (backwards) | A blocking card is focused (question, permission prompt, cancel-turn panel) | Walk that card's rows, wrapping round at the ends. Focus stays in the card |
+| `Tab` | `Space` (and `i` in vim mode) | Scrollback focused with a card parked | Hand the keyboard back to the card (the bar's focus hint names it) |
+| `Enter` | | Prompt focused | Send the current prompt |
 
 **Esc is not a focus key.** It follows the cancel / clear / rewind semantics below. The mid-turn cancel is the only branch gated on `[ui].vim_mode` (scrollback nav); nothing depends on `[ui].simple_mode` (prompt editor). Overlays, modals, slash/file dropdowns, voice, search, and selection still steal Esc first.
+
+## Blocking cards
+
+Three surfaces block the agent on your answer and take over the keyboard while
+they are open: the **question card** (`ask_user_question`), the **permission
+prompt**, and the **cancel-turn panel**. When more than one is open the
+permission prompt has the keyboard first, then the cancel-turn panel, then the
+question card — and the shortcuts bar always shows the keys of whichever one is
+receiving them.
+
+They share one contract:
+
+- `Tab` / `Shift+Tab` walk that card's rows and wrap at both ends. They never
+  move focus out of the card, so the cursor is always somewhere you can see.
+- `Esc` steps back out, one rung at a time: it clears whatever the card has
+  pending first, and only once there is nothing left to clear does it leave.
+  Where it leaves to is the one thing that differs per card — the question card
+  and the permission prompt park the keyboard in the scrollback so you can
+  scroll up and read the context behind them (the card stays on screen), while
+  the cancel-turn panel's "keep running" closes the panel and leaves the
+  turn (and any subagents) running. Enter or `1`–`4` still pick a
+  cancel-and-subagent choice.
+- With the keyboard parked, the shortcuts bar shows the scrollback's own keys,
+  and its focus hint names the card rather than the prompt: `Tab/Space:
+  question`. That hint is pinned, so a narrow bar can never trim away the only
+  route back.
+- Inside the dashboard's session overlay there is one more rung: once the
+  keyboard is parked, the next `Esc` returns to the dashboard, leaving the card
+  pending. (`Ctrl+\` still leaves from any state.)
+
+### Question card (`ask_user_question`)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between answers (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk this question's answers in a loop — off the last answer back to the first. It never carries you into another question |
+| `←` / `→`, `h` / `l`, `[` / `]` | Previous / next question |
+| `1`–`9`, `a`–`f` | Pick that answer directly |
+| `z` | Jump to the free-text row and start typing |
+| `Space` | Toggle the focused answer (multi-select), or start typing on the free-text row |
+| `Enter` | Select and advance, submit on the last question, or edit the free-text row |
+| `Esc` | Unselect this question's answer; with nothing selected, park focus in the scrollback (`Tab` returns). On the *first* question inside the dashboard's session overlay it returns to the dashboard instead — from a later question `←` is still the way back, so the park comes first and the next `Esc` leaves. The shortcuts bar names whichever rung is live |
+| `y` | Copy the focused answer |
+| `Shift+X` | Dismiss the question (the agent continues without an answer) |
+| `Ctrl+F` | Fullscreen the card |
+
+The bare `/feedback` pane is the one exception to this table: it has no answers
+to walk, `Enter` sends the report, and `Esc` dismisses the pane.
+
+While typing a free-text answer, `Enter` submits and `Esc` returns to the
+answer rows; every other key goes to the text field.
+
+### Permission prompt
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Move between options (clamped at the ends) |
+| `Tab` / `Shift+Tab` | Walk the options in a loop |
+| `1`–`9` | Choose that option directly |
+| `Enter` | Choose the focused option |
+| `←` / `→` | Widen / narrow the scope an "always" answer would remember |
+| `e` | Edit the always-allow pattern by hand (bash prompts) |
+| `Ctrl+F` | Expand / collapse the full arguments |
+| `Ctrl+O` | Turn on always-approve mode |
+| `Esc` | Park focus in the scrollback (`Tab` returns). It never answers or dismisses the request |
+| `Ctrl+C` | Cancel the request |
+
+Typing on the "No" row starts a message back to the agent instead; `Enter`
+sends it and `Esc` returns to the options.
+
+### Cancel-turn panel
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k`, `Tab` / `Shift+Tab` | Move between the choices |
+| `1`–`4`, `Enter` | Confirm that choice |
+| `Esc` | Keep everything running. This resolves the panel, so it is never a dead end and never needs to park |
 
 ## Escape
 
 | State | Gesture | Effect |
 |--------|---------|--------|
-| Turn running, **minimal mode or vim scrollback mode off (the default)** | **2× `Esc` within 800ms** | Hard-cancel the turn (same outcome as the status-row **`[stop]`** control). Works with prompt or scrollback focused, even with a draft — the draft is **preserved**, unlike Ctrl+C's clear-first gesture. First press shows “press again to cancel” and does **not** cancel yet, so Esc that only closed a dialog or dropdown cannot also stop the turn. |
+| Turn running, **minimal mode or vim scrollback mode off (the default)** | `Esc` | Cancel immediately (prompt or scrollback focused, even with a draft — the draft is **preserved**, unlike Ctrl+C's clear-first gesture). |
 | Turn running, **fullscreen vim mode** | `Esc` | Swallowed no-op (does **not** cancel). Use `Ctrl+C` (or palette / other cancel entry points). |
-| **Subagents still running** cancel panel open | `Esc` | **Dismiss only** — closes the panel and leaves the parent turn (and subagents) running. Cancel proceeds only via an explicit choice (Enter / 1–4 / click). |
-| Turn cancelling | `Esc` | Re-sends cancel in **every** mode (retry if the first ack was lost; no double-Esc arm). `Ctrl+C` in this state escalates toward quit. |
+| Turn cancelling | `Esc` | Re-sends cancel in **every** mode (retry if the first ack was lost). `Ctrl+C` in this state escalates toward quit. |
 | Idle + non-empty prompt (text or image chips), **prompt focused** | **2× `Esc` within 800ms** | Clear the prompt; non-empty text is saved to prompt history. First press shows “press again to clear”. |
 | Idle + empty prompt + conversation messages, **prompt or scrollback focused** | **2× `Esc` within 800ms** | Open the rewind picker (same as `/rewind`). First press is silent (no toast). |
-| Idle + empty + no messages, **or scrollback focused with a draft / moded (`!` `#` feedback) composer / pending needs-input overlay / open history search** | `Esc` | Swallowed no-op (does not focus scrollback). Clear is prompt-pane only; rewind requires an empty Normal-mode composer, no pending overlay, and no open history search — reading the scrollback never mutates your draft, your composer mode, a question awaiting an answer, or an in-progress search. |
+| Idle + empty + no messages, **or scrollback focused with a draft / moded (`!` `#`) composer / pending needs-input overlay / open history search** | `Esc` | Swallowed no-op (does not focus scrollback). Clear is prompt-pane only; rewind requires an empty Normal-mode composer, no pending overlay, and no open history search. Reading the scrollback never mutates your draft, your composer mode, a question awaiting an answer, or an in-progress search. |
 
 **Post-cancel grace:** for about a second after an Esc-triggered cancel, the idle rewind arm stays suppressed — mashing Esc to stop a turn cannot silently open the rewind picker. Only the rewind arm is held; every other Esc behavior is unaffected.
 
-**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals (including the **subagents cancel panel** — Esc dismisses without cancelling), slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember / Feedback mode exit** when the prompt is empty (Esc leaves `!` / `#` / feedback mode and returns to the normal prompt — even while a turn is running).
+**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt, even while a turn is running). Bare `/feedback` opens the report pane; Esc dismisses it.
 
-**Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc requires two presses within 800ms to cancel and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; idle Esc also requires two presses within 800ms (clear or rewind).
+**Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc cancels immediately and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; Esc requires two presses within 800ms.
 
 ---
 
@@ -127,17 +205,17 @@ Actions that affect the agent session, available from the agent screen.
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
 | `Ctrl+M` | Agent screen | Open the model picker / switch model |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
-| `Ctrl+C` | Agent screen | **Hard cancel** the current turn (or clear a non-empty draft first; see Escape table). Same action as the turn-status **`[stop]`** button (red on hover) while a turn is running. When the primary session is idle but background subagents are still running, cancel opens the “Subagents are still running” panel or stops them according to your cancel preference. This is not global pause and not soft stop. |
-| `Ctrl+Shift+Space` | Always (any screen) | **Pause or resume all work** across every open session in this process (not only the focused one). On a mouse host the turn-status row also paints a quiet **`[pause]`** control while a turn or subagents are live; while paused the same control becomes **`[resume]`** (quiet white on hover, never red). Global pause cancels in-flight turns, holds queues, then resumes only interrupted mid-turn prompts and already-queued work; finished sessions are not re-spawned. A toast tracks how long you have been paused. Bare `Space` still focuses the prompt / types spaces; voice dictation stays on `Ctrl+Space`. |
-| `Ctrl+Shift+S` | Always (any screen) | **Soft stop:** arm so that after the **current** top-level turn finishes (success or terminal fail), further **queued** work does not start. Does **not** cancel mid-flight (unlike fearless pause or hard `[stop]`). There is **no** soft-stop button on the status row in this release; the control is chord-only. Status toast shows armed vs queue held. Press again before the turn ends to disarm, or after hold to release the queue. Does not steal `Ctrl+Shift+Space`. |
+| `Ctrl+C` | Agent screen | Hard cancel the current turn (or clear a non-empty draft first; see Escape table). Same action as the turn-status **`[stop]`** chip while a turn is running. |
+| `Ctrl+Shift+Space` | Always | Pause or resume **all** in-process agent sessions (not only the focused one). Cancels in-flight turns, holds queues, then resumes unfinished work once. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. Soft-stop paint is not this control. `/start` also unpauses or continues interrupted work; it does not toggle pause on. |
+| `Ctrl+Shift+S` | Always | **Soft stop** (chord only): after the current top-level turn finishes, queued work does not start. Does not cancel mid-flight. There is no soft-stop button. |
+| `F9` | Always | Capture the current TUI frame as a PNG (`/screenshot`). When plan approval is open, the PNG auto-attaches to the plan composer. |
 | `Ctrl+O` | Agent screen | Toggle always-approve (YOLO) mode |
-| `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
+| `Ctrl+S` | Agent screen | Open the session picker (same as `/resume`). `/start` does not open this picker. |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
 | `Shift+Tab` | Prompt focused | Cycle mode (Normal → Plan → Always-approve) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
 | `Ctrl+T` | Agent screen | Toggle the todos pane |
-| `h` | Todo pane focused | Hide or show completed/cancelled rows in the pane only (view filter; does not change the board or badge) |
-| `X` | Todo pane focused | Optional **Clear finished** accelerator — remove completed and cancelled items and archive them. Prefer the pane **clear-finished icon** (`[−]`, when the todo board is open and finished rows exist; quiet idle paint; does not cover tasks model/timer / subagent open chrome) or `/clear-completed-todos` |
+| `X` | Todo pane focused | **Clear finished:** archive completed and cancelled rows from the live session board. Same action as clicking `[−]` in the todo header or running `/clear-completed-todos`. Tasks and catalog do not use this key. |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the current draft in an external editor without sending it. If the terminal reserves this chord, choose **Edit Prompt in External Editor** from the command palette. |
 | `Ctrl+L` | Agent screen | Open the extensions modal (**non–VS Code family only**; on VS Code / Cursor / Windsurf / Zed, `Ctrl+L` is mid-turn **interject** and extensions open via `/plugins` / `/hooks`) |
@@ -153,6 +231,8 @@ Actions that affect the agent session, available from the agent screen.
 **Note:** `Ctrl+'` is a Windows alt for `Ctrl+;` — some Windows consoles drop the `Ctrl` modifier on punctuation keys.
 
 **Note:** `Ctrl+.` needs the Kitty keyboard protocol (or tmux `extended-keys on` so that protocol can pass through). On VS Code / Cursor / Windsurf / Zed integrated terminals, VTE, Apple Terminal, Windows Terminal, JetBrains, tmux with `extended-keys off`, screen, and similar no-KKP setups, Grok advertises **`Ctrl+X`** as the primary shortcuts-cheatsheet key instead. **`Ctrl+X` always works** as a classic control character even when `Ctrl+.` does not. Run `/doctor` if modified keys misbehave in tmux.
+
+**Clear finished** lives on the todo pane, not the tasks pane. When the todo board is open and at least one completed or cancelled row exists, the header paints a compact **`[−]`** (U+2212 minus) next to close. The icon is there whether or not the todo pane has keyboard focus. It does not paint when the board is hidden or nothing is finished. Click it, press `X` while the todo pane is focused, or run [`/clear-completed-todos`](04-slash-commands.md#clear-completed-todos). That archives finished rows. It does not hide them with `h` (hide done), and it does not wipe open work. Hints still say **Clear finished**. The chrome itself is the compact minus, not the long words.
 
 ---
 
@@ -180,45 +260,52 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 ---
 
+## Plan approval keys
+
+When plan approval is open, letter keys type into the prompt and the plan pane box. Mouse is the primary path for **Approve**, **Clarify**, **Revise**, and **Exit**. See [Plan mode](19-plan-mode.md).
+
+| Key | Action |
+|-----|--------|
+| letters | Type (including `a` / `A`). They do not Approve or open notes. |
+| `?` | Clarify (focus the box for a question) |
+| `Tab` | Move focus between the plan preview and the prompt |
+| empty `Ctrl+C` | Exit (abandon the plan) |
+
+Empty `Enter` never approves a plan. Use the clickable **Approve** button.
+
 ## During an active turn (agent running)
 
-Plain `Enter` is **not always "send."** The shortcuts bar footer labels the real outcome (`Enter: send`, `Enter: queue`, or `Enter: interject`) using the same rules as dispatch. Read that label before you type if you are unsure.
+The composer footer Enter cue is **send**, **queue**, or **interject**. It names what plain `Enter` will do.
 
-While the **primary** agent turn is generating (thinking, tools, streaming, or a blocked wait):
+While the agent is generating:
 
-- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends. They also hold while the agent is **blocked waiting** on background-task output or a foreground subagent (sendable wait). Mid-turn status may show `· N queued` / `· N queued — Enter to interject`.
-
-  **Background subagents alone do not force queue-only.** When the primary turn is idle, plain `Enter` **sends** a normal main turn even if status shows `N subagent(s) still running`. Children keep running in parallel; the status still-running cue and `[pause]` / `[stop]` stay available.
-
-  Running **monitors** alone also never force queue (they can run forever).
-- **`Enter` again on the emptied composer** (double-Enter) **soft-interjects** the **top** queued follow-up into the running turn (mid-turn only).
-- The **interject** chord is **soft only** mid-turn: it injects your message into the **current** turn at the next safe point. It **never cancels** the running turn — cancel is **Esc / stop** only:
-  - **Non-empty composer** → soft-interject that text into the running turn.
-  - **Empty composer** + a queued follow-up → soft-interject the **top** queued follow-up (no need to focus the queue pane). On the queue pane, the same chord (or the **[Interject]** button) soft-interjects the **selected** row (plain prompts only; bash / non-plain stay queued).
-  - **Idle** (including live background subagents) → toast *Nothing running to interject into — press Enter to send* (never a silent no-op). Plain Enter starts a normal main turn.
-- While the agent is **blocked waiting** (on task output or a subagent) **and the queue is empty**, plain `Enter` with text **cancels the blocked wait and runs your message next** (shell auto `sendNow` / cancel-and-send). That is an **intentional unblock**, not soft Interject — soft Interject is for mid-turn steer only; cancel on a normal running turn is still **Esc / stop** only. If anything is already queued, plain Enter appends and holds like a normal mid-turn queue.
+- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends, and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold).
+- **Empty `Enter` mid-turn** with a queued follow-up **soft-interjects** the top queued row into the current turn.
+- **Soft interject** injects into the current turn and **never cancels**. Cancel is `Esc` or status **`[stop]`** only. This is not send-now.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
-| Default | `Ctrl+Enter` | `Ctrl+I` | Soft interject (inject into the running turn; does **not** cancel) |
+| Default | `Ctrl+Enter` | `Ctrl+I` | Soft interject (injects into the current turn; never cancels) |
 | Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Soft interject |
-| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Soft interject (`Ctrl+I` not used — Tab / host chat; plugins via `/plugins`) |
+| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Soft interject (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
-In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline — except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row (same as normal mode). (`Ctrl+Enter` is the interject chord mid-turn when bound on non–VS Code family; it does not submit a new idle turn.)
+In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.)
 
-Interject is **not** cancel-and-send. To stop the turn, use **Esc** or the status-row **`[stop]`** control (hard cancel). To hand the agent a note for the **next** turn without steering mid-turn, queue with plain `Enter`; the agent picks it up at the next turn boundary.
+To hand the agent a note **without** stopping it, queue with plain `Enter` or use the soft-interject chord.
 
-### Pause vs stop (discoverable chrome)
+**Background subagents alone do not force queue-only.** When the primary turn is idle, plain `Enter` **sends** a normal main turn even if status shows subagents still running.
 
-Three different work controls exist. They are not interchangeable:
+### Pause vs stop
+
+Three work controls exist. They are not interchangeable:
 
 | Control | How to find it | What it does |
 |---------|----------------|--------------|
-| **Hard stop / cancel** | Status-row **`[stop]`** (red on hover), **2× Esc**, or empty-prompt **Ctrl+C** | Cancels the focused session’s current turn. When the parent is idle but subagents still run, the same cancel path can open the subagents panel or stop those subagents per preference. |
-| **Global pause** | Status-row **`[pause]`** / **`[resume]`** (quiet white on hover), or **Ctrl+Shift+Space** | Pauses **all** sessions in this process: cancels in-flight turns, holds queues, then resumes only unfinished work. Not a media-player freeze of a single stream. |
-| **Soft stop** | **Ctrl+Shift+S** only (no status-row button) | Lets the **current** turn finish, then holds the queue so nothing new starts until you disarm. |
+| **Hard stop / cancel** | Status-row **`[stop]`**, `Esc` (see Escape), or empty-prompt `Ctrl+C` | Cancels the focused session's current turn. |
+| **Global pause** | **`Ctrl+Shift+Space`**. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. | Pauses **all** sessions in this process: cancels in-flight turns, holds queues, then resumes only unfinished work. Not a freeze of a single stream. |
+| **Soft stop** | **`Ctrl+Shift+S` only** (no status-row button) | Lets the **current** turn finish, then holds the queue. |
 
-The shortcuts bar also shows a **pause** (or **resume**) hint while work is live or global pause is holding sessions, next to cancel when a turn is running.
+Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause is not continue interrupted turn (`canceled_turn_resume.json`). See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
 
@@ -235,8 +322,9 @@ Actions available from any screen.
 | Key | Alt Key | Action | Confirmation |
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
+| `Ctrl+\` | | Open or toggle the [Agent Dashboard](23-dashboard.md) | No |
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
-| `F9` | | Capture the current TUI frame as a PNG (`/screenshot`) | No |
+| `F9` | | Capture the current TUI frame as a PNG (`/screenshot`). When plan approval is open, auto-attach that PNG. | No |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
 
@@ -260,6 +348,30 @@ Bindings that only fire on the welcome screen (before any agent session is open)
 | `Ctrl+Shift+I` | Dismiss the Claude import row (when available) |
 
 `Ctrl+W`, `Ctrl+I`, and `Ctrl+Shift+I` are only active on the welcome screen. `Ctrl+S` opens the session picker on both the welcome screen and inside an agent session (where it opens as a modal overlay, same as the `/resume` command). `Ctrl+Q` is the same global Quit binding documented above, not a welcome-specific handler.
+
+---
+
+## Agent Dashboard
+
+Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/dashboard`).
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Navigate agent rows (selecting a row opens peek) |
+| `Enter` | Open the selected agent, or send a typed peek reply / dispatch prompt |
+| `Ctrl+S` | Reply or dispatch **and** attach to that agent |
+| `Ctrl+/` | Toggle search / filter mode |
+| `Ctrl+R` | Rename the selected agent |
+| `Ctrl+T` | Pin / unpin |
+| `Ctrl+G` | Toggle grouping (state ↔ working directory) |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
+| `Ctrl+O` | Toggle always-approve on the selected agent |
+| `Tab` | Toggle focus between the list and the dispatch / peek input |
+| `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |
+| `Ctrl+\` | Exit the dashboard (or return from an attached agent) |
+| `Ctrl+.` (alt: `?`) | Shortcuts cheatsheet |
+
+Details (peek vs dispatch, search prefixes, persistence): [Agent Dashboard](23-dashboard.md).
 
 ---
 
@@ -290,11 +402,11 @@ The bottom of the TUI displays a contextual shortcuts bar showing the most relev
 The TUI supports mouse interaction:
 
 - **Click** on a scrollback entry to select it
-- **Click** always-on **`⧉`** on a user or assistant message bubble to copy that bubble without selecting it first (default on via `scrollback.display.bubble_copy_buttons`)
 - **Scroll wheel** to scroll through the scrollback
 - **Click** on the prompt area to focus it
 - **Hover** over the prompt to see a highlight (configurable via `pager.toml`)
 - **Middle click** on Linux X11/XWayland to paste the PRIMARY selection
+- **Click** **`[−]`** in the todo header (board open, at least one completed or cancelled row) to **Clear finished**. Idle is quiet gray. Hover is a stronger gray, not Human green and not agent magenta. Tasks pane open/kill chrome (`[↗]` / `[x]`) wins if the hits overlap. Compact layout still keeps one chrome row above the todo body so this control cannot paint into the tasks model/timer.
 
 ---
 
@@ -327,28 +439,15 @@ Newline:          Shift+Enter or Alt+Enter
 Multiline:        Ctrl+M (toggle)
 Buffer start:     Ctrl+Home or Ctrl+PageUp (whole draft)
 Buffer end:       Ctrl+End or Ctrl+PageDown (whole draft)
-Line start/end:   Home / End (current visual row only; soft wrap)
-Line (logical):   Ctrl+A / Ctrl+E
 Paste:            Ctrl+V (text, files, screenshots on macOS/Linux)
 Selected text:    Middle click or Shift+Insert (Linux X11/XWayland PRIMARY)
 Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
-Copy draft:       click ⧉ on the prompt top border (full composer plain text)
 Select all:       Cmd+A (macOS, Ghostty only — see note below)
 Leave:            Tab (back to scrollback)
 Cancel (running): Ctrl+C (empty prompt; non-empty draft clears first)
 Clear (idle):     Esc Esc within 800ms (non-empty prompt)
 Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 ```
-
-> **Composer navigation:** `Ctrl+Home` / `Ctrl+PageUp` move the caret to the
-> **start of the entire draft**; `Ctrl+End` / `Ctrl+PageDown` to the **end**.
-> Bare `Home` / `End` stay on the current visual row (wrapped line). Bare
-> `PageUp` / `PageDown` still scroll conversation scrollback when prompt paging
-> is on (they do not jump the draft). The Human-green software caret reverse-
-> plates the current cell on the solid blink half; empty half keeps normal
-> text colour (`text_primary`) on mid-draft letters (not neon green letter ink).
-> It does **not** paint a solid green `█` block on a mid-draft space (solid
-> block only when the caret is at buffer end).
 
 > **Cmd+A is gated to Ghostty.** Grok's in-app `Cmd+A` handler is only
 > wired up when the detected terminal is Ghostty. Other terminals
@@ -370,31 +469,13 @@ Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 > filepath (when known) appears only in the image preview overlay on
 > hover or when the cursor is on/right after the chip.
 
-### Plan approval (side panel open, empty prompt)
-
-Mouse footer / panel CTAs are the primary path. With an **empty** prompt while
-the side panel is open, these keys decide (full detail:
-[Plan mode](19-plan-mode.md#plan-approval)):
-
-```
-Approve:          a          (empty Enter never approves)
-Approve + notes:  A then type + Enter
-Clarify:          ? then type + Enter
-Revise:           s          (or freeform text + Enter)
-Quit plan:        q
-Reopen panel:     /view-plan
-```
-
-Always-approve (`Ctrl+O`) is **tool permissions only** — it does not auto-click
-plan Approve.
-
 ### Always available
 
 ```
 Command palette:  Ctrl+P or ?
 Model picker:     Ctrl+M (from scrollback)
 Cancel:           Ctrl+C (see Escape table)
-Always-approve:   Ctrl+O (toggle YOLO; not plan Approve)
+Always-approve:   Ctrl+O (toggle YOLO)
 New session:      Ctrl+N (press again, then choose normal/worktree)
 Quit:             Ctrl+Q (or Ctrl+D in VSCode)
 ```

@@ -240,6 +240,28 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
+            ChatStateCommand::StripConversationImages { urls, reply } => {
+                match self.strip_conversation_images(&urls) {
+                    None => {
+                        let _ = reply.send(crate::StripOutcome::NoMatch);
+                    }
+                    Some((stripped, ack_rx)) => {
+                        // Await the disk ack off-actor: the persistence
+                        // channel already orders the write against later
+                        // commands, and blocking here would stall reads
+                        // behind an fsync.
+                        tokio::spawn(async move {
+                            let outcome = match ack_rx.await {
+                                Ok(Ok(())) => crate::StripOutcome::Applied { stripped },
+                                Ok(Err(_)) | Err(_) => {
+                                    crate::StripOutcome::WriteFailed { stripped }
+                                }
+                            };
+                            let _ = reply.send(outcome);
+                        });
+                    }
+                }
+            }
             ChatStateCommand::ReplaceSystemHead { prompt, reply } => {
                 let changed = self.replace_system_head(&prompt);
                 let _ = reply.send(changed);
@@ -328,8 +350,12 @@ impl ChatStateActor {
                 let _ = reply.send(self.state.session_usage.clone());
             }
             ChatStateCommand::GetEstimatedTotalTokens { reply } => {
-                let _ =
-                    reply.send(self.state.total_tokens + self.state.estimated_tokens_since_model);
+                let _ = reply.send(
+                    self.state
+                        .total_tokens
+                        .saturating_add(self.state.estimated_tokens_since_model)
+                        .saturating_sub(self.state.omitted_spawn_prompt_tokens),
+                );
             }
             ChatStateCommand::GetSamplingConfig { reply } => {
                 let _ = reply.send(self.state.sampling_config.clone());

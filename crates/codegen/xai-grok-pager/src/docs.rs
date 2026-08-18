@@ -156,6 +156,16 @@ pub static USER_GUIDE: &[Doc] = &[
         "Permissions and Safety",
         "Modes, authorization order, allow/ask/deny rules, matching, and hooks"
     ),
+    guide!(
+        "23-dashboard.md",
+        "Agent Dashboard",
+        "Live multi-session roster: peek, dispatch, pin, stop, and search"
+    ),
+    guide!(
+        "24-monitoring-usage.md",
+        "Monitoring Usage (External OpenTelemetry)",
+        "Export usage metrics to a customer OpenTelemetry collector"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
@@ -352,6 +362,350 @@ mod tests {
         assert!(
             docs_dir.join("notes.md").exists(),
             "User file should not be deleted"
+        );
+    }
+
+    /// Named contract: after included SuperGrok period limits are full, dual-auth
+    /// hop is shipped (SuperGrok dollar credits, then console failover). The
+    /// embedded user-guide must not say that hop is unshipped.
+    #[test]
+    fn user_guide_does_not_claim_automatic_host_hop_is_unshipped() {
+        for doc in USER_GUIDE {
+            let claims_unshipped = doc.content.contains("not a shipped automatic hop")
+                || doc.content.contains("**not** a shipped automatic hop")
+                || doc.content.contains("is **not** shipped on this restack")
+                || (doc.content.contains("Automatic hop")
+                    && doc.content.contains("**not** shipped"))
+                || (doc.content.contains("Automatic host hop")
+                    && doc.content.contains("**not** shipped"));
+            assert!(
+                !claims_unshipped,
+                "{} still claims automatic host hop after included SuperGrok period limits are full is unshipped",
+                doc.filename
+            );
+        }
+
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        for (name, content) in [
+            ("02-authentication.md", auth.content),
+            ("04-slash-commands.md", slash.content),
+        ] {
+            assert!(
+                content.contains("while included SuperGrok period limits still have room")
+                    || content.contains("While included SuperGrok period limits still have room"),
+                "{name} must say stay on SuperGrok while included SuperGrok period limits have room"
+            );
+            assert!(
+                content.contains("After those included SuperGrok period limits are full"),
+                "{name} must describe hop after included SuperGrok period limits are full"
+            );
+            assert!(
+                content.contains("SuperGrok dollar credits") && content.contains("console"),
+                "{name} must name SuperGrok dollar credits then console failover"
+            );
+            assert!(
+                !content.contains("free SuperGrok"),
+                "{name} must not call SuperGrok free"
+            );
+        }
+    }
+
+    /// Named contract: user-guide spend-order sentences match source
+    /// (Business / Team included first, combined remaining, one fetcher).
+    #[test]
+    fn user_guide_names_token_economy_spend_order() {
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        for (name, content) in [
+            ("02-authentication.md", auth.content),
+            ("04-slash-commands.md", slash.content),
+        ] {
+            assert!(
+                content.contains(
+                    "spend included SuperGrok period limits on stored Business / Team SuperGrok logins first"
+                ),
+                "{name} must spend Business / Team included SuperGrok period limits first"
+            );
+            assert!(
+                content.contains("then personal included"),
+                "{name} must spend personal included SuperGrok period limits after Team"
+            );
+            assert!(
+                content.contains("SuperGrok dollar credits that never expire"),
+                "{name} must name SuperGrok dollar credits that never expire"
+            );
+            assert!(
+                content.contains("console team prepaid / console API credits"),
+                "{name} must put console team prepaid / console API credits last"
+            );
+            assert!(
+                content.contains(
+                    "Remaining included SuperGrok period limits across distinct stored plans are added together"
+                ),
+                "{name} must say remaining included SuperGrok period limits are added together"
+            );
+            assert!(
+                content.contains("That sum is the real remaining included quota"),
+                "{name} must say the sum is the real remaining included quota"
+            );
+            assert!(
+                content.contains("unified pool") && content.contains("counts once"),
+                "{name} must say a unified pool counts once"
+            );
+            assert!(
+                content.contains("Only one `grok-oss` process fetches"),
+                "{name} must say only one grok-oss process fetches billing and limits"
+            );
+            assert!(
+                content.contains("snapshot under `$GROK_HOME`"),
+                "{name} must say other live TUIs read a snapshot under $GROK_HOME"
+            );
+            assert!(
+                content.contains("There is no extra daemon"),
+                "{name} must say there is no extra daemon"
+            );
+            assert!(
+                content.contains("Rebuild SIGUSR1 is not this"),
+                "{name} must say rebuild SIGUSR1 is not the limits snapshot"
+            );
+            assert!(
+                content.contains("second `grok-oss login` that stores the Team principal"),
+                "{name} must say a second SuperGrok plan needs a second grok-oss login"
+            );
+            assert!(
+                content.contains("grok.com's account switcher is a different product"),
+                "{name} must say grok.com's account switcher is a different product"
+            );
+            assert!(
+                !content.contains("free SuperGrok"),
+                "{name} must not call SuperGrok free"
+            );
+        }
+    }
+
+    /// Named contract: product skills are not a Python runtime. Restack must
+    /// not drop this from user-guide `08-skills.md`.
+    #[test]
+    fn user_guide_skills_are_not_a_python_runtime() {
+        let skills = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "08-skills.md")
+            .expect("08-skills.md is embedded");
+        assert!(
+            skills.content.contains("not a Python runtime"),
+            "08-skills.md must say product skills are not a Python runtime"
+        );
+        assert!(
+            skills.content.contains("must not add `.py` helpers")
+                || skills.content.contains("must not add .py helpers"),
+            "08-skills.md must tell agents not to add .py helpers"
+        );
+        assert!(
+            skills.content.contains("implement/scripts/memory.py")
+                && skills.content.contains("validate-plan.py")
+                && skills.content.contains("session_reader.py"),
+            "08-skills.md must name the allowlisted intercept CLI forms"
+        );
+        assert!(
+            skills.content.contains("docx")
+                && skills.content.contains("pptx")
+                && skills.content.contains("xlsx")
+                && skills.content.contains("pdf"),
+            "08-skills.md must name the office/PDF exception"
+        );
+    }
+
+    /// Named contract: operator-facing resume / `--version` examples use
+    /// `grok-oss`, never upstream `grok`.
+    #[test]
+    fn user_guide_resume_and_version_examples_use_grok_oss() {
+        let getting_started = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "01-getting-started.md")
+            .expect("01-getting-started.md is embedded");
+        assert!(
+            getting_started.content.contains("grok-oss --resume"),
+            "01-getting-started must show grok-oss --resume"
+        );
+        assert!(
+            getting_started.content.contains("grok-oss --version"),
+            "01-getting-started must show grok-oss --version"
+        );
+        assert!(
+            getting_started.content.contains("grok-oss --yolo"),
+            "01-getting-started must not tell operators to run grok --yolo"
+        );
+        for doc in USER_GUIDE {
+            assert!(
+                !doc.content.contains("grok --resume"),
+                "{} must not tell operators to run grok --resume",
+                doc.filename
+            );
+            assert!(
+                !doc.content.contains("grok --version"),
+                "{} must not tell operators to run grok --version",
+                doc.filename
+            );
+            assert!(
+                !doc.content.contains("grok --yolo"),
+                "{} must not tell operators to run grok --yolo",
+                doc.filename
+            );
+            assert!(
+                !doc.content.contains("grok --continue"),
+                "{} must not tell operators to run grok --continue",
+                doc.filename
+            );
+        }
+    }
+
+    /// Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
+    /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
+    /// Notes (`A`) is gone. Empty `a` does not Approve.
+    #[test]
+    fn user_guide_plan_mode_ctas_are_approve_clarify_revise_exit() {
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        let content = plan.content;
+        assert!(
+            content.contains("**Approve**")
+                && content.contains("**Comment**")
+                && content.contains("**Clarify**")
+                && content.contains("**Revise**")
+                && content.contains("**Exit**"),
+            "19-plan-mode.md must name Approve, Comment, Clarify, Revise, and Exit"
+        );
+        assert!(
+            content.contains("comment composer") || content.contains("Comment**"),
+            "19-plan-mode.md must teach Comment as the idle notes entry"
+        );
+        assert!(
+            !content.contains("Approve with notes") && !content.contains("Notes (`A`)"),
+            "19-plan-mode.md must not keep Notes (`A`) as a CTA"
+        );
+        assert!(
+            !content.contains("empty-prompt `a`") && !content.contains("empty-prompt a"),
+            "19-plan-mode.md must not say empty-prompt a Approves"
+        );
+        assert!(
+            content.contains("also") || content.contains("type"),
+            "19-plan-mode.md must say letters type into the prompt while review is open"
+        );
+        assert!(
+            content.contains("--legacy"),
+            "19-plan-mode.md must keep the questionnaire on --legacy only"
+        );
+        assert!(
+            content.contains("Empty `Enter`") || content.contains("Empty Enter"),
+            "19-plan-mode.md must still say empty Enter never Approves"
+        );
+    }
+
+    /// Named contract: implement-loop effort in user-guide `05-configuration`
+    /// is thoroughness. It is not reviewer fan-out and not how many Review
+    /// rows to launch.
+    #[test]
+    fn user_guide_implement_effort_is_thoroughness_not_reviewer_fan_out() {
+        let config = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "05-configuration.md")
+            .expect("05-configuration.md is embedded");
+        assert!(
+            !config.content.contains("reviewer fan-out"),
+            "05-configuration.md must not say reviewer fan-out"
+        );
+        assert!(
+            !config.content.contains("always-a-reviewer"),
+            "05-configuration.md must not say always-a-reviewer"
+        );
+        assert!(
+            config
+                .content
+                .contains("not how many Review rows to launch"),
+            "05-configuration.md must say implement effort is not how many Review rows to launch"
+        );
+    }
+
+    /// Named contract: leftover operator-facing CLI examples for this tree
+    /// use `grok-oss`, not bare `grok sessions` / `grok login` / `grok mcp add`
+    /// and similar operator commands. Official xAI `grok` product mentions and
+    /// `~/.grok` paths are not this contract.
+    #[test]
+    fn user_guide_operator_cli_examples_use_grok_oss() {
+        const FORBIDDEN: &[&str] = &[
+            "grok sessions",
+            "grok login",
+            "grok logout",
+            "grok mcp ",
+            "grok mcp`",
+            "grok inspect",
+            "grok doctor",
+            "grok plugin ",
+            "grok plugin`",
+            "grok memory",
+            "grok dashboard",
+            "grok wrap",
+            "grok agent",
+            "grok models",
+            "grok workspace",
+            "grok worktree",
+            "grok setup",
+            "grok du",
+            "grok disk-usage",
+            "grok -p",
+            "grok -w",
+            "grok --",
+        ];
+        for doc in USER_GUIDE {
+            for stem in FORBIDDEN {
+                assert!(
+                    !doc.content.contains(stem),
+                    "{} must not tell operators to run `{stem}`; use grok-oss for this tree",
+                    doc.filename
+                );
+            }
+        }
+
+        let sessions = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "17-sessions.md")
+            .expect("17-sessions.md is embedded");
+        assert!(
+            sessions.content.contains("grok-oss sessions"),
+            "17-sessions must show grok-oss sessions"
+        );
+
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        assert!(
+            auth.content.contains("grok-oss login"),
+            "02-authentication must show grok-oss login"
+        );
+
+        let mcp = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "07-mcp-servers.md")
+            .expect("07-mcp-servers.md is embedded");
+        assert!(
+            mcp.content.contains("grok-oss mcp add"),
+            "07-mcp-servers must show grok-oss mcp add"
         );
     }
 }

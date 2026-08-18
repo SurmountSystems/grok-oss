@@ -29,7 +29,7 @@ impl AgentView {
             && (matches!(key.code, KeyCode::Tab | KeyCode::Char(' '))
                 || (allow_i_alt && matches!(key.code, KeyCode::Char('i'))))
         {
-            if self.question_view.is_some() {
+            if self.parked_card().is_some() {
                 self.set_active_pane(AgentPane::Prompt, false);
                 return InputOutcome::Changed;
             }
@@ -276,7 +276,7 @@ impl AgentView {
     pub(super) fn handle_todo_key(
         &mut self,
         key: &KeyEvent,
-        registry: &ActionRegistry,
+        _registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         if key!('t', CONTROL).matches(key) {
@@ -302,10 +302,9 @@ impl AgentView {
             }
             return overlay_action_to_outcome(action);
         }
-        // X = clear completed (same as chrome Clear finished / ActionId).
-        if !has_input
-            && (key!('X').matches(key) || registry.matches_id(ActionId::ClearCompletedTodos, key))
-        {
+        // X = clear completed (same as chrome Clear finished). Optional and
+        // only when the todo pane is focused.
+        if !has_input && key!('X').matches(key) {
             return InputOutcome::Action(Action::ClearCompletedTodos);
         }
         if self.todo.handle_key(key) {
@@ -561,7 +560,7 @@ impl AgentView {
         }
         if let Some(ref mut viewer) = self.line_viewer {
             if let Some(area) = viewer.last_popup_area
-                && area.contains((col, row).into())
+                && (area.contains((col, row).into()) || viewer.list_state.scrollbar_hit(col, row))
             {
                 viewer
                     .list_state
@@ -797,134 +796,6 @@ mod scroll_granularity_tests {
     }
 }
 #[cfg(test)]
-mod clear_completed_todos_key_tests {
-    use super::super::{AgentPane, test_fixtures::make_agent};
-    use crate::actions::ActionRegistry;
-    use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
-    use crate::key;
-    use crossterm::event::Event;
-    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
-
-    fn shift_x() -> Event {
-        Event::Key(key!('X').to_key_event())
-    }
-
-    /// Named contract: bare X / Shift+X only clears completed when the todo
-    /// pane is focused. Tasks (and other panes) must not fall through to
-    /// AgentScreen ClearCompletedTodos.
-    #[test]
-    fn clear_completed_todos_x_key_only_when_todo_pane_focused() {
-        let registry = ActionRegistry::defaults();
-        let mut agent = make_agent();
-        agent.todo.update_todos(vec![TodoItem {
-            content: "shipped".into(),
-            priority: TodoPriority::Medium,
-            status: TodoStatus::Completed,
-            meta: None,
-            size: None,
-        }]);
-
-        // Tasks focused: X must not archive.
-        agent.tasks.overlay.visible = true;
-        agent.tasks.overlay.focused = true;
-        agent.set_active_pane(AgentPane::Tasks, true);
-        let tasks_out = agent.handle_input(&shift_x(), &registry);
-        assert!(
-            !matches!(tasks_out, InputOutcome::Action(Action::ClearCompletedTodos)),
-            "Tasks pane must not map X to ClearCompletedTodos, got {tasks_out:?}"
-        );
-
-        // Catalog focused: same guard.
-        agent.tasks.overlay.visible = false;
-        agent.tasks.overlay.focused = false;
-        agent.set_active_pane(AgentPane::Catalog, true);
-        let catalog_out = agent.handle_input(&shift_x(), &registry);
-        assert!(
-            !matches!(
-                catalog_out,
-                InputOutcome::Action(Action::ClearCompletedTodos)
-            ),
-            "Catalog pane must not map X to ClearCompletedTodos, got {catalog_out:?}"
-        );
-
-        // Todo focused: X clears.
-        agent.todo.overlay.visible = true;
-        agent.todo.overlay.focused = true;
-        agent.set_active_pane(AgentPane::Todo, true);
-        let todo_out = agent.handle_input(&shift_x(), &registry);
-        assert!(
-            matches!(todo_out, InputOutcome::Action(Action::ClearCompletedTodos)),
-            "Todo pane focused must map X to ClearCompletedTodos, got {todo_out:?}"
-        );
-    }
-
-    /// Named contract: when a clear-finished hit rect is present (product paints
-    /// it for open board + finished rows), a mouse click on that rect dispatches
-    /// ClearCompletedTodos. Empty hit (hidden board / nothing finished) does not
-    /// invent the action.
-    #[test]
-    fn clear_finished_click_dispatches_when_hit_rect_set() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        use ratatui::layout::Rect;
-
-        let mut agent = make_agent();
-        agent.set_active_pane(AgentPane::Todo, false);
-        // Simulate last-frame paint of clear-finished `[−]` chrome (open + finished).
-        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 3, 1)));
-        let mouse = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 11,
-            row: 3,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-        };
-        let out = agent.handle_input(
-            &crossterm::event::Event::Mouse(mouse),
-            &ActionRegistry::defaults(),
-        );
-        assert!(
-            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
-            "Clear finished click on hit rect must dispatch, got {out:?}"
-        );
-
-        // Empty hit (hidden / nothing finished): click does not invent ClearCompletedTodos.
-        agent.hit_todo_clear_done.clear();
-        let out_miss = agent.handle_input(
-            &crossterm::event::Event::Mouse(mouse),
-            &ActionRegistry::defaults(),
-        );
-        assert!(
-            !matches!(out_miss, InputOutcome::Action(Action::ClearCompletedTodos)),
-            "no clear hit must not dispatch ClearCompletedTodos, got {out_miss:?}"
-        );
-    }
-
-    /// Named contract: status-bar credits meter click opens /limits detail.
-    #[test]
-    fn credits_status_click_dispatches_show_limits() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        use ratatui::layout::Rect;
-
-        let mut agent = make_agent();
-        agent.hit_credits.set(Some(Rect::new(40, 0, 16, 1)));
-        let mouse = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 45,
-            row: 0,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-        };
-        let out = agent.handle_input(
-            &crossterm::event::Event::Mouse(mouse),
-            &ActionRegistry::defaults(),
-        );
-        assert!(
-            matches!(out, InputOutcome::Action(Action::ShowLimits)),
-            "credits meter click must open limits, got {out:?}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod mouse_reporting_registry_tests {
     use super::super::{AgentPane, test_fixtures::make_agent};
     use crate::actions::ActionRegistry;
@@ -973,6 +844,7 @@ mod paste_routing_tests {
     #[test]
     fn scrollback_search_paste_stays_scoped_and_browse_is_inert() {
         let mut agent = make_agent();
+        agent.vim_mode = false;
         agent.set_active_pane(AgentPane::Scrollback, true);
         agent.prompt.set_text("hidden prompt");
         agent.scrollback_search = Some(ScrollbackSearchState::open());
@@ -1004,8 +876,107 @@ mod paste_routing_tests {
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
         agent.scrollback_search = None;
-        let outcome = agent.handle_input(&Event::Paste("still ignored".to_owned()), &registry);
-        assert!(matches!(outcome, InputOutcome::Unchanged));
+        let outcome = agent.handle_input(&Event::Paste("forwarded".to_owned()), &registry);
+        assert!(matches!(
+            outcome,
+            InputOutcome::ActionThenForward(crate::app::actions::Action::FocusPrompt)
+        ));
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod clear_completed_todos_key_tests {
+    use super::super::{AgentPane, test_fixtures::make_agent};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::key;
+    use crossterm::event::Event;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn shift_x() -> Event {
+        Event::Key(key!('X').to_key_event())
+    }
+
+    /// Named contract: bare X / Shift+X only clears completed when the todo
+    /// pane is focused. Tasks (and other panes) must not fall through.
+    #[test]
+    fn clear_completed_todos_x_key_only_when_todo_pane_focused() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+
+        agent.tasks.overlay.visible = true;
+        agent.tasks.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Tasks, true);
+        let tasks_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(tasks_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Tasks pane must not map X to ClearCompletedTodos, got {tasks_out:?}"
+        );
+
+        agent.tasks.overlay.visible = false;
+        agent.tasks.overlay.focused = false;
+        agent.set_active_pane(AgentPane::Catalog, true);
+        let catalog_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            !matches!(
+                catalog_out,
+                InputOutcome::Action(Action::ClearCompletedTodos)
+            ),
+            "Catalog pane must not map X to ClearCompletedTodos, got {catalog_out:?}"
+        );
+
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(AgentPane::Todo, true);
+        let todo_out = agent.handle_input(&shift_x(), &registry);
+        assert!(
+            matches!(todo_out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Todo pane focused must map X to ClearCompletedTodos, got {todo_out:?}"
+        );
+    }
+
+    /// Named contract: when a clear-finished hit rect is present, a mouse
+    /// click on that rect dispatches ClearCompletedTodos. Empty hit does not.
+    #[test]
+    fn clear_finished_click_dispatches_when_hit_rect_set() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Todo, false);
+        agent.hit_todo_clear_done.set(Some(Rect::new(10, 3, 3, 1)));
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear finished click on hit rect must dispatch, got {out:?}"
+        );
+
+        agent.hit_todo_clear_done.clear();
+        let out_miss = agent.handle_input(
+            &crossterm::event::Event::Mouse(mouse),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            !matches!(out_miss, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "no clear hit must not dispatch ClearCompletedTodos, got {out_miss:?}"
+        );
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use xai_grok_sampling_types::{
-    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage,
+    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage, ToolSpec,
     dedup_duplicate_tool_results, repair_dangling_tool_calls,
 };
 
@@ -20,18 +20,37 @@ pub fn estimate_system_message_tokens(item: &ConversationItem) -> u64 {
     }
 }
 
+fn estimate_tool_tokens(
+    name: &str,
+    description: Option<&str>,
+    parameters: &serde_json::Value,
+) -> u64 {
+    let desc_len = description.map_or(0, str::len);
+    let params_len = parameters.to_string().len();
+    ((name.len() + desc_len + params_len) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+}
+
 /// Bytes/4 estimate of one tool definition (name + description + the
 /// JSON-serialized parameters).
 pub fn estimate_tool_definition_tokens(td: &xai_grok_sampling_types::ToolDefinition) -> u64 {
-    let name_len = td.function.name.len();
-    let desc_len = td.function.description.as_deref().map_or(0, |d| d.len());
-    let params_len = td.function.parameters.to_string().len();
-    ((name_len + desc_len + params_len) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+    estimate_tool_tokens(
+        &td.function.name,
+        td.function.description.as_deref(),
+        &td.function.parameters,
+    )
 }
 
 /// Sum [`estimate_tool_definition_tokens`] across a slice.
 pub fn estimate_tool_definitions_tokens(tds: &[xai_grok_sampling_types::ToolDefinition]) -> u64 {
     tds.iter().map(estimate_tool_definition_tokens).sum()
+}
+
+/// Bytes/4 estimate of the exact tool specs serialized on a request.
+pub fn estimate_tool_specs_tokens(tools: &[ToolSpec]) -> u64 {
+    tools
+        .iter()
+        .map(|tool| estimate_tool_tokens(&tool.name, tool.description.as_deref(), &tool.parameters))
+        .sum()
 }
 
 /// Bytes/4 estimate for a single [`ConversationItem`].
@@ -141,6 +160,12 @@ pub(crate) struct ChatState {
     /// Used by `check_preflight_overflow` to detect context window overflows
     /// between model responses.
     pub estimated_tokens_since_model: u64,
+    /// Spawn `prompt` bodies omitted from parent ingest after the last
+    /// `record_token_usage`. The API `total_tokens` still includes the
+    /// generated prompt; the next request will not. Subtracted from
+    /// `get_estimated_total_tokens` so sampling compact does not fire on
+    /// child-owned L2 prompts.
+    pub omitted_spawn_prompt_tokens: u64,
     /// Bytes/4 estimate of the conversation as of the last `record_token_usage`
     /// (or last reseed). `total_tokens − estimate_at_last_response` is the
     /// provider-side overhead carried across compaction.
@@ -223,6 +248,7 @@ impl ChatState {
                 "Repaired dangling tool calls in initial conversation (likely from a previous crash)"
             );
         }
+        xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
 
         let initial_tokens = estimate_conversation_tokens(&conversation);
 
@@ -238,6 +264,7 @@ impl ChatState {
             last_compaction_prompt_index: None,
             credentials: Credentials::default(),
             estimated_tokens_since_model: 0,
+            omitted_spawn_prompt_tokens: 0,
             estimate_at_last_response: initial_tokens,
             last_turn_usage: None,
             prompt_usage: None,
@@ -359,6 +386,27 @@ mod tests {
         );
         // name=6 + desc=11 + params=`{}`.len()=2 = 19, /4 = 4
         assert_eq!(estimate_tool_definition_tokens(&td), 4);
+    }
+
+    #[test]
+    fn estimate_tool_specs_tokens_counts_only_provided_specs() {
+        let kept = xai_grok_sampling_types::ToolDefinition::function(
+            "search",
+            Some("find a file"),
+            serde_json::json!({"type": "object"}),
+        );
+        let dropped = xai_grok_sampling_types::ToolDefinition::function(
+            "web_search",
+            Some("search the web"),
+            serde_json::json!({"type": "object"}),
+        );
+        let tools = vec![ToolSpec::from(kept.clone())];
+        let actual = estimate_tool_specs_tokens(&tools);
+        let expected = estimate_tool_definitions_tokens(std::slice::from_ref(&kept));
+        let unfiltered = estimate_tool_definitions_tokens(&[kept, dropped]);
+
+        assert_eq!(actual, expected);
+        assert!(actual < unfiltered);
     }
 
     #[test]

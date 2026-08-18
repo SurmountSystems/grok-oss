@@ -93,7 +93,7 @@ impl SessionActor {
     }
     pub(super) async fn build_prefix_background(&self) -> String {
         let start = std::time::Instant::now();
-        if matches!(self.mcp_strategy, McpInitStrategy::Blocking) {
+        if matches!(self.mcp_strategy.get(), McpInitStrategy::Blocking) {
             use xai_grok_agent::prompt::user_message::UserMessageTemplate;
             let mcp_wait = match self.agent.borrow().definition().user_message_template {
                 UserMessageTemplate::Default => std::time::Duration::from_secs(15),
@@ -202,13 +202,37 @@ impl SessionActor {
         }
         skill_count
     }
+    /// Skills used for slash resolve, mid-turn interjection expansion, and
+    /// prompt skill listings. Same source as ACU: product REST for chat-kind
+    /// (TTL-cached; never disk), `SkillManager` for Build.
+    pub(crate) async fn slash_skills_for_resolve(
+        &self,
+    ) -> Vec<xai_grok_tools::implementations::skills::types::SkillInfo> {
+        match slash_commands::acu_skill_source(self.is_chat_kind) {
+            slash_commands::AcuSkillSource::Product => Vec::new(),
+            slash_commands::AcuSkillSource::Disk => {
+                let bridge = self.tool_bridge_handle();
+                bridge.slash_skills().await
+            }
+        }
+    }
     /// Send `AvailableCommandsUpdate` to the client.
     ///
-    /// Reads the current slash-command skill list from the tools layer
-    /// (`SkillManager`), NOT from `PromptContext`.
+    /// Chat-kind sessions advertise the product Skills REST catalog (same
+    /// source as `list_commands(kind=chat)`). Build sessions read disk skills
+    /// from the tools layer (`SkillManager`). Chat never falls back to disk.
+    /// Product REST failure (or missing auth) reuses the shared last-successful
+    /// product catalog (same as `list_commands(kind=chat)`); if none exists yet,
+    /// advertises builtins only (never invents product skill names, never disk).
+    /// Empty product success still advertises builtins.
     pub(super) async fn send_available_commands_update(&self) {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let skills = bridge.slash_skills().await;
+        let skills = match slash_commands::acu_skill_source(self.is_chat_kind) {
+            slash_commands::AcuSkillSource::Product => {
+                return;
+            }
+            slash_commands::AcuSkillSource::Disk => bridge.slash_skills().await,
+        };
         let tool_names: Vec<String> = bridge
             .tool_definitions()
             .await
@@ -220,14 +244,12 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        if commands.is_empty() {
-            return;
-        }
         let meta = Some(slash_commands::build_tools_meta(&tool_names));
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),
             tool_count = tool_names.len(),
+            is_chat_kind = self.is_chat_kind,
             "Advertising available slash commands",
         );
         self.send_update(
@@ -366,7 +388,6 @@ impl SessionActor {
             threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
             "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
         );
-        let creds = self.chat_state_handle.get_credentials().await;
         let Some(ref am) = self.auth_manager else {
             tracing::debug!("No auth manager available for model metadata refresh");
             return;
@@ -403,20 +424,28 @@ impl SessionActor {
                 crate::http::process_client_mode(),
             )
             .timeout(std::time::Duration::from_secs(5));
-        let response = match request.send().await {
+        let built = match request.build() {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
+                tracing::warn!(error = %e, "Failed to build idle-refresh models request");
                 return;
             }
         };
+        let (response, stamp) =
+            match xai_grok_auth::execute_with_stamp(&middleware_client, built).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
+                    return;
+                }
+            };
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             crate::auth::attribution::record_consumer_401(
                 am,
                 None,
                 crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
                 "",
-                creds.api_key.as_deref(),
+                stamp.as_ref().map(|s| s.0.as_str()),
             );
         }
         let result = if !response.status().is_success() {
@@ -441,28 +470,13 @@ impl SessionActor {
         if current_config.context_window != new_context_window
             && self.compaction.context_window_override.is_none()
         {
-            // Catalog size from remote refresh; effective size may still be
-            // economic-capped.
-            self.compaction
-                .model_context_window
-                .set(new_context_window.get());
-            let effective =
-                std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
-                    new_context_window.get(),
-                    self.compaction.economic_mode.get(),
-                ))
-                .unwrap_or(new_context_window);
-            if current_config.context_window != effective {
-                tracing::info!(
-                    old_context_window = current_config.context_window.get(),
-                    catalog_context_window = new_context_window.get(),
-                    new_context_window = effective.get(),
-                    economic_mode = self.compaction.economic_mode.get(),
-                    "Context window updated on session resume"
-                );
-                updated_config.context_window = effective;
-                config_changed = true;
-            }
+            tracing::info!(
+                old_context_window = current_config.context_window.get(),
+                new_context_window = new_context_window.get(),
+                "Context window updated on session resume"
+            );
+            updated_config.context_window = new_context_window;
+            config_changed = true;
         }
         if let Some(new_mct) = new_max_completion_tokens
             && current_config.max_completion_tokens != Some(new_mct)
@@ -495,63 +509,32 @@ impl SessionActor {
         let mut config_changed = false;
         let mut new_context_window = current_config.context_window;
         let mut new_max_completion_tokens = current_config.max_completion_tokens;
+        if let Some(header_cw) = metadata.context_window.filter(|&w| w > 0) {
+            self.compaction.model_context_window.set(header_cw);
+        }
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
             && self.compaction.context_window_override.is_none()
         {
-            // Track catalog size (pre-economic cap) for later restore.
-            if new_cw.get() > self.compaction.model_context_window.get() {
-                self.compaction.model_context_window.set(new_cw.get());
-            }
-            let catalog = self.compaction.model_context_window.get().max(new_cw.get());
-            let effective =
-                std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
-                    catalog,
-                    self.compaction.economic_mode.get(),
-                ))
-                .unwrap_or(new_cw);
-
-            if effective.get() > current_config.context_window.get() {
-                tracing::info!(
-                    old_context_window = current_config.context_window.get(),
-                    catalog_context_window = catalog,
-                    new_context_window = effective.get(),
-                    economic_mode = self.compaction.economic_mode.get(),
-                    "Model context_window upgraded via response header"
-                );
-                new_context_window = effective;
-                config_changed = true;
-            } else if new_cw.get() < current_config.context_window.get()
-                && !self.compaction.economic_mode.get()
-            {
-                // Preserve the historical "no header downgrade" rule when
-                // economic mode is off (effective == catalog).
+            let effective = crate::util::config::apply_economic_context_cap(
+                new_cw.get(),
+                self.compaction.economic_mode.get(),
+            );
+            let effective_cw = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
+            if new_cw < current_config.context_window {
                 tracing::warn!(
                     current_context_window = current_config.context_window.get(),
                     header_context_window = new_cw.get(),
                     "Ignoring context_window downgrade from response header"
                 );
-            } else if self.compaction.economic_mode.get()
-                && effective.get() < current_config.context_window.get()
-            {
-                // Economic mode may pull effective below a previously uncapped
-                // window after a mid-session enable (handled by slash path too).
+            } else if effective_cw != current_config.context_window {
                 tracing::info!(
                     old_context_window = current_config.context_window.get(),
-                    catalog_context_window = catalog,
-                    new_context_window = effective.get(),
-                    "economic mode: clamping context_window to pricing cap"
+                    new_context_window = effective_cw.get(),
+                    header_context_window = new_cw.get(),
+                    "Model context_window upgraded via response header"
                 );
-                new_context_window = effective;
+                new_context_window = effective_cw;
                 config_changed = true;
-            } else if self.compaction.economic_mode.get()
-                && new_cw.get() > current_config.context_window.get()
-                && effective.get() == current_config.context_window.get()
-            {
-                tracing::debug!(
-                    catalog_context_window = new_cw.get(),
-                    effective_context_window = effective.get(),
-                    "economic mode: ignoring catalog upgrade past pricing cap"
-                );
             }
         }
         if let Some(new_mct) = metadata.max_completion_tokens

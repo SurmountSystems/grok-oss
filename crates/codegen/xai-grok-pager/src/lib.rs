@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "test-support", allow(dead_code, unused_imports))]
 //! xai-grok-pager — Grok Build TUI.
 //!
 //! A clean-room implementation built on the v3 pager rendering engine.
@@ -10,10 +9,11 @@ pub mod client_identity;
 pub mod completions_cmd;
 mod config_toml_edit;
 pub mod diagnostics;
-pub mod diff;
+pub mod disk_usage_cmd;
 pub mod docs;
 pub mod doctor_cmd;
 pub mod export_cmd;
+pub(crate) mod fs_size;
 pub mod git_info;
 pub mod headless;
 pub mod hyperlink_route;
@@ -44,8 +44,9 @@ pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
 pub mod plugin_cmd;
-pub mod project_picker;
 pub mod pty_wrap;
+pub mod recent_dirs;
+pub mod running_sessions;
 pub mod scrollback;
 pub mod search;
 pub mod sessions_cmd;

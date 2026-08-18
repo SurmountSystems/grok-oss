@@ -618,10 +618,14 @@ fn render_selection_overlay_impl(
 
     for line in &range.lines {
         let col_ranges: Vec<Range<u16>> = if let Some(geom) = table {
-            // Clipped to content so the highlight matches the trimmed copy.
+            // Snapped to grapheme boundaries and clipped to content so the highlight matches the copy.
             table_selected_cols_for_line(geom, kind, anchor, head, line.block_line_idx)
                 .into_iter()
-                .map(|cols| clip_cols_to_content(&line.text, cols))
+                .map(|cols| {
+                    let snapped = endpoint_start_col(&line.text, cols.start)
+                        ..endpoint_end_col(&line.text, cols.end.saturating_sub(1));
+                    clip_cols_to_content(&line.text, snapped)
+                })
                 .collect()
         } else {
             if line.block_line_idx < start_bl || line.block_line_idx > end_bl {
@@ -808,9 +812,13 @@ pub fn reconstruct_table_selection_text(
             let mut out = String::new();
             for line in l0..=l1 {
                 let text = text_at(line)?;
-                let start = if line == l0 { c0 } else { band.start };
+                let start = if line == l0 {
+                    endpoint_start_col(&text, c0).max(band.start)
+                } else {
+                    band.start
+                };
                 let end = if line == l1 {
-                    c1.saturating_add(1).min(band.end)
+                    endpoint_end_col(&text, c1).min(band.end)
                 } else {
                     band.end
                 };
@@ -880,10 +888,11 @@ pub(crate) fn apply_selection_boundary(
 
 /// Compute the selected column range for a given line based on anchor/head endpoints.
 ///
-/// Shared implementation used by both active drag and persistent selection overlays:
-/// - Single-line: `min(anchor_col, head_col)..max(anchor_col, head_col)+1`
-/// - Multi-line first: `start_col..width`
-/// - Multi-line last: `0..end_col+1`
+/// Shared implementation used by both active drag and persistent selection overlays. Endpoints snap to grapheme
+/// boundaries: starts floor onto the grapheme under the anchor, ends advance past the grapheme under the head.
+/// - Single-line: `floor(min(anchor_col, head_col))..past(max(anchor_col, head_col))`
+/// - Multi-line first: `floor(start_col)..width`
+/// - Multi-line last: `0..past(end_col)`
 /// - Multi-line middle: `0..width` (full line)
 ///
 /// Returns `None` if the line falls outside the anchor/head range.
@@ -908,9 +917,10 @@ fn selected_cols_for_endpoints(
     }
 
     if start_bl == end_bl {
-        let start = min(anchor_col, head_col);
-        let end = max(anchor_col, head_col).saturating_add(1);
-        return Some(start.min(width)..end.min(width));
+        let start = endpoint_start_col(&line.text, min(anchor_col, head_col));
+        return Some(
+            start.min(width)..endpoint_end_col(&line.text, max(anchor_col, head_col)).min(width),
+        );
     }
 
     if bl == start_bl {
@@ -919,17 +929,31 @@ fn selected_cols_for_endpoints(
         } else {
             head_col
         };
-        return Some(start.min(width)..width);
+        return Some(endpoint_start_col(&line.text, start).min(width)..width);
     }
+
     if bl == end_bl {
         let end = if anchor_is_start {
             head_col
         } else {
             anchor_col
         };
-        return Some(0..end.saturating_add(1).min(width));
+        return Some(0..endpoint_end_col(&line.text, end).min(width));
     }
+
     Some(0..width)
+}
+
+/// Exclusive end for a selection that includes the cell at `col`: one column past the grapheme there.
+/// On a padded or empty line `col` can sit past the text, so the result is never less than `col + 1`.
+fn endpoint_end_col(text: &str, col: u16) -> u16 {
+    crate::scrollback::types::col_past_grapheme(text, col).max(col.saturating_add(1))
+}
+
+/// Start of a selection whose first cell is `col`: the first column of the grapheme there, so a wide character is selected whole.
+/// When `col` is past the text, it is returned unchanged.
+fn endpoint_start_col(text: &str, col: u16) -> u16 {
+    crate::scrollback::types::grapheme_cells_at(text, col).map_or(col, |cells| cells.start)
 }
 
 fn selected_cols_for_line_by_block_idx(
@@ -991,25 +1015,26 @@ pub(crate) fn reconstruct_full_selection_text_with_boundaries(
         };
         let width = cols.end.saturating_sub(cols.start);
 
-        // Determine column slice for this line.
+        // Snap endpoints exactly like selected_cols_for_endpoints: `col_range.end == width` decides suffix re-attachment below,
+        // so an unsnapped end stopping mid-character would drop a suffix that the highlight includes.
         let col_range = if start_bl == end_bl {
             let s = min(drag.anchor.col_within_range, drag.head.col_within_range);
-            let e = max(drag.anchor.col_within_range, drag.head.col_within_range).saturating_add(1);
-            s.min(width)..e.min(width)
+            let e = max(drag.anchor.col_within_range, drag.head.col_within_range);
+            endpoint_start_col(&text, s).min(width)..endpoint_end_col(&text, e).min(width)
         } else if idx == start_bl {
             let s = if anchor_is_start {
                 drag.anchor.col_within_range
             } else {
                 drag.head.col_within_range
             };
-            s.min(width)..width
+            endpoint_start_col(&text, s).min(width)..width
         } else if idx == end_bl {
             let e = if anchor_is_start {
                 drag.head.col_within_range
             } else {
                 drag.anchor.col_within_range
             };
-            0..e.saturating_add(1).min(width)
+            0..endpoint_end_col(&text, e).min(width)
         } else {
             0..width
         };
@@ -1203,6 +1228,194 @@ pub fn url_range_at_col(text: &str, col: u16) -> Option<Range<u16>> {
     }
 
     None
+}
+
+/// Wrap-aware word or URL selection. `head` is inclusive; `text` is the joined
+/// fragment text and is never empty. `None` means nothing selectable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SemanticSelection {
+    pub anchor: SelectionEndpoint,
+    pub head: SelectionEndpoint,
+    pub text: String,
+}
+
+struct ConcatFragment {
+    block_line_idx: usize,
+    text_start: u16,
+    text_end: u16,
+}
+
+/// Snap when an inclusive concat column lands inside a joiner: `Forward` → next
+/// fragment col 0, `Backward` → previous fragment's last col.
+#[derive(Clone, Copy)]
+enum JoinerColSnap {
+    Forward,
+    Backward,
+}
+
+/// Select the wrap-group word or URL at `hit`.
+///
+/// The wrap group is the maximal run of `Some` joiners inside one range.
+/// `head` is inclusive; `text` is the joined fragment text and is never empty.
+/// `None` means nothing selectable.
+///
+/// `joiner_to_previous: None` is a hard source-line break and is not crossed,
+/// even though `'\n'` is not in `word_separators`.
+#[must_use]
+pub fn semantic_selection_at(
+    model: &ResolvedSelectionModel,
+    hit: &RangeHit,
+    separators: &str,
+) -> Option<SemanticSelection> {
+    let range = model.range(hit.entry_idx, hit.range_id)?;
+    let lines = &range.lines;
+    let hit_pos = lines
+        .iter()
+        .position(|line| line.block_line_idx == hit.block_line_idx)?;
+
+    let mut lo = hit_pos;
+    while lo > 0 && lines[lo].joiner_to_previous.is_some() {
+        lo -= 1;
+    }
+    let mut hi = hit_pos;
+    while hi + 1 < lines.len() && lines[hi + 1].joiner_to_previous.is_some() {
+        hi += 1;
+    }
+
+    // Common single-row case: skip concat allocation.
+    if lo == hi {
+        let line = &lines[lo];
+        let (sel, text) = word_or_url_slice(&line.text, hit.col_within_range, separators)?;
+        return Some(SemanticSelection {
+            anchor: SelectionEndpoint {
+                block_line_idx: line.block_line_idx,
+                col_within_range: sel.start,
+            },
+            head: SelectionEndpoint {
+                block_line_idx: line.block_line_idx,
+                col_within_range: sel.end.saturating_sub(1),
+            },
+            text,
+        });
+    }
+
+    let mut concat = String::new();
+    let mut text_byte_ranges = Vec::with_capacity(hi - lo + 1);
+    for (offset, line) in lines[lo..=hi].iter().enumerate() {
+        if offset > 0
+            && let Some(joiner) = line.joiner_to_previous.as_deref()
+        {
+            concat.push_str(joiner);
+        }
+        let text_byte_start = concat.len();
+        concat.push_str(&line.text);
+        text_byte_ranges.push((line.block_line_idx, text_byte_start, concat.len()));
+    }
+
+    // Measure fragment columns on the finished concat so a grapheme split
+    // across a wrap boundary is not counted twice.
+    let mut fragments = Vec::with_capacity(text_byte_ranges.len());
+    let mut hit_concat_col = None;
+    for (block_line_idx, text_byte_start, text_byte_end) in text_byte_ranges {
+        let text_start = display_width(&concat[..text_byte_start]);
+        let text_end = display_width(&concat[..text_byte_end]);
+        fragments.push(ConcatFragment {
+            block_line_idx,
+            text_start,
+            text_end,
+        });
+        if block_line_idx == hit.block_line_idx {
+            hit_concat_col = Some(map_local_hit_to_concat_col(
+                &concat[text_byte_start..text_byte_end],
+                text_start,
+                text_end,
+                hit.col_within_range,
+            ));
+        }
+    }
+
+    let (sel, text) = word_or_url_slice(&concat, hit_concat_col?, separators)?;
+    let last_col = sel.end.saturating_sub(1);
+    let anchor = map_inclusive_concat_col(&fragments, sel.start, JoinerColSnap::Forward)?;
+    let head = map_inclusive_concat_col(&fragments, last_col, JoinerColSnap::Backward)?;
+    if (anchor.block_line_idx, anchor.col_within_range)
+        > (head.block_line_idx, head.col_within_range)
+    {
+        return None;
+    }
+
+    Some(SemanticSelection { anchor, head, text })
+}
+
+/// Map a fragment-local click column into concat display columns.
+///
+/// When a wrap splits a grapheme, the continuation still has local width but
+/// adds little or none in concat. Those absorbed columns snap to the last
+/// concat column of the split cluster instead of drifting into later text.
+fn map_local_hit_to_concat_col(
+    local_text: &str,
+    text_start: u16,
+    text_end: u16,
+    col_within_range: u16,
+) -> u16 {
+    let local_width = display_width(local_text);
+    let concat_width = text_end.saturating_sub(text_start);
+    let absorbed = local_width.saturating_sub(concat_width);
+    if col_within_range < absorbed {
+        text_start.saturating_sub(1)
+    } else {
+        text_start.saturating_add(col_within_range - absorbed)
+    }
+}
+
+fn word_or_url_slice(text: &str, col: u16, separators: &str) -> Option<(Range<u16>, String)> {
+    let range = url_range_at_col(text, col)
+        .unwrap_or_else(|| word_boundaries_at_col(text, col, separators));
+    if range.is_empty() {
+        return None;
+    }
+    let sliced = crate::scrollback::types::slice_display_cols(text, range.start, range.end);
+    if sliced.is_empty() {
+        return None;
+    }
+    Some((range, sliced))
+}
+
+fn fragment_last_col(frag: &ConcatFragment) -> Option<SelectionEndpoint> {
+    let width = frag.text_end.saturating_sub(frag.text_start);
+    (width > 0).then_some(SelectionEndpoint {
+        block_line_idx: frag.block_line_idx,
+        col_within_range: width.saturating_sub(1),
+    })
+}
+
+fn map_inclusive_concat_col(
+    fragments: &[ConcatFragment],
+    col: u16,
+    snap: JoinerColSnap,
+) -> Option<SelectionEndpoint> {
+    for (i, frag) in fragments.iter().enumerate() {
+        if col < frag.text_start {
+            return match snap {
+                JoinerColSnap::Forward => Some(SelectionEndpoint {
+                    block_line_idx: frag.block_line_idx,
+                    col_within_range: 0,
+                }),
+                JoinerColSnap::Backward => fragment_last_col(fragments.get(i.checked_sub(1)?)?),
+            };
+        }
+        if col < frag.text_end {
+            return Some(SelectionEndpoint {
+                block_line_idx: frag.block_line_idx,
+                col_within_range: col.saturating_sub(frag.text_start),
+            });
+        }
+    }
+
+    match snap {
+        JoinerColSnap::Forward => None,
+        JoinerColSnap::Backward => fragment_last_col(fragments.last()?),
+    }
 }
 
 #[cfg(test)]
@@ -2230,6 +2443,456 @@ mod tests {
         assert_eq!(wb(text, non_url_col), 34..43);
     }
 
+    fn wrap_model(fragments: &[(&str, Option<&str>)]) -> ResolvedSelectionModel {
+        let mut model = ResolvedSelectionModel::default();
+        for (i, (text, joiner)) in fragments.iter().enumerate() {
+            model.push_line(ResolvedSelectableLine {
+                entry_idx: 0,
+                range_id: 0,
+                block_line_idx: i,
+                screen_y: i as u16,
+                screen_x: 0,
+                selectable_cols: 0..display_width(text),
+                text: (*text).to_string(),
+                joiner_to_previous: joiner.map(str::to_string),
+            });
+        }
+        model
+    }
+
+    fn wrap_hit(block_line_idx: usize, col_within_range: u16) -> RangeHit {
+        RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx,
+            col_within_range,
+        }
+    }
+
+    fn semantic(model: &ResolvedSelectionModel, line: usize, col: u16) -> SemanticSelection {
+        semantic_selection_at(model, &wrap_hit(line, col), DEFAULT_WORD_SEPARATORS)
+            .expect("semantic selection")
+    }
+
+    fn ep(block_line_idx: usize, col_within_range: u16) -> SelectionEndpoint {
+        SelectionEndpoint {
+            block_line_idx,
+            col_within_range,
+        }
+    }
+
+    #[test]
+    fn semantic_selection_mid_word_wrap_selects_full_identifier() {
+        let model = wrap_model(&[("hello_world_", None), ("identifier", Some(""))]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(1, 9),
+            text: "hello_world_identifier".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 0), expected);
+        assert_eq!(semantic(&model, 0, 11), expected);
+        assert_eq!(semantic(&model, 1, 0), expected);
+        assert_eq!(semantic(&model, 1, 5), expected);
+    }
+
+    #[test]
+    fn semantic_selection_space_wrap_does_not_cross() {
+        let model = wrap_model(&[("hello", None), ("world", Some(" "))]);
+        assert_eq!(
+            semantic(&model, 0, 1),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 4),
+                text: "hello".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic(&model, 1, 0),
+            SemanticSelection {
+                anchor: ep(1, 0),
+                head: ep(1, 4),
+                text: "world".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_hard_break_does_not_cross() {
+        let model = wrap_model(&[("hello", None), ("hello", None)]);
+        let first = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(0, 4),
+            text: "hello".to_string(),
+        };
+        let second = SemanticSelection {
+            anchor: ep(1, 0),
+            head: ep(1, 4),
+            text: "hello".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 2), first);
+        assert_eq!(semantic(&model, 1, 2), second);
+    }
+
+    #[test]
+    fn semantic_selection_wrapped_url_spans_fragments() {
+        let model = wrap_model(&[
+            ("https://example.", None),
+            ("com/very/long/", Some("")),
+            ("path", Some("")),
+        ]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(2, 3),
+            text: "https://example.com/very/long/path".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 2), expected);
+        assert_eq!(semantic(&model, 1, 3), expected);
+        assert_eq!(semantic(&model, 2, 0), expected);
+    }
+
+    #[test]
+    fn semantic_selection_custom_separators_across_wrap() {
+        let model = wrap_model(&[("hello-", None), ("world", Some(""))]);
+        let grouped = semantic_selection_at(&model, &wrap_hit(0, 1), "").expect("grouped");
+        assert_eq!(
+            grouped,
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(1, 4),
+                text: "hello-world".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic_selection_at(&model, &wrap_hit(1, 0), "").expect("grouped from row 1"),
+            grouped
+        );
+
+        let split = semantic_selection_at(&model, &wrap_hit(0, 1), "-").expect("split");
+        assert_eq!(
+            split,
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 4),
+                text: "hello".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic_selection_at(&model, &wrap_hit(1, 2), "-").expect("world side"),
+            SemanticSelection {
+                anchor: ep(1, 0),
+                head: ep(1, 4),
+                text: "world".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_single_row_word_and_url() {
+        let words = wrap_model(&[("hello world", None)]);
+        assert_eq!(
+            semantic(&words, 0, 1),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 4),
+                text: "hello".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic(&words, 0, 7),
+            SemanticSelection {
+                anchor: ep(0, 6),
+                head: ep(0, 10),
+                text: "world".to_string(),
+            }
+        );
+
+        let urls = wrap_model(&[("see https://x.ai now", None)]);
+        assert_eq!(
+            semantic(&urls, 0, 6),
+            SemanticSelection {
+                anchor: ep(0, 4),
+                head: ep(0, 15),
+                text: "https://x.ai".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_three_fragment_mid_word_click_middle() {
+        let model = wrap_model(&[
+            ("hello_", None),
+            ("world_", Some("")),
+            ("identifier", Some("")),
+        ]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(2, 9),
+            text: "hello_world_identifier".to_string(),
+        };
+        assert_eq!(semantic(&model, 1, 0), expected);
+        assert_eq!(semantic(&model, 1, 5), expected);
+    }
+
+    #[test]
+    fn semantic_selection_partial_first_row_then_wrap() {
+        let model = wrap_model(&[("foo bar_very", None), ("long", Some(""))]);
+        let wrapped = SemanticSelection {
+            anchor: ep(0, 4),
+            head: ep(1, 3),
+            text: "bar_verylong".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 4), wrapped);
+        assert_eq!(semantic(&model, 0, 11), wrapped);
+        assert_eq!(semantic(&model, 1, 1), wrapped);
+        assert_eq!(
+            semantic(&model, 0, 1),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 2),
+                text: "foo".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_head_stops_mid_continuation_row() {
+        let model = wrap_model(&[("foo bar_very", None), ("long baz", Some(""))]);
+        let wrapped = SemanticSelection {
+            anchor: ep(0, 4),
+            head: ep(1, 3),
+            text: "bar_verylong".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 4), wrapped);
+        assert_eq!(semantic(&model, 1, 0), wrapped);
+        assert_eq!(
+            semantic(&model, 1, 5),
+            SemanticSelection {
+                anchor: ep(1, 5),
+                head: ep(1, 7),
+                text: "baz".to_string(),
+            }
+        );
+
+        let one_char = wrap_model(&[("hello_", None), ("x", Some(""))]);
+        assert_eq!(
+            semantic(&one_char, 0, 0),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(1, 0),
+                text: "hello_x".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_mid_word_wrap_wide_glyphs() {
+        let cjk = wrap_model(&[("你", None), ("好世界", Some(""))]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(1, 5),
+            text: "你好世界".to_string(),
+        };
+        assert_eq!(semantic(&cjk, 0, 0), expected);
+        assert_eq!(semantic(&cjk, 0, 1), expected);
+        assert_eq!(semantic(&cjk, 1, 0), expected);
+        assert_eq!(semantic(&cjk, 1, 4), expected);
+
+        let mixed = wrap_model(&[("hello_", None), ("世界", Some(""))]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(1, 3),
+            text: "hello_世界".to_string(),
+        };
+        assert_eq!(semantic(&mixed, 0, 3), expected);
+        assert_eq!(semantic(&mixed, 1, 1), expected);
+    }
+
+    #[test]
+    fn semantic_selection_wrap_split_cluster_uses_concat_width() {
+        // Per-fragment widths are 2+2; concatenated ZWJ pair is width 2.
+        let model = wrap_model(&[("👨", None), ("\u{200d}👩", Some(""))]);
+        let from_first = semantic(&model, 0, 0);
+        assert_eq!(from_first.text, "👨‍👩");
+        assert_eq!(from_first.anchor, ep(0, 0));
+        // Finished-concat widths assign both columns to the first fragment.
+        assert_eq!(from_first.head, ep(0, 1));
+        assert_eq!(semantic(&model, 1, 0), from_first);
+
+        // Local col 1 on the continuation is still the cluster, not `tail`.
+        let with_tail = wrap_model(&[("👨", None), ("\u{200d}👩 tail", Some(""))]);
+        assert_eq!(semantic(&with_tail, 1, 1).text, "👨‍👩");
+        assert_eq!(semantic(&with_tail, 1, 3).text, "tail");
+    }
+
+    #[test]
+    fn semantic_selection_joiner_only_range_returns_none() {
+        let model = wrap_model(&[("ab", None), ("cd", Some(" "))]);
+        // Past-end col is not hit-testable when selectable_cols matches text width.
+        assert_eq!(
+            semantic_selection_at(&model, &wrap_hit(0, 2), DEFAULT_WORD_SEPARATORS),
+            None
+        );
+
+        let mut padded = ResolvedSelectionModel::default();
+        padded.push_line(ResolvedSelectableLine {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            screen_y: 0,
+            screen_x: 0,
+            selectable_cols: 0..5,
+            text: "ab".to_string(),
+            joiner_to_previous: None,
+        });
+        padded.push_line(ResolvedSelectableLine {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 1,
+            screen_y: 1,
+            screen_x: 0,
+            selectable_cols: 0..2,
+            text: "cd".to_string(),
+            joiner_to_previous: Some(" ".to_string()),
+        });
+        assert_eq!(
+            semantic_selection_at(&padded, &wrap_hit(0, 2), DEFAULT_WORD_SEPARATORS),
+            None
+        );
+
+        assert_eq!(
+            semantic_selection_at(
+                &wrap_model(&[("", None), ("", Some(" "))]),
+                &wrap_hit(0, 0),
+                DEFAULT_WORD_SEPARATORS,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn semantic_selection_multi_space_and_newline_joiners_do_not_merge() {
+        let spaces = wrap_model(&[("hello", None), ("world", Some("   "))]);
+        assert_eq!(
+            semantic(&spaces, 0, 1),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 4),
+                text: "hello".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic(&spaces, 1, 0),
+            SemanticSelection {
+                anchor: ep(1, 0),
+                head: ep(1, 4),
+                text: "world".to_string(),
+            }
+        );
+
+        let newline = wrap_model(&[("https://ex", None), ("ample.com", Some("\n"))]);
+        assert_eq!(
+            semantic(&newline, 0, 0),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 9),
+                text: "https://ex".to_string(),
+            }
+        );
+        assert_eq!(
+            semantic(&newline, 1, 0),
+            SemanticSelection {
+                anchor: ep(1, 0),
+                head: ep(1, 4),
+                text: "ample".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_empty_wrap_fragments() {
+        let trailing = wrap_model(&[("hello_world", None), ("", Some(""))]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(0, 10),
+            text: "hello_world".to_string(),
+        };
+        assert_eq!(semantic(&trailing, 0, 0), expected);
+        assert_eq!(semantic(&trailing, 1, 0), expected);
+
+        let middle = wrap_model(&[("hello_", None), ("", Some("")), ("world", Some(""))]);
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(2, 4),
+            text: "hello_world".to_string(),
+        };
+        assert_eq!(semantic(&middle, 0, 0), expected);
+        assert_eq!(semantic(&middle, 1, 0), expected);
+        assert_eq!(semantic(&middle, 2, 0), expected);
+    }
+
+    #[test]
+    fn semantic_selection_wrapped_url_among_words() {
+        let model = wrap_model(&[("see https://ex", None), ("ample.com please", Some(""))]);
+        assert_eq!(
+            semantic(&model, 0, 0),
+            SemanticSelection {
+                anchor: ep(0, 0),
+                head: ep(0, 2),
+                text: "see".to_string(),
+            }
+        );
+        let url = SemanticSelection {
+            anchor: ep(0, 4),
+            head: ep(1, 8),
+            text: "https://example.com".to_string(),
+        };
+        assert_eq!(semantic(&model, 0, 12), url);
+        assert_eq!(semantic(&model, 1, 0), url);
+        assert_eq!(
+            semantic(&model, 1, 10),
+            SemanticSelection {
+                anchor: ep(1, 10),
+                head: ep(1, 15),
+                text: "please".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_selection_from_word_wrap_joiners() {
+        let source = ratatui::text::Line::from("hello_world_identifier");
+        let (wrapped, joiners) = crate::render::wrapping::word_wrap_line_with_joiners(&source, 12);
+        let mut model = ResolvedSelectionModel::default();
+        let mut last_width = 0u16;
+        for (i, (line, joiner)) in wrapped.iter().zip(joiners).enumerate() {
+            let text = crate::scrollback::types::line_plain_text(line);
+            last_width = display_width(&text);
+            model.push_line(ResolvedSelectableLine {
+                entry_idx: 0,
+                range_id: 0,
+                block_line_idx: i,
+                screen_y: i as u16,
+                screen_x: 0,
+                selectable_cols: 0..last_width,
+                text,
+                joiner_to_previous: joiner,
+            });
+        }
+        let expected = SemanticSelection {
+            anchor: ep(0, 0),
+            head: ep(
+                model.ranges[0].lines.len() - 1,
+                last_width.saturating_sub(1),
+            ),
+            text: "hello_world_identifier".to_string(),
+        };
+        for line in &model.ranges[0].lines {
+            if !line.text.is_empty() {
+                assert_eq!(semantic(&model, line.block_line_idx, 0), expected);
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // selected_cols_for_endpoints tests
     // -----------------------------------------------------------------------
@@ -2267,6 +2930,30 @@ mod tests {
     fn endpoints_single_line_same_col() {
         let line = make_test_line(5, 0..20);
         assert_eq!(selected_cols_for_endpoints(5, 7, 5, 7, &line), Some(7..8));
+    }
+
+    #[test]
+    fn endpoints_snap_to_grapheme_boundaries() {
+        let mut line = make_test_line(5, 0..16);
+        line.text = "需要我帮你做什么".to_string();
+
+        // Ends snap past the glyph: 么 spans [14, 16), so either endpoint cell yields the full range.
+        assert_eq!(selected_cols_for_endpoints(5, 0, 5, 14, &line), Some(0..16));
+        assert_eq!(selected_cols_for_endpoints(5, 0, 5, 15, &line), Some(0..16));
+
+        // Starts floor onto the glyph: 要 spans [2, 4), so an anchor on cell 3 selects from cell 2. The head on 你 ([8, 10)) snaps the end past it.
+        assert_eq!(selected_cols_for_endpoints(5, 3, 5, 8, &line), Some(2..10));
+
+        // Multi-line last and first lines snap the same way.
+        assert_eq!(selected_cols_for_endpoints(2, 4, 5, 14, &line), Some(0..16));
+        assert_eq!(selected_cols_for_endpoints(5, 3, 7, 8, &line), Some(2..16));
+
+        // Padded fixture lines (text narrower than the range) keep raw columns.
+        let padded = make_test_line(5, 0..20);
+        assert_eq!(
+            selected_cols_for_endpoints(5, 3, 5, 10, &padded),
+            Some(3..11)
+        );
     }
 
     #[test]
@@ -2938,6 +3625,40 @@ mod tests {
         assert_eq!(
             reconstruct_table_selection_text(&geom, &drag, table_text_at),
             Some("Eng".to_string())
+        );
+    }
+
+    #[test]
+    fn table_cell_copy_snaps_wide_graphemes() {
+        const CJK_LINES: &[&str] = &[
+            "┌────────┬───────┐",
+            "│ 需要我 │ 帮你  │",
+            "└────────┴───────┘",
+        ];
+        let text_at = |i: usize| CJK_LINES.get(i).map(|s| s.to_string());
+        let geom = TableGeometry::detect(text_at, 1).expect("grid");
+
+        // 需 spans [2, 4), 我 spans [6, 8): anchor on 需's second cell, head on 我's first cell.
+        let drag = table_drag((1, 3), (1, 6), SelectionKind::TableCell);
+        assert_eq!(
+            reconstruct_table_selection_text(&geom, &drag, text_at),
+            Some("需要我".to_string())
+        );
+    }
+
+    #[test]
+    fn endpoints_and_slice_agree_with_zero_width_graphemes() {
+        let mut line = make_test_line(5, 0..4);
+        line.text = "x\u{200B}界y".to_string();
+
+        // 界 paints on cells [1, 3): a head on its second cell snaps the end to 3.
+        let cols = selected_cols_for_endpoints(5, 0, 5, 2, &line).expect("in range");
+        assert_eq!(cols, 0..3);
+
+        // The slice keeps the ZWSP attached to 界 and excludes the trailing y.
+        assert_eq!(
+            crate::scrollback::types::slice_display_cols(&line.text, cols.start, cols.end),
+            "x\u{200B}界"
         );
     }
 

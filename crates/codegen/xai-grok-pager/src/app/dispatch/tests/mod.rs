@@ -11,9 +11,11 @@ mod permissions;
 mod prompt;
 mod rewind;
 mod router;
+mod running;
 mod session;
 mod settings;
 mod soft_stop;
+mod start;
 mod status;
 mod task_result;
 mod transcript;
@@ -31,27 +33,27 @@ use super::ctx::{find_agent_by_session_id, get_active_agent, get_active_agent_mu
 use super::dashboard::{
     apply_pending_dispatch_config, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
     dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
-    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_dispatch,
-    dispatch_dashboard_dispatch_slash, dispatch_dashboard_overlay_cycle,
-    dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
-    dispatch_dashboard_peek_reply, dispatch_dashboard_permission_followup,
-    dispatch_dashboard_permission_select, dispatch_dashboard_question_answer,
-    dispatch_dashboard_stop, dispatch_dashboard_toggle_auto_approve, dispatch_exit_dashboard,
-    dispatch_open_dashboard, ensure_dashboard_state, resolve_location_input,
+    dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_delete,
+    dispatch_dashboard_dispatch, dispatch_dashboard_dispatch_slash,
+    dispatch_dashboard_overlay_cycle, dispatch_dashboard_overlay_exit,
+    dispatch_dashboard_overlay_stop, dispatch_dashboard_peek_reply,
+    dispatch_dashboard_permission_followup, dispatch_dashboard_permission_select,
+    dispatch_dashboard_question_answer, dispatch_dashboard_stop,
+    dispatch_dashboard_toggle_auto_approve, dispatch_exit_dashboard, dispatch_open_dashboard,
+    ensure_dashboard_state, resolve_location_input,
 };
 use super::modes::{
     YOLO_ON_UNDER_PLAN_TOAST, active_agent_plan_nudge_state, dispatch_cycle_mode_and_sync,
     permission_mode_toast,
 };
 use super::permissions::drain_permission_queue;
-use super::prompt::{
-    dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner,
-    input_can_trigger_project_picker,
-};
+use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner};
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
-use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
+use super::session::modal::{
+    dispatch_rename_session, dispatch_reset_session_title, dispatch_sessions_confirm_close,
+};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::status::scrub_error_for_toast;
@@ -77,19 +79,21 @@ use std::time::Instant;
 fn test_app() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
+        pending_startup: None,
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),
-        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
-        soft_stop: crate::app::soft_stop::SoftStop::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::default(),
+        soft_stop: crate::app::soft_stop::SoftStop::default(),
+        rebuild_relaunch: None,
+        pending_tui_screenshot: false,
+        console_team_prepaid_cents: None,
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         cwd: PathBuf::from("/tmp"),
-        project_picker_shown: true,
-        project_picker_disabled: false,
         cwd_has_git_ancestor: false,
         acp_tx: tx,
         scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -122,6 +126,16 @@ fn test_app() -> AppView {
         require_plan_approval: false,
         plan_mode: false,
         chat_mode: false,
+        #[cfg(feature = "local-workspace")]
+        welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
+        #[cfg(feature = "local-workspace")]
+        local_workspace_startup_locked: false,
+        #[cfg(feature = "local-workspace")]
+        welcome_session_local_workspace: None,
+        #[cfg(feature = "local-workspace")]
+        welcome_local_workspace_ack_pending: false,
+        #[cfg(feature = "local-workspace")]
+        welcome_history_load_as_build: false,
         subagents: false,
         ask_user: false,
         mouse_captured: true,
@@ -136,6 +150,7 @@ fn test_app() -> AppView {
         new_session_worktree_mode: crate::app::app_view::WorktreeMode::Never,
         fork_worktree_mode: crate::app::app_view::WorktreeMode::Ask,
         restore_code: None,
+        suppress_code_restore_once: None,
         resume_local_miss: None,
         agent_override: None,
         bootstrap_acp_commands: Vec::new(),
@@ -163,10 +178,12 @@ fn test_app() -> AppView {
         privacy_notice_rollout: false,
         privacy_banner_reshow_days: None,
         privacy_banner_acked: None,
-        privacy_banner_accept_inflight: false,
+        privacy_banner_opt_in_inflight: false,
+        coding_data_write_seq: 0,
         show_tips: None,
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
+        default_reasoning_effort: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
@@ -207,9 +224,14 @@ fn test_app() -> AppView {
         welcome_gate_url_rect: None,
         welcome_changelog_cta_rect: None,
         welcome_upgrade_cta_rect: None,
-        welcome_privacy_banner_accept_rect: None,
-        welcome_privacy_banner_customize_rect: None,
-        welcome_privacy_banner_legal_rect: None,
+        welcome_privacy_banner_opt_in_rect: None,
+        welcome_privacy_banner_opt_out_rect: None,
+        welcome_privacy_banner_terms_rect: None,
+        welcome_privacy_banner_policy_rect: None,
+        #[cfg(feature = "local-workspace")]
+        welcome_workspace_mode_rects: Default::default(),
+        #[cfg(feature = "local-workspace")]
+        welcome_on_workspace_mode: false,
         welcome_toast: None,
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
@@ -232,6 +254,7 @@ fn test_app() -> AppView {
         session_picker_lanes: Default::default(),
         session_picker_detail_generation: 0,
         session_picker_entries_query: None,
+        session_picker_pending_delete: None,
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
         startup_warnings: Vec::new(),
@@ -240,7 +263,6 @@ fn test_app() -> AppView {
         foreign_resume_launch_generation: 0,
         foreign_resume_launch: None,
         quit_for_update: false,
-        rebuild_relaunch: None,
         relaunch: None,
         import_claude_modal: None,
         welcome_doc_viewer: None,
@@ -249,19 +271,17 @@ fn test_app() -> AppView {
         pending_editor: None,
         pending_pager_path: None,
         pending_pager_ansi: false,
-        pending_tui_screenshot: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,
         usage_visible: true,
+        has_external_auth_provider: false,
         tier_restricted_commands: Vec::new(),
         leader_mode: true,
         credit_balance: None,
         auto_topup: None,
-        openrouter_credit_balance: None,
-        console_team_prepaid_cents: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),
@@ -270,6 +290,7 @@ fn test_app() -> AppView {
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         pending_running_adoptions: std::collections::HashMap::new(),
         session_picker_grouped: false,
+        scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
         session_recap_available: false,
         features_session_recap: true,
@@ -326,7 +347,6 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
-        cancel_resume_prompt_text: None,
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
@@ -381,6 +401,8 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
+        parent_session_id: None,
+        depth: None,
         started_at: std::time::Instant::now(),
         last_progress_at: std::time::Instant::now(),
         finished: false,
@@ -575,7 +597,6 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -722,7 +743,6 @@ fn two_agent_app_with_bg_task() -> AppView {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -737,12 +757,6 @@ fn two_agent_app_with_bg_task() -> AppView {
     app.agents.insert(id1, agent1);
     app.next_agent_id = 2;
     assert!(matches!(app.active_view, ActiveView::Agent(AgentId(0))));
-    app
-}
-fn project_picker_app() -> AppView {
-    let mut app = test_app();
-    app.cwd = PathBuf::from("/tmp");
-    app.project_picker_shown = false;
     app
 }
 /// Test helper: open Settings then OpenResetConfirm for `key`.
@@ -776,6 +790,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         branch: None,
         repo_name: "repo".into(),
         worktree_label: None,
+        last_turn_summary: None,
         card_detail: None,
     }
 }
@@ -868,6 +883,7 @@ fn enqueue_permission_with_enable_always_approve(
         active_idx: 0,
         bash_highlights: None,
         bash_selection_count: 0,
+        bash_deny_selection_count: 0,
         bash_command_raw: None,
         mcp_scope: None,
         title: "test-enable-always-approve".to_string(),
@@ -998,6 +1014,7 @@ fn push_synthetic_permission(
         active_idx: 0,
         bash_highlights: None,
         bash_selection_count: 0,
+        bash_deny_selection_count: 0,
         bash_command_raw: None,
         mcp_scope: None,
         title: "Test permission".to_string(),
@@ -1024,14 +1041,12 @@ fn test_bal(usage_pct: f64) -> crate::views::credit_bar::CreditBalance {
         usage_pct,
         effective_usage_pct: usage_pct,
         period_end_display: None,
-        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: None,
         period_type: None,
         is_unified_billing_user: None,
-        grok_build_usage_pct: None,
-        included_usage_known: true,
+        ..Default::default()
     }
 }

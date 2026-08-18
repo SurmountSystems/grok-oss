@@ -4,7 +4,10 @@ use crate::acp::tracker::TurnActivity;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::roster::{RosterActivity, RosterEntry};
-use crate::app::subagent::{SubagentInfo, format_activity_label, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_activity_label, format_live_l3_count, format_subagent_label,
+    is_l2_list_row, live_l3_count,
+};
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
@@ -196,10 +199,15 @@ fn build_local_rows(
         if !include_subagents {
             continue;
         }
+        let child_ids: std::collections::HashSet<&str> = agent
+            .subagent_sessions
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
         let mut subagents: Vec<&SubagentInfo> = agent
             .subagent_sessions
             .values()
-            .filter(|info| info.workflow_run_id.is_none())
+            .filter(|info| info.workflow_run_id.is_none() && is_l2_list_row(info, &child_ids))
             .collect();
         subagents.sort_by(|a, b| {
             let a_running = !a.finished;
@@ -253,7 +261,9 @@ fn build_local_rows(
     rows
 }
 /// Map a leader [`RosterActivity`] to the dashboard's coarse [`RowState`].
-fn roster_activity_to_state(activity: RosterActivity) -> RowState {
+/// Public so the dispatcher can gate roster-row deletion through the very
+/// same `RowState::allows_delete` predicate the renderer paints `[✗]` with.
+pub fn roster_activity_to_state(activity: RosterActivity) -> RowState {
     match activity {
         RosterActivity::Working => RowState::Working,
         RosterActivity::NeedsInput => RowState::NeedsInput,
@@ -335,8 +345,9 @@ fn append_roster_rows(
             state,
             activity,
             secondary_line: entry
-                .model_id
+                .last_turn_summary
                 .as_deref()
+                .or(entry.model_id.as_deref())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(sanitize),
@@ -375,6 +386,7 @@ pub fn classify_top_level(agent: &AgentView) -> RowState {
         return RowState::NeedsInput;
     }
     if !agent.session.state.is_idle()
+        || agent.wake_turn_active()
         || agent.session.turn_activity().is_some()
         || !agent.session.pending_prompts.is_empty()
     {
@@ -577,10 +589,20 @@ fn subagent_row(
     let label = {
         let label = sanitize(&label_raw);
         let desc = sanitize(&desc_raw);
-        if desc.trim().is_empty() {
-            label
+        let l3 = if info.is_running() {
+            format_live_l3_count(live_l3_count(
+                parent_view.subagent_sessions.values(),
+                info.child_session_id.as_ref(),
+            ))
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default()
         } else {
-            format!("{label} · {desc}")
+            String::new()
+        };
+        if desc.trim().is_empty() {
+            format!("{label}{l3}")
+        } else {
+            format!("{label} · {desc}{l3}")
         }
     };
     let activity = subagent_activity(info, state);
@@ -735,7 +757,11 @@ fn top_level_secondary_line(
         | RowState::Inactive
         | RowState::Completed
         | RowState::Failed
-        | RowState::Blocked => last_agent_message_preview(agent),
+        | RowState::Blocked => agent
+            .last_turn_summary
+            .as_deref()
+            .map(sanitize)
+            .or_else(|| last_agent_message_preview(agent)),
     }
 }
 /// Walk the scrollback from the end, returning the first
@@ -1067,6 +1093,8 @@ mod tests {
             context_normalized: false,
             child_updates_replayed: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: now,
             last_progress_at: now,
             finished,
@@ -1505,6 +1533,7 @@ mod tests {
             model_id: None,
             yolo: false,
             activity: RosterActivity::Dormant,
+            last_turn_summary: None,
             resident: false,
             last_change_unix_ms,
             origin: RosterOrigin::default(),
@@ -1676,6 +1705,22 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].secondary_line.as_deref(), Some("grok-4.5"));
     }
+    /// The last-turn summary wins the secondary line over the model id.
+    #[test]
+    fn append_roster_rows_prefers_last_turn_summary() {
+        let empty = std::collections::BTreeSet::new();
+        let entry = RosterEntry {
+            model_id: Some("grok-4.5".to_string()),
+            last_turn_summary: Some("Fixed the roster merge".to_string()),
+            ..roster_entry_with("m", Some("Fix the bug"), RosterActivity::Dormant)
+        };
+        let rows = collect_roster(&[entry], &empty);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].secondary_line.as_deref(),
+            Some("Fixed the roster merge")
+        );
+    }
     /// Without a model id there's genuinely nothing to show, so the
     /// second line stays empty rather than rendering a placeholder.
     #[test]
@@ -1737,7 +1782,6 @@ mod tests {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

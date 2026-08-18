@@ -3,9 +3,10 @@
 use ratatui::style::Style;
 use ratatui::text::{Span, Text};
 
-use crate::diff::DiffHunk;
+use crate::appearance::AppearanceConfig;
 use crate::inline_media_ffmpeg::inline_media_reserved_rows;
 use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef, ScrollbackVideoRef};
+use xai_grok_pager_diff::DiffHunk;
 // Imported (rather than referenced as `crate::…`) so the default trait method
 // below stays free of `crate::` tokens: `#[enum_delegate::register]` captures
 // default method bodies into a generated macro, where `crate::` trips
@@ -84,8 +85,15 @@ pub trait BlockContent {
     }
 
     /// Vertical padding (blank line with accent top/bottom).
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    ///
+    /// Borrows the appearance rather than taking a [`BlockContext`] so the
+    /// O(history) height passes do not build one per entry.
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         true
+    }
+
+    fn has_vpad(&self, ctx: &BlockContext) -> bool {
+        self.has_vpad_for(&ctx.appearance)
     }
 
     /// Whether block supports raw mode toggle.
@@ -490,8 +498,8 @@ impl BlockContent for RenderBlock {
         delegate_block!(self, background(ctx))
     }
 
-    fn has_vpad(&self, ctx: &BlockContext) -> bool {
-        delegate_block!(self, has_vpad(ctx))
+    fn has_vpad_for(&self, appearance: &AppearanceConfig) -> bool {
+        delegate_block!(self, has_vpad_for(appearance))
     }
 
     fn has_raw_mode(&self) -> bool {
@@ -978,24 +986,16 @@ impl RenderBlock {
         let theme = Theme::current();
 
         match self {
-            // Finish-flash / lookup: same Human token as live UserPrompt rail.
-            RenderBlock::UserPrompt(_) => Some(theme.accent_user),
-            // Finished agent messages paint no left rail (active-only magenta).
-            // No finish-flash on AgentMessage; keep None so lookups match paint.
-            RenderBlock::AgentMessage(_) => None,
+            RenderBlock::UserPrompt(_) => Some(theme.text_primary),
+            RenderBlock::AgentMessage(_) => None, // No accent for agent messages
             RenderBlock::Workflow(_) => None,
             RenderBlock::ToolCall(block) => {
-                // Execute: user `!` bash keeps success green; agent Run uses
-                // neutral tool chrome when finished (not Human green rail).
+                // Execute: Green for success, red for failure
                 // Read/Edit/ListDir/Search: No accent
                 match block {
                     ToolCallBlock::Execute(b) => {
                         if b.is_success() {
-                            if b.bash_mode {
-                                Some(theme.accent_success)
-                            } else {
-                                Some(theme.accent_tool)
-                            }
+                            Some(theme.accent_success)
                         } else {
                             Some(theme.accent_error)
                         }
@@ -1575,7 +1575,7 @@ mod searchable_text_tests {
             message_tokens: 30,
             free_tokens: 900,
             usage_pct: 10,
-            auto_compact_threshold_percent: 95,
+            auto_compact_threshold_percent: 85,
             usage_categories: vec![],
         };
         let block = RenderBlock::context_info(snapshot, "grok-4.5");

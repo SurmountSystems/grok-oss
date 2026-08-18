@@ -20,7 +20,7 @@ A hook is a shell command or HTTP endpoint that Grok calls when a specific lifec
 - **Safety guards**: Block commands such as `rm -rf /` before they run.
 - **Audit logging**: Record tool use and sessions to a file or external service.
 - **Notifications**: Send a message when a task finishes.
-- **Auto-formatting**: Run `cargo fmt` or `prettier` after edits.
+- **Auto-formatting**: After a structured edit of a `.rs` file, the product already formats that file. Do not add a second crate-wide `cargo fmt` hook for Rust. Use a hook for other languages if you want.
 - **Environment setup**: Export variables at session start.
 - **Custom workflows**: Trigger builds, tests, or deployments on specific events.
 
@@ -68,9 +68,12 @@ Hooks are discovered from several places (all are merged):
 | Project | `<project>/.grok/hooks/*.json` | Requires trust | Per-repo automation |
 | Project | `<project>/.claude/settings.json` (and `settings.local.json`) | Requires trust | Claude compatibility (configurable) |
 | Project | `<project>/.cursor/hooks.json` | Requires trust | Cursor compatibility (configurable) |
+| Config | `~/.grok/config.toml` | Always | Your hooks alongside the rest of your config |
+| Config | `managed_config.toml` (`$GROK_HOME` and `/etc/grok`) | Always | Organization-distributed hooks (server-synced and on-device) |
+| Config | `requirements.toml` (user and system) | Always | Organization-distributed hooks in the requirements layer |
 | Plugin | Bundled inside installed plugins | Per-plugin | Shared team hooks |
 
-The Claude and Cursor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.grok/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
+Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format. The compatible vendor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.grok/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run -- until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grok/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grok/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
@@ -90,7 +93,7 @@ Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant
 | `PermissionDenied` | The permission system denies a tool call. | No |
 | `Stop` | An agent turn ends on a genuine completion (not on a user interrupt). | Yes — can block the stop |
 | `StopFailure` | A turn ends because of an API error. | No |
-| `Notification` | The agent sends a notification. | No |
+| `Notification` | User-attention events (`idle_prompt`, `permission_prompt`, `task_complete`, …). | No |
 | `SubagentStart` | A subagent starts. | No |
 | `SubagentStop` | A subagent's turn ends (fires once, in the subagent, with stop decision control). | Yes — can block the stop |
 | `PreCompact` | Conversation compaction is about to run. | No |
@@ -147,7 +150,7 @@ Each `.json` file can define hooks for multiple events:
 ### Key Fields
 
 - **Event name** (top-level key): any event listed in [Hook Events](#hook-events). Grok skips unrecognized event names so a shared Claude or Cursor settings file still loads.
-- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), and the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`). A matcher on `Stop` or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
+- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), and the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`). A matcher on `Stop` or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. Claude-style finish-thinking chimes should set `matcher` to `idle_prompt` on `Notification` (turn complete and the user stayed idle); `permission_prompt` fires only when a permission UI is actually waiting. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
 - **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
 - **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop` gates, matching Claude Code). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call.
@@ -165,6 +168,47 @@ In a `matcher`, Grok maps Claude-style tool names to its own so hooks migrated f
 - `Task` → `spawn_subagent`
 
 A matcher keeps its original name too, so `Bash` matches both `Bash` and `run_terminal_command`.
+
+---
+
+## Hooks in Config Files
+
+Hooks can also live directly in your Grok config, so a team can distribute them with the rest of their configuration instead of shipping separate JSON files. The same `hooks` object is read from three TOML files:
+
+| File | Tier | Who sets it |
+|------|------|-------------|
+| `~/.grok/config.toml` | User | You |
+| `managed_config.toml` (`$GROK_HOME`, `/etc/grok`) | Managed / system | Your organization |
+| `requirements.toml` (user and system) | Requirements | Your organization |
+
+The TOML is structurally identical to the JSON hook object, so an existing hook transliterates directly:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+hooks = [
+  { type = "command", command = "/opt/guard/pretooluse.sh", timeout = 10 },
+]
+```
+
+Each matcher group is a `[[hooks.<Event>]]` entry with an optional `matcher` and an inner `hooks` array of handlers. The handler fields (`type`, `command`, `url`, `timeout`, `env`) and event names are exactly the same as the [JSON format](#the-hook-json-format).
+
+TOML offers two equivalent notations for the inner handlers, and both parse to the identical structure. The inline-table array shown above is recommended: it reads best for the common single-handler case. The nested array-of-tables form is also accepted:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/opt/guard/pretooluse.sh"
+timeout = 10
+```
+
+Prefer the inline form to avoid repeating the `[[hooks.<Event>.hooks]]` header for each handler.
+
+- **Additive across layers.** Every layer's hooks run; a lower-priority layer adds hooks but never replaces another layer's block. A hook defined identically in more than one layer is deduplicated, keeping the highest-authority copy.
+- **Provenance labels.** Config hooks appear in `/hooks` tagged by origin (`managed:`, `requirements/user:`, `user:`, and so on) so you can see which layer contributed each one.
+- **No read-time expansion.** A literal `${VAR}` in a `command` or `url` reaches the hook runner unchanged, matching JSON hook-file semantics; the runner performs the single expansion.
 
 ---
 
@@ -201,8 +245,10 @@ For `PreToolUse` hooks, write JSON to **stdout**:
 | Exit Code | Meaning |
 |-----------|---------|
 | `0` | Success / allow (for blocking hooks) |
-| `2` | Explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`) |
-| Other | Fail-open — the failure is recorded but nothing is blocked. For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of exit code. For `Stop`/`SubagentStop`, a valid decision JSON on stdout wins over the exit code (matching Claude Code); the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as the feedback. |
+| `2` | Explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`). For `PreToolUse`, the first stderr line (capped) becomes the deny reason when the JSON carries none; `Stop`/`SubagentStop` feed the full stderr to the model. |
+| Other | Fail-open — the failure is recorded (as `exit code N: <first stderr line>`) but nothing is blocked. For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of exit code. For `Stop`/`SubagentStop`, a valid decision JSON on stdout wins over the exit code; the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as the feedback. |
+
+Write human-readable diagnostics to **stderr**: it is the hook's feedback channel. On failures the first stderr line appears in the scrollback entry and logs instead of a bare exit code.
 
 ### Stop Decision Control
 
@@ -433,4 +479,4 @@ echo '{"decision": "allow"}'
 - **Hook not running?** Press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere) to see if it is loaded and matched.
 - **Project hooks ignored?** The folder may be untrusted. Run `/hooks-trust` (or relaunch with `--trust`).
 - **Script not found?** Check the path is relative to the `.json` file and executable (`chmod +x`).
-- **See errors?** Capture logs by launching with `RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok`, then check `/tmp/grok.log`.
+- **See errors?** Capture logs by launching with `RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok-oss`, then check `/tmp/grok.log`.

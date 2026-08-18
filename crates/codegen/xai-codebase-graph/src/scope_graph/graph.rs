@@ -123,11 +123,7 @@ impl ScopeGraph {
                 node.start_byte() >= start_byte && node.end_byte() <= end_byte
             })
             .collect::<Vec<_>>();
-        node_idxs.sort_by(|a, b| {
-            let first_node = self.graph[*a].range().byte_size();
-            let second_node = self.graph[*b].range().byte_size();
-            first_node.cmp(&second_node)
-        });
+        node_idxs.sort_by_key(|&idx| self.graph[idx].range().byte_size());
         node_idxs.first().copied()
     }
 
@@ -1317,7 +1313,7 @@ impl ScopeGraphIndex {
                     .map(|name| (name.to_string(), locs.len()))
             })
             .collect();
-        ref_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        ref_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         ref_counts.truncate(limit);
         ref_counts
     }

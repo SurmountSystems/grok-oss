@@ -410,6 +410,28 @@ INSERT INTO reconciliation_run (
     Ok(store.connection().last_insert_rowid())
 }
 
+/// Whether `local_usage_event` contains this ulid (spend ingest checks).
+pub fn local_usage_event_exists(
+    store: &GrokOssStore,
+    event_ulid: &str,
+) -> Result<bool, rusqlite::Error> {
+    let n: i64 = store.connection().query_row(
+        "SELECT COUNT(*) FROM local_usage_event WHERE event_ulid = ?1",
+        [event_ulid],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// How many `reconciliation_run` rows exist.
+pub fn count_reconciliation_runs(store: &GrokOssStore) -> Result<i64, rusqlite::Error> {
+    store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM reconciliation_run", [], |row| {
+            row.get(0)
+        })
+}
+
 /// Sessions root under a grok home.
 pub fn sessions_dir(grok_home: &Path) -> PathBuf {
     grok_home.join("sessions")

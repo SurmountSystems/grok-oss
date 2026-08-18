@@ -18,6 +18,10 @@ Not the same as session-board L0–L2 (todos / reports). Doc layers:
 use D2 logs. Closed residual history:
 [`doc/dev/campaigns/interject-todos-closed-2026-07.md`](doc/dev/campaigns/interject-todos-closed-2026-07.md).
 
+Write new short reports under `~/.agents/reports/` on this machine. Agent
+reports stay on the local machine. They are not part of the git tree. Session
+board L1 todos stay on the session board; that board is not the reports home.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -40,22 +44,61 @@ less than product code and tests. Do not invent long essays or git nags.
    `gpg.program`, hook disables, etc.).
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
    be surgical and reviewed in context.
-3a. **Post-impl verify (fmt + clippy + tests; pinned 2026-08-04).** When you
-   create or edit product code (especially `*.rs`), before report / handoff:
-   (1) **`cargo fmt -p <crate>`** for touched packages (not bare `rustfmt`;
-   workspace is **edition 2024**); (2) **`cargo clippy -p <crate>
-   --all-targets -- -D warnings`** (or package-equivalent) on those packages;
-   (3) **targeted tests** for contracts you touched (`cargo test -p …`
-   / nextest filters). Goal: no first-compile CI fail after “done,” no second
-   full fmt pass that re-dirties the tree after `git add`.
-3b. **Effort ≥ 2 process mop.** After the primary implementer finishes (and
-   after fix rounds that change code), spawn a **process mop** subagent
-   (`[process]` / `[process-mop]`) that only runs fmt → clippy → relevant
-   tests and **mops** fallout. Primary implementer still runs the three steps
-   first; mop is backup. Host law: `~/.grok/AGENTS.md` § *Post-impl verify*.
+3a. **Structured Rust edits format and lint the written file (pinned 2026-08-15).**
+   Product, not a process slogan: after ACP `search_replace` / `apply_patch`,
+   the edit tool formats and lints that `.rs` file (infer from path). See
+   [`FORK.md`](FORK.md) § *File-level infer-from-path verify*. Kill switch:
+   `GROK_SKIP_EDIT_VERIFY=1`. Host dual-pin: `~/.grok/AGENTS.md` §
+   *Structured Rust edits*.
+3b. **Do not prove product work with crate-wide cargo via subagents (pinned 2026-08-15).**
+   Do not launch crate-wide cargo (`cargo clippy -p ... --lib`, `cargo fmt -p`,
+   `just check`) through extra subagents to prove a product slice. One agent
+   per job. No duplicate red-test pairs. No backup mop swarm for file-level
+   edit verify. Implement-time proof is the named fixture tests
+   (`cargo test -p xai-grok-tools --lib rust_edit_verify`). Ordinary post-impl
+   mop stays one L2 after a finished slice (not a swarm; that L2 spawns L3).
+   Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove product work with
+   crate-wide cargo via subagents*.
 3c. **Implementer ↔ reviewer swap each feature.** For each **new** feature or
    independent implement slice, swap who implements and who reviews (roles
-   fixed within one feature’s fix/re-review loop). Host dual-pin: same section.
+   fixed within one feature’s fix/re-review loop). Host dual-pin:
+   `~/.grok/AGENTS.md` § *Implementer ↔ reviewer swap*.
+3d. **One review job per slice (pinned 2026-08-15; thoroughness 2026-08-16).**
+   Do not launch three (or more) visible Review agents for the same
+   slice because implement `--effort 3` has three slots. Token Economy
+   and implement `--effort` are **thoroughness**, not reviewer count.
+   One reviewer unless the operator **explicitly** asked for more than
+   one. Three lookalike "Review ..." rows in the Subagents list is a
+   process violation. Dual-pin: host `~/.grok/AGENTS.md` § *One review
+   job per slice*.
+3e. **Document every live task on disk (pinned 2026-08-15; re-pinned
+   same day).** Always remember: every live task must be documented so
+   it survives context compaction. That is standing process law, not a
+   reminder. Chat status is not enough. Same turn the task becomes
+   real, write it in all of these that apply:
+   1. Session board: namespaced item and a **bare remaining-work
+      pointer** (one owed outcome). Not a paste of the user message.
+      Not a session novel.
+   2. Write the short report under `~/.agents/reports/` on this
+      machine and/or an Open residual bullet only when the remaining
+      contract must survive a compaction. Keep it a pointer, not a
+      diary. Agent reports stay on the local machine. They are not
+      part of the git tree.
+   3. This file or host `~/.grok/AGENTS.md` when it is process law.
+   After a compaction, disk wins. If a job is only in chat, it was
+   never documented. Host dual-pin: `~/.grok/AGENTS.md` §
+   *Document every live task on disk*. Remaining-work pointer this
+   session: `~/.agents/reports/remaining-2026-08-17.md`.
+3f. **L1 stays lean so we do not compact (pinned 2026-08-17).** Past
+   ~200k parent tokens costs about double. Compaction is also
+   expensive and slow. Avoid both by keeping L1 memory small: board
+   pointers, spawn, wait, read the asked-for report. Do not load
+   inventories, closed todos, or session history into L1. When the
+   operator names work, record a pointer and implement. Do **not**
+   lock that work behind a plan rewrite / present / approve cycle
+   while implementation is already running. Plan mode is for unclear
+   or large new design only. Host dual-pin: `~/.grok/AGENTS.md` §
+   *L1 stays lean so we do not compact*.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**. **No bare plan-step codes**
@@ -73,25 +116,56 @@ less than product code and tests. Do not invent long essays or git nags.
    not try to *be* human. Full pin: host `~/.grok/AGENTS.md` § Sapient
    Experience; open residual [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump
    novels here.
-   **Billing meters stay distinct:** SuperGrok dollar credits ≠ free SuperGrok
+   **Billing meters stay distinct:** SuperGrok dollar credits ≠ included SuperGrok
    period limits ≠ console team prepaid / console API credits. Name which meter.
-   **Limits and credits vocabulary (pinned 2026-08-08):** say **limits** not
-   bare "allowance"; say **credits** not bare "extras." When the meter matters,
-   use the full name: free SuperGrok period limits; SuperGrok dollar credits;
+   **Limits and credits vocabulary (pinned 2026-08-08; SuperGrok is paid 2026-08-13; omit extras 2026-08-16):**
+   Omit the word extras in user-facing copy, residual, reports, board titles,
+   comments that humans read, and process law. Do not teach extras as a nickname.
+   Say **limits** not bare "allowance". When the prepaid SuperGrok top-up meter is
+   meant, say SuperGrok dollar credits. That is not included SuperGrok period
+   limits and not console team prepaid / console API credits. SuperGrok is a
+   **paid** product. Never call SuperGrok free. When the meter matters, use the
+   full name: included SuperGrok period limits; SuperGrok dollar credits;
    console team prepaid / console API credits. Desired spend order (docs and
-   comments): free SuperGrok period limits first, then SuperGrok dollar credits,
-   then console team prepaid / console API credits. While free SuperGrok period
+   comments): included SuperGrok period limits first, then SuperGrok dollar credits,
+   then console team prepaid / console API credits. While included SuperGrok period
    limits still have room, stay on SuperGrok session and do not make the console
-   API key primary. Never invent free SuperGrok period used % on the client.
+   API key primary. Never invent included SuperGrok period used % on the client.
+   **Do not report included SuperGrok period limits as used up (pinned
+   2026-08-17).** Never tell the operator a SuperGrok included pool is
+   full unless the live product Usage view or `/limits` surface they can
+   see agrees, or a named live fetch of that same named meter agrees.
+   A subagent snapshot is not enough to override the operator. If they
+   contradict a percent, retract it the same turn and diagnose. Do not
+   pad a guess. Name which meter and which workspace. SuperGrok Heavy
+   is a distinct weekly pool from standard SuperGrok. Dual-pin: host
+   `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **SuperGrok Heavy (operator-reported 2026-08-16; not a product-code proof):**
+   SuperGrok Heavy is a real tier, distinct from standard SuperGrok. Personal
+   SuperGrok Heavy and Business/Team SuperGrok Heavy are separate weekly compute
+   pools. They do not combine. Switching workspace switches which pool is drawn
+   from. Standard Business seats are SuperGrok. Heavy is an explicit upgrade.
+   xAI does not publish fixed numeric quotas. Remaining percent is in the product
+   Usage view for that workspace. The operator has SuperGrok Heavy and does not
+   see it used. Board `bug:supergrok-heavy-not-used` owns the diagnose. This pin
+   does not diagnose product code.
    **Complete thoughts (pinned 2026-08-03):** Plans, residual, reports, board
    titles, user-facing docs, and chat about product work must use **complete
    American English thoughts**. Do not use half-labels as if they were sentences
-   (wrong: "SuperGrok included weekly"). Right: "the free SuperGrok period limits
-   for the current billing period (how much of that free quota is already used)."
+   (wrong: "SuperGrok included weekly"). Right: "the included SuperGrok period limits
+   for the current billing period (how much of that included quota is already used)."
    When naming a meter, say what it is and what it is not. Conditions use full
    clauses (not "room/headroom"). Config and wire names may follow the plain
    thought in parentheses. Operator corrections about incomplete phrasing are
    permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
+   minute or more to the operator, write minutes (or hours and leftover
+   minutes). Do not write 943 seconds or 943s. Compact chrome is `15m43s`
+   for 943 seconds, `1h2m` for 3725 seconds. Times under 60 seconds may
+   stay in seconds, including the model turn timer and Thought for N.s.
+   SuperGrok is a paid product. Do not teach extras as a nickname. When
+   the prepaid SuperGrok top-up meter is meant, say SuperGrok dollar
+   credits.
    **No bad metaphors, no sloppy language, no imprecision (pinned 2026-08-09):**
    Accurate, precise, concise natural American English. Say what the product
    actually does. No invented metaphors that name things not in the product
@@ -100,6 +174,12 @@ less than product code and tests. Do not invent long essays or git nags.
    Real control, path, or outcome first. **No void/gap/jargon padding** —
    short concrete sentences only (host pin: *Speak like a normal precise
    person*). Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **No lossy job nicknames (pinned 2026-08-15):** Chat, board titles, spawn
+   descriptions, and status lines are operator-facing. Do not mash process
+   slang with a tool name into a nickname (wrong: "Red bash"). Say the real
+   job in ordinary English (right: "failing tests that the shell tool must
+   refuse crate-wide cargo"). The spawn description is what the Subagents
+   list shows. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
    "always remember", "please remember", "I hate repeating myself" (and close
    variants) mean same-turn standing pin (project `AGENTS.md` / residual when
@@ -119,22 +199,22 @@ less than product code and tests. Do not invent long essays or git nags.
    **Plan present ≠ Approve (pinned 2026-08-10):** `exit_plan_mode` tool
    success and “Plan ready” soft-park are **present for review**, not operator
    approval. Always-approve is tool permissions only. Empty freeform Enter
-   never approves (mouse Approve / empty-prompt `a`). After one decisive
+   never approves (clickable Approve). After one decisive
    Approve or Quit, do not re-arm CTAs until a new present. After Revise or
    Clarify, wait for re-present (no idle “Plan written / Click or /view-plan”
    CTA re-arm mid-rewrite). User-guide `19-plan-mode`; FORK plan-approval
    bullets P1–P2.
-   **Dual-auth language (pinned 2026-07-27; vocabulary 2026-08-08):** ban bare
+   **Dual-auth language (pinned 2026-07-27; vocabulary 2026-08-08; omit extras 2026-08-16):** ban bare
    jargon **proactive hop**, **sticky exhaust** / **sticky hop**, and
    **dual-host** without plain explanation. Prefer: *mark SuperGrok used up from
-   billing % / leave SuperGrok when free SuperGrok period limits are full*;
+   billing % / leave SuperGrok when included SuperGrok period limits are full*;
    *stay on the console key after switch / remember this SuperGrok identity is
-   out of free SuperGrok period limits*; *also switch the API host (SuperGrok
+   out of included SuperGrok period limits*; *also switch the API host (SuperGrok
    proxy ↔ `api.x.ai`)*. Residual, reports, comments, tests, and **identifiers**
-   use the plain names. Prefer **limits** over bare "allowance" and **credits**
-   over bare "extras" (see **Limits and credits vocabulary** above). (UI sticky
-   headers / permission sticky cursor are unrelated product terms — leave those
-   alone.)
+   use the plain names. Prefer **limits** over bare "allowance". When the prepaid
+   SuperGrok top-up meter is meant, say SuperGrok dollar credits (see **Limits
+   and credits vocabulary** above). (UI sticky headers / permission sticky cursor
+   are unrelated product terms. Leave those alone.)
 5. **Never ask permission to continue clear work.** If the goal is known
    (finish the onto stack, resolve conflicts, keep going), **do the next step**
    — do not end with “say the word,” “want me to continue?,” or similar. Ask
@@ -165,6 +245,15 @@ less than product code and tests. Do not invent long essays or git nags.
    paste inventories here. Host dual-pin: `~/.grok/AGENTS.md` § *Prefer Rust
    tools; do not invent…*; skill-rules rule 17; D2:
    [`doc/dev/research/python-to-rust-tools-2026-07-26.md`](doc/dev/research/python-to-rust-tools-2026-07-26.md).
+   **Tools improve tools (pinned 2026-08-15).** It is wasteful for agents
+   or tools to write disposable bash or Python as if those scripts were
+   the product. Always better to improve the tools we already use. A
+   lever: tools build better tools. Do not paper over a missing or
+   vague API by writing a one-off `curl` (or equivalent) in a throwaway
+   script. Prefer a named product tool surface (`search_replace`,
+   `apply_patch`, `write`, native fetch, existing bins). When a surface
+   is missing or wrong, extend that product tool. Do not invent a
+   disposable wrapper around it.
 7. **Friction → suggest plan** — process pushback / “plan first” → stop
    implementing and suggest or enter plan mode; explicit “just fix it” is fine.
    Host law: `~/.grok/AGENTS.md` § *Friction → suggest plan*.
@@ -219,34 +308,68 @@ less than product code and tests. Do not invent long essays or git nags.
 
 ## Subagents — parent is HITL UX only (hard)
 
-The **main/parent thread is HITL UX only**: goals, spawn/wait, read **short
-on-disk reports** subagents wrote, brief user status. **Research and
-implementation never run in the parent** — not even “just a quick look.” Full
-rule: `~/.grok/AGENTS.md` § *Regressions…* + § *Hard stop — parent is
-coordinator only*. Git handoff only when the operator asked for complex git
-help (see hard constraint **Git silence**).
+The **main/parent thread is HITL UX only**: status to the operator, spawn L2,
+wait, read **short on-disk reports**, board upsert, plus the **Hierarchical
+fast path**. **Research, implementation, multi-file greps, edits, tests, and
+skill-body rewrites never run on L1 or L2**, not even “just a quick look.”
+L2 parallelizes and spawns L3s; L3 does the actual tools and work. Full
+rule: this file § *Agent depth L1 / L2 / L3*; host `~/.grok/AGENTS.md` §
+*Regressions…* + § *Hard stop — parent is coordinator only*. Git handoff
+only when the operator asked for complex git help (see hard constraint
+**Git silence**).
 
-**Reports, not “joins” (pinned 2026-08-03):** On-disk handoff files are
-**reports** (prefer `.agents/reports/`). Do not call them join notes / join
-artifacts. Fork-join parallelism may still be named when explaining
-hierarchically structured subagent work (agent depth L1 main / L2 subagents /
-L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy files may
-remain under `.agents/joins/`; new work uses **reports**.
+**Reports, not “joins” (pinned 2026-08-03; local home 2026-08-17):** On-disk
+handoff files are **reports**. Write new reports under `~/.agents/reports/`
+on this machine. Do not add report files to the git tree. Do not call them
+join notes / join artifacts. Fork-join parallelism may still be named when
+explaining hierarchically structured subagent work (agent depth L1 main / L2
+subagents / L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy
+files may remain under `.agents/joins/`; new work uses **reports** under
+`~/.agents/reports/`.
 
-### Agent depth L1 / L2 / L3 (pinned 2026-07-29) — not session-board layers
+### Agent depth L1 / L2 / L3 (pinned 2026-07-29; three layers always 2026-08-15; Hierarchical fast path 2026-08-16)
 
 **Not** the session-board L0/L1/L2 table below (residual / todos / reports).
-Product agent depth:
+Whenever implement work, multi-file diagnosis, CI, or a regression needs
+tools, agents are **three layers deep.** Including implement loops. A
+"simple" implement job is not an exception. Implement loops are not an
+exception.
 
-| Depth | Name | Role |
-|-------|------|------|
-| **L1** | **Main thread** | Operator chat. HITL coordinator only. **Modal-free** — typing and chat must stay unobstructed. Must not get stuck in plan soft-park or exclusive key capture that blocks the prompt. |
-| **L2** | **Subagents** | Spawned by L1 (implement, explore, plan, review, …). Planning, research, implement, review, test work lives here. |
-| **L3** | **Subagent-spawned specialists** | L2 may spawn further specialists/personas. **Do not go deeper than L3.** |
+The old softer law (L2 must spawn L3 when the job is many greps, or when L2
+crosses about half the window) is **too weak**. Do not teach it. Work on L2
+fills L2 and causes compaction. That is how restack and skills work was lost.
+L1 stays cheap for HITL. L2 exists so context can be discarded after a report
+goes up.
 
-L1 coordinates; deeper layers do the heavy work. Product: soft-park that
-**traps** L1 is rejected; plan review is on demand (`/view-plan`, status click,
-panel CTAs), not forced keyboard capture of the main thread.
+| Depth | Does | Does not |
+|-------|------|----------|
+| **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs |
+| **L2 subagent** | Parallelize. Spawn L3s. Stay token-efficient. Throw context away after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
+| **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (**forbidden**) |
+
+**Hierarchical fast path (pinned 2026-08-16).** The main thread may do
+these three things without spawning L2:
+
+1. A one-command host question (for example `journalctl` or `last`).
+2. A single known-path read that the operator or the prompt already named.
+3. Read and quote the short on-disk report that this thread asked for.
+
+That is the **Hierarchical fast path**. It is not a license to diagnose,
+implement, or walk many files in the main thread. Still three layers for
+implement work, multi-file diagnosis, CI, and regressions. L2 still
+always spawns L3 for tool work.
+
+L1 and L2 may still use `spawn_subagent`, `todo_write`,
+`get_command_or_subagent_output` / wait, and read the short on-disk report they
+asked for. That is coordination, not work. **Do not go deeper than L3.**
+
+This section is project **D1** law and must survive recon. Host dual-pin:
+`~/.grok/AGENTS.md` § *Regressions and deep diagnosis* + § *Hard stop — parent
+is coordinator only*.
+
+Product: soft-park that **traps** L1 is rejected; plan review is on demand
+(`/view-plan`, status click, panel CTAs), not forced keyboard capture of the
+main thread.
 
 **Default loop (pinned 2026-07-27):** track on board → **spawn** → **wait** →
 read the short report on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
@@ -260,13 +383,16 @@ if disjoint). Host: § *Hard stop* default loop.
   **explore agent**, **worker**, or a role name. Keep ban on “kids” + “cheap.”
   “Child process” = OS process only, in technical docs.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
-  claims:** first tool turn is `spawn_subagent` — not parent `grep` / `gh` log
-  pull / test file reads / “I’ll check the docs.”
-- Parent may: goals, spawn/wait, read **short on-disk reports**, brief user
-  status; git handoff only when asked for complex git/recon work.
-- Parent must **not**: pull CI logs, open failing tests, re-run nextest, edit
-  product code, re-do the subagent’s greps “to be sure,” or research/implement
-  in the main thread.
+  claims:** L1’s first tool turn is `spawn_subagent`, not parent `grep` / `gh`
+  log pull / unnamed test-file reads / “I’ll check the docs.” L2 then
+  spawns L3 specialists. L2 does not grep, walk the hot path, or implement.
+  Hierarchical fast path stays on L1.
+- L1 and L2 may: spawn, wait, board upsert, read the **short on-disk report**
+  they asked for; L1 also gives brief user status. Git handoff only when asked
+  for complex git/recon work.
+- L1 and L2 must **not**: pull CI logs, open failing tests, re-run nextest,
+  edit product code, grep “to be sure,” rewrite skill bodies, or
+  research/implement. L3 does that work.
 - **Additive asks / “also” / “btw”:** phrases like **also**, **btw**, **by the
   way**, **this too**, **and also**, **this work too** mean a second slice, not
   a pivot. Board-upsert; **spawn** another subagent (or queue if same-file race);
@@ -281,6 +407,15 @@ if disjoint). Host: § *Hard stop* default loop.
   see FORK). Full auto-bind / sticky-on-new-message remain soft residual.
   Host: § *Multi-track: prose is not enough*.
 
+### Mention is in scope (pinned 2026-08-16)
+
+If the operator mentions work, that mention is in scope. Do not park it
+as optional. Do not ask "say if you want that." Do the work.
+
+This is not a substitute for *Ambiguity → park* when intent is actually
+unclear. A named job is not unclear. Dual-pin: host `~/.grok/AGENTS.md`
+§ *Mention is in scope*.
+
 ## Never assume without checking
 
 **Docs can be wrong** — treat prose as untrusted until code and load paths
@@ -289,25 +424,27 @@ be wrong or stale. Do **not** claim skills location, CI root cause, conflict
 intent, or recon survival from prose alone.
 
 - First tool turn for multi-file / CI / regression / “where do skills live?” is
-  **spawn_subagent** (explore or general-purpose as fits).
-- Verify against **code and load paths** (and live trees) before asserting.
+  **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
+  L2. L2 always spawns L3 for the greps, reads, and edits. L2 does not do them.
+- Verify against **code and load paths** (and live trees) before asserting
+  (L3 does that work; L1/L2 read the short report).
 - Read short on-disk reports; do not re-prove the subagent in the parent.
 - **Auth / credentials store / keyring:** diagnose with **red/green TDD**
   (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
   out explore + implementer on the same store bug. One implementer owns TDD.
   Pin: `~/.grok/AGENTS.md` § *Product auth / store diagnosis*.
 - **Plan approval:** product CTAs only (`exit_plan_mode` soft-park / side panel
-  → Approve / Notes / Clarify / Revise / Quit; keys `a`/`A`/`?`/`s`/`q` when
-  panel has empty prompt focus). **`exit_plan_mode` tool success = present for
-  review, not operator Approve.** Always-approve permission mode skips tool
-  permission prompts only; it does not auto-click plan CTAs. **Empty freeform
-  Enter never approves** (mouse Approve or empty-prompt `a`). After one
-  decisive Approve or Quit, do not re-arm Approve for the same present until a
-  new `exit_plan_mode`. After Revise/Clarify, status is rewriting wait (not
-  idle “Plan written / Click or /view-plan”) until re-present. **Never**
-  freeform chat “reply approve/revise/abandon.” Pin: `~/.grok/AGENTS.md` §
-  *Plan approval — product CTAs only*; user-guide `19-plan-mode`; FORK plan
-  bullets P1–P2.
+  → Approve / Comment / Revise / Exit). After Comment, Clarify is the read-only path. Letter `a` / `A` type. `?` still
+  arms Clarify. Approve is the clickable Approve button. **`exit_plan_mode`
+  tool success = present for review, not operator Approve.** Always-approve
+  permission mode skips tool-permission prompts only; it does not auto-click
+  plan CTAs. **Empty freeform Enter never approves** (clickable Approve).
+  After one decisive Approve or Exit, do not re-arm Approve for the same
+  present until a new `exit_plan_mode`. After Revise/Clarify, status is
+  rewriting wait (not idle “Plan written / Click or /view-plan”) until
+  re-present. **Never** freeform chat “reply approve/revise/abandon.” Pin:
+  `~/.grok/AGENTS.md` § *Plan approval — product CTAs only*; user-guide
+  `19-plan-mode`; FORK plan bullets P1–P2.
 - **DOGE colour roles (do not invent from screenshots):** Human chrome is
   **green** (`accent_user`: composer caret, human rails, OSC 12, success).
   Mid-draft letter under caret: empty blink half is normal text
@@ -333,11 +470,22 @@ Process that must survive recon: pin on **branch** (`AGENTS`, `FORK`,
 `docs/upstream-*`) **and** host when both apply. Detail:
 `doc/dev/research/where-skills-come-from-2026-07-24.md`, user-guide `08-skills.md`.
 
+### Skill maintenance must revise carefully (pinned 2026-08-17)
+
+The next skill-maintenance run must read current `AGENTS.md`, `FORK.md`, and
+product seams, then revise skill bodies. Do not treat copy-sync as enough.
+This wave changed hop honesty, plan pane, L1 lean remaining-work pointers,
+and report location.
+
 ## Survive recon (process pins on the branch)
 
 Chat is **not** enough. Import restores only `FORK_PATHS`; put-history
 cherry-picks product; join (`-s ours`) keeps the onto tip tree. Pins on branch:
-this file, [`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md),
+this file (including § *Agent depth L1 / L2 / L3*: three layers for
+implement, multi-file diagnosis, CI, and regressions, plus the
+**Hierarchical fast path**; not the old weaker “spawn L3 when many greps /
+half the window” rule),
+[`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md),
 [`docs/upstream-history.md`](docs/upstream-history.md) + sibling logs, upstream
 scripts (`put-history`, import, join, hermetic PATH, assert pins, …).
 
@@ -349,13 +497,17 @@ just upstream-assert-process-pins
 
 Import runs the assert after `FORK_PATHS` restore. See FORK § *What recon keeps*.
 
-**Product seams inside `xai-grok-*` are not path-restored.** OpenRouter,
-dual-auth, DOGE default, titles-on, stuck-retry clear, and similar live in
-shared crates and survive onto only via cherry-picks plus **cargo tests**.
-Assert proves files exist; it does not prove those contracts. Durable filter
-catalog: [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md);
-cheat sheet also in FORK § *Upstream regression filters*. After recon, run
-assert **and** those filters (or `just check`).
+**Product seams inside `xai-grok-*` are not path-restored.** They survive
+onto only via cherry-picks plus **named cargo tests**. Assert proves files
+exist; it does not prove those contracts. Land must cover the seven inventory
+classes in [`FORK.md`](FORK.md) § *Land checklist* (chrome/paint, `/settings`
+plus unread config, grok-oss ledger `/spend`, CLI branding, dual-auth hop
+after included SuperGrok period limits are full, last-session on start, product
+skills are not a Python runtime). A restack that reintroduces non-excepted
+Python under product skills, or drops the Rust intercept for the allowlisted
+CLI forms, is a failed land. A chrome-only pass is a failed land. `just check`
+cannot fail a deleted catalog test. Catalog:
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md).
 
 ## Ship / CI / git
 
@@ -380,8 +532,9 @@ history). Detail: [`docs/upstream-history.md`](docs/upstream-history.md).
 2. [`docs/upstream-onto-log.md`](docs/upstream-onto-log.md)
 
 No `MODE=overlay` / commit-tree. No `cherry-pick --abort` or `FORCE=1` rebuild
-while a healthy stack is mid-pick. Multi-file conflicts → subagents on disjoint
-paths; subagents write short reports on disk. Every continue/join merge = human `git commit -S`.
+while a healthy stack is mid-pick. Multi-file conflicts → L2 coordinators on
+disjoint paths spawn L3 specialists (L2 does not resolve files itself); L2
+writes short reports on disk. Every continue/join merge = human `git commit -S`.
 
 ## Residual
 
@@ -398,7 +551,7 @@ Session-board layers only (todos / reports). **Do not confuse** with agent depth
 |---------------|--------|
 | **L0** durable residual | `RESIDUAL.md` (D0 open) / campaign docs |
 | **L1** session todos | Namespaced `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` `feat:*` `bug:*` — **never casual wipe**; merge upsert only; product keep-unless-mentioned on `merge: false`. **Fib leaves:** size **1 or 2** only; larger work → split children; **progress = Σ leaf sizes** (phases/containers unsized). Prefer `meta.kind` + `parentId`. See [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md). |
-| **L2** reports | Short on-disk reports under `.agents/reports/` (legacy: `.agents/joins/`) |
+| **L2** reports | Short on-disk reports under `~/.agents/reports/` on this machine (legacy leftover: `.agents/joins/`). Agent reports are not part of the git tree. |
 
 ### Session board: track well and close out (pinned 2026-08-01)
 

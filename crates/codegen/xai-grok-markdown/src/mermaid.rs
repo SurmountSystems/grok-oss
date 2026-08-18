@@ -3182,10 +3182,9 @@ fn parse_note_anchor(rest: &str, seq: &mut Sequence) -> Option<(String, NoteAnch
         (&rest[rest.len() - r.len()..], 0u8)
     } else if let Some(r) = lower.strip_prefix("left of ") {
         (&rest[rest.len() - r.len()..], 1)
-    } else if let Some(r) = lower.strip_prefix("right of ") {
-        (&rest[rest.len() - r.len()..], 2)
     } else {
-        return None;
+        let r = lower.strip_prefix("right of ")?;
+        (&rest[rest.len() - r.len()..], 2)
     };
     let (ids, text) = ids_and_text.split_once(':')?;
     let text = decode_html_entities(text.trim());

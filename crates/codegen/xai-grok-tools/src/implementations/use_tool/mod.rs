@@ -281,7 +281,8 @@ impl crate::types::tool_metadata::ToolMetadata for UseTool {
     fn description_template(&self) -> &str {
         "Call an MCP integration tool.\n\n\
          The `tool_name` must be the qualified `server__tool` name (e.g., `linear__save_issue`). \
-         The `tool_input` must conform exactly to the input schema returned by `${{ tools.by_kind.search_tool }}`."
+         The `tool_input` must conform exactly to the tool's input schema\
+         ${%- if tools.by_kind.search_tool %} as returned by `${{ tools.by_kind.search_tool }}`${%- endif %}."
     }
 }
 
@@ -299,7 +300,7 @@ impl xai_tool_runtime::Tool for UseTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "use_tool",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -1079,7 +1080,7 @@ mod tests {
                     "truncated output must contain truncation annotation, got: {}",
                     &text[text.len().saturating_sub(200)..],
                 );
-                let expected = format!("showing first {}", format_bytes(limit));
+                let expected = format!("showing first {}", format_bytes(limit as u64));
                 assert!(
                     text.contains(&expected),
                     "annotation must show the truncation limit ({expected})"
@@ -1138,7 +1139,7 @@ mod tests {
                     "truncated output must contain truncation annotation"
                 );
                 assert!(
-                    text.contains("showing first 5.0KB"),
+                    text.contains("showing first 4.9 KB"),
                     "annotation must reflect the custom limit"
                 );
             } else {
@@ -1413,6 +1414,8 @@ mod tests {
     // ── run() wiring: extension, file, and the gated steer ──
 
     #[tokio::test]
+    // Process-env serialization across awaits is intentional for this hermetic test.
+    #[allow(clippy::await_holding_lock)]
     async fn json_dump_written_as_json_with_query_steer() {
         use crate::types::context::TruncationConfig;
         use crate::types::output::{MCPOutput, MCPOutputDetails};

@@ -2,6 +2,12 @@
 //! deployment-config endpoint. Proxy-side resolution is unit-tested in
 //! the cli-chat-proxy deployment-config route.
 //!
+//! This suite is **dark (keyless)**. Unsigned mock bodies are intentional;
+//! armed/signed contracts live in `xai-grok-config` unit tests. Product
+//! builds embed the prod `v1` pubkey, so without the process-global dark
+//! override `apply_fetched` rejects every mock (`SignatureRejected`) and
+//! nothing is written.
+//!
 //! Every test here MUST be `#[serial]`: they share one process-global
 //! `GROK_HOME` (the `grok_home` `OnceLock` allows a single value per process)
 //! and mutate that directory + process env, so concurrent tests would race.
@@ -15,42 +21,67 @@ use serial_test::serial;
 use xai_grok_shell::config::ServingIdentity;
 use xai_grok_test_support::spawn_counting_server;
 
+/// Process-global hermetic home + dark verification.
+///
+/// Integration binaries do not compile the lib's `#[cfg(test)]` ctor, so
+/// this file owns the pin. Must run before any `grok_home()` OnceLock init:
+/// GHA has no operator `~/.grok`, and a first read without `$GROK_HOME`
+/// caches the default home for the rest of the process.
+#[ctor::ctor]
+fn install_hermetic_home_and_dark() {
+    let path = tempfile::TempDir::new().expect("hermetic GROK_HOME").keep();
+    // SAFETY: process-global, pre-main, before any grok_home() read.
+    unsafe {
+        std::env::set_var("GROK_HOME", &path);
+        for var in [
+            "GROK_DEPLOYMENT_KEY",
+            "GROK_MANAGED_CONFIG",
+            "GROK_DEPLOYMENT_CONFIG_REFRESH_INTERVAL_SECS",
+            "GROK_DEPLOYMENT_CONFIG_CACHE_TTL_SECS",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            std::env::remove_var(var);
+        }
+        std::env::set_var("GROK_DEPLOYMENT_CONFIG_BACKOFF_MS", "10");
+    }
+    let pinned = xai_grok_config::grok_home();
+    assert_eq!(
+        pinned, path,
+        "grok_home() OnceLock must pin the hermetic test home, not the operator or GHA default"
+    );
+    xai_grok_config::signed_policy::test_seam::set_embedded_keys(Some(&[]));
+    assert!(
+        !xai_grok_config::signed_policy::verification_active(),
+        "this suite serves unsigned mocks; verification must be dark"
+    );
+}
+
 /// The serving identity for a team id (the staleness checks key on this).
 fn team_identity(id: &str) -> ServingIdentity {
     ServingIdentity::Team(id.to_owned())
 }
 
 /// Shared temp dir used as GROK_HOME for the whole test binary (the grok_home
-/// `OnceLock` only allows one value per process). Also scrubs/installs the env
-/// this suite depends on, before any test thread reads it.
+/// `OnceLock` only allows one value per process). The pre-main ctor already
+/// installed this path; we re-assert dark so a sibling test cannot re-arm
+/// verification mid-suite.
 fn test_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let path = tempfile::TempDir::new().unwrap().keep();
-        // SAFETY: set once at init before other threads read the vars.
-        unsafe {
-            std::env::set_var("GROK_HOME", &path);
-            // Ambient env must not shadow the scenarios under test: a real
-            // deployment key, a managed-config opt-out, or a proxy that would
-            // intercept the 127.0.0.1 mocks.
-            for var in [
-                "GROK_DEPLOYMENT_KEY",
-                "GROK_MANAGED_CONFIG",
-                "GROK_DEPLOYMENT_CONFIG_REFRESH_INTERVAL_SECS",
-                "GROK_DEPLOYMENT_CONFIG_CACHE_TTL_SECS",
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-            ] {
-                std::env::remove_var(var);
-            }
-            // Real exponential backoff would add seconds per retry test.
-            std::env::set_var("GROK_DEPLOYMENT_CONFIG_BACKOFF_MS", "10");
-        }
-        path
+        xai_grok_config::signed_policy::test_seam::set_embedded_keys(Some(&[]));
+        assert!(
+            !xai_grok_config::signed_policy::verification_active(),
+            "unsigned mocks require dark verification"
+        );
+        std::env::var_os("GROK_HOME")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(xai_grok_config::grok_home)
     })
 }
 
@@ -857,6 +888,12 @@ async fn bootstrap_fails_closed_when_managed_policy_compromised() {
         .await
         .expect("initial sync should succeed");
     std::fs::remove_file(home.join("requirements.toml")).unwrap();
+
+    // Offline after tamper: a live mock would re-serve the policy during
+    // bootstrap and the gate would go green. Same shape as
+    // `managed_policy_gate_fails_closed_on_deleted_policy_offline`.
+    let (err_url, _c, _a) = spawn_mock_seq(vec![(500, "{}".to_string())]);
+    write_config(&home, &err_url);
 
     // The gate is bootstrap's first step, so it refuses before any config/model work.
     let cfg = xai_grok_shell::agent::config::Config::default();

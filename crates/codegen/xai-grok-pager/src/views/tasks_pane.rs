@@ -18,7 +18,10 @@ use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
-use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
+    is_l2_list_row, live_l3_count, live_subagent_list,
+};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
@@ -100,15 +103,8 @@ pub fn highlight_bash_command(command: &str) -> Vec<Span<'static>> {
 }
 
 /// Dim highlighted spans by blending each color toward background.
-///
-/// Under DOGE, skip alpha blend (solid-step at the usual 0.45 recede factor
-/// would snap to black and hide the command). Keep pure span colours; the
-/// finished-vs-running distinction still comes from the spinner/status chrome.
 fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
     let theme = Theme::current();
-    if Theme::current_kind() == ThemeKind::Doge {
-        return spans.to_vec();
-    }
     spans
         .iter()
         .map(|span| {
@@ -121,17 +117,6 @@ fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
             Span::styled(span.content.clone(), style)
         })
         .collect()
-}
-
-/// Finished / idle type-label colour: non-DOGE blends toward bg so rows recede;
-/// DOGE keeps the pure role primary (green/red/magenta) — mid-channel blend
-/// would invent grays, and solid-step at 0.45 would hide the label on black.
-fn finished_type_color(theme: &Theme, raw: Color) -> Color {
-    if Theme::current_kind() == ThemeKind::Doge {
-        raw
-    } else {
-        crate::render::color::blend_color(theme.bg_base, raw, 0.45).unwrap_or(raw)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +361,10 @@ impl TaskEntry {
     }
 
     fn from_subagent(info: &SubagentInfo) -> Self {
+        Self::from_subagent_with_l3_count(info, 0)
+    }
+
+    fn from_subagent_with_l3_count(info: &SubagentInfo, live_l3: usize) -> Self {
         let theme = Theme::current();
 
         // Single consolidated label (persona > role > subagent_type > tag >
@@ -404,7 +393,8 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.pending_kill {
             raw_type_color
         } else {
-            finished_type_color(&theme, raw_type_color)
+            crate::render::color::blend_color(theme.bg_base, raw_type_color, 0.45)
+                .unwrap_or(raw_type_color)
         };
         let type_style = Style::default().fg(type_color);
         let desc_style = if info.is_running() {
@@ -443,6 +433,12 @@ impl TaskEntry {
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
         ];
+        if let Some(count) = format_live_l3_count(live_l3) {
+            spans.push(Span::styled(
+                format!(" · {count}"),
+                Style::default().fg(theme.gray),
+            ));
+        }
         if let Some(activity) = activity {
             spans.push(Span::styled(
                 format!(" \u{2014} {activity}"),
@@ -450,11 +446,14 @@ impl TaskEntry {
             ));
         }
 
+        let l3_suffix = format_live_l3_count(live_l3)
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default();
         let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => type_label.clone(),
-            (true, false) => format!("{type_label} {model_suffix}"),
-            (false, true) => format!("{type_label} {description}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}"),
+            (true, true) => format!("{type_label}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
+            (false, true) => format!("{type_label} {description}{l3_suffix}"),
+            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
         };
         let styled = Line::from(spans);
 
@@ -492,7 +491,8 @@ impl TaskEntry {
         let tag_color = if running {
             raw_tag_color
         } else {
-            finished_type_color(&theme, raw_tag_color)
+            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
+                .unwrap_or(raw_tag_color)
         };
         let name_style = if running {
             Style::default().fg(theme.text_primary)
@@ -611,7 +611,7 @@ impl TaskEntry {
         };
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, info.human_schedule, &prompt_preview, &suffix
+            tag_display, info.human_schedule, prompt_preview, suffix
         );
 
         // Only the tag (e.g. `Loop`) carries color — the blue system accent.
@@ -945,11 +945,23 @@ impl TasksPane {
             }
         }
 
-        for info in subagents.values() {
-            if info.workflow_run_id.is_some() {
-                continue;
-            }
-            if self.show_done || info.is_running() {
+        let child_ids: std::collections::HashSet<&str> = subagents
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
+        for info in live_subagent_list(subagents.values()) {
+            let n = live_l3_count(subagents.values(), info.child_session_id.as_ref());
+            self.items
+                .push(TaskEntry::from_subagent_with_l3_count(info, n));
+        }
+        if self.show_done {
+            for info in subagents.values() {
+                if info.workflow_run_id.is_some() || info.is_running() {
+                    continue;
+                }
+                if !is_l2_list_row(info, &child_ids) {
+                    continue;
+                }
                 self.items.push(TaskEntry::from_subagent(info));
             }
         }
@@ -1819,10 +1831,8 @@ impl TasksPane {
             ));
         }
 
-        // View button glyph. Open hit (below) also covers model + timer so a
-        // click on top-right subagent chrome opens the child, not only [↗].
+        // View button
         rx = rx.saturating_sub(3);
-        let view_x = rx;
         let is_view_hovered = matches!(
             &self.hovered_view,
             Some(TaskEntryId::Agent(sid)) if sid == subagent_id
@@ -1838,6 +1848,10 @@ impl TasksPane {
             &Span::styled(crate::glyphs::enlarge_button(), view_style),
             3,
         );
+        self.view_button_rects.push((
+            TaskEntryId::Agent(subagent_id.to_string()),
+            Rect::new(rx, y, 3, 1),
+        ));
 
         // Time/status text
         let right_width = right_text.width() as u16;
@@ -1856,15 +1870,6 @@ impl TasksPane {
                 model_w,
             );
         }
-
-        // Open chrome hit: model + elapsed + [↗], not kill [x].
-        let open_x = rx.min(view_x);
-        let open_right = view_x.saturating_add(3);
-        let open_w = open_right.saturating_sub(open_x).max(3);
-        self.view_button_rects.push((
-            TaskEntryId::Agent(subagent_id.to_string()),
-            Rect::new(open_x, y, open_w, 1),
-        ));
 
         // Context badge (pre-computed above for overlay clearing)
         if !badge.is_empty() {
@@ -1959,42 +1964,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// Finished agent type labels under DOGE keep pure role primaries (no
-    /// mid-channel gray from 0.45 opacity blend toward black).
-    #[test]
-    fn doge_finished_type_color_stays_pure_primary_no_gray_blend() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(ThemeKind::Doge);
-
-        let theme = Theme::doge();
-        let green = theme.accent_success;
-        let red = theme.accent_error;
-        let magenta = theme.accent_running;
-
-        for raw in [green, red, magenta] {
-            let c = finished_type_color(&theme, raw);
-            assert_eq!(c, raw, "DOGE finished label must keep pure role color");
-            if let Color::Rgb(r, g, b) = c {
-                for ch in [r, g, b] {
-                    assert!(
-                        ch == 0 || ch == 255,
-                        "invented mid-channel in finished color {c:?}"
-                    );
-                }
-            }
-        }
-
-        // Non-DOGE still recedes via blend.
-        crate::theme::cache::set(ThemeKind::GrokNight);
-        let night = Theme::groknight();
-        let raw = night.accent_success;
-        let receded = finished_type_color(&night, raw);
-        assert_ne!(
-            receded, raw,
-            "GrokNight finished labels still alpha-recede toward bg"
-        );
-    }
-
     fn make_info() -> SubagentInfo {
         SubagentInfo {
             subagent_id: Arc::from("sa-1"),
@@ -2010,6 +1979,8 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,
@@ -2700,6 +2671,70 @@ mod tests {
     }
 
     #[test]
+    fn tasks_pane_sync_does_not_paint_two_live_same_description_rows() {
+        let mut pane = TasksPane::new();
+        let t0 = Instant::now();
+        let mut a = make_info();
+        a.subagent_id = Arc::from("sa-a");
+        a.child_session_id = Arc::from("cs-a");
+        a.description = Arc::from("[reviewer] Review implementation");
+        a.subagent_type = Arc::from("general-purpose");
+        a.finished = false;
+        a.started_at = t0;
+        let mut b = make_info();
+        b.subagent_id = Arc::from("sa-b");
+        b.child_session_id = Arc::from("cs-b");
+        b.description = Arc::from("[reviewer] Review implementation");
+        b.subagent_type = Arc::from("general-purpose");
+        b.finished = false;
+        b.started_at = t0 + std::time::Duration::from_millis(10);
+        let mut other = make_info();
+        other.subagent_id = Arc::from("sa-other");
+        other.child_session_id = Arc::from("cs-other");
+        other.description = Arc::from("[implementer] Land the slice");
+        other.subagent_type = Arc::from("general-purpose");
+        other.finished = false;
+        other.started_at = t0 + std::time::Duration::from_millis(20);
+
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-a".into(), a);
+        subagents.insert("cs-b".into(), b);
+        subagents.insert("cs-other".into(), other);
+
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+
+        let same: Vec<_> = pane
+            .items
+            .iter()
+            .filter(|entry| match entry {
+                TaskEntry::Agent { label, .. } => label.contains("Review implementation"),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            same.len(),
+            1,
+            "Tasks pane sync must not paint two live same-description rows, got {}",
+            same.len()
+        );
+        let distinct = pane.items.iter().any(|entry| match entry {
+            TaskEntry::Agent { label, .. } => label.contains("Land the slice"),
+            _ => false,
+        });
+        assert!(
+            distinct,
+            "distinct live description must still appear after same-description collapse"
+        );
+    }
+
+    #[test]
     fn sync_sorts_running_before_done() {
         let mut pane = TasksPane::new();
         pane.show_done = true;
@@ -3069,16 +3104,27 @@ mod tests {
     fn subagents_ordered_by_agent_type() {
         let mut pane = TasksPane::new();
         let mut subagents = HashMap::new();
-        // Two running subagents of different types; both running so the
-        // running-first key ties and the type order decides.
+        // Two running L2s of different types; both running so the
+        // running-first key ties and the type order decides. Distinct
+        // descriptions: same-trim collapse keeps only the earliest row.
         let mut plan = make_info();
         plan.child_session_id = "cs-plan".into();
         plan.subagent_type = "plan".into();
+        plan.description = "Write the implementation plan".into();
         let mut explore = make_info();
         explore.child_session_id = "cs-explore".into();
         explore.subagent_type = "explore".into();
+        explore.description = "Find API endpoints".into();
+        // L3 under the plan L2 must not appear as its own list row.
+        let mut specialist = make_info();
+        specialist.child_session_id = "cs-l3".into();
+        specialist.subagent_type = "general-purpose".into();
+        specialist.description = "Read the tasks pane sort".into();
+        specialist.parent_session_id = Some(Arc::from("cs-plan"));
+        specialist.depth = Some(2);
         subagents.insert("cs-plan".into(), plan);
         subagents.insert("cs-explore".into(), explore);
+        subagents.insert("cs-l3".into(), specialist);
 
         pane.sync(
             &std::collections::BTreeMap::new(),
@@ -3089,7 +3135,7 @@ mod tests {
             &[],
         );
 
-        // Ordered by agent type alphabetically: Explore before Plan.
+        // L2 rows only, ordered by agent type alphabetically: Explore before Plan.
         let types: Vec<&str> = pane
             .items
             .iter()
@@ -3144,6 +3190,27 @@ mod tests {
             _ => panic!("expected Agent variant"),
         };
         assert_eq!(label, "Explore Find API endpoints");
+    }
+
+    #[test]
+    fn l2_row_shows_live_l3_count_not_specialist_names() {
+        let info = make_info();
+        let entry = TaskEntry::from_subagent_with_l3_count(&info, 2);
+        let (label, styled) = match &entry {
+            TaskEntry::Agent { label, styled, .. } => (label, styled),
+            _ => panic!("expected Agent variant"),
+        };
+        assert!(
+            label.contains(" · 2 specialists"),
+            "L2 row must show a specialist count: {label}"
+        );
+        assert!(
+            styled
+                .spans
+                .iter()
+                .any(|s| s.content.contains("2 specialists")),
+            "styled L2 row must show the count, not L3 names: {styled:?}"
+        );
     }
 
     #[test]

@@ -282,6 +282,8 @@ async fn run_capped(
     cmd: &mut tokio::process::Command,
     timeout: std::time::Duration,
 ) -> anyhow::Result<std::process::Output> {
+    #[allow(clippy::disallowed_methods)]
+    // enrolled into ProcessGroup below; timeout kills the group
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("command failed to start: {e}"))?;

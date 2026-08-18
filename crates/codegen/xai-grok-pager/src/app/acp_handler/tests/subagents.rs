@@ -157,6 +157,56 @@
         );
     }
 
+    /// Thread-leak regression: every `SubagentSpawned` creates a child
+    /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
+    /// matcher thread used to spawn eagerly per view — one leaked thread per
+    /// subagent ever spawned, for the process lifetime.
+    ///
+    /// Drives the real handler with spawn+finish pairs and asserts the exact
+    /// invariant on every platform: no child view ever builds a matcher
+    /// daemon (each daemon owns exactly one named thread).
+    #[test]
+    fn subagent_spawn_storm_spawns_no_matcher_daemons() {
+        const SUBAGENTS: usize = 50;
+
+        let mut app = make_app_with_agent("sess-parent");
+        for i in 0..SUBAGENTS {
+            let child_sid = format!("child-storm-{i}");
+            handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    test_subagent_spawned("sess-parent", &child_sid),
+                ),
+                &mut app,
+            );
+            handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    test_subagent_finished(&child_sid),
+                ),
+                &mut app,
+            );
+        }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.subagent_views.len(),
+            SUBAGENTS,
+            "every spawn must have created a child view (the leak's unit)"
+        );
+        let daemons = agent
+            .subagent_views
+            .values()
+            .filter(|v| v.prompt.history_search.daemon_built())
+            .count();
+        assert_eq!(
+            daemons, 0,
+            "subagent child views must never spawn history-search matcher threads"
+        );
+    }
+
     /// Regression: replay from `updates.jsonl` emits `x.ai/session/update` (not
     /// `session_notification`). Subagent lifecycle events must still populate
     /// `subagent_sessions` and the parent scrollback `SubagentBlock`.
@@ -320,6 +370,205 @@
         );
     }
 
+    #[test]
+    fn subagent_tool_call_delta_stamps_writing_activity_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(changed, "first delta must request a redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_ignored_while_child_loading_replay() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-replay";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none()
+        );
+        assert_eq!(
+            agent
+                .subagent_views
+                .get(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .activity(),
+            None,
+            "reloading child tracker must not pick up the delta"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_without_registry_row_reports_no_redraw() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-orphan";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .remove(child_sid);
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed, "no registry row → nothing visible → no redraw");
+    }
+
+    #[test]
+    fn subagent_acp_chunk_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-acp-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        // Simulate the racing child rail still looking live.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .state = AgentState::TurnRunning;
+
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must not be re-stamped by the child ACP fan-out"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must keep its cleared label"
+        );
+    }
+
     /// Regression: replayed SubagentSpawned (resumed_from unset) must load child
     /// updates.jsonl so fullscreen scrollback is not prompt-only.
     #[test]
@@ -347,6 +596,74 @@
                 "spawn must set child_updates_replayed"
             );
         });
+    }
+
+    /// Isolated `isReplay` with `loading_replay == false`: drop_unexpected_replay
+    /// runs before SubagentSpawned (`!meta.is_replay` is defense-in-depth).
+    #[test]
+    fn replayed_subagent_spawned_without_loading_replay_is_dropped() {
+        with_replay_disk_home(|_| {
+            let child_sid = "child-unexpected-replay";
+            let mut app = make_app_with_agent("sess-parent");
+            assert!(!app.agents[&AgentId(0)].session.loading_replay);
+            write_child_updates_jsonl(
+                replay_disk_test_home(),
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+            let spawned = subagent_ext_replay(
+                "sess-parent",
+                serde_json::json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": child_sid,
+                    "parent_session_id": "sess-parent",
+                    "child_session_id": child_sid,
+                    "subagent_type": "explore",
+                    "description": "scan src/",
+                }),
+                "sess-parent-1",
+            );
+            handle_ext_notification(&spawned, &mut app);
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.subagent_sessions.is_empty(),
+                "unexpected replay spawn must not register"
+            );
+            assert!(agent.subagent_views.is_empty());
+        });
+    }
+
+    #[test]
+    fn late_replay_grace_accepts_is_replay_after_loading_replay_clears() {
+        let mut app = make_app_with_agent("sess-late");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(!agent.session.loading_replay);
+        agent.arm_late_replay_grace();
+        let meta = crate::acp::meta::NotificationMeta {
+            is_replay: true,
+            ..crate::acp::meta::NotificationMeta::default()
+        };
+        assert!(
+            !drop_unexpected_replay(agent, &meta, "sess-late", "test"),
+            "isReplay during late grace must apply"
+        );
+    }
+
+    #[test]
+    fn live_update_closes_late_replay_grace() {
+        let mut app = make_app_with_agent("sess-late");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.arm_late_replay_grace();
+        let live = crate::acp::meta::NotificationMeta::default();
+        assert!(!drop_unexpected_replay(agent, &live, "sess-late", "test"));
+        let replay = crate::acp::meta::NotificationMeta {
+            is_replay: true,
+            ..crate::acp::meta::NotificationMeta::default()
+        };
+        assert!(
+            drop_unexpected_replay(agent, &replay, "sess-late", "test"),
+            "this-session live must close late grace"
+        );
     }
 
     /// Resume: a `SubagentSpawned` during `loading_replay` must defer the child
@@ -637,6 +954,84 @@
     }
 
     #[test]
+    fn subagent_spawn_live_foreign_cwd_does_not_hydrate() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-foreign-cwd";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "live spawn must not scan a foreign-cwd transcript"
+            );
+            assert!(
+                agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .is_some_and(|i| i.child_updates_replayed),
+                "live spawn must latch child_updates_replayed even on Empty"
+            );
+        });
+    }
+
+    #[test]
+    fn subagent_spawn_live_resume_hydrates_foreign_cwd() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-foreign";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let tools = child_scrollback_tool_call_count(agent, child_sid);
+            let replayed = agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|i| i.child_updates_replayed);
+            if tools != 1 {
+                assert!(
+                    !replayed,
+                    "live resume must hydrate now or leave first-open able to scan"
+                );
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.open_subagent_fullscreen(child_sid.to_string());
+                assert_eq!(
+                    child_scrollback_tool_call_count(agent, child_sid),
+                    1,
+                    "opening after live resume must hydrate the dest transcript"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn open_subagent_fullscreen_replays_when_flag_false_and_prompt_only() {
         with_replay_disk_home(|_| {
             let child_sid = "child-open-replay";
@@ -850,6 +1245,7 @@
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),
                     summary_preview: None,
+                    saved_too_little: false,
                 },
             ),
             &mut app,
@@ -867,9 +1263,9 @@
         );
     }
 
-    /// Compaction must not wipe the user-visible todo board. Resources still
-    /// hold TodoState; the UI used to call `update_todos([])` on
-    /// AutoCompactCompleted, making the list look empty after compact.
+    /// Auto-compact refreshes the context bar. It must not wipe the UI todo
+    /// board. Resources still hold the board; a later Plan / todo_write
+    /// refresh still replaces via the normal ACP Plan path.
     #[test]
     fn auto_compact_completed_preserves_todo_board() {
         let mut app = make_app_with_agent("sess-compact");
@@ -902,6 +1298,7 @@
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),
                     summary_preview: None,
+                    saved_too_little: false,
                 },
             ),
             &mut app,

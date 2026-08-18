@@ -36,7 +36,7 @@ pub use super::config::default_allow_spend_when_free_period_debit_unproven;
 /// User-facing block copy when opt-in hard block is on (toast / acp error).
 /// Complete thoughts; meters named; not framed as an Internal error.
 pub fn free_period_unproven_spend_block_message() -> &'static str {
-    "Blocked: free SuperGrok period limits are not debiting (flat poll) while still below 100% used. SuperGrok session traffic can still move team Grok Build / OAuth settlement dollars and SuperGrok dollar credits. Hard block is on because [auth] allow_spend_when_free_period_debit_unproven = false (or env GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN=0). Set that key to true (or unset the env) to allow turns under unproven free SuperGrok period debit. Run grok limits / multipoll; file the C4 xAI ticket if free SuperGrok period never steps."
+    "Blocked: included SuperGrok period limits are not debiting (flat poll) while still below 100% used. SuperGrok session traffic can still move team Grok Build / OAuth settlement dollars and SuperGrok dollar credits. Hard block is on because [auth] allow_spend_when_free_period_debit_unproven = false (or env GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN=0). Set that key to true (or unset the env) to allow turns under unproven included SuperGrok period debit. Run grok limits / multipoll; file the C4 xAI ticket if included SuperGrok period limits never step."
 }
 
 /// Pure decision: whether to block a sampler turn.
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn block_message_names_meters_and_opt_in_block() {
         let msg = free_period_unproven_spend_block_message();
-        assert!(msg.contains("free SuperGrok period"));
+        assert!(msg.contains("included SuperGrok period"));
         assert!(msg.contains("allow_spend_when_free_period_debit_unproven"));
         assert!(msg.contains("team Grok Build") || msg.contains("OAuth"));
         assert!(msg.contains("SuperGrok dollar credits"));

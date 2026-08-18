@@ -21,7 +21,9 @@ use reqwest::header::{
 };
 use serde::Serialize;
 
-use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
+use xai_grok_sampling_types::error::{
+    parse_error_code, try_parse_stream_error, user_facing_api_error_message,
+};
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
@@ -240,6 +242,13 @@ pub(crate) fn stream_headers_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(stream_headers_timeout_secs(env.as_deref()))
 }
 
+fn format_stream_headers_timeout_message(budget: std::time::Duration) -> String {
+    format!(
+        "timed out waiting for response headers after {}",
+        xai_tty_utils::format_human_duration(budget)
+    )
+}
+
 /// Join `source()` chain — reqwest Display hides hyper causes.
 fn error_cause_chain(err: &dyn std::error::Error) -> String {
     let mut msg = err.to_string();
@@ -279,7 +288,7 @@ async fn execute_streaming(
         }
         Err(_elapsed) => {
             let secs = budget.as_secs();
-            let msg = format!("timed out waiting for response headers after {secs}s");
+            let msg = format_stream_headers_timeout_message(budget);
             tracing::warn!(timeout_secs = secs, "{msg}");
             let span = tracing::Span::current();
             span.record("success", false);
@@ -605,9 +614,8 @@ impl SamplingClient {
                             api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
-                        SamplingError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP header"
-                                .to_string(),
+                        SamplingError::auth_unknown(
+                            "Invalid api_key: cannot be converted to a valid HTTP header",
                         )
                     })?;
                     headers.insert(HeaderName::from_static("x-api-key"), header_value);
@@ -619,9 +627,8 @@ impl SamplingClient {
                             api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
-                        SamplingError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
-                                .to_string(),
+                        SamplingError::auth_unknown(
+                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header",
                         )
                     })?;
                     headers.insert(AUTHORIZATION, header_value);
@@ -869,6 +876,19 @@ impl SamplingClient {
         }
     }
 
+    /// Build a wire-provenance [`SamplingError::Auth`] from the credential
+    /// header this client would stamp (or not) on the request. 401 / forbidden-
+    /// credentials arms must use this so the session's auth-retry budget can
+    /// distinguish fail-closed (missing) from credential rejections (sent).
+    fn auth_error_for_wire(&self, message: impl Into<String>) -> SamplingError {
+        SamplingError::auth(
+            message,
+            xai_grok_sampling_types::SentCredential::from_sent_fragment(
+                self.current_sent_bearer_prefix().as_deref(),
+            ),
+        )
+    }
+
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
         let auth_prefix = self.current_sent_bearer_prefix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
@@ -949,16 +969,16 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401): {server_message}"
-                )));
+                return Err(
+                    self.auth_error_for_wire(format!("Unauthorized (401): {server_message}"))
+                );
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
             if is_forbidden_credentials_rejection(status, &message) {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (token rejected): {message}"
-                )));
+                return Err(
+                    self.auth_error_for_wire(format!("Unauthorized (token rejected): {message}"))
+                );
             }
             return Err(SamplingError::Api {
                 status,
@@ -966,6 +986,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1103,7 +1124,7 @@ impl SamplingClient {
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
@@ -1116,7 +1137,7 @@ impl SamplingClient {
                     crate::attribution::SamplingConsumer::ChatCompletionsStream,
                 );
                 let endpoint = self.endpoint("chat/completions");
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
                 )));
             }
@@ -1134,6 +1155,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1309,7 +1331,7 @@ impl SamplingClient {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
                 let endpoint = self.endpoint("responses");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
@@ -1318,7 +1340,7 @@ impl SamplingClient {
             if is_forbidden_credentials_rejection(status, &message) {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
                 let endpoint = self.endpoint("responses");
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
                 )));
             }
@@ -1335,6 +1357,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1441,9 +1464,13 @@ impl SamplingClient {
         let mut http_request = grok_headers
             .apply(self.post(self.endpoint("responses")))
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        if doom_loop.is_some() {
-            // Presence opts in; the server ignores the value.
-            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+        if let Some(policy) = self.defaults.doom_loop_recovery {
+            // Wire value is the clamped detector window (default 1024), not
+            // a boolean. Presence still opts in; the server uses the number.
+            let window = xai_grok_sampling_types::DoomLoopRecoveryPolicy::clamp_window_tokens(
+                policy.window_tokens,
+            );
+            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, window.to_string());
         }
         let http_request = http_request.json(&request_body);
 
@@ -1472,7 +1499,7 @@ impl SamplingClient {
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
@@ -1485,7 +1512,7 @@ impl SamplingClient {
                 span.record("error", "forbidden credentials rejected");
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
                 let endpoint = self.endpoint("responses");
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
                 )));
             }
@@ -1503,6 +1530,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1661,7 +1689,7 @@ impl SamplingClient {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
                 let endpoint = self.endpoint("messages");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
@@ -1670,7 +1698,7 @@ impl SamplingClient {
             if is_forbidden_credentials_rejection(status, &message) {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
                 let endpoint = self.endpoint("messages");
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
                 )));
             }
@@ -1687,6 +1715,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -1785,7 +1814,7 @@ impl SamplingClient {
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
@@ -1798,7 +1827,7 @@ impl SamplingClient {
                 span.record("error", "forbidden credentials rejected");
                 self.record_401_attribution(crate::attribution::SamplingConsumer::MessagesStream);
                 let endpoint = self.endpoint("messages");
-                return Err(SamplingError::Auth(format!(
+                return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
                 )));
             }
@@ -1816,6 +1845,7 @@ impl SamplingClient {
                 model_metadata,
                 retry_after_secs,
                 should_retry,
+                error_code: parse_error_code(bytes.as_ref()),
             });
         }
 
@@ -2138,6 +2168,7 @@ impl SamplingClient {
                 model_metadata: info.model_metadata,
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
+                error_code: info.error_code,
             })
     }
 }
@@ -2163,6 +2194,7 @@ mod tests {
             api_backend: ApiBackend::ChatCompletions,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
+            extra_response_includes: Vec::new(),
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: 8192,
@@ -2218,6 +2250,19 @@ mod tests {
             stream_headers_timeout_secs(Some("1")),
             1,
             "positive override still honored"
+        );
+    }
+
+    #[test]
+    fn stream_headers_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_stream_headers_timeout_message(std::time::Duration::from_secs(120));
+        assert!(
+            msg.contains("after 2m0s"),
+            "default 120s header wait must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("120s") && !msg.contains("120 seconds"),
+            "raw second budget must not leak: {msg}"
         );
     }
 

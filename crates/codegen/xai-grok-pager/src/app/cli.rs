@@ -4,59 +4,6 @@ use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::str::FromStr;
-
-/// Clap value for `login --api-key` that never dumps secrets in [`Debug`].
-///
-/// Empty string = bare flag; `-` = stdin sentinel; any other value is refused
-/// at runtime by [`xai_grok_shell::auth::materialize_cli_api_key`].
-#[derive(Clone, PartialEq, Eq)]
-pub struct ApiKeyCliValue(String);
-
-impl ApiKeyCliValue {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl std::ops::Deref for ApiKeyCliValue {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for ApiKeyCliValue {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for ApiKeyCliValue {
-    type Err = std::convert::Infallible;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_owned()))
-    }
-}
-
-impl std::fmt::Debug for ApiKeyCliValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Show structure only — never raw secrets (even on refuse path).
-        let shown = match self.0.as_str() {
-            "" => "\"\"",
-            "-" => "\"-\"",
-            _ => "\"<redacted>\"",
-        };
-        f.write_str("ApiKeyCliValue(")?;
-        f.write_str(shown)?;
-        f.write_str(")")
-    }
-}
-
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -70,79 +17,27 @@ pub enum Command {
     },
     /// Check terminal, clipboard, color, and input support without starting Grok
     Doctor(crate::doctor_cmd::DoctorArgs),
-    /// Print live sampling principal + SuperGrok / console spend meters
-    ///
-    /// Agent-usable: no TUI. Same meters as in-session `/limits` (SuperGrok
-    /// included weekly %, SuperGrok dollar extras, console team prepaid when
-    /// configured). Never prints raw keys or tokens. Prefer `--json` for
-    /// scripts and subagents.
+    /// Show SuperGrok included period limits, SuperGrok dollar credits, and console team meters
     Limits(crate::limits_cmd::LimitsArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout {
-        /// Clear only the stored OpenRouter API key (not xAI session auth).
-        #[arg(long = "openrouter")]
-        openrouter: bool,
-    },
+    Logout,
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "openrouter", "management_key"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth", "openrouter", "management_key"]
+            conflicts_with_all = ["oauth"]
         )]
         device_auth: bool,
-        /// Store an OpenRouter API key (for Grok 4.5 via OpenRouter).
-        ///
-        /// Keys go to the OS secret store (or `$GROK_HOME/provider_credentials.json`
-        /// when the keyring is unavailable). Prefer `OPENROUTER_API_KEY` env over
-        /// storing a key. Does not replace xAI login.
-        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth", "list_api_keys", "management_key"])]
-        openrouter: bool,
-        /// Add a console / Business API key (or OpenRouter key with `--openrouter`).
-        ///
-        /// Flag only (no value): no-echo prompt. Do **not** pass the secret as
-        /// an argument (refused — shell history / process lists). Optional `-`
-        /// reads one line from **non-TTY** stdin only (TTY stdin is refused).
-        /// Prefer `XAI_API_KEY` / `OPENROUTER_API_KEY` env for CI. List
-        /// fingerprints with `--list-api-keys`.
-        #[arg(
-            long = "api-key",
-            num_args = 0..=1,
-            default_missing_value = "",
-            value_name = "VALUE",
-            conflicts_with_all = ["oauth", "device_auth", "list_api_keys", "management_key"]
-        )]
-        api_key: Option<ApiKeyCliValue>,
-        /// Store a Management API key for **console team prepaid** (Business
-        /// Usage remaining on console.x.ai). Not the inference `XAI_API_KEY`
-        /// and not SuperGrok $ extras. Flag only: no-echo prompt; `-` reads
-        /// non-TTY stdin. Prefer `XAI_MANAGEMENT_API_KEY` env for CI. Team id
-        /// is auto-discovered when the key validates; optional pin via
-        /// `[endpoints] management_team_id` or `XAI_MANAGEMENT_TEAM_ID`.
-        #[arg(
-            long = "management-key",
-            num_args = 0..=1,
-            default_missing_value = "",
-            value_name = "VALUE",
-            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key", "list_api_keys"]
-        )]
-        management_key: Option<ApiKeyCliValue>,
-        /// Dual-auth status: SuperGrok session?, N console keys (fingerprints),
-        /// env wins?, preferred method. Never prints raw keys or tokens.
-        #[arg(
-            long = "list-api-keys",
-            conflicts_with_all = ["oauth", "device_auth", "openrouter", "api_key", "management_key"]
-        )]
-        list_api_keys: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -161,6 +56,12 @@ pub enum Command {
     Models,
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
+    /// List running grok-oss TUI windows on this machine
+    Running {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;
@@ -196,42 +97,36 @@ See ~/.grok/README.md for more information.
     /// Export or upload session trace data
     Trace(crate::trace_cmd::TraceArgs),
     /// Check for updates or install a specific version
-    /// Check freshness vs Surmount main (git SHA), or print how to rebuild.
-    ///
-    /// Grok OSS has no binary release train. `update --check` compares this
-    /// build’s commit to github.com/SurmountSystems/grok-oss `main`.
     Update {
-        /// Compare embedded git SHA to Surmount `main` (no install).
+        /// Check for updates without installing.
         #[arg(long)]
         check: bool,
         /// Emit machine-readable JSON output (for --check).
         #[arg(long)]
         json: bool,
-        /// Force re-download via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
-        #[arg(long, hide = true)]
+        /// Force re-download and install even if already up to date.
+        #[arg(long)]
         force_reinstall: bool,
-        /// Install a specific version via xAI updater (requires GROK_OSS_ENABLE_XAI_UPDATER=1).
-        #[arg(long, hide = true)]
+        /// Install a specific version (e.g. 0.1.150 or 0.1.151-alpha.2).
+        #[arg(long)]
         version: Option<String>,
-        /// xAI channel switch (hidden; requires GROK_OSS_ENABLE_XAI_UPDATER=1).
-        #[arg(long, conflicts_with_all = ["stable", "enterprise"], hide = true)]
+        /// Switch to the alpha release channel (faster updates, may have bugs).
+        #[arg(long, conflicts_with_all = ["stable", "enterprise"])]
         alpha: bool,
-        #[arg(long, conflicts_with_all = ["alpha", "enterprise"], hide = true)]
+        /// Switch to the stable release channel (default, weekly releases).
+        #[arg(long, conflicts_with_all = ["alpha", "enterprise"])]
         stable: bool,
+        /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
-    },
-    /// Rebuild this tree's `grok-oss` and soft-relaunch live leaders.
-    ///
-    /// Runs `just install` (or fixed cargo argv) from a resolved Grok OSS
-    /// checkout, verifies `--version`, then signals reachable leaders with
-    /// `RelaunchForUpdate`. Does **not** use the SpaceXAI auto-updater.
-    /// Prefer `/rebuild` in the TUI so this session re-execs onto the new
-    /// binary with the same session id.
-    Rebuild {
-        /// Source tree to build (default: walk up from the process cwd).
-        #[arg(long, value_name = "DIR")]
-        source: Option<std::path::PathBuf>,
+        /// Internal: what spawned this `grok update` (`user_command`,
+        /// `auto_background`, `leader_converge`). Hidden.
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        /// Internal compat alias for `--trigger=auto_background` (older
+        /// parents still spawn children with it).
+        #[arg(long, hide = true)]
+        auto: bool,
     },
     /// Print version information
     #[command(visible_alias = "v")]
@@ -248,6 +143,9 @@ See ~/.grok/README.md for more information.
     },
     /// Manage git worktrees
     Worktree(crate::worktree_cmd::WorktreeArgs),
+    /// Show what the grok home (~/.grok) uses on disk
+    #[command(name = "du", visible_alias = "disk-usage")]
+    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set
@@ -517,21 +415,11 @@ pub struct LeaderArgs {
     #[command(flatten)]
     pub headless: HeadlessArgs,
 }
-/// Return the version string for `--version` / `-v` (clap `ArgAction::Version`).
-///
-/// Grok OSS: upstream package version + short git SHA (no release channel).
-/// Uses a `OnceLock` so the result is `'static` for clap.
-fn version_with_channel() -> &'static str {
-    use std::sync::OnceLock;
-    static V: OnceLock<String> = OnceLock::new();
-    // env!("VERSION_WITH_COMMIT") is set by this crate's build.rs.
-    V.get_or_init(|| env!("VERSION_WITH_COMMIT").to_string())
-}
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok-oss",
-    version = version_with_channel(),
-    about = "Grok OSS TUI (unofficial Surmount fork of Grok Build)",
+    name = crate::client_identity::PRODUCT_CLI_NAME,
+    version = env!("VERSION_WITH_COMMIT"),
+    about = "Grok OSS TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -633,6 +521,10 @@ pub struct PagerArgs {
     /// Output format for headless mode.
     #[clap(long = "output-format", value_enum, default_value = "plain")]
     pub output_format: OutputFormat,
+    /// Emit incremental `stream_event` lines (text/thinking deltas) alongside
+    /// whole messages. Only affects `--output-format streaming-messages-json`.
+    #[clap(long = "include-partial-messages")]
+    pub include_partial_messages: bool,
     /// JSON Schema for structured output. When set, the model is constrained to
     /// produce JSON matching this schema. Implies --output-format json.
     /// Example: --json-schema '{"type":"object","properties":{"name":{"type":"string"}}}'
@@ -721,18 +613,49 @@ pub struct PagerArgs {
     #[arg(long = "fork-session")]
     pub fork_session: bool,
     /// Start the session in a new git worktree, optionally named.
+    /// With `--resume` of a remote session, pass `--restore-code` to apply
+    /// the snapshot codebase (conversation is restored either way).
+    /// Headless (`-p`) does not create a worktree from this flag.
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
     #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
-    /// Check out the original session's commit when resuming.
+    /// Restore the original session's repository snapshot when resuming.
+    /// Remote sessions require `--worktree` (never checks out into the current
+    /// directory). Without this flag, resume restores conversation only.
     #[arg(long = "restore-code", requires = "resume_session")]
     pub restore_code: bool,
     /// Disable plan mode.
     #[arg(long = "no-plan")]
     pub no_plan: bool,
+    /// Own a local `workspace_server` (replaces remote sandbox). Requires `--chat`.
+    ///
+    /// Compiled only with `--features local-workspace` (not implied by `chat`).
+    #[cfg(feature = "local-workspace")]
+    #[arg(
+        long = "local-workspace",
+        num_args = 0..= 1,
+        value_name = "CWD",
+        conflicts_with = "local_workspace_attach",
+        requires = "chat"
+    )]
+    pub local_workspace: Option<Option<PathBuf>>,
+    /// Attach an existing local `workspace_server` by `server_id`,
+    /// replacing the chat sandbox (ExistingWorkspace only). Requires `--chat`.
+    #[cfg(feature = "local-workspace")]
+    #[arg(
+        long = "local-workspace-attach",
+        value_name = "SERVER_ID",
+        conflicts_with = "local_workspace",
+        requires = "chat"
+    )]
+    pub local_workspace_attach: Option<String>,
+    /// Cwd override for local-workspace attach/own. Requires `--chat`.
+    #[cfg(feature = "local-workspace")]
+    #[arg(long = "local-workspace-cwd", value_name = "PATH", requires = "chat")]
+    pub local_workspace_cwd: Option<PathBuf>,
     /// Disable subagent spawning.
     #[arg(long = "no-subagents")]
     pub no_subagents: bool,
@@ -921,10 +844,22 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == crate::client_identity::PRODUCT_CLI_NAME || *n == "agent")
+            .unwrap_or(crate::client_identity::PRODUCT_CLI_NAME)
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
+    }
+    /// When this invocation should print version and exit without a TUI.
+    ///
+    /// `Some(json)` means print version (JSON when `true`). `None` means this
+    /// is not a version-only run. `--version` / `-v` / `-V` and the `version`
+    /// subcommand are version-only. `update --version <semver>` is not.
+    pub fn version_only_json(&self) -> Option<bool> {
+        match self.command {
+            Some(Command::Version { json }) => Some(json),
+            _ if self.version => Some(false),
+            _ => None,
+        }
     }
     /// Apply launch-directory path anchoring and `--cwd` after early commands
     /// have been dispatched without filesystem or process initialization.
@@ -950,6 +885,21 @@ impl PagerArgs {
     /// feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
         false
+    }
+    /// `--local-workspace[=cwd]` own-mode flag.
+    #[cfg(feature = "local-workspace")]
+    pub fn local_workspace(&self) -> Option<Option<&std::path::Path>> {
+        self.local_workspace.as_ref().map(|inner| inner.as_deref())
+    }
+    /// `--local-workspace-attach=<server_id>`.
+    #[cfg(feature = "local-workspace")]
+    pub fn local_workspace_attach(&self) -> Option<&str> {
+        self.local_workspace_attach.as_deref()
+    }
+    /// `--local-workspace-cwd=<path>`.
+    #[cfg(feature = "local-workspace")]
+    pub fn local_workspace_cwd(&self) -> Option<&std::path::Path> {
+        self.local_workspace_cwd.as_deref()
     }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
     ///
@@ -1117,11 +1067,38 @@ mod tests {
             let args = PagerArgs::try_parse_from(["grok", flag]).expect("version flag parses");
             assert!(args.version, "{flag} must set the early version intent");
             assert!(args.command.is_none());
+            assert_eq!(
+                args.version_only_json(),
+                Some(false),
+                "{flag} must be version-only (plain text, not JSON)"
+            );
         }
+    }
+    #[test]
+    fn version_subcommand_is_version_only() {
+        let plain = PagerArgs::try_parse_from(["grok", "version"]).unwrap();
+        assert_eq!(plain.version_only_json(), Some(false));
+        let json = PagerArgs::try_parse_from(["grok", "version", "--json"]).unwrap();
+        assert_eq!(json.version_only_json(), Some(true));
+    }
+    #[test]
+    fn update_semver_flag_is_not_version_only() {
+        let args = PagerArgs::try_parse_from(["grok", "update", "--version", "1.0.0"]).unwrap();
+        assert_eq!(
+            args.version_only_json(),
+            None,
+            "update --version <semver> installs that release; it is not `grok-oss --version`"
+        );
     }
     #[test]
     fn ordinary_and_doctor_parsing_do_not_set_version_intent() {
         assert!(!PagerArgs::try_parse_from(["grok"]).unwrap().version);
+        assert_eq!(
+            PagerArgs::try_parse_from(["grok"])
+                .unwrap()
+                .version_only_json(),
+            None
+        );
         assert!(
             !PagerArgs::try_parse_from(["grok", "doctor"])
                 .unwrap()
@@ -1195,6 +1172,47 @@ mod tests {
                 .expect_err("unsupported doctor form must fail");
             assert_eq!(error.exit_code(), 2);
         }
+    }
+    #[test]
+    fn limits_subcommand_parses_bare_json_and_multipoll() {
+        let bare = PagerArgs::try_parse_from(["grok", "limits"]).expect("bare limits parses");
+        assert!(
+            matches!(
+                bare.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: false,
+                    command: None,
+                }))
+            ),
+            "grok limits must be Command::Limits, got {:?}",
+            bare.command
+        );
+        let json =
+            PagerArgs::try_parse_from(["grok", "limits", "--json"]).expect("limits --json parses");
+        assert!(
+            matches!(
+                json.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: true,
+                    command: None,
+                }))
+            ),
+            "grok limits --json must be Command::Limits, got {:?}",
+            json.command
+        );
+        let multipoll = PagerArgs::try_parse_from(["grok", "limits", "multipoll"])
+            .expect("limits multipoll parses");
+        assert!(
+            matches!(
+                multipoll.command,
+                Some(Command::Limits(crate::limits_cmd::LimitsArgs {
+                    json: false,
+                    command: Some(crate::limits_cmd::LimitsCommand::Multipoll(_)),
+                }))
+            ),
+            "grok limits multipoll must be Command::Limits, got {:?}",
+            multipoll.command
+        );
     }
     #[test]
     fn resume_target_classifies_flags() {
@@ -1468,232 +1486,8 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(
-            args.command,
-            Some(Command::Logout { openrouter: false })
-        ));
+        assert!(matches!(args.command, Some(Command::Logout)));
         assert!(args.prompt.is_none());
-    }
-
-    #[test]
-    fn login_openrouter_parses_api_key() {
-        let args =
-            PagerArgs::try_parse_from(["grok", "login", "--openrouter", "--api-key", "sk-or-test"])
-                .expect("login --openrouter parses");
-        match args.command {
-            Some(Command::Login {
-                openrouter: true,
-                api_key: Some(key),
-                list_api_keys: false,
-                ..
-            }) => assert_eq!(key.as_str(), "sk-or-test"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_console_api_key_parses_without_openrouter() {
-        // Clap still accepts a value for parse-level tests; runtime refuses
-        // non-empty argv secrets via `materialize_cli_api_key`.
-        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "console-biz"])
-            .expect("login --api-key with value parses");
-        match args.command {
-            Some(Command::Login {
-                openrouter: false,
-                api_key: Some(key),
-                list_api_keys: false,
-                ..
-            }) => assert_eq!(key.as_str(), "console-biz"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_bare_api_key_flag_is_console_path_not_oauth() {
-        // Bare `--api-key` → Some("") (default_missing_value). Bin must call
-        // console login with None (interactive), not fall through to OAuth.
-        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key"])
-            .expect("login --api-key bare flag parses");
-        match args.command {
-            Some(Command::Login {
-                openrouter: false,
-                api_key: Some(key),
-                list_api_keys: false,
-                oauth: false,
-                device_auth: false,
-                ..
-            }) => {
-                assert!(
-                    key.is_empty(),
-                    "bare --api-key must be empty string missing value, got {key:?}"
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_api_key_stdin_sentinel_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "-"])
-            .expect("login --api-key - parses");
-        match args.command {
-            Some(Command::Login {
-                api_key: Some(key),
-                openrouter: false,
-                ..
-            }) => assert_eq!(key.as_str(), "-"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_api_key_equals_form_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key=xai-fake"])
-            .expect("login --api-key=value parses");
-        match args.command {
-            Some(Command::Login {
-                api_key: Some(key), ..
-            }) => assert_eq!(key.as_str(), "xai-fake"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_api_key_debug_redacts_secret_value() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--api-key", "xai-secret-value"])
-            .expect("parses");
-        let dbg = format!("{:?}", args.command);
-        assert!(
-            !dbg.contains("xai-secret-value"),
-            "Debug must not dump argv secret: {dbg}"
-        );
-        assert!(
-            dbg.contains("<redacted>") || dbg.contains("ApiKeyCliValue"),
-            "expected redacted Debug: {dbg}"
-        );
-    }
-
-    #[test]
-    fn login_list_api_keys_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--list-api-keys"])
-            .expect("login --list-api-keys parses");
-        match args.command {
-            Some(Command::Login {
-                list_api_keys: true,
-                api_key: None,
-                management_key: None,
-                openrouter: false,
-                ..
-            }) => {}
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_management_key_bare_flag_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--management-key"])
-            .expect("login --management-key bare parses");
-        match args.command {
-            Some(Command::Login {
-                management_key: Some(key),
-                api_key: None,
-                openrouter: false,
-                list_api_keys: false,
-                oauth: false,
-                device_auth: false,
-                ..
-            }) => {
-                assert!(
-                    key.is_empty(),
-                    "bare --management-key must be empty missing value, got {key:?}"
-                );
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_management_key_stdin_sentinel_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "login", "--management-key", "-"])
-            .expect("login --management-key - parses");
-        match args.command {
-            Some(Command::Login {
-                management_key: Some(key),
-                api_key: None,
-                ..
-            }) => assert_eq!(key.as_str(), "-"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_management_key_debug_redacts_secret_value() {
-        let args =
-            PagerArgs::try_parse_from(["grok", "login", "--management-key", "mgmt-secret-value"])
-                .expect("parses");
-        let dbg = format!("{:?}", args.command);
-        assert!(
-            !dbg.contains("mgmt-secret-value"),
-            "Debug must not dump argv secret: {dbg}"
-        );
-    }
-
-    #[test]
-    fn limits_parses_human_and_json() {
-        let bare = PagerArgs::try_parse_from(["grok", "limits"]).expect("limits parses");
-        assert!(matches!(
-            bare.command,
-            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
-                json: false,
-                command: None,
-            }))
-        ));
-        let json = PagerArgs::try_parse_from(["grok", "limits", "--json"]).expect("limits --json");
-        assert!(matches!(
-            json.command,
-            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
-                json: true,
-                command: None,
-            }))
-        ));
-    }
-
-    #[test]
-    fn limits_multipoll_parses() {
-        let args = PagerArgs::try_parse_from([
-            "grok",
-            "limits",
-            "multipoll",
-            "--samples",
-            "3",
-            "--sleep-secs",
-            "30",
-        ])
-        .expect("limits multipoll parses");
-        match args.command {
-            Some(Command::Limits(crate::limits_cmd::LimitsArgs {
-                command:
-                    Some(crate::limits_cmd::LimitsCommand::Multipoll(
-                        crate::limits_cmd::MultipollArgs {
-                            samples: 3,
-                            sleep_secs: 30,
-                            out_dir: None,
-                        },
-                    )),
-                ..
-            })) => {}
-            other => panic!("expected limits multipoll, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn logout_openrouter_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "logout", "--openrouter"])
-            .expect("logout --openrouter parses");
-        assert!(matches!(
-            args.command,
-            Some(Command::Logout { openrouter: true })
-        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

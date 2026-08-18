@@ -369,7 +369,9 @@ impl AgentBuilder {
     /// Mark this session as non-interactive (headless / SDK / stdio /
     /// generic-ACP). Suppresses prompt sections that only make sense when
     /// a human is typing into the TUI prompt input (e.g. the `! <command>`
-    /// shell-prefix tip and the `<user_guide>` TUI pointer).
+    /// shell-prefix tip and the `<user_guide>` TUI pointer), and stamps
+    /// `non_interactive` into the ask_user_question params so an unanswered
+    /// questionnaire returns no-operator text instead of "user declined".
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
         self
@@ -879,6 +881,11 @@ impl AgentBuilder {
                 ask_params,
             );
         }
+        if self.is_non_interactive {
+            let mut ni = serde_json::Map::new();
+            ni.insert("non_interactive".into(), serde_json::Value::Bool(true));
+            merge_tool_params(&mut tool_config, &["GrokBuild:ask_user_question"], &ni);
+        }
         if !definition.disallowed_tools.is_empty() {
             let before: std::collections::HashSet<String> =
                 tool_config.tools.iter().map(|tc| tc.id.clone()).collect();
@@ -1165,6 +1172,7 @@ impl AgentBuilder {
             prompt_mode: definition.prompt_mode.clone(),
             audience: self.prompt_audience,
             prompt_body: definition.prompt_body.clone(),
+            include_browser_verification: definition.include_browser_verification(),
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
             persona_summaries: self.persona_summaries,
@@ -1231,22 +1239,61 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
 };
-/// Concise task-tool description for child sessions. Delegation from a child
-/// is possible but discouraged — prefer doing the work directly.
+/// Concise task-tool description for child (L2) sessions. L2 always
+/// spawns L3 for any tools/work. L2 never does greps, edits, or tests.
+/// Three layers always. Do not compact-and-continue a product restore on L2.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
 /// consider generating this list dynamically like the parent description does.
 const CHILD_TASK_DESCRIPTION: &str = "\
-Launch a sub-agent to handle a specific sub-task. Use this only when \n\
-the sub-task is clearly independent and would benefit from a separate \n\
-context (e.g., a parallel search while you continue working).\n\
+Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Prefer doing the work yourself unless delegation is clearly necessary.\n\
+Whenever work is to be done and tools are to be called, agents are \
+three layers deep. Always. Including implement loops. \
+You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
+Do not compact-and-continue a product restore on L2. \
+Give each L3 a distinct description. One reviewer unless the operator asked for more. \
+Token Economy effort is not reviewer count.\n\
 \n\
-Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
+Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+${{ params.task.run_in_background }}: Returns immediately with a subagent_id.";
+
+/// Reviewer rows for an implement loop.
+///
+/// Token Economy implement-loop effort is thoroughness, not reviewer count.
+/// One reviewer unless the operator explicitly asked for more.
+pub fn review_row_count_for_implement_effort(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> u8 {
+    xai_grok_tools::implementations::grok_build::task::admission::review_row_count_for_implement_effort(
+        effort,
+        operator_asked_for_more_reviewers,
+    )
+}
+
+/// Review-row descriptions the implement loop must spawn for this effort.
+///
+/// Token Economy implement-loop effort is thoroughness. This is the
+/// product spawn list the parent Task tool description uses. One reviewer
+/// unless the operator asked for more.
+pub fn implement_loop_review_rows(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> Vec<String> {
+    let n = review_row_count_for_implement_effort(effort, operator_asked_for_more_reviewers);
+    (1..=n)
+        .map(|i| {
+            if n == 1 {
+                "[reviewer] Review implementation".to_string()
+            } else {
+                format!("[reviewer] Review implementation ({i}/{n})")
+            }
+        })
+        .collect()
+}
 /// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its
 /// `${{ tools.by_kind.* }}` template placeholder, so rendering a built-in's
 /// `tools_template` reproduces the placeholders for the CLI's `TemplateRenderer`
@@ -1324,7 +1371,26 @@ pub(crate) fn build_task_description(
         .collect();
     let mut description = xai_tool_types::build_task_description(&descriptors, &TASK_TOOL_NAMING);
     description.push_str(&task_model_guidance(model_slugs));
+    description.push_str(&implement_loop_review_spawn_guidance());
     description
+}
+
+/// Parent Task tool text for the implement-loop Review spawn list.
+///
+/// Live `/implement --effort` (1 through 5) is thoroughness, not reviewer
+/// count. Without an operator ask, one Review row at every setting.
+fn implement_loop_review_spawn_guidance() -> String {
+    let rows = implement_loop_review_rows(2, false);
+    let list = rows
+        .iter()
+        .map(|row| format!("- {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nImplement-loop Review rows: Token Economy implement-loop effort is thoroughness, \
+         not how many Review rows to launch. One reviewer unless the operator asked for more. \
+         Default spawn (effort 1 through 5 when the operator did not ask, including --effort 3):\n{list}"
+    )
 }
 /// Resolve the shell name for the system prompt.
 ///
@@ -1531,10 +1597,101 @@ mod tests {
         assert!(!rendered.contains("params.task.model"));
     }
     #[test]
+    fn implement_loop_effort_two_spawns_one_review_row_unless_operator_asked() {
+        let rows = implement_loop_review_rows(2, false);
+        assert_eq!(
+            rows.len(),
+            1,
+            "implement-loop effort 2 without an operator ask must spawn one Review row, got {}",
+            rows.len()
+        );
+        assert!(
+            rows[0].contains("Review"),
+            "the one default row must be a Review spawn, got {:?}",
+            rows[0]
+        );
+
+        let asked = implement_loop_review_rows(2, true);
+        assert_eq!(
+            asked.len(),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two Review rows"
+        );
+
+        let subagents = vec![entry(
+            "general-purpose",
+            "General-purpose agent.",
+            SubagentSource::Builtin(BuiltinAgentName::GeneralPurpose),
+        )];
+        let desc = build_task_description(&subagents, &[]);
+        assert!(
+            desc.contains(&rows[0]),
+            "parent Task tool description is the implement-loop spawn path and must list the one default Review row, got {desc}"
+        );
+        for extra in asked.iter().skip(1) {
+            assert!(
+                !desc.contains(extra.as_str()),
+                "default parent Task description must not list extra Review rows unless the operator asked, found {extra} in {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked() {
+        assert_eq!(
+            review_row_count_for_implement_effort(2, false),
+            1,
+            "Token Economy effort 2 is thoroughness, not two Review rows"
+        );
+        assert_eq!(
+            review_row_count_for_implement_effort(3, false),
+            1,
+            "effort 3 must not spawn three Review rows unless the operator asked"
+        );
+        assert_eq!(review_row_count_for_implement_effort(1, false), 1);
+        assert_eq!(
+            review_row_count_for_implement_effort(2, true),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("One reviewer unless"),
+            "child task description must teach one reviewer unless the operator asked"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("distinct"),
+            "child task description must require distinct L3 descriptions"
+        );
+    }
+    #[test]
     fn child_task_description_is_concise() {
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Prefer doing the work yourself"),
-            "child description should discourage recursive delegation"
+            CHILD_TASK_DESCRIPTION.contains("three layers deep. Always"),
+            "child description must teach three layers always"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3 for any tools/work"),
+            "child description must tell L2 to always spawn L3 for any tools/work"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
+            "child description must forbid L2 greps, edits, and tests"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
+            "child description must include implement loops in the three-layer rule"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("Do not compact-and-continue"),
+            "child description must forbid compact-and-continue on L2"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("many greps"),
+            "child description must not teach the old many-greps spawn rule"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("half the window"),
+            "child description must not teach the old half-window spawn rule"
         );
         assert!(
             !CHILD_TASK_DESCRIPTION.contains("Agent types:"),
@@ -1573,6 +1730,64 @@ mod tests {
         assert!(
             desc.contains("same subagent_type"),
             "should state the resumed agent must match subagent_type"
+        );
+    }
+    /// The bridge's full-discovery snapshot must record every discovered
+    /// skill name — including `paths:`-gated and preloaded skills that the
+    /// listing baseline (`slash_skills`) holds back — so session-start
+    /// telemetry can reuse it instead of re-walking the disk.
+    #[tokio::test]
+    async fn discovery_snapshot_records_gated_and_preloaded_skills() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let write_skill = |dir: &str, content: &str| {
+            let d = tmp.path().join(".grok/skills").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), content).unwrap();
+        };
+        write_skill(
+            "snapshot-plain-skill",
+            "---\nname: snapshot-plain-skill\ndescription: plain\n---\nbody\n",
+        );
+        write_skill(
+            "snapshot-gated-skill",
+            "---\nname: snapshot-gated-skill\ndescription: gated\npaths: \"src/**\"\n---\nbody\n",
+        );
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        definition.skills = vec!["snapshot-plain-skill".to_string()];
+        let agent = AgentBuilder::new(
+            tmp.path().to_path_buf(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .build()
+        .await
+        .expect("agent should build with local skill fixtures");
+        let snapshot = agent.tool_bridge().skill_discovery_snapshot_names().await;
+        assert!(
+            snapshot.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill missing from snapshot: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill missing from snapshot: {snapshot:?}"
+        );
+        let listed: Vec<String> = agent
+            .tool_bridge()
+            .slash_skills()
+            .await
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !listed.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill must stay out of the listing baseline: {listed:?}"
+        );
+        assert!(
+            !listed.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill must stay out of the listing baseline: {listed:?}"
         );
     }
     async fn build_pager_agent(
@@ -1769,6 +1984,33 @@ mod tests {
             .expect("finalize must insert Params for the injected ask_user_question");
         assert_eq!(applied.0.timeout_enabled, Some(false));
         assert_eq!(applied.0.timeout_secs, Some(5));
+        assert_eq!(applied.0.non_interactive, None);
+    }
+    /// A non-interactive build stamps `non_interactive: true` into the AUQ
+    /// params (session state, not user config) so cancel/timeout return the
+    /// no-operator text.
+    #[tokio::test]
+    async fn non_interactive_build_stamps_ask_user_question_params() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionParams;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        use xai_grok_tools::types::resources::Params;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_grok_build())
+        .with_is_non_interactive(true)
+        .build()
+        .await
+        .expect("agent should build");
+        let applied = agent
+            .tool_bridge()
+            .read_resource::<Params<AskUserQuestionParams>>()
+            .await
+            .expect("finalize must insert Params for the injected ask_user_question");
+        assert_eq!(applied.0.non_interactive, Some(true));
     }
     async fn build_with_tools(tools: Vec<String>, disallowed: Vec<String>) -> crate::agent::Agent {
         use xai_grok_tools::computer::local::LocalTerminalBackend;

@@ -1,17 +1,24 @@
 //! Prompt history search with background-thread nucleo matching.
 //!
 //! Architecture mirrors the file search `FuzzyFileMatcherDaemon`:
-//! - A background `std::thread` owns the nucleo `Matcher` + `MultiPattern`.
+//! - One process-wide background `std::thread` owns the nucleo `Matcher`.
+//! - Each `HistorySearchState` is a client of that thread (own items + snapshot).
 //! - The UI thread sends queries via a channel (`set_query`) — never blocks.
 //! - The background thread scores items, computes indices, writes results
 //!   to `Arc<Mutex<…>>`.
 //! - The UI thread polls results on each tick via `poll()`.
+//! - The client handle is created lazily on first activation. Every
+//!   `PromptWidget` (one per agent view, including subagent child views)
+//!   owns a `HistorySearchState`; they share the one matcher thread so a
+//!   session with many composers cannot grow `history-search` workers.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{SyncSender, sync_channel},
+    atomic::{AtomicU64, Ordering},
+    mpsc::{Receiver, SyncSender, sync_channel},
 };
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use nucleo::{
     Config, Matcher, Utf32String,
@@ -62,95 +69,176 @@ enum Msg {
 
 struct Daemon {
     shared: Arc<Mutex<Snapshot>>,
-    tx: SyncSender<Msg>,
-    _handle: JoinHandle<()>,
+    tx: SyncSender<Work>,
+    id: u64,
 }
 
 const MAX_RESULTS: usize = 100;
 
-impl Daemon {
-    fn new() -> Self {
-        let shared = Arc::new(Mutex::new(Snapshot::default()));
-        let (tx, rx) = sync_channel::<Msg>(256);
+/// Test-only count of OS `history-search` threads ever started in this process.
+/// The leak contract is: many live `HistorySearchState`s share one matcher
+/// thread, they do not each spawn another.
+#[cfg(test)]
+static HISTORY_SEARCH_THREADS_SPAWNED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-        let out = shared.clone();
-        let handle = thread::spawn(move || {
-            let mut pattern = MultiPattern::new(1);
-            let mut matcher = Matcher::new(Config::DEFAULT);
-            let mut items: Vec<(String, Utf32String)> = Vec::new();
-            let mut generation: usize = 0;
-            let mut prev_q = String::new();
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static SHARED_TX: Mutex<Option<SyncSender<Work>>> = Mutex::new(None);
 
-            while let Ok(msg) = rx.recv() {
-                // Drain to latest — skip intermediate queries.
-                let msg = drain_to_latest(msg, &rx);
+/// Work for the process-wide matcher thread. `Stop` forgets one client; the
+/// thread stays up for the next composer.
+enum Work {
+    Client {
+        id: u64,
+        msg: Msg,
+        out: Arc<Mutex<Snapshot>>,
+    },
+}
 
-                match msg {
-                    Msg::SetItems(new) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        publish_matches(&items, "", &mut pattern, &mut matcher, &out, generation);
-                    }
-                    Msg::SetItemsAndQuery(new, query) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
-                        publish_matches(
-                            &items,
-                            &trimmed,
-                            &mut pattern,
-                            &mut matcher,
-                            &out,
-                            generation,
-                        );
-                        prev_q = trimmed;
-                    }
-                    Msg::SetQuery(query) => {
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
+struct ClientCtx {
+    items: Vec<(String, Utf32String)>,
+    pattern: MultiPattern,
+    prev_q: String,
+    generation: usize,
+}
 
-                        if trimmed.is_empty() {
-                            publish_matches(
-                                &items,
-                                "",
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q.clear();
-                        } else {
-                            let append = !prev_q.is_empty()
-                                && trimmed.as_bytes().starts_with(prev_q.as_bytes())
-                                && !trimmed.ends_with('\\')
-                                && !trimmed
-                                    .as_bytes()
-                                    .last()
-                                    .is_some_and(|b| b.is_ascii_whitespace());
-                            publish_query_matches(
-                                &items,
-                                &trimmed,
-                                append,
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q = trimmed;
-                        }
-                    }
-                    Msg::Stop => break,
-                }
-            }
-        });
-
-        Self {
-            shared,
-            tx,
-            _handle: handle,
+fn shared_sender() -> Option<SyncSender<Work>> {
+    let mut guard = SHARED_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        return Some(tx.clone());
+    }
+    let (tx, rx) = sync_channel::<Work>(256);
+    #[cfg(test)]
+    HISTORY_SEARCH_THREADS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    match thread::Builder::new()
+        .name("history-search".into())
+        .spawn(move || shared_worker(rx))
+    {
+        Ok(_) => {
+            *guard = Some(tx.clone());
+            Some(tx)
         }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "history search daemon thread spawn failed; history search disabled"
+            );
+            None
+        }
+    }
+}
+
+fn shared_worker(rx: Receiver<Work>) {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut clients: HashMap<u64, ClientCtx> = HashMap::new();
+    let mut peeked: Option<Work> = None;
+
+    loop {
+        let first = if let Some(p) = peeked.take() {
+            p
+        } else {
+            match rx.recv() {
+                Ok(w) => w,
+                Err(_) => break,
+            }
+        };
+        let work = drain_same_client(first, &rx, &mut peeked);
+        let Work::Client { id, msg, out } = work;
+        if matches!(msg, Msg::Stop) {
+            clients.remove(&id);
+            continue;
+        }
+        let ctx = clients.entry(id).or_insert_with(|| ClientCtx {
+            items: Vec::new(),
+            pattern: MultiPattern::new(1),
+            prev_q: String::new(),
+            generation: 0,
+        });
+        apply_client_msg(ctx, &mut matcher, msg, &out);
+    }
+}
+
+fn apply_client_msg(
+    ctx: &mut ClientCtx,
+    matcher: &mut Matcher,
+    msg: Msg,
+    out: &Arc<Mutex<Snapshot>>,
+) {
+    match msg {
+        Msg::SetItems(new) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            publish_matches(
+                &ctx.items,
+                "",
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+        }
+        Msg::SetItemsAndQuery(new, query) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+            publish_matches(
+                &ctx.items,
+                &trimmed,
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+            ctx.prev_q = trimmed;
+        }
+        Msg::SetQuery(query) => {
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+
+            if trimmed.is_empty() {
+                publish_matches(
+                    &ctx.items,
+                    "",
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
+                );
+                ctx.prev_q.clear();
+            } else {
+                let append = !ctx.prev_q.is_empty()
+                    && trimmed.as_bytes().starts_with(ctx.prev_q.as_bytes())
+                    && !trimmed.ends_with('\\')
+                    && !trimmed
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b.is_ascii_whitespace());
+                publish_query_matches(
+                    &ctx.items,
+                    &trimmed,
+                    append,
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
+                );
+                ctx.prev_q = trimmed;
+            }
+        }
+        Msg::Stop => {}
+    }
+}
+
+impl Daemon {
+    /// Attach to the process-wide matcher thread. `None` when the spawn fails
+    /// — that attempt is not cached, so a later activation retries.
+    fn spawn() -> Option<Self> {
+        let tx = shared_sender()?;
+        let shared = Arc::new(Mutex::new(Snapshot::default()));
+        let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        Some(Self { shared, tx, id })
     }
 }
 
@@ -211,7 +299,7 @@ fn publish_query_matches(
             hits.push((i, sc));
         }
     }
-    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    hits.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
     if hits.len() > MAX_RESULTS {
         hits.truncate(MAX_RESULTS);
     }
@@ -238,30 +326,59 @@ fn publish_query_matches(
     };
 }
 
-/// Drain the channel to the most recent message, coalescing queries.
-fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
-    let mut current = first;
-    while let Ok(next) = rx.try_recv() {
-        current = match (current, next) {
-            // Coalesce consecutive SetQuery — keep latest.
+/// Drain same-client messages, coalescing queries. A different client's work
+/// is peeked and left for the next loop so two composers cannot drop each
+/// other's updates.
+fn drain_same_client(first: Work, rx: &Receiver<Work>, peeked: &mut Option<Work>) -> Work {
+    let Work::Client { id, mut msg, out } = first;
+    loop {
+        let next = if let Some(Work::Client { id: nid, .. }) = peeked.as_ref() {
+            if *nid == id {
+                peeked.take().expect("peeked same-id work")
+            } else {
+                break;
+            }
+        } else {
+            match rx.try_recv() {
+                Ok(Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                }) if nid == id => Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                },
+                Ok(other) => {
+                    *peeked = Some(other);
+                    break;
+                }
+                Err(_) => break,
+            }
+        };
+        let Work::Client { msg: next_msg, .. } = next;
+        msg = match (msg, next_msg) {
             (Msg::SetQuery(_), next @ Msg::SetQuery(_)) => next,
-            // Preserve the item refresh and latest query as one atomic update.
             (Msg::SetItems(items), Msg::SetQuery(query)) => Msg::SetItemsAndQuery(items, query),
             (Msg::SetItemsAndQuery(items, _), Msg::SetQuery(query)) => {
                 Msg::SetItemsAndQuery(items, query)
             }
-            // Stop always wins.
-            (_, stop @ Msg::Stop) => return stop,
-            // SetItems after SetQuery — keep SetItems (reset).
-            (_, next) => next,
+            (_, stop @ Msg::Stop) => {
+                return Work::Client { id, msg: stop, out };
+            }
+            (_, next_msg) => next_msg,
         };
     }
-    current
+    Work::Client { id, msg, out }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop);
+        let _ = self.tx.send(Work::Client {
+            id: self.id,
+            msg: Msg::Stop,
+            out: self.shared.clone(),
+        });
     }
 }
 
@@ -274,7 +391,25 @@ impl Drop for Daemon {
 /// The UI thread never runs nucleo. All matching happens on the daemon
 /// thread. The UI sends queries via `update_query()` and polls results
 /// via `poll()`, exactly like `FuzzyFileMatcherDaemon`.
+/// Which entry point opened the overlay.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// `/history`: the composer is the filter query.
+    Search,
+    /// Up on an empty prompt: selection live-populates the composer.
+    Browse,
+}
+
 pub struct HistorySearchState {
+    /// Client handle for the process-wide matcher, built lazily on first
+    /// activation (see module docs) and kept until the widget drops
+    /// (`Daemon::drop` forgets this client). Its copy of the history is
+    /// released on `deactivate`, so retained memory is bounded by the time
+    /// the overlay is open. Mirrors `FileSearchState::daemon`.
+    daemon: Option<Daemon>,
+    /// Test-only count of daemon builds, to prove reuse (no drop-and-rebuild).
+    #[cfg(test)]
+    daemon_builds: usize,
     active: bool,
     saved_text: String,
     snapshot: Snapshot,
@@ -292,12 +427,11 @@ pub struct HistorySearchState {
     last_query: String,
     /// Mouse-hovered result index (visual highlight only).
     hovered: Option<usize>,
-    /// Browse mode (Up-arrow entry point): the selection lives in the
-    /// composer (live-populated on every move), typing detaches to edit,
-    /// and Down at the newest closes. Search mode (`/history`)
-    /// keeps the composer as the filter query instead.
-    browse: bool,
-    daemon: Daemon,
+    /// Browse (Up-arrow entry point): the selection lives in the composer
+    /// (live-populated on every move), typing detaches to edit, and Down at
+    /// the newest closes. Search (`/history`) keeps the composer as the
+    /// filter query instead.
+    mode: Mode,
 }
 
 impl Default for HistorySearchState {
@@ -309,6 +443,9 @@ impl Default for HistorySearchState {
 impl HistorySearchState {
     pub fn new() -> Self {
         Self {
+            daemon: None,
+            #[cfg(test)]
+            daemon_builds: 0,
             active: false,
             saved_text: String::new(),
             snapshot: Snapshot::default(),
@@ -317,9 +454,48 @@ impl HistorySearchState {
             stick_to_bottom: true,
             last_query: String::new(),
             hovered: None,
-            browse: false,
-            daemon: Daemon::new(),
+            mode: Mode::Search,
         }
+    }
+
+    /// Build the matcher daemon on first activation. Returns `false` when
+    /// the thread spawn failed — that attempt is not cached, so a later
+    /// activation retries (thread pressure is often transient).
+    fn ensure_daemon(&mut self) -> bool {
+        if self.daemon.is_none() {
+            self.daemon = Daemon::spawn();
+            #[cfg(test)]
+            if self.daemon.is_some() {
+                self.daemon_builds += 1;
+            }
+        }
+        self.daemon.is_some()
+    }
+
+    /// Send to the shared matcher. A disconnected channel means the matcher
+    /// thread is gone (panicked); drop the client handle and forget the
+    /// sender so the next activation respawns instead of serving an overlay
+    /// that never updates.
+    fn send(&mut self, msg: Msg) {
+        let Some(daemon) = &self.daemon else {
+            return;
+        };
+        let work = Work::Client {
+            id: daemon.id,
+            msg,
+            out: daemon.shared.clone(),
+        };
+        if daemon.tx.send(work).is_err() {
+            *SHARED_TX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.daemon = None;
+        }
+    }
+
+    /// Whether the matcher daemon has been spawned. Regression accessor for
+    /// the subagent storm test: child views must never build one.
+    #[cfg(test)]
+    pub(crate) fn daemon_built(&self) -> bool {
+        self.daemon.is_some()
     }
 
     pub fn is_active(&self) -> bool {
@@ -334,56 +510,84 @@ impl HistorySearchState {
         self.snapshot.items.len()
     }
 
+    /// Push the latest history into a running daemon. No-op before first
+    /// activation (`activate_inner` re-sends the items it is given, so
+    /// nothing is lost).
     pub fn refresh_items(&mut self, history: &[HistoryEntry]) {
+        if self.daemon.is_none() {
+            return;
+        }
         let items: Vec<String> = history.iter().map(|e| e.text.clone()).collect();
-        let _ = self.daemon.tx.send(Msg::SetItems(items));
+        self.send(Msg::SetItems(items));
     }
 
     /// Activate in SEARCH mode (`/history`): send items to the
     /// daemon, show overlay. The composer is the filter query; navigation
-    /// highlights only, Enter/Tab accepts.
-    pub fn activate(&mut self, history: &[HistoryEntry], current_text: &str) {
-        self.activate_inner(history, current_text, false);
+    /// highlights only, Enter/Tab accepts. Returns `false` when the matcher
+    /// thread could not start — the overlay stays closed and callers must
+    /// leave the composer alone.
+    #[must_use]
+    pub fn activate(&mut self, history: &[HistoryEntry], current_text: &str) -> bool {
+        self.activate_inner(history, current_text, Mode::Search)
     }
 
     /// Activate in BROWSE mode (Up on an empty prompt): same panel, but the
     /// caller fills the newest entry straight into the composer and every
     /// selection move live-populates it; typing detaches to edit, and Down
-    /// at the newest entry closes the panel.
-    pub fn activate_browse(&mut self, history: &[HistoryEntry], current_text: &str) {
-        self.activate_inner(history, current_text, true);
+    /// at the newest entry closes the panel. Returns `false` when the matcher
+    /// thread could not start.
+    #[must_use]
+    pub fn activate_browse(&mut self, history: &[HistoryEntry], current_text: &str) -> bool {
+        self.activate_inner(history, current_text, Mode::Browse)
     }
 
-    fn activate_inner(&mut self, history: &[HistoryEntry], current_text: &str, browse: bool) {
+    fn activate_inner(&mut self, history: &[HistoryEntry], current_text: &str, mode: Mode) -> bool {
+        if !self.ensure_daemon() {
+            return false;
+        }
         self.active = true;
-        self.browse = browse;
+        self.mode = mode;
         self.saved_text = current_text.to_string();
         // Open with the most-recent prompt (rendered at the bottom) selected;
         // `poll` keeps it pinned to the bottom until the user navigates.
         self.stick_to_bottom = true;
         self.last_query.clear();
         self.refresh_items(history);
-        // Eagerly grab the initial snapshot.
-        self.snapshot = self.daemon.shared.lock().unwrap().clone();
+        // Eagerly grab the initial snapshot. Poison-tolerant: a daemon-side
+        // panic must not take the UI thread down with it.
+        if let Some(daemon) = &self.daemon {
+            self.snapshot = daemon
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+        }
         self.last_gen = self.snapshot.generation;
         self.selected = self.snapshot.items.len().saturating_sub(1);
+        true
     }
 
     /// True while the overlay is in browse mode (see [`Self::activate_browse`]).
     pub fn is_browse(&self) -> bool {
-        self.active && self.browse
+        self.active && self.mode == Mode::Browse
     }
 
-    /// Deactivate: clear overlay (daemon thread stays alive for reuse).
+    /// Deactivate: clear the overlay. The daemon thread stays alive for
+    /// reuse, but its copy of the history is released so retained memory is
+    /// bounded by the time the overlay is open (`activate` re-sends items).
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.browse = false;
+        self.mode = Mode::Search;
         self.snapshot = Snapshot::default();
         self.selected = 0;
+        self.send(Msg::SetItems(Vec::new()));
     }
 
     /// Send a query update to the daemon (non-blocking, never stalls UI).
     pub fn update_query(&mut self, query: &str) {
+        if self.daemon.is_none() {
+            return;
+        }
         // A genuinely new query (the user typed) re-anchors selection to the
         // best match at the bottom. Re-applying the *same* query (e.g. a late
         // background `PromptHistoryLoaded` refresh that re-sends the current
@@ -392,7 +596,7 @@ impl HistorySearchState {
             self.last_query = query.to_string();
             self.stick_to_bottom = true;
         }
-        let _ = self.daemon.tx.send(Msg::SetQuery(query.to_string()));
+        self.send(Msg::SetQuery(query.to_string()));
     }
 
     /// Poll for new results from the daemon. Returns `true` if changed.
@@ -401,7 +605,14 @@ impl HistorySearchState {
         if !self.active {
             return false;
         }
-        let snap = self.daemon.shared.lock().unwrap().clone();
+        let Some(daemon) = &self.daemon else {
+            return false;
+        };
+        let snap = daemon
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if snap.generation == self.last_gen {
             return false;
         }
@@ -427,13 +638,7 @@ impl HistorySearchState {
 
     /// Set hovered index. Returns `true` if changed.
     pub fn set_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.snapshot.items.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.snapshot.items.len());
         let changed = clamped != self.hovered;
         self.hovered = clamped;
         changed
@@ -532,7 +737,7 @@ mod tests {
 
     /// Helper: activate + poll until results arrive.
     fn activate_and_poll(state: &mut HistorySearchState, history: &[HistoryEntry], saved: &str) {
-        state.activate(history, saved);
+        assert!(state.activate(history, saved));
         // The daemon runs on another thread; spin-poll briefly.
         for _ in 0..100 {
             if state.poll() && state.result_count() > 0 {
@@ -553,10 +758,38 @@ mod tests {
         }
     }
 
+    /// The leak regression this module's laziness exists for: construction
+    /// (one state per `PromptWidget`) must not spawn the matcher thread.
+    #[test]
+    fn construction_does_not_spawn_the_daemon() {
+        let state = HistorySearchState::new();
+        assert!(state.daemon.is_none());
+    }
+
+    /// Deactivate/reactivate reuses the one daemon (no drop-and-respawn).
+    #[test]
+    fn reactivation_reuses_the_daemon() {
+        let mut state = HistorySearchState::new();
+        assert!(state.activate(&entries(&["a"]), ""));
+        state.deactivate();
+        assert!(state.activate(&entries(&["a", "b"]), ""));
+        assert_eq!(state.daemon_builds, 1);
+    }
+
+    /// Pre-activation refresh/query/poll are inert — no daemon, no panic.
+    #[test]
+    fn refresh_query_poll_are_noops_before_first_activation() {
+        let mut state = HistorySearchState::new();
+        state.refresh_items(&entries(&["a"]));
+        state.update_query("a");
+        assert!(!state.poll());
+        assert!(state.daemon.is_none());
+    }
+
     #[test]
     fn refresh_items_and_query_are_applied_together() {
         let mut state = HistorySearchState::new();
-        state.activate(&[], "");
+        assert!(state.activate(&[], ""));
         state.refresh_items(&entries(&["alpha", "beta"]));
         state.update_query("beta");
 
@@ -633,7 +866,7 @@ mod tests {
     #[test]
     fn activate_stores_saved_text() {
         let mut state = HistorySearchState::new();
-        state.activate(&entries(&["hello"]), "my draft");
+        assert!(state.activate(&entries(&["hello"]), "my draft"));
         assert!(state.is_active());
         assert_eq!(state.saved_text(), "my draft");
     }
@@ -690,12 +923,12 @@ mod tests {
     #[test]
     fn browse_mode_flag_tracks_activation_kind() {
         let mut state = HistorySearchState::new();
-        state.activate_browse(&entries(&["a"]), "");
+        assert!(state.activate_browse(&entries(&["a"]), ""));
         assert!(state.is_active());
         assert!(state.is_browse());
         state.deactivate();
         assert!(!state.is_browse());
-        state.activate(&entries(&["a"]), "");
+        assert!(state.activate(&entries(&["a"]), ""));
         assert!(state.is_active());
         assert!(!state.is_browse(), "/history search mode is not browse");
     }
@@ -703,7 +936,7 @@ mod tests {
     #[test]
     fn no_panic_on_empty_history() {
         let mut state = HistorySearchState::new();
-        state.activate(&[], "");
+        assert!(state.activate(&[], ""));
         assert_eq!(state.result_count(), 0);
         assert!(state.selected_text().is_none());
         assert!(!state.move_up());
@@ -715,5 +948,51 @@ mod tests {
         let state = HistorySearchState::default();
         assert!(!state.is_active());
         assert_eq!(state.result_count(), 0);
+    }
+
+    /// Named contract: a second (and twentieth) history search must reuse the
+    /// matcher thread. Many live `HistorySearchState`s must not grow
+    /// `history-search` workers without bound (the dragon-npu / iso leak).
+    #[test]
+    fn many_live_states_share_one_history_search_thread() {
+        let spawned_before =
+            HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed);
+        let live_before = count_threads_named("history-search");
+        let mut states: Vec<HistorySearchState> =
+            (0..20).map(|_| HistorySearchState::new()).collect();
+        for (i, state) in states.iter_mut().enumerate() {
+            let unique = format!("unique-item-{i}");
+            let history = entries(&[&unique, "shared-other"]);
+            activate_and_poll(state, &history, "");
+            query_and_poll(state, &unique);
+            assert_eq!(
+                state.result_count(),
+                1,
+                "state {i} must match only its own item"
+            );
+            assert_eq!(state.selected_text(), Some(unique.as_str()));
+        }
+        let spawned = HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed)
+            - spawned_before;
+        let live_grown = count_threads_named("history-search").saturating_sub(live_before);
+        assert!(
+            spawned <= 1,
+            "20 live history searches must reuse one matcher thread, spawned {spawned}"
+        );
+        assert!(
+            live_grown <= 1,
+            "OS history-search threads must stay bounded; this burst grew {live_grown}"
+        );
+    }
+
+    fn count_threads_named(name: &str) -> usize {
+        let dir = std::fs::read_dir("/proc/self/task")
+            .expect("need /proc/self/task to count history-search workers");
+        dir.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            (comm.trim() == name).then_some(())
+        })
+        .count()
     }
 }

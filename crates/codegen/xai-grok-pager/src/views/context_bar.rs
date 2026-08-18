@@ -99,39 +99,9 @@ pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
 }
 
 /// Blend between breakpoints for a given percentage.
-///
-/// Default themes lerp between neighbouring breakpoints. DOGE themes use
-/// solid steps only (no mid-segment lerp) so intermediate usage never
-/// invents off-palette grays — see [`blend_color_with_mode`].
 pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
-    blend_color_with_mode(pct, breakpoints, false)
-}
-
-/// Like [`blend_color`], but when `solid_steps` is true the colour jumps at
-/// breakpoints instead of lerping (DOGE pure 8-colour palette stays pure).
-///
-/// Solid mode is a **right-closed step function**: at an exact breakpoint
-/// percentage the colour of that breakpoint is used (e.g. 95% → error red).
-/// Between breakpoints the lower step is held until the next threshold.
-pub fn blend_color_with_mode(
-    pct: f64,
-    breakpoints: &[ColorBreakpoint],
-    solid_steps: bool,
-) -> Color {
     if breakpoints.is_empty() {
         return Color::Reset;
-    }
-    if solid_steps {
-        // Last breakpoint with `pct >= bp.pct` (breakpoints are ascending).
-        let mut color = breakpoints[0].color;
-        for bp in breakpoints {
-            if pct >= bp.pct {
-                color = bp.color;
-            } else {
-                break;
-            }
-        }
-        return color;
     }
     if pct <= breakpoints[0].pct {
         return breakpoints[0].color;
@@ -143,91 +113,6 @@ pub fn blend_color_with_mode(
         }
     }
     breakpoints.last().unwrap().color
-}
-
-/// Whether the context bar should use solid DOGE steps (no mid-segment lerp).
-///
-/// **Kind-first** for the live path: production paints with
-/// `Theme::current()` which is always quantized (`Indexed` / named ANSI on
-/// low-color terminals), so an RGB-only fingerprint would silently fall back
-/// to lerp and invent mid-cube pastels — the failure DOGE targets.
-///
-/// Structural pure-primary fingerprint is a **fallback** for unit tests that
-/// build `Theme::doge()` (raw or quantized) without setting the kind cache.
-/// Slot contract must stay aligned with `Theme::doge()`:
-/// `bg_base=black`, `text_primary=white`, `gray=yellow` (secondary chrome),
-/// `warning=yellow`, `accent_error=red`, `accent_assistant=magenta`,
-/// `path=cyan`.
-fn uses_solid_context_steps(theme: &Theme) -> bool {
-    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
-        return true;
-    }
-    is_doge_theme_structural(theme)
-}
-
-/// Structural DOGE pure-palette fingerprint via resolved RGB (works for pure
-/// `Rgb`, pure cube `Indexed`, and named ANSI / Light* after Basic quantize).
-///
-/// Not the production gate — see [`uses_solid_context_steps`]. Keep in sync
-/// with the semantic mapping on `Theme::doge()`.
-fn is_doge_theme_structural(theme: &Theme) -> bool {
-    let rgb = |c: Color| crate::render::color::resolve_to_rgb(c);
-    matches!(
-        (
-            rgb(theme.bg_base),
-            rgb(theme.text_primary),
-            rgb(theme.gray),
-            rgb(theme.warning),
-            rgb(theme.accent_error),
-            rgb(theme.accent_assistant),
-            rgb(theme.path),
-        ),
-        (
-            Some((0, 0, 0)),
-            Some((255, 255, 255)),
-            Some((255, 255, 0)), // gray = yellow secondary chrome (not mid-gray)
-            Some((255, 255, 0)),
-            Some((255, 0, 0)),
-            Some((255, 0, 255)),
-            Some((0, 255, 255)),
-        )
-    )
-}
-
-/// True when `c` resolves to a DOGE pure primary (or is a named ANSI colour
-/// that maps to one after resolve). Used by solid-step tests.
-#[cfg(test)]
-fn is_doge_primary_color(c: Color) -> bool {
-    if let Some((r, g, b)) = crate::render::color::resolve_to_rgb(c) {
-        return matches!(
-            (r, g, b),
-            (0, 0, 0)
-                | (255, 0, 0)
-                | (0, 255, 0)
-                | (255, 255, 0)
-                | (0, 0, 255)
-                | (255, 0, 255)
-                | (0, 255, 255)
-                | (255, 255, 255)
-        );
-    }
-    matches!(
-        c,
-        Color::Black
-            | Color::Red
-            | Color::Green
-            | Color::Yellow
-            | Color::Blue
-            | Color::Magenta
-            | Color::Cyan
-            | Color::White
-            | Color::LightRed
-            | Color::LightGreen
-            | Color::LightYellow
-            | Color::LightBlue
-            | Color::LightMagenta
-            | Color::LightCyan
-    )
 }
 
 /// Linear interpolation between two colors.
@@ -315,16 +200,99 @@ pub fn context_bar_line_for_session(
     theme: &Theme,
     gateway_chat: bool,
 ) -> Option<Line<'static>> {
+    context_bar_line_with_windows(
+        used_tokens,
+        total_tokens,
+        total_tokens,
+        hovered,
+        theme,
+        gateway_chat,
+    )
+}
+
+/// Footer chip copy for used tokens against sampling and catalog windows.
+///
+/// When the windows differ, names each so catalog size is not implied as the
+/// AUTO compact gate. AUTO gates on the sampling window.
+pub fn context_chip_token_text(
+    used: u64,
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+) -> Option<String> {
+    let sampling = sampling_window.filter(|&t| t > 0);
+    let catalog = catalog_window.filter(|&t| t > 0);
+    match (sampling, catalog) {
+        (Some(sampling), Some(catalog)) if sampling != catalog => Some(format!(
+            "{} / {} sampling · {} catalog",
+            fmt_tokens(used),
+            fmt_tokens(sampling),
+            fmt_tokens(catalog),
+        )),
+        (Some(total), _) | (_, Some(total)) => {
+            Some(format!("{} / {}", fmt_tokens(used), fmt_tokens(total)))
+        }
+        _ => None,
+    }
+}
+
+/// Sampling window the footer chip should paint.
+///
+/// Live session sampling wins over the pager economic-mode cache so a 200k
+/// session window still names sampling when catalog is 500k and the cache is
+/// off.
+pub fn footer_sampling_window(
+    session_sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+    economic_cache_on: bool,
+) -> Option<u64> {
+    if let Some(window) = session_sampling_window.filter(|&w| w > 0) {
+        return Some(window);
+    }
+    catalog_window.map(|catalog| {
+        xai_grok_shell::util::config::apply_economic_context_cap(catalog, economic_cache_on)
+    })
+}
+
+/// Window AUTO compact actually gates on when both sizes are known.
+///
+/// Percent and urgency follow this window, not the larger catalog total.
+pub fn context_chip_gate_window(
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+) -> Option<u64> {
+    let sampling = sampling_window.filter(|&t| t > 0);
+    let catalog = catalog_window.filter(|&t| t > 0);
+    match (sampling, catalog) {
+        (Some(sampling), Some(catalog)) if sampling != catalog => Some(sampling),
+        (Some(total), _) | (_, Some(total)) => Some(total),
+        _ => None,
+    }
+}
+
+/// Footer context chip with both windows AUTO uses vs what the catalog shows.
+///
+/// When `sampling_window` and `catalog_window` are both set and differ, the
+/// chip names each window. AUTO compact gates on the sampling window. Do not
+/// paint unlabeled `used / catalog` as if catalog were the AUTO gate (same
+/// honesty as the CompactionStarted banner).
+pub fn context_bar_line_with_windows(
+    used_tokens: Option<u64>,
+    sampling_window: Option<u64>,
+    catalog_window: Option<u64>,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+) -> Option<Line<'static>> {
     if gateway_chat {
         return None;
     }
     let used = used_tokens?;
-    let total = total_tokens.filter(|&t| t > 0)?;
+    let total = context_chip_gate_window(sampling_window, catalog_window)?;
     let pct = xai_token_estimation::usage_percentage(used, total);
 
-    // Default form drives the line width: `used / total`, right-padded to the
-    // minimum hover width so the two states always render at the same width.
-    let mut token_str = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
+    // Default form drives the line width. Two-meter copy is longer than
+    // unlabeled `used / total`; hover pads to that same width.
+    let mut token_str = context_chip_token_text(used, sampling_window, catalog_window)?;
     let natural_width = token_str.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
     if natural_width < min_width {
@@ -334,10 +302,8 @@ pub fn context_bar_line_for_session(
 
     // Urgency color shared by both branches so the default still surfaces
     // high-usage warnings without requiring the user to hover.
-    // DOGE: solid pure-palette steps only (no lerp mid-grays).
     let breakpoints = default_breakpoints(theme);
-    let solid_steps = uses_solid_context_steps(theme);
-    let color = crate::theme::quantize(blend_color_with_mode(pct, &breakpoints, solid_steps));
+    let color = crate::theme::quantize(blend_color(pct, &breakpoints));
 
     if hovered {
         // Bar fills the space the default tokens would occupy, minus the gap
@@ -443,243 +409,6 @@ mod tests {
         assert_eq!(c95, theme.accent_error);
     }
 
-    /// Colour-distinct solid-step fixture (not DOGE white=white) so equality
-    /// at 0 / 50 / 75 / 95 / 100 is meaningful.
-    fn distinct_step_breakpoints() -> Vec<ColorBreakpoint> {
-        vec![
-            ColorBreakpoint {
-                pct: 0.0,
-                color: Color::Rgb(0, 255, 0), // green
-            },
-            ColorBreakpoint {
-                pct: 50.0,
-                color: Color::Rgb(255, 255, 0), // yellow
-            },
-            ColorBreakpoint {
-                pct: 75.0,
-                color: Color::Rgb(255, 0, 255), // magenta
-            },
-            ColorBreakpoint {
-                pct: 95.0,
-                color: Color::Rgb(255, 0, 0), // red
-            },
-        ]
-    }
-
-    #[test]
-    fn solid_steps_right_closed_at_exact_breakpoints() {
-        let bps = distinct_step_breakpoints();
-        assert_eq!(
-            blend_color_with_mode(0.0, &bps, true),
-            Color::Rgb(0, 255, 0)
-        );
-        assert_eq!(
-            blend_color_with_mode(50.0, &bps, true),
-            Color::Rgb(255, 255, 0),
-            "exact 50% takes the 50% breakpoint colour"
-        );
-        assert_eq!(
-            blend_color_with_mode(75.0, &bps, true),
-            Color::Rgb(255, 0, 255)
-        );
-        assert_eq!(
-            blend_color_with_mode(95.0, &bps, true),
-            Color::Rgb(255, 0, 0),
-            "exact 95% is error red, not the prior yellow/magenta hold"
-        );
-        assert_eq!(
-            blend_color_with_mode(100.0, &bps, true),
-            Color::Rgb(255, 0, 0)
-        );
-        // Just below a threshold holds the previous step.
-        assert_eq!(
-            blend_color_with_mode(94.9, &bps, true),
-            Color::Rgb(255, 0, 255)
-        );
-        assert_eq!(
-            blend_color_with_mode(95.1, &bps, true),
-            Color::Rgb(255, 0, 0)
-        );
-        // Mid-segment holds lower (no lerp pastels).
-        assert_eq!(
-            blend_color_with_mode(60.0, &bps, true),
-            Color::Rgb(255, 255, 0)
-        );
-    }
-
-    #[test]
-    fn doge_context_bar_solid_steps_at_0_50_100() {
-        let theme = Theme::doge();
-        assert!(uses_solid_context_steps(&theme));
-        let bps = default_breakpoints(&theme);
-
-        // Right-closed: 0% white, 50% accent_user (Human green on DOGE),
-        // 95%+ error red, 100% error red.
-        let c0 = blend_color_with_mode(0.0, &bps, true);
-        let c50 = blend_color_with_mode(50.0, &bps, true);
-        let c95 = blend_color_with_mode(95.0, &bps, true);
-        let c100 = blend_color_with_mode(100.0, &bps, true);
-        assert_eq!(c0, theme.text_primary, "0% step");
-        assert_eq!(c50, theme.accent_user, "50% step (right-closed)");
-        assert_eq!(c95, theme.accent_error, "exact 95% is error");
-        assert_eq!(c100, theme.accent_error, "100% holds last breakpoint");
-        assert!(is_doge_primary_color(c0));
-        assert!(is_doge_primary_color(c50));
-        assert!(is_doge_primary_color(c95));
-        assert!(is_doge_primary_color(c100));
-    }
-
-    #[test]
-    fn doge_context_bar_mid_segment_holds_lower_not_lerp_gray() {
-        let theme = Theme::doge();
-        let bps = default_breakpoints(&theme);
-        // Between 65% (accent_user / Human green on DOGE) and 75% (warning/yellow):
-        // solid holds the lower step. Lerp would invent off-palette midtones.
-        let c70 = blend_color_with_mode(70.0, &bps, true);
-        assert_eq!(c70, theme.accent_user);
-        assert!(is_doge_primary_color(c70));
-        // Between 85% (warning) and 95% (error): hold yellow; exact 95 is red.
-        let c90 = blend_color_with_mode(90.0, &bps, true);
-        assert_eq!(c90, theme.warning);
-        assert!(is_doge_primary_color(c90));
-        assert_eq!(blend_color_with_mode(95.0, &bps, true), theme.accent_error);
-    }
-
-    #[test]
-    fn doge_context_bar_line_usage_colors_are_doge_only() {
-        let theme = Theme::doge();
-        // 0%, 50%, 100% of a 1M window — solid-step path before quantize.
-        // (quantize may map pure white → Reset under some color levels; that
-        // is still not an off-palette mid-gray.)
-        for (used, total, expect_step) in [
-            (0u64, 1_000_000u64, theme.text_primary),
-            (500_000, 1_000_000, theme.accent_user),
-            (1_000_000, 1_000_000, theme.accent_error),
-        ] {
-            let pct = xai_token_estimation::usage_percentage(used, total);
-            let bps = default_breakpoints(&theme);
-            let solid = blend_color_with_mode(pct, &bps, true);
-            assert_eq!(solid, expect_step, "usage {used}/{total} step");
-            assert!(is_doge_primary_color(solid));
-            // Live path must still produce a line (and not invent mid-gray RGB).
-            let line =
-                context_bar_line(Some(used), Some(total), false, &theme).expect("token data");
-            for span in &line.spans {
-                if let Some(fg) = span.style.fg {
-                    if matches!(fg, Color::Reset) {
-                        continue;
-                    }
-                    assert!(
-                        is_doge_primary_color(fg),
-                        "usage {used}/{total} painted off-palette {fg:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn doge_quantized_themes_still_use_solid_steps() {
-        // Production path: Theme::current() is always quantized. Solid steps
-        // must not depend on raw Color::Rgb fingerprints alone.
-        use crate::theme::color_support::ColorLevel;
-        use crate::theme::{ThemeKind, cache as theme_cache};
-
-        let _guard = theme_cache::test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        theme_cache::reset_for_test();
-        theme_cache::set(ThemeKind::Doge);
-        assert_eq!(Theme::current_kind(), ThemeKind::Doge);
-
-        for level in [
-            ColorLevel::TrueColor,
-            ColorLevel::Ansi256,
-            ColorLevel::Basic,
-        ] {
-            let theme = Theme::doge().quantized(level);
-            assert!(
-                uses_solid_context_steps(&theme),
-                "kind=Doge must enable solid steps after {level:?} quantize"
-            );
-            // Structural fingerprint also survives pure-primary quantize
-            // (defense in depth when kind is set — and for kind-less tests).
-            if level != ColorLevel::None {
-                assert!(
-                    is_doge_theme_structural(&theme),
-                    "structural DOGE fingerprint should hold after {level:?}"
-                );
-            }
-
-            let bps = default_breakpoints(&theme);
-            // Mid white→yellow segment must not lerp to a non-primary.
-            let c70 = blend_color_with_mode(70.0, &bps, true);
-            assert!(
-                is_doge_primary_color(c70),
-                "70% solid step off-palette after {level:?}: {c70:?}"
-            );
-            // Live line path: no mid-tone RGB/Indexed pastels in span fg.
-            let line = context_bar_line(Some(700_000), Some(1_000_000), false, &theme)
-                .expect("token data");
-            for span in &line.spans {
-                if let Some(fg) = span.style.fg {
-                    if matches!(fg, Color::Reset) {
-                        continue;
-                    }
-                    // After a second global quantize the fg may be Indexed;
-                    // resolve and require pure DOGE RGB.
-                    if let Some((r, g, b)) = crate::render::color::resolve_to_rgb(fg) {
-                        assert!(
-                            is_doge_primary_color(Color::Rgb(r, g, b)),
-                            "quantized live path {level:?} painted mid-tone {fg:?} → ({r},{g},{b})"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Without kind cache, quantized structural still enables solid steps.
-        theme_cache::set(ThemeKind::GrokNight);
-        let q256 = Theme::doge().quantized(ColorLevel::Ansi256);
-        assert!(
-            uses_solid_context_steps(&q256),
-            "quantized pure-primary theme must still solid-step without Doge kind"
-        );
-        theme_cache::reset_for_test();
-    }
-
-    #[test]
-    fn non_doge_theme_still_lerps_between_breakpoints() {
-        // Default (GrokNight) must keep the smooth gradient between
-        // neighbouring breakpoints — solid-steps is DOGE-only.
-        // Hold the theme test lock so a parallel Doge kind set cannot
-        // flip uses_solid_context_steps via current_kind().
-        use crate::theme::{ThemeKind, cache as theme_cache};
-        let _guard = theme_cache::test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        theme_cache::reset_for_test();
-        theme_cache::set(ThemeKind::GrokNight);
-
-        let theme = Theme::default();
-        assert!(!uses_solid_context_steps(&theme));
-        assert!(!is_doge_theme_structural(&theme));
-        let bps = default_breakpoints(&theme);
-        // 70% sits between 65% (accent_user) and 75% (warning).
-        let solid = blend_color_with_mode(70.0, &bps, true);
-        let lerped = blend_color_with_mode(70.0, &bps, false);
-        assert_eq!(solid, theme.accent_user);
-        // Lerp should differ from either endpoint when the endpoints differ.
-        if theme.accent_user != theme.warning {
-            assert_ne!(
-                lerped, theme.accent_user,
-                "expected mid-segment lerp, not solid hold"
-            );
-            assert_ne!(lerped, theme.warning);
-        }
-        theme_cache::reset_for_test();
-    }
-
     /// Concatenate all span content into one string for assertions.
     fn line_text(line: &Line<'static>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -781,6 +510,108 @@ mod tests {
         assert!(
             context_bar_line_for_session(Some(1_000), Some(1_000_000), false, &theme, false)
                 .is_some()
+        );
+    }
+
+    /// Named contract: when AUTO gates on the sampling window and the painted
+    /// catalog total is larger, the footer chip must name which window is
+    /// which. Do not imply catalog 500K is the AUTO gate.
+    #[test]
+    fn context_chip_names_sampling_window_when_catalog_differs() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(207_000),
+            Some(200_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        let text = line_text(&line);
+        assert!(
+            text.contains("sampling"),
+            "when the painted catalog total differs from the sampling window, name the sampling window: {text}"
+        );
+        assert!(
+            text.contains("200K"),
+            "must include the 200K sampling window AUTO gates on: {text}"
+        );
+        assert!(
+            text.contains("catalog"),
+            "must name the catalog window when showing the larger total: {text}"
+        );
+        assert!(
+            text.contains("500K"),
+            "must still show the 500K catalog window, labeled: {text}"
+        );
+        assert!(
+            !text.starts_with("207K / 500K"),
+            "must not imply unlabeled catalog 500K is the AUTO gate: {text}"
+        );
+    }
+
+    /// Hover percent is of the sampling window AUTO uses, not of catalog 500K.
+    #[test]
+    fn context_chip_hover_percent_uses_sampling_window_when_catalog_differs() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(160_000),
+            Some(200_000),
+            Some(500_000),
+            true,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        let text = line_text(&line);
+        assert!(
+            text.contains("80.0%"),
+            "hover percent must be of the 200K sampling window (160K/200K), got: {text}"
+        );
+        assert!(
+            !text.contains("32.0%"),
+            "must not paint catalog 160K/500K as 32% when AUTO uses 200K: {text}"
+        );
+    }
+
+    #[test]
+    fn context_chip_keeps_unlabeled_used_over_total_when_windows_match() {
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(207_000),
+            Some(500_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        assert_eq!(line_text(&line), "207K / 500K");
+    }
+
+    /// Session sampling stays the AUTO gate even when the pager economic cache
+    /// is off. Catalog 500K must not paint as the unlabeled total.
+    #[test]
+    fn footer_chip_uses_session_sampling_window_when_economic_cache_is_off() {
+        let sampling = footer_sampling_window(Some(200_000), Some(500_000), false);
+        assert_eq!(
+            sampling,
+            Some(200_000),
+            "session sampling 200k must win when the economic cache is off"
+        );
+        let text = context_chip_token_text(201_000, sampling, Some(500_000)).expect("token data");
+        assert!(
+            text.contains("sampling"),
+            "must name the sampling window: {text}"
+        );
+        assert!(
+            text.contains("200K"),
+            "must show the 200K sampling window: {text}"
+        );
+        assert!(
+            !text.starts_with("201K / 500K"),
+            "must not imply unlabeled catalog 500K is the AUTO gate: {text}"
         );
     }
 }

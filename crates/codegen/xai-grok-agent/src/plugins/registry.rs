@@ -264,10 +264,8 @@ impl PluginRegistry {
     /// List all plugins (including disabled ones).
     pub fn list(&self) -> Vec<&LoadedPlugin> {
         let mut plugins: Vec<&LoadedPlugin> = self.plugins.values().collect();
-        plugins.sort_by(|a, b| {
-            // Sort by scope (priority order), then by name
-            (a.scope as u8, &a.name).cmp(&(b.scope as u8, &b.name))
-        });
+        // Sort by scope (priority order), then by name.
+        plugins.sort_by_key(|a| (a.scope as u8, a.name.clone()));
         plugins
     }
 

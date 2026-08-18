@@ -5,6 +5,7 @@ use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput};
 
 use super::markdown_content::MarkdownContent;
 use super::mermaid_content::{self, MermaidContent};
+use crate::appearance::AppearanceConfig;
 
 /// Block displaying an agent message with streaming markdown support.
 ///
@@ -170,10 +171,13 @@ impl BlockContent for AgentMessageBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         // Common path: no diagrams (or raw mode) → plain markdown, no affordance
         // machinery and no extra output rebuild.
-        if ctx.raw || self.mermaid.is_empty() {
-            return self.content.output(ctx.width as usize);
-        }
-        self.rendered_output(ctx).0
+        let mut out = if ctx.raw || self.mermaid.is_empty() {
+            self.content.output(ctx.width as usize)
+        } else {
+            self.rendered_output(ctx).0
+        };
+        super::append_bubble_copy_button(&mut out.lines, ctx);
+        out
     }
 
     fn diagram_affordances(&self, ctx: &BlockContext) -> Vec<mermaid_content::DiagramAffordance> {
@@ -205,11 +209,10 @@ impl BlockContent for AgentMessageBlock {
     }
 
     /// Magenta Agent rail only while the turn is active (`ctx.is_running`).
-    ///
     /// Streaming / thinking / tool-running: left `┃` in `theme.accent_running`
-    /// (magenta under DOGE). Once the turn is finished the rail goes away
-    /// (black / no accent) so scrollback is not permanently pink. Human green
-    /// rails stay always-on on user prompts only.
+    /// (Reset → Cyan so the rail stays visible under NO_COLOR). Finished
+    /// scrollback has no coloured rail. Human green is the other side of this
+    /// pair (`UserPromptBlock`).
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         if !ctx.is_running {
             return None;
@@ -222,7 +225,7 @@ impl BlockContent for AgentMessageBlock {
         Some(AccentStyle::static_color(color))
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 
@@ -269,7 +272,10 @@ mod tests {
     /// Finished agent messages paint no left rail (no permanent magenta).
     #[test]
     fn agent_message_block_accent_none_when_finished() {
-        let _pin = crate::theme::cache::pin_theme();
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
 
         let blocks = [
@@ -290,8 +296,10 @@ mod tests {
     fn agent_message_block_accent_is_static_agent_rail_while_running() {
         use ratatui::style::Color;
 
-        // Mutex so Theme::current() and accent() cannot race other pin_theme tests.
-        let _pin = crate::theme::cache::pin_theme();
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
         crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
 
         let theme = crate::theme::Theme::current();
@@ -338,7 +346,10 @@ mod tests {
         assert_ne!(doge.accent_running, doge.accent_user);
         assert_ne!(doge.accent_running, Color::Rgb(0, 255, 255)); // not cyan
 
-        let _pin = crate::theme::cache::pin_theme();
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
 
         assert!(
@@ -374,7 +385,10 @@ mod tests {
     /// `RenderBlock::accent_color` for AgentMessage is None (no permanent rail).
     #[test]
     fn render_block_agent_message_accent_color_is_none_when_finished() {
-        let _pin = crate::theme::cache::pin_theme();
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         let block = crate::scrollback::block::RenderBlock::agent_message("hi");
         assert_eq!(

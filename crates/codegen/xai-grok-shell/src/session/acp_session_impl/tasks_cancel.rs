@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// Outcome of `cancel_running_task`: rewind/non-stop clears; a stop gesture arms.
+#[must_use = "gate the post-cancel notification drain on this outcome"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeBarrier {
+    Armed,
+    Clear,
+}
+
 pub(super) struct TurnSubagentScopeGuard {
     current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     prompt_id: String,
@@ -69,6 +77,7 @@ impl AgentTask {
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
+        send_now: bool,
         json_schema: Option<serde_json::Value>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
         persist_ack: Option<oneshot::Sender<()>>,
@@ -87,6 +96,7 @@ impl AgentTask {
                     client_identifier,
                     screen_mode,
                     verbatim,
+                    send_now,
                     json_schema,
                     pid,
                     completion_tx,
@@ -151,6 +161,7 @@ async fn run_task(
     client_identifier: Option<String>,
     screen_mode: Option<String>,
     verbatim: bool,
+    send_now: bool,
     json_schema: Option<serde_json::Value>,
     prompt_id: String,
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
@@ -167,6 +178,7 @@ async fn run_task(
             client_identifier,
             screen_mode,
             verbatim,
+            send_now,
             json_schema,
             persist_ack,
             parsed_prompt_tx,
@@ -176,17 +188,29 @@ async fn run_task(
 }
 
 impl SessionActor {
-    pub(super) fn cancel_running_turn_subagents(&self) {
-        let Some(parent_prompt_id) = self
-            .current_prompt_id
-            .lock()
-            .expect("current_prompt_id mutex poisoned")
-            .clone()
-        else {
-            return;
-        };
+    /// Turn-scoped: soft cancel / max-turns only (not user Stop).
+    /// `parent_prompt_id` is the authoritative turn id from the turn runner.
+    pub(super) fn cancel_running_turn_subagents(&self, parent_prompt_id: &str) {
+        self.cancel_subagents_for_prompt_id(parent_prompt_id);
+    }
 
-        self.cancel_subagents_for_prompt_id(&parent_prompt_id);
+    /// User Stop with cancel_subagents: all non-workflow session children.
+    /// Uses the session-bound backend API so cancel never wildcards other sessions.
+    pub(super) fn cancel_all_session_subagents(&self) {
+        if let Some(event_tx) = self.tool_context.subagent_event_tx.clone() {
+            use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
+            let backend = ChannelBackend::for_session(event_tx, self.session_id_string());
+            let _ = backend.request_cancel_parent_session(tokio::sync::oneshot::channel().0);
+        }
+    }
+
+    /// Re-open Task spawns for this session after a prior user Stop.
+    pub(super) fn open_subagent_spawn_admission(&self) {
+        if let Some(event_tx) = self.tool_context.subagent_event_tx.clone() {
+            use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
+            let backend = ChannelBackend::for_session(event_tx, self.session_id_string());
+            let _ = backend.open_spawn_admission();
+        }
     }
 
     fn cancel_subagents_for_prompt_id(&self, parent_prompt_id: &str) {
@@ -205,7 +229,8 @@ impl SessionActor {
     /// Cancel the running turn for a send-now prompt: Ctrl+C parity (kills the
     /// turn's foreground command; background tasks, subagents, and the queue
     /// survive). Flushes the replay buffer before teardown so streamed chunks
-    /// persist; the caller's `maybe_start_running_task` then promotes the prompt.
+    /// persist; the caller's `maybe_start_running_task` then promotes the new
+    /// front (a flushed interjection fallback runs ahead of the send-now prompt).
     pub(super) async fn cancel_turn_for_send_now(
         &self,
         replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
@@ -213,8 +238,20 @@ impl SessionActor {
         if let Some(notification) = replay_buffer.flush() {
             self.emit_buffered(notification).await;
         }
-        self.pending_interjections.clear();
-        self.cancel_running_task(false, false, false, Some("send_now".to_string()))
+        // Flush, don't clear: the pager already painted the text and said "Interjection sent".
+        let flushed = self.flush_stranded_interjections().await;
+        if flushed > 0 {
+            xai_grok_telemetry::unified_log::info(
+                "shell.prompt.send_now_flushed_interjections",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "count": flushed })),
+            );
+        }
+        let _ = self
+            .cancel_running_task(crate::session::CancelOptions {
+                trigger: Some(crate::session::CancelTrigger::SendNow),
+                ..Default::default()
+            })
             .await;
         // Re-enable notification drains: unlike Ctrl+C, a send-now means the user is re-engaged.
         if let Some(gate) = &self.tool_context.task_wake_suppressed {
@@ -230,23 +267,34 @@ impl SessionActor {
 
     pub(super) async fn cancel_running_task(
         &self,
-        cancel_subagents: bool,
-        kill_background_tasks: bool,
-        rewind_if_pristine: bool,
-        trigger: Option<String>,
-    ) {
-        let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+        options: crate::session::CancelOptions,
+    ) -> WakeBarrier {
+        let crate::session::CancelOptions {
+            cancel_subagents,
+            kill_background_tasks,
+            rewind_if_no_output,
+            trigger,
+            user_initiated,
+        } = options;
+        let suppress_task_wakes = trigger
+            .as_ref()
+            .is_some_and(crate::session::CancelTrigger::is_stop_gesture);
+        // Abort in-flight `/compact` or auto-compact generation (stream select +
+        // pre-replace guard). Safe when no compact is running.
+        self.compaction.cancel.request_cancel();
         if suppress_task_wakes {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(true);
             }
+            // Arm before the first await so a racing completion cannot slip
+            // a wake in.
             let mut state = self.state.try_lock().expect("session state is actor-owned");
             state.notifications_suppressed = true;
             xai_grok_telemetry::unified_log::info(
                 "shell.task_wake.cancel_barrier",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
-                    "ctrl_c": true,
+                    "trigger": trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                     "gate": self
                         .tool_context
                         .task_wake_suppressed
@@ -283,18 +331,29 @@ impl SessionActor {
                     "prompt_id": &pinned_prompt_id,
                     "cancel_subagents": cancel_subagents,
                     "kill_background_tasks": kill_background_tasks,
-                    "rewind_if_pristine": rewind_if_pristine,
-                    "trigger": trigger,
+                    "rewind_if_no_output": rewind_if_no_output,
+                    "trigger": trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                 })),
             );
         }
 
         if cancel_subagents {
-            self.cancel_running_turn_subagents();
+            // Abort the producer first so it cannot enqueue more TaskTool work
+            // after the ParentSession sweep. Keep the task slot for prompt-id
+            // attribution below; cleanup will take+abort again (idempotent).
+            {
+                let state = self.state.lock().await;
+                if let Some(task) = state.running_task.as_ref() {
+                    task.abort();
+                }
+            }
+            // Then cancel every non-workflow session child (incl. prior turns)
+            // and close spawn admission until the next turn opens it.
+            self.cancel_all_session_subagents();
         }
 
-        // Don't count send-now/rewound cancels — they'd skew the cancel-rate signal.
-        if !rewind_if_pristine && trigger.as_deref() != Some("send_now") {
+        // A rewind is not a cancel either: the turn is being replaced, not stopped.
+        if user_initiated && !rewind_if_no_output {
             self.signals_handle().record_cancellation();
         }
 
@@ -355,7 +414,8 @@ impl SessionActor {
             // is_turn_active may still be true, causing InjectNotification
             // to route Next-priority events to the buffer instead of
             // pending_notifications. Moving them here ensures they survive in
-            // the queue; Ctrl+C defers their drain, while other cancels do not.
+            // the queue; an interactive stop defers their drain, while other
+            // cancels do not.
             self.sweep_monitor_buffer_into_pending(&mut state, "monitor-cancel-drain");
 
             // When killing all background tasks, also clear their pending
@@ -364,7 +424,14 @@ impl SessionActor {
                 state.clear_pending_notifications();
             }
 
-            let rewound_input = if rewind_if_pristine && state.rewindable {
+            // Only a client-visible user front may pop (the wire carries no
+            // prompt id, so this is an origin check); other fronts take a
+            // plain cancel rather than silently losing their message.
+            let front_is_user_row = state.pending_inputs.front().is_some_and(|f| {
+                matches!(f.origin, crate::session::PromptOrigin::User)
+                    && !super::interjection::is_interject_fallback(&f.prompt_id)
+            });
+            let rewound_input = if rewind_if_no_output && state.rewindable && front_is_user_row {
                 if let Some(task) = state.running_task.take() {
                     task.abort();
                 }
@@ -396,8 +463,9 @@ impl SessionActor {
             //   path that sends `Shutdown` next): drain the WHOLE queue — there
             //   is no point starting the next prompt and draining resolves every
             //   queued input's `respond_to` cleanly.
-            // * normal cancel: remove the running turn; only Ctrl+C also removes
-            //   queued task/workflow completion wakes. Preserve real user prompts
+            // * normal cancel: remove the running turn; only an interactive stop
+            //   (Ctrl+C / Esc / [stop]) also removes queued task/workflow
+            //   completion wakes. Preserve real user prompts
             //   and unrelated synthetic entries so `maybe_start_running_task` can
             //   promote the next genuine user turn.
             //   The cancelling client does not pull any prompt back into its
@@ -492,13 +560,15 @@ impl SessionActor {
         self.set_goal_loop_active_resource(false).await;
 
         self.events.cancel_active_tool();
-        if rewound_input.is_none() {
+        // No prompt id means no turn ran, and closing a fresh session would
+        // otherwise write a `TurnEnded` with no `turn_started`.
+        if rewound_input.is_none() && cancelled_prompt_id.is_some() {
             // The trigger (esc / ctrl_c / …) rides in the events.jsonl
             // `cancellation_context`; the category stays `MidTurnAbort` so the
             // existing dashboards/dataset keep working.
             let cancellation_context = trigger
-                .as_deref()
-                .map(|t| serde_json::json!({ "trigger": t }));
+                .as_ref()
+                .map(|t| serde_json::json!({ "trigger": t.as_str() }));
             self.emit_turn_ended(
                 crate::session::events::TurnOutcomeLabel::Cancelled,
                 Some(crate::session::events::CancellationCategory::MidTurnAbort),
@@ -506,26 +576,26 @@ impl SessionActor {
             );
             // Mark the next real user prompt as following a mid-turn abort so
             // replay/analytics/the model can see the user stopped this turn.
-            // Send-now is a silent cancel-and-send — the user is continuing,
-            // not aborting — so it must not arm the interrupt category or the
-            // "[Request interrupted]" reminder for its own continuation turn
+            // Send-now is a silent cancel-and-send: the user is continuing,
+            // not aborting, so it must not arm the interrupt category or the
+            // interrupt envelope for its own continuation turn
             // (mirrors the cancel-rate skip above).
-            let send_now = trigger.as_deref() == Some("send_now");
+            let send_now = matches!(trigger, Some(crate::session::CancelTrigger::SendNow));
             if !send_now {
                 self.events.set_prior_interrupt_category(
                     crate::session::events::CancellationCategory::MidTurnAbort,
                 );
             }
-            // Arm a one-shot `<system-reminder>` for the next real user turn,
-            // but only when the abort leaves the model with NO other signal:
-            // the partial assistant text is discarded out-of-band, so the only
-            // remaining cue is the dangling-tool-call repair. If a tool call is
-            // committed but unanswered — a tool mid-execution, OR a turn parked
-            // on a permission prompt (where no tool is marked active yet) — the
-            // next-turn repair already emits a "cancelled" tool-result, so we
-            // skip the reminder to avoid a duplicate signal. Gating on the
-            // actual dangling state (not `had_active_tool`) covers the
-            // permission-prompt and partial-parallel-call cases too.
+            // Arm a one-shot interjection-shaped frame for the next real user
+            // query, but only when the abort leaves the model with NO other
+            // signal: the partial assistant text is discarded out-of-band, so
+            // the only remaining cue is the dangling-tool-call repair. If a
+            // tool call is committed but unanswered (a tool mid-execution, OR
+            // a turn parked on a permission prompt where no tool is marked
+            // active yet), the next-turn repair already emits a "cancelled"
+            // tool-result, so we skip the frame to avoid a duplicate signal.
+            // Gating on the actual dangling state (not `had_active_tool`)
+            // covers the permission-prompt and partial-parallel-call cases too.
             if !send_now && !self.chat_state_handle.has_dangling_tool_calls().await {
                 self.events.set_pending_interrupt_reminder();
             }
@@ -583,7 +653,7 @@ impl SessionActor {
                 prompt_id,
                 &Ok(acp::StopReason::Cancelled),
                 cancelled_usage.clone(),
-                trigger.as_deref(),
+                trigger.as_ref().map(crate::session::CancelTrigger::as_str),
             )
             .await;
         }
@@ -614,7 +684,8 @@ impl SessionActor {
                 usage: None,
                 tool_overrides: self.effective_tool_overrides(),
             }));
-            return;
+            // The rewound branch cleared the barrier above; wakes flow again.
+            return WakeBarrier::Clear;
         }
 
         for (idx, input) in pending_inputs.into_iter().enumerate() {
@@ -641,12 +712,12 @@ impl SessionActor {
                         // Thread the trigger on the running turn only (idx 0);
                         // MvpAgent stamps it on the `PromptResponse` `_meta`.
                         context: if is_running_turn {
-                            trigger
-                                .clone()
-                                .map(|t| crate::session::commands::CancellationContext {
-                                    trigger: Some(t),
+                            trigger.as_ref().map(|t| {
+                                crate::session::commands::CancellationContext {
+                                    trigger: Some(t.as_str().to_string()),
                                     ..Default::default()
-                                })
+                                }
+                            })
                         } else {
                             None
                         },
@@ -666,6 +737,11 @@ impl SessionActor {
                     },
                 }))
                 .ok();
+        }
+        if suppress_task_wakes {
+            WakeBarrier::Armed
+        } else {
+            WakeBarrier::Clear
         }
     }
 }

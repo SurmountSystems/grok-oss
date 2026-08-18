@@ -56,10 +56,13 @@ fn auth_error() -> xai_grok_sampler::SamplingErrorInfo {
         status_code: Some(401),
         is_retryable: false,
         retry_after_secs: None,
+        should_retry: None,
+        error_code: None,
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }
 
@@ -197,7 +200,13 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        ..
+                    })
+                ),
                 "session-based auth with a working refresher must return RefreshAuthAndResubmit"
             );
             assert!(called.load(Ordering::SeqCst), "refresher must be invoked");
@@ -444,59 +453,6 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
         .await;
 }
 
-/// Dual-auth after hop / prefer_live: chat-state holds the console API key as
-/// live primary and the SuperGrok JWT in `session_identity_key`. Pre-flight must
-/// **not** overwrite the console key with a fresh session JWT (session ACP method
-/// stays active; clobber left JWT on api.x.ai and burned SuperGrok extras).
-#[tokio::test(flavor = "current_thread")]
-#[serial_test::serial(attribution_emit_count)]
-async fn pre_flight_keeps_console_primary_when_session_identity_differs() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (_dir, am) = auth_manager_with_valid_token("session-jwt-live");
-            let (actor, _rx) = make_actor_with_method_and_credentials(
-                Some(am),
-                "cached_token",
-                xai_chat_state::AuthType::SessionToken,
-                "xai-console-primary-key".to_string(),
-            )
-            .await;
-            // Prefer_live / hop shape: console key live, session JWT recorded.
-            actor
-                .chat_state_handle
-                .update_credentials(xai_chat_state::Credentials {
-                    api_key: Some("xai-console-primary-key".into()),
-                    failover_api_keys: vec!["session-jwt-live".into()],
-                    auth_type: xai_chat_state::AuthType::SessionToken,
-                    session_identity_key: Some("session-jwt-live".into()),
-                    failover_base_url: Some("https://api.x.ai/v1".into()),
-                    session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
-                    ..Default::default()
-                });
-            // Also put sampling on console host (post-hop chat-state shape).
-            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
-                cfg.base_url = "https://api.x.ai/v1".into();
-                actor.chat_state_handle.update_sampling_config(cfg);
-            }
-
-            actor.refresh_token_if_expired().await;
-
-            let creds = actor.chat_state_handle.get_credentials().await;
-            assert_eq!(
-                creds.api_key.as_deref(),
-                Some("xai-console-primary-key"),
-                "pre-flight must not clobber console primary with session JWT after hop"
-            );
-            assert_ne!(
-                creds.api_key.as_deref(),
-                Some("session-jwt-live"),
-                "session JWT must not replace console key"
-            );
-        })
-        .await;
-}
-
 /// Proactive refresh keeps the cache hot so `refresh_token_if_expired`
 /// (per-turn pre-flight) is a cache hit — the refresher fires once
 /// (proactive), then the per-turn call sees the fresh token without
@@ -533,8 +489,12 @@ async fn proactive_refresh_makes_per_turn_refresh_a_cache_hit() {
             let cancel = tokio_util::sync::CancellationToken::new();
             am.start_proactive_refresh(cancel.clone());
 
-            // Wait for proactive task to fire.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Wait for the proactive task to fire; its first pass runs after
+            // PROACTIVE_MIN_SLEEP, so the window must exceed the floor.
+            tokio::time::sleep(
+                crate::auth::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
+            )
+            .await;
             assert!(
                 call_count.load(Ordering::SeqCst) >= 1,
                 "proactive task must have fired"
@@ -575,10 +535,13 @@ fn model_not_found_error() -> xai_grok_sampler::SamplingErrorInfo {
             status_code: Some(404),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         }
 }
 
@@ -610,12 +573,22 @@ async fn legacy_auth_hint_on_404_model_not_found() {
                 "404 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
+                msg.contains("grok update"),
+                "hint must mention `grok update` before re-login, got: {msg}"
+            );
+            assert!(
                 msg.contains("grok logout"),
                 "hint must mention `grok logout`, got: {msg}"
             );
             assert!(
                 msg.contains("grok login"),
                 "hint must mention `grok login`, got: {msg}"
+            );
+            let update_at = msg.find("grok update").expect("grok update");
+            let logout_at = msg.find("grok logout").expect("grok logout");
+            assert!(
+                update_at < logout_at,
+                "update must come before logout, got: {msg}"
             );
             assert!(
                 msg.contains("Version:"),
@@ -642,10 +615,13 @@ fn unauthorized_401_error() -> xai_grok_sampler::SamplingErrorInfo {
             status_code: Some(401),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         }
 }
 
@@ -679,12 +655,22 @@ async fn legacy_auth_hint_on_401_unauthorized() {
                 "401 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
+                msg.contains("grok update"),
+                "hint must mention `grok update` before re-login, got: {msg}"
+            );
+            assert!(
                 msg.contains("grok logout"),
                 "hint must mention `grok logout`, got: {msg}"
             );
             assert!(
                 msg.contains("grok login"),
                 "hint must mention `grok login`, got: {msg}"
+            );
+            let update_at = msg.find("grok update").expect("grok update");
+            let logout_at = msg.find("grok logout").expect("grok logout");
+            assert!(
+                update_at < logout_at,
+                "update must come before logout, got: {msg}"
             );
         })
         .await;
@@ -824,7 +810,10 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "session-based method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -858,7 +847,10 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "oidc method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -1145,9 +1137,6 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
                 failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
                 max_completion_tokens: None,
@@ -1156,6 +1145,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
+                extra_response_includes: Vec::new(),
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: 256_000,
@@ -1171,13 +1161,12 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
-                stashed_bearer_resolver: None,
-                session_bearer_resolver: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                ..Default::default()
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85, None)
@@ -1243,10 +1232,6 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
 
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("session-jwt".to_string()),
-                failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: "https://api.x.ai/v1".to_string(),
                 model,
                 max_completion_tokens: None,
@@ -1255,6 +1240,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
+                extra_response_includes: Vec::new(),
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
                 context_window: 256_000,
@@ -1270,13 +1256,12 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
-                stashed_bearer_resolver: None,
-                session_bearer_resolver: None,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                ..Default::default()
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85, None)
@@ -1315,8 +1300,14 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
-                "provider 401 must re-mint and resubmit"
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::AuthProvider,
+                        ..
+                    })
+                ),
+                "provider 401 must re-mint and resubmit via the provider store"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
             assert_eq!(
@@ -1351,7 +1342,10 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             error.kind = xai_grok_sampler::SamplingErrorKind::Api;
             let result = actor.handle_sampling_failure(error).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "a non-Auth-kind 401 on a provider model must still recover via 4c"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1383,7 +1377,10 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "an unauthenticated 401 on a provider model must mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1426,7 +1423,10 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "the provider arm must recover"
             );
             assert!(

@@ -123,12 +123,12 @@ pub struct GrokComConfig {
     /// Not for SuperGrok multi-identity ranking — use [`Self::auto_use_included_limits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
-    /// Prefer the free SuperGrok allowance for the current billing period
+    /// Prefer included SuperGrok period limits for the current billing period
     /// (personal and/or Business) before SuperGrok dollar top-ups and the
     /// console API key. When multi-identity exists, rank SuperGrok logins by
-    /// free-period headroom (sooner reset is a ranking heuristic, not the
-    /// feature name). Exhausted free period on one login fails over to another
-    /// with free period left, then SuperGrok top-up dollars, then console.
+    /// included-period headroom (sooner reset is a ranking heuristic, not the
+    /// feature name). Exhausted included SuperGrok period limits on one login
+    /// fail over to another with room left, then SuperGrok top-up dollars, then console.
     /// Independent of [`Self::preferred_method`] so ordinary `oidc` /
     /// `api_key` pins stay compatible with stock grok. Config.toml only
     /// (`[auth] auto_use_included_limits`). **Default true** for new/empty
@@ -140,12 +140,12 @@ pub struct GrokComConfig {
         skip_serializing_if = "auto_use_included_limits_is_default_true"
     )]
     pub auto_use_included_limits: bool,
-    /// When free SuperGrok period limits still have room (used % below 100) but
-    /// multipoll / poll history marks free SuperGrok period debit **unproven**
+    /// When included SuperGrok period limits still have room (used % below 100) but
+    /// multipoll / poll history marks included SuperGrok period debit **unproven**
     /// (`flatPollUnprovenDebit`), the product still **allows** sampler turns by
     /// default so dogfood is not hard-stopped by unproven server debit (C4).
     /// Honesty notes on `/limits`, doctor dual-auth status, and multipoll still
-    /// name the flat free SuperGrok period and that team settlement can move.
+    /// name the flat included SuperGrok period limits and that team settlement can move.
     /// Set **false** only to **opt into a hard block** of new turns under that
     /// state. Config.toml: `[auth] allow_spend_when_free_period_debit_unproven`.
     /// Env: `GROK_ALLOW_SPEND_WHEN_FREE_PERIOD_DEBIT_UNPROVEN` (truthy = allow,
@@ -157,8 +157,8 @@ pub struct GrokComConfig {
     pub allow_spend_when_free_period_debit_unproven: bool,
 }
 
-/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer free SuperGrok
-/// period allowance before the console API key on new/empty config.
+/// Default for [`GrokComConfig::auto_use_included_limits`]: prefer included SuperGrok
+/// period limits before the console API key on new/empty config.
 pub const fn default_auto_use_included_limits() -> bool {
     true
 }
@@ -221,7 +221,7 @@ pub const XAI_OAUTH2_ISSUER: &str = "https://auth.x.ai";
 const PROD_ACCOUNTS_APP_ORIGINS: &[&str] = &["https://accounts.x.ai"];
 /// See the opt-in non-production feature variant above — builds without
 /// the feature accept only the production accounts app.
-pub fn allowed_accounts_app_origins() -> Vec<String> {
+pub(crate) fn allowed_accounts_app_origins() -> Vec<String> {
     PROD_ACCOUNTS_APP_ORIGINS
         .iter()
         .map(|o| o.to_string())
@@ -232,7 +232,7 @@ pub fn allowed_accounts_app_origins() -> Vec<String> {
 ///
 /// Callers can chain additional configuration (e.g. `.allow_headers(...)` or
 /// `.allow_private_network(true)`) onto the returned layer.
-pub fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http::cors::CorsLayer {
+pub(crate) fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http::cors::CorsLayer {
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::list(
             allowed_accounts_app_origins()
@@ -252,7 +252,7 @@ const XAI_OAUTH2_LOCAL_ISSUER: &str = "http://localhost:22255";
 const DEFAULT_OAUTH2_REFERRER: &str = "grok-build";
 /// Returns `true` when `GROK_LOCAL_AUTH=1` is set,
 /// indicating the local accounts-app should be used as the OAuth2 issuer.
-pub fn use_local_auth() -> bool {
+pub(crate) fn use_local_auth() -> bool {
     std::env::var("GROK_LOCAL_AUTH")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false)
@@ -275,7 +275,7 @@ pub fn is_xai_oauth2_issuer(issuer: &str) -> bool {
 }
 /// auth.json scope key used by the pre-OIDC `grok login --legacy` flow.
 /// Matches the key format produced by the original `accounts.x.ai` relay auth.
-pub const LEGACY_AUTH_SCOPE: &str = "https://accounts.x.ai/sign-in";
+pub(crate) const LEGACY_AUTH_SCOPE: &str = "https://accounts.x.ai/sign-in";
 impl GrokComConfig {
     /// Whether `xai.api_key` auth is disabled. Pinning a team
     /// (`force_login_team_uuid`) implies this — team membership can't be verified
@@ -285,7 +285,7 @@ impl GrokComConfig {
     /// otherwise set `disable_api_key_auth = false` and override it — so the env
     /// is OR-ed in here and cannot be turned back off by a user layer. Trusted
     /// `requirements.toml` already wins over `config.toml` via layer precedence.
-    pub fn api_key_auth_disabled(&self) -> bool {
+    pub(crate) fn api_key_auth_disabled(&self) -> bool {
         self.disable_api_key_auth == Some(true)
             || self.force_login_team_uuid.is_some()
             || env_lockdown_forced()
@@ -294,7 +294,7 @@ impl GrokComConfig {
     /// interactive browser login, external auth provider) must not run — the
     /// pin is fail-closed. Explicit `grok login --devbox` / `--api-key` bypass
     /// this by not consulting automatic flow helpers.
-    pub fn blocks_automatic_oidc(&self) -> bool {
+    pub(crate) fn blocks_automatic_oidc(&self) -> bool {
         matches!(self.preferred_method, Some(PreferredAuthMethod::ApiKey))
     }
     /// The auth.json scope key for this config.
@@ -336,7 +336,7 @@ impl OAuth2ProviderConfig {
         })
     }
     /// Convert to [`OidcAuthConfig`] to reuse the OIDC login flow.
-    pub fn as_oidc(&self) -> OidcAuthConfig {
+    pub(crate) fn as_oidc(&self) -> OidcAuthConfig {
         OidcAuthConfig {
             issuer: self.issuer.clone(),
             client_id: self.client_id.clone(),
@@ -344,7 +344,7 @@ impl OAuth2ProviderConfig {
             audience: None,
         }
     }
-    pub fn base_auth_scope(&self) -> String {
+    pub(crate) fn base_auth_scope(&self) -> String {
         format!("{}::{}", self.issuer.trim_end_matches('/'), self.client_id)
     }
     pub fn auth_scope(&self) -> String {

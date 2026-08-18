@@ -175,8 +175,6 @@ impl AgentViewLayout {
         voice_recording_height: u16,
         shortcuts_height: u16,
         compact: bool,
-        // When true, the top agent status bar has height 0 (no paint/hits).
-        hide_header: bool,
     ) -> Self {
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
         let bottom_vpad = if area.height <= SHORT_TERMINAL_ROWS {
@@ -202,9 +200,13 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let status_bar_height = if hide_header { 0 } else { 1 };
+        let status_h = if crate::appearance::cache::load_hide_header() {
+            0
+        } else {
+            1
+        };
         let mut constraints = vec![
-            Constraint::Length(status_bar_height), // StatusBar (0 when hide_header)
+            Constraint::Length(status_h), // StatusBar
         ];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
@@ -411,6 +413,15 @@ impl AgentViewLayout {
             timeline_width,
         }
     }
+
+    /// Shrink the transcript so a right-docked soft plan pane does not
+    /// cover wrapped scrollback. Call after [`Self::compute`].
+    pub fn reserve_soft_plan_pane(&mut self, pane_width: u16) {
+        let leave_left = 16.min(self.scrollback.width.saturating_sub(1));
+        let pane_width = pane_width.min(self.scrollback.width.saturating_sub(leave_left));
+        self.scrollback.width = self.scrollback.width.saturating_sub(pane_width);
+        self.scrollback_content.width = self.scrollback_content.width.saturating_sub(pane_width);
+    }
     /// Inner area width (for prompt height computation before full layout).
     ///
     /// This computes just the inner width without the full layout split,
@@ -578,6 +589,16 @@ pub fn render_hook_hover_popup(
     let Some(entry) = scrollback.get(hover_idx) else {
         return;
     };
+    let layout_info = scrollback
+        .get_cached_entry_layouts()
+        .and_then(|layouts| layouts.get(hover_idx));
+    if layout_info.is_some_and(|info| {
+        info.verb_group_header && !info.is_expanded_verb_header() && info.group_header_count > 1
+    }) {
+        return;
+    }
+    let is_expanded_verb_header =
+        layout_info.is_some_and(crate::scrollback::EntryLayoutInfo::is_expanded_verb_header);
     if entry.display_mode != crate::scrollback::types::DisplayMode::Collapsed {
         return;
     }
@@ -600,14 +621,19 @@ pub fn render_hook_hover_popup(
     if lines.is_empty() {
         return;
     }
-    let Some((entry_area, _, _)) = scrollback.entry_screen_area(hover_idx, scrollback_area) else {
+    let Some((entry_area, top_clipped, _)) =
+        scrollback.entry_screen_area(hover_idx, scrollback_area)
+    else {
         return;
     };
     let (mouse_col, mouse_row) = mouse_pos;
     if mouse_row < entry_area.y || mouse_row >= entry_area.y + entry_area.height {
         return;
     }
-    let badge_row = entry_area.y;
+    let badge_row = entry_area.y + u16::from(is_expanded_verb_header && !top_clipped);
+    if badge_row >= entry_area.y + entry_area.height {
+        return;
+    }
     let row_start = scrollback_area.x;
     let row_end = scrollback_area.x + scrollback_area.width;
     let row_text: String = (row_start..row_end)
@@ -676,38 +702,10 @@ pub fn render_hook_hover_popup(
         buf.set_line_safe(inner.x, y, &line.content, inner.width);
     }
 }
-/// Paint a static left accent rail (`┃`) in the pane's accent column.
-///
-/// Mirrors the Human green gutter on user prompts: agent-associated side
-/// panes (tasks/subagents, status board) pass `theme.accent_running`
-/// (magenta under DOGE). Always on while the pane is open, not only when
-/// focused — focus chrome still draws the outer selection box separately.
-pub fn paint_side_pane_agent_rail(
-    buf: &mut Buffer,
-    pane_area: Rect,
-    rail_color: ratatui::style::Color,
-) {
-    if pane_area.width == 0 || pane_area.height == 0 {
-        return;
-    }
-    let style = Style::default().fg(rail_color);
-    let bar = crate::glyphs::accent_bar();
-    for y in pane_area.y..pane_area.y.saturating_add(pane_area.height) {
-        if let Some(cell) = buf.cell_mut((pane_area.x, y)) {
-            cell.set_symbol(bar);
-            cell.set_style(style);
-        }
-    }
-}
-
 /// Selection/hover chrome for a side pane (todo / queue / tasks). Focused panes get a dismiss control.
 ///
-/// `focus_border` is the left/right rail colour while **focused** (role chrome:
-/// agent magenta / queue green). Hovered-but-unfocused uses `theme.hover_border`
-/// so soft hover cue stays distinct from keyboard focus.
-/// Agent-associated panes (tasks/subagents, status board, catalog) pass
-/// `theme.accent_running` (magenta under DOGE). Human queue keeps
-/// `theme.selection_border` / `theme.accent_user` as the caller prefers.
+/// `focus_border` is the left/right rail colour while focused (role chrome).
+/// Hovered-but-unfocused uses `theme.hover_border`.
 pub fn render_todo_chrome(
     buf: &mut Buffer,
     todo_area: Rect,
@@ -735,15 +733,12 @@ pub fn render_todo_chrome(
 }
 /// Like [`render_todo_chrome`], with optional close label (queue uses `[close]`).
 ///
-/// `action_label` is an optional chrome control left of close (todo clear-finished
-/// icon, e.g. `[−]`). Callers decide when to pass a label: product clear-finished
-/// passes it when the todo board is **open** and finished rows exist (focused or
-/// not). No paint when the board is hidden or there is nothing to clear.
+/// `action_label` is an optional chrome control left of close (todo
+/// clear-finished icon, e.g. `[−]`). Product clear-finished passes it when
+/// the todo board is open and finished rows exist (focused or not).
 /// `action_enabled` controls live hit vs dim paint when a label is supplied.
 /// Close and role-coloured rails stay focus/hover gated; action can paint
 /// without rails via the unfocused action-only path.
-/// `focus_border` paints the side rails when focused; hover-only uses
-/// `theme.hover_border` (see [`render_todo_chrome`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_todo_chrome_with_close_label(
     buf: &mut Buffer,
@@ -763,10 +758,6 @@ pub fn render_todo_chrome_with_close_label(
         return None;
     }
     let layout = HorizontalLayout::new(todo_area, layout_cfg);
-    // Focus gets the role colour (magenta agent / green queue). Hover-only
-    // keeps the softer theme.hover_border so the two cues stay distinct on
-    // GrokNight and DOGE alike. Action (when provided) paints next to close
-    // with focus chrome; unfocused open boards still paint action-only.
     if focused || hovered {
         let color = if focused {
             focus_border
@@ -784,9 +775,6 @@ pub fn render_todo_chrome_with_close_label(
         sel.render(buf);
         return Some(sel);
     }
-    // Unfocused + no hover: product clear-finished still passes a label when
-    // the board is open with finished rows. Action-only path paints the
-    // control without focus rails (no always-on smash into status chrome).
     if action_label.is_some() {
         let sel = SelectionBox::new(
             layout.selection_area(),
@@ -880,21 +868,6 @@ pub fn render_todo_badge_spans(
         Style::default().fg(theme.gray_dim).bg(theme.bg_base)
     };
     if matches!(format, TodoBadgeFormat::Default) {
-        // Points mode: leaf fib sizes (e.g. "3/8 pts"); else legacy done/total counts.
-        if counts.points_mode {
-            if counts.total_points == 0 {
-                return None;
-            }
-            return Some(vec![
-                Span::styled(counts.completed_points.to_string(), count_style),
-                Span::styled("/", dim_style),
-                Span::styled(counts.total_points.to_string(), count_style),
-                Span::styled(
-                    " pts".to_string(),
-                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-                ),
-            ]);
-        }
         let total = counts.total_excluding_cancelled();
         if total == 0 {
             return None;
@@ -980,8 +953,9 @@ pub fn render_todo_badge_spans(
     ));
     Some(spans)
 }
-/// Space:prompt hint — shared across multiple scrollback hint branches.
-fn space_prompt_hint() -> HintItem {
+/// The scrollback's default focus hint: `Space` leaves for the prompt. A
+/// parked blocking card replaces it with its own (pinned) route back.
+pub fn prompt_focus_hint() -> HintItem {
     use crate::input::key::KeyShortcut;
     use crossterm::event::{KeyCode, KeyModifiers};
     HintItem {
@@ -992,72 +966,6 @@ fn space_prompt_hint() -> HintItem {
         pinned: false,
     }
 }
-
-/// What plain Enter does for the agent composer (footer label truth).
-///
-/// Callers pass the same predicates dispatch uses: turn running (with parked
-/// empty wait already collapsed to "not running" for the footer when Enter
-/// cancel-and-sends), background-subagent queue hold, and whether a follow-up
-/// is already queued for empty-Enter soft-interject.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnterPromptMode {
-    /// Clean idle: enqueue and drain immediately.
-    Send,
-    /// Mid-turn follow-up, or idle while background subagents hold drain.
-    Queue,
-    /// Empty composer + mid-turn + visible queue: soft-interject top row.
-    Interject,
-    /// Composer cannot submit (empty draft and no empty-Enter interject path).
-    Blocked,
-}
-
-impl EnterPromptMode {
-    /// Footer / shortcuts-bar label for the Enter key, if any.
-    pub fn footer_label(self) -> Option<&'static str> {
-        match self {
-            Self::Send => Some("send"),
-            Self::Queue => Some("queue"),
-            Self::Interject => Some("interject"),
-            Self::Blocked => None,
-        }
-    }
-}
-
-/// Resolve what bare Enter does for the agent composer.
-///
-/// Mirrors dispatch:
-/// - sendable text + primary turn running → queue
-/// - sendable text + primary idle → send (live background subagents alone do
-///   **not** force queue; they run in parallel with a new main turn)
-/// - empty composer + mid-turn + queued follow-up → soft-interject
-/// - otherwise → blocked (no Enter submit hint)
-///
-/// `turn_running_for_footer` should be `session.is_turn_running() &&
-/// !renders_parked()` so a parked empty sendable wait still labels Enter as
-/// send (cancel-and-send), matching live drain behavior.
-///
-/// `holds_queue_for_background` is accepted for call-site compatibility but
-/// ignored: background children no longer hold Enter (operator 2026-08-09).
-pub fn enter_prompt_mode(
-    composer_can_send: bool,
-    turn_running_for_footer: bool,
-    holds_queue_for_background: bool,
-    has_queued_follow_up: bool,
-) -> EnterPromptMode {
-    let _ = holds_queue_for_background;
-    if composer_can_send {
-        if turn_running_for_footer {
-            EnterPromptMode::Queue
-        } else {
-            EnterPromptMode::Send
-        }
-    } else if turn_running_for_footer && has_queued_follow_up {
-        EnterPromptMode::Interject
-    } else {
-        EnterPromptMode::Blocked
-    }
-}
-
 /// Build the hints list for the shortcuts bar based on current state.
 ///
 /// Each pane contributes its own hints dynamically. The registry provides
@@ -1069,12 +977,14 @@ pub fn enter_prompt_mode(
 /// `group_header_label` ("expand"/"collapse") marks a selected group header;
 /// it replaces the fold and Enter:open hints with a single Enter toggle hint.
 ///
-/// `has_live_background_subagents` is true when standalone background
-/// subagents are still live (pause chrome / live-work surfaces). It does
-/// **not** change Enter:queue; only a running primary turn does.
+/// `focus_hint` is how the scrollback says the keyboard can leave it —
+/// [`prompt_focus_hint`], or a caller-supplied replacement. A pinned one
+/// leads the bar and is offered once; an unpinned one is offered only in the
+/// selection states where moving on is the useful next step.
 #[allow(clippy::too_many_arguments)]
 pub fn build_hints(
     active_pane: ActivePane,
+    focus_hint: HintItem,
     prompt: &PromptWidget,
     registry: &ActionRegistry,
     is_editing_queued: bool,
@@ -1091,7 +1001,6 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
-    has_live_background_subagents: bool,
     esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
@@ -1107,11 +1016,6 @@ pub fn build_hints(
                 crate::key!('h'),
                 if show_done { "hide done" } else { "show done" },
             ));
-            if let Some(def) = registry.find(ActionId::ClearCompletedTodos) {
-                hints.push(def.hint());
-            } else {
-                hints.push(HintItem::new(crate::key!('X'), "clear finished"));
-            }
             hints
         }
         ActivePane::Queue => {
@@ -1121,8 +1025,6 @@ pub fn build_hints(
                 HintItem::paired(crate::key!('J'), crate::key!('K'), "reorder"),
                 HintItem::new(crate::key!('y'), "copy"),
             ];
-            // Soft-interject mid-turn only (background children alone do not
-            // force queue / idle Interject).
             if is_turn_running && let Some(def) = registry.find(ActionId::InterjectPrompt) {
                 hints.push(def.hint());
             }
@@ -1161,29 +1063,16 @@ pub fn build_hints(
             } else {
                 crate::key!(Enter, SHIFT)
             };
-            // Enter label matches dispatch (send / queue / soft-interject).
-            // Live background subagents do not force queue (pass false).
-            let enter_mode = enter_prompt_mode(
-                prompt.can_send(),
-                is_turn_running,
-                false,
-                has_queued_follow_up,
-            );
+            let submit_label = if is_turn_running { "queue" } else { "send" };
             if let Some(key) = registry.key_for(ActionId::SendPrompt) {
                 if prompt.paste_element_at_cursor().is_some() {
                     hints.push(HintItem::new(key, "expand"));
-                } else if let Some(submit_label) = enter_mode.footer_label() {
-                    if multiline_mode && prompt.can_send() {
-                        // Multiline: modified Enter submits; bare Enter is newline
-                        // (except empty mid-turn queue soft-interject, still bare Enter).
-                        if matches!(enter_mode, EnterPromptMode::Interject) {
-                            hints.push(HintItem::new(key, submit_label));
-                        } else {
-                            hints.push(HintItem::new(newline_key, submit_label));
-                        }
-                    } else {
-                        hints.push(HintItem::new(key, submit_label));
-                    }
+                } else if multiline_mode && prompt.can_send() {
+                    hints.push(HintItem::new(newline_key, submit_label));
+                } else if prompt.can_send() {
+                    hints.push(HintItem::new(key, submit_label));
+                } else if is_turn_running && has_queued_follow_up {
+                    hints.push(HintItem::new(key, "send now"));
                 }
             }
             if shift_enter_unavailable && !multiline_mode && prompt.can_send() {
@@ -1207,18 +1096,6 @@ pub fn build_hints(
                     continue;
                 }
                 if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
-                    continue;
-                }
-                // Live expand vs collapse verb from scrollback state — not the
-                // static ActionDef "expand/collapse thinking" label. Hidden when
-                // always-expand-thinking is on (chord is pointless; no dead label).
-                if def.id == ActionId::ExpandAllThinking {
-                    if crate::appearance::cache::load_always_expand_thinking() {
-                        continue;
-                    }
-                    let mut item = def.hint();
-                    item.label = std::borrow::Cow::Borrowed(thinking_label);
-                    hints.push(item);
                     continue;
                 }
                 hints.push(def.hint());
@@ -1269,6 +1146,14 @@ pub fn build_hints(
         }
         ActivePane::Scrollback => {
             let mut hints = Vec::new();
+            if focus_hint.pinned {
+                hints.push(focus_hint.clone());
+            }
+            let offer_focus_hint = |hints: &mut Vec<HintItem>| {
+                if !focus_hint.pinned {
+                    hints.push(focus_hint.clone());
+                }
+            };
             let nothing_special = !selected_is_agent_message
                 && !selected_is_user_prompt
                 && !selected_is_credit_limit
@@ -1276,13 +1161,13 @@ pub fn build_hints(
                 && group_header_label.is_none()
                 && !selected_supports_fullscreen;
             if nothing_special {
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_credit_limit {
                 if let Some(key) = registry.key_for(ActionId::OpenBlockViewer) {
                     hints.push(HintItem::new(key, "open"));
                 }
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_agent_message {
                 if vim_mode
@@ -1291,7 +1176,7 @@ pub fn build_hints(
                 {
                     hints.push(HintItem::new(key, "copy"));
                 }
-                hints.push(space_prompt_hint());
+                offer_focus_hint(&mut hints);
             }
             if selected_is_user_prompt {
                 let user_collapsed = fold_label == Some("expand");
@@ -1309,7 +1194,7 @@ pub fn build_hints(
                     hints.push(HintItem::new(key, thinking_label));
                 }
                 if !user_collapsed {
-                    hints.push(space_prompt_hint());
+                    offer_focus_hint(&mut hints);
                 }
             }
             let user_collapsed_already_pushed =
@@ -1351,9 +1236,7 @@ pub fn build_hints(
                     registry.key_for(ActionId::NextTurn),
                 )
             {
-                let mut hint = HintItem::paired(l, h, "turn").pinned();
-                hint.custom_display = Some("Shift+l/h");
-                hints.push(hint);
+                hints.push(HintItem::paired(l, h, "turn").pinned());
             }
             if !selected_is_user_prompt
                 && !crate::appearance::cache::load_always_expand_thinking()
@@ -1398,25 +1281,9 @@ pub fn build_hints(
         }
         hints.push(hint);
     }
-    // Work B: advertise global pause while a turn runs or background subagents
-    // are live (same live-work surface as status-row pause chrome). Soft stop
-    // stays chord-only (no footer button). Live children do not force queue.
-    if (is_turn_running || has_live_background_subagents)
-        && let Some(def) = registry.find(ActionId::ToggleGlobalPause)
-    {
-        let mut hint = def.hint();
-        // Short footer label; long_help still names fearless global pause.
-        hint.label = std::borrow::Cow::Borrowed("pause");
-        hints.push(hint);
-    }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
-    // Soft-interject only while the primary turn is busy (not merely because
-    // background subagents are running).
-    let interject_available =
-        ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
-            || (is_turn_running && has_queued_follow_up);
     if matches!(active_pane, ActivePane::Prompt)
-        && interject_available
+        && ActionRegistry::interjection_possible(is_turn_running, has_composer_payload)
         && let Some(def) = registry.find(ActionId::InterjectPrompt)
     {
         hints.push(def.hint());
@@ -1465,6 +1332,7 @@ mod tests {
     ) -> Vec<HintItem> {
         build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1483,7 +1351,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
@@ -1494,11 +1361,119 @@ mod tests {
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
     }
+    fn hooked_read_state(member_count: usize, viewport: Rect) -> ScrollbackState {
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+        crate::appearance::cache::set_group_tool_verbs(true);
+        crate::appearance::cache::set_show_thinking_blocks(false);
+        let mut state = ScrollbackState::new();
+        let first = state.push_block(RenderBlock::read("first.rs", None));
+        for i in 1..member_count {
+            state.push_block(RenderBlock::read(format!("member-{i}.rs"), None));
+        }
+        state.attach_hooks(
+            first,
+            HookPhase::Post,
+            vec![HookRunEntry {
+                name: "hover-hook".to_owned(),
+                status: HookRunStatus::Success {
+                    elapsed: std::time::Duration::from_millis(1),
+                },
+                output: None,
+            }],
+        );
+        state.prepare_layout(viewport.width, viewport.height);
+        state
+    }
+    fn render_hook_frame(state: &ScrollbackState, viewport: Rect) -> Buffer {
+        let layouts = state.get_cached_entry_layouts().expect("layout cache");
+        let entries = state.entries_in_range(0..state.len());
+        let mut buf = Buffer::empty(viewport);
+        crate::scrollback::render::render_scrolled_entries_with_scratch(
+            &mut buf,
+            viewport,
+            &entries,
+            0,
+            None,
+            &Theme::current(),
+            state.appearance(),
+            layouts,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            &[],
+            Some((state.group_spans(), 0)),
+            state.cwd(),
+        );
+        buf
+    }
+    fn hover_hook_badge(buf: &mut Buffer, state: &ScrollbackState, viewport: Rect, row: u16) {
+        let row_text: String = (viewport.left()..viewport.right())
+            .map(|x| buf[(x, row)].symbol())
+            .collect();
+        let badge_col = viewport.x + row_text.find("[hooks:").expect("rendered hook badge") as u16;
+        render_hook_hover_popup(
+            buf,
+            viewport,
+            state,
+            Some(0),
+            (badge_col, row),
+            &Theme::current(),
+        );
+    }
+    fn frame_text(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom())
+            .flat_map(|y| (buf.area.left()..buf.area.right()).map(move |x| buf[(x, y)].symbol()))
+            .collect()
+    }
+    #[test]
+    fn hook_hover_popup_allows_singleton_verb_header() {
+        let viewport = Rect::new(0, 0, 100, 12);
+        let state = hooked_read_state(1, viewport);
+        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
+        assert!(layout.verb_group_header);
+        assert_eq!(layout.group_header_count, 1);
+        assert!(!layout.is_expanded_verb_header());
+        let mut buf = render_hook_frame(&state, viewport);
+        hover_hook_badge(&mut buf, &state, viewport, 0);
+        assert!(frame_text(&buf).contains("hover-hook"));
+    }
+    #[test]
+    fn hook_hover_popup_allows_expanded_verb_member_zero() {
+        let viewport = Rect::new(0, 0, 100, 12);
+        let mut state = hooked_read_state(2, viewport);
+        state.set_selected(Some(0));
+        assert!(state.toggle_group_expansion());
+        state.set_selected(None);
+        state.prepare_layout(viewport.width, viewport.height);
+        assert!(
+            state.get_cached_entry_layouts().expect("layout cache")[0].is_expanded_verb_header()
+        );
+        let mut buf = render_hook_frame(&state, viewport);
+        hover_hook_badge(&mut buf, &state, viewport, 1);
+        assert!(frame_text(&buf).contains("hover-hook"));
+    }
+    #[test]
+    fn hook_hover_popup_skips_collapsed_multi_member_verb_header() {
+        let viewport = Rect::new(0, 0, 100, 12);
+        let state = hooked_read_state(2, viewport);
+        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
+        assert!(layout.verb_group_header);
+        assert_eq!(layout.group_header_count, 2);
+        assert!(!layout.is_expanded_verb_header());
+        let mut buf = render_hook_frame(&state, viewport);
+        hover_hook_badge(&mut buf, &state, viewport, 0);
+        assert!(!frame_text(&buf).contains("hover-hook"));
+    }
     #[test]
     fn demotion_hint_uses_registered_ctrl_b_binding() {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1513,7 +1488,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1535,6 +1509,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1549,7 +1524,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1701,6 +1675,7 @@ mod tests {
         }
         build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             registry,
             false,
@@ -1715,7 +1690,6 @@ mod tests {
             false,
             false,
             vim_mode,
-            false,
             false,
             false,
             false,
@@ -1806,6 +1780,7 @@ mod tests {
         let registry = ActionRegistry::defaults();
         let hints = build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -1820,7 +1795,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1836,174 +1810,6 @@ mod tests {
             "ExitSession (home) must not appear in prompt-focused bar"
         );
     }
-
-    /// Contract: footer Ctrl+E verb follows live fold state — "expand thinking"
-    /// when collapsed / not fully open, "collapse thinking" when expanded.
-    /// Never the static ActionDef "expand/collapse thinking" (dogfood: prompt
-    /// focus was still using the registry label).
-    #[test]
-    fn prompt_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
-        crate::appearance::cache::set_always_expand_thinking(false);
-        let registry = ActionRegistry::defaults();
-        for thinking_label in ["expand thinking", "collapse thinking"] {
-            let hints = build_hints(
-                ActivePane::Prompt,
-                &PromptWidget::default(),
-                &registry,
-                false,
-                None,
-                None,
-                thinking_label,
-                false,
-                false,
-                None,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-            );
-            let thinking = hints
-                .iter()
-                .find(|h| h.label.as_ref().contains("thinking"))
-                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
-            assert_eq!(
-                thinking.label.as_ref(),
-                thinking_label,
-                "prompt footer must use live thinking_label, not ActionDef static"
-            );
-            assert_ne!(
-                thinking.label.as_ref(),
-                "expand/collapse thinking",
-                "must not show both expand and collapse at once"
-            );
-        }
-    }
-
-    /// Same contract on scrollback-focused footer (already wired; guard regression).
-    #[test]
-    fn scrollback_ctrl_e_thinking_hint_reflects_expand_or_collapse_state() {
-        crate::appearance::cache::set_always_expand_thinking(false);
-        let registry = ActionRegistry::defaults();
-        for thinking_label in ["expand thinking", "collapse thinking"] {
-            let hints = build_hints(
-                ActivePane::Scrollback,
-                &PromptWidget::default(),
-                &registry,
-                false,
-                None,
-                None,
-                thinking_label,
-                false,
-                false,
-                None,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-            );
-            let thinking = hints
-                .iter()
-                .find(|h| h.label.as_ref().contains("thinking"))
-                .unwrap_or_else(|| panic!("expected Ctrl+E thinking hint; got {hints:?}"));
-            assert_eq!(thinking.label.as_ref(), thinking_label);
-            assert_ne!(thinking.label.as_ref(), "expand/collapse thinking");
-        }
-    }
-
-    /// Contract: when always_expand_thinking is on, footers omit the Ctrl+E
-    /// expand/collapse thinking affordance (no dead label).
-    #[test]
-    fn always_expand_thinking_hides_ctrl_e_footer_hint() {
-        crate::appearance::cache::set_always_expand_thinking(true);
-        let registry = ActionRegistry::defaults();
-        for pane in [ActivePane::Prompt, ActivePane::Scrollback] {
-            let hints = build_hints(
-                pane,
-                &PromptWidget::default(),
-                &registry,
-                false,
-                None,
-                None,
-                "expand thinking",
-                false,
-                false,
-                None,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-            );
-            assert!(
-                !hints.iter().any(|h| h.label.as_ref().contains("thinking")),
-                "always_expand_thinking must hide Ctrl+E thinking hint on {pane:?}; got {hints:?}"
-            );
-        }
-        crate::appearance::cache::set_always_expand_thinking(false);
-        let hints = build_hints(
-            ActivePane::Prompt,
-            &PromptWidget::default(),
-            &registry,
-            false,
-            None,
-            None,
-            "expand thinking",
-            false,
-            false,
-            None,
-            false,
-            false,
-            false,
-            false,
-            true,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert!(
-            hints.iter().any(|h| h.label.as_ref().contains("thinking")),
-            "with always_expand_thinking off, Ctrl+E thinking hint must return"
-        );
-    }
     fn prompt_hints_with_text(
         multiline_mode: bool,
         shift_enter_unavailable: bool,
@@ -2015,25 +1821,12 @@ mod tests {
         shift_enter_unavailable: bool,
         is_turn_running: bool,
     ) -> Vec<HintItem> {
-        prompt_hints_with_text_turn_and_hold(
-            multiline_mode,
-            shift_enter_unavailable,
-            is_turn_running,
-            false,
-        )
-    }
-
-    fn prompt_hints_with_text_turn_and_hold(
-        multiline_mode: bool,
-        shift_enter_unavailable: bool,
-        is_turn_running: bool,
-        has_live_background_subagents: bool,
-    ) -> Vec<HintItem> {
         let mut prompt = PromptWidget::default();
         prompt.textarea.insert_str("hello");
         let registry = ActionRegistry::defaults();
         build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &prompt,
             &registry,
             false,
@@ -2050,7 +1843,6 @@ mod tests {
             true,
             false,
             is_turn_running,
-            has_live_background_subagents,
             false,
             false,
             false,
@@ -2070,7 +1862,7 @@ mod tests {
         );
     }
     #[test]
-    fn prompt_running_submit_hint_is_queue_and_interject() {
+    fn prompt_running_submit_hint_is_queue_and_send_now() {
         let hints = prompt_hints_with_text_and_turn(false, false, true);
         let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
         assert!(
@@ -2082,83 +1874,20 @@ mod tests {
             "mid-turn must not mislabel Enter as send; got {labels:?}"
         );
         assert!(
-            labels.contains(&"interject"),
-            "mid-turn with composer text must advertise the soft-interject chord; got {labels:?}"
+            labels.contains(&"send now"),
+            "mid-turn with composer text must advertise the send-now (interject) chord; got {labels:?}"
         );
     }
-
-    /// Named contract: plain Enter outcome matches dispatch predicates.
-    ///
-    /// | composer | turn running | live bg children | queued | mode |
-    /// |----------|--------------|------------------|--------|------|
-    /// | text     | no           | *                | *      | Send |
-    /// | text     | yes          | *                | *      | Queue |
-    /// | empty    | yes          | *                | yes    | Interject |
-    /// | empty    | no           | *                | *      | Blocked |
-    /// | empty    | yes          | *                | no     | Blocked |
-    ///
-    /// Live background subagents alone do **not** force Queue (operator 2026-08-09).
-    #[test]
-    fn enter_prompt_mode_matrix_matches_dispatch_predicates() {
-        use EnterPromptMode::*;
-        // (can_send, turn_running, live_bg_children, has_queued, expected)
-        let cases = [
-            (true, false, false, false, Send),
-            (true, false, false, true, Send),
-            (true, true, false, false, Queue),
-            (true, true, true, true, Queue),
-            // Primary idle + live children → still Send (not Queue).
-            (true, false, true, false, Send),
-            (true, false, true, true, Send),
-            (false, true, false, true, Interject),
-            (false, true, true, true, Interject),
-            (false, false, true, true, Blocked), // idle: empty Enter does not soft-interject
-            (false, false, false, false, Blocked),
-            (false, true, false, false, Blocked),
-            (false, false, true, false, Blocked),
-        ];
-        for (can_send, turn, hold, queued, expected) in cases {
-            let got = enter_prompt_mode(can_send, turn, hold, queued);
-            assert_eq!(
-                got, expected,
-                "enter_prompt_mode(can_send={can_send}, turn={turn}, live_bg={hold}, queued={queued})"
-            );
-        }
-    }
-
-    /// Primary idle + live background subagents: Enter still sends a normal
-    /// main turn (children run in parallel; do not force queue-only).
-    #[test]
-    fn prompt_idle_with_live_subagents_submit_hint_is_send() {
-        let hints = prompt_hints_with_text_turn_and_hold(false, false, false, true);
-        let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
-        assert!(
-            labels.contains(&"send"),
-            "idle + live subagents must advertise Enter:send; got {labels:?}"
-        );
-        assert!(
-            !labels.contains(&"queue"),
-            "idle + live subagents must not force Enter:queue; got {labels:?}"
-        );
-        assert!(
-            !labels.contains(&"interject"),
-            "idle primary: Interject is mid-turn only; got {labels:?}"
-        );
-        // Pause stays discoverable while children are live.
-        assert!(
-            labels.contains(&"pause"),
-            "idle + live subagents must still advertise pause; got {labels:?}"
-        );
-    }
-    /// Empty composer + mid-turn queue: bare Enter soft-interjects in both normal
+    /// Empty composer + mid-turn queue: bare Enter is send-now in both normal
     /// and multiline modes (multiline only inserts newline when there is text).
     #[test]
-    fn prompt_empty_mid_turn_queue_advertises_interject_including_multiline() {
+    fn prompt_empty_mid_turn_queue_advertises_send_now_including_multiline() {
         for multiline in [false, true] {
             let prompt = PromptWidget::default();
             let registry = ActionRegistry::defaults();
             let hints = build_hints(
                 ActivePane::Prompt,
+                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -2176,7 +1905,6 @@ mod tests {
                 false,
                 true,
                 false,
-                false,
                 true,
                 false,
                 false,
@@ -2186,8 +1914,8 @@ mod tests {
             );
             let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
             assert!(
-                labels.contains(&"interject"),
-                "empty composer mid-turn with queue must advertise Enter:interject \
+                labels.contains(&"send now"),
+                "empty composer mid-turn with queue must advertise Enter:send now \
                  (multiline={multiline}); got {labels:?}"
             );
         }
@@ -2207,6 +1935,7 @@ mod tests {
         {
             let hints = build_hints(
                 ActivePane::Prompt,
+                prompt_focus_hint(),
                 &prompt,
                 &registry,
                 false,
@@ -2223,7 +1952,6 @@ mod tests {
                 true,
                 false,
                 true,
-                false,
                 esc_would_cancel_turn,
                 false,
                 false,
@@ -2253,6 +1981,7 @@ mod tests {
         let search = ScrollbackSearchState::open();
         let hints = build_hints(
             ActivePane::Scrollback,
+            prompt_focus_hint(),
             &PromptWidget::default(),
             &registry,
             false,
@@ -2269,7 +1998,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -2305,6 +2033,7 @@ mod tests {
         prompt.textarea.insert_str("edited row");
         let hints = build_hints(
             ActivePane::Prompt,
+            prompt_focus_hint(),
             &prompt,
             &registry,
             true,
@@ -2321,7 +2050,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -2450,11 +2178,24 @@ mod tests {
             0,
             1,
             false,
-            false,
         )
     }
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
+    }
+    #[test]
+    fn hide_header_zeroes_status_bar_height() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_hide_header(true);
+            let area = Rect::new(0, 0, 80, 40);
+            let layout = layout_with_rows(area, 0, 0, 0);
+            assert_eq!(
+                layout.status_bar.height, 0,
+                "[ui] hide_header must zero the agent status bar"
+            );
+        })
+        .join()
+        .unwrap();
     }
     /// Minimal layout with a timeline rail request — hides the cfg-dependent
     /// arity of `compute` like `layout_with_rows` does.
@@ -2484,67 +2225,7 @@ mod tests {
             0,
             1,
             false,
-            false,
         )
-    }
-
-    #[test]
-    fn hide_header_zeroes_status_bar_height() {
-        let area = Rect::new(0, 0, 80, 40);
-        let layout_cfg = LayoutConfig::default();
-        let scrollbar_cfg = ScrollbarConfig::default();
-        let shown = AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            &scrollbar_cfg,
-            0,
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            false,
-            false,
-        );
-        let hidden = AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            &scrollbar_cfg,
-            0,
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            false,
-            true,
-        );
-        assert_eq!(shown.status_bar.height, 1);
-        assert_eq!(hidden.status_bar.height, 0);
-        assert!(
-            hidden.scrollback.height >= shown.scrollback.height,
-            "hiding header should free space for scrollback (shown={}, hidden={})",
-            shown.scrollback.height,
-            hidden.scrollback.height
-        );
     }
     #[test]
     fn timeline_rail_replaces_the_scrollbar_column() {
@@ -2730,7 +2411,6 @@ mod tests {
             pending: 2,
             completed: 2,
             cancelled: 0,
-            ..Default::default()
         };
         let spans =
             render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
@@ -2745,7 +2425,6 @@ mod tests {
             pending: 1,
             completed: 2,
             cancelled: 1,
-            ..Default::default()
         };
         let spans = render_todo_badge_spans(
             &with_cancelled,
@@ -2760,26 +2439,6 @@ mod tests {
             text.starts_with("2/3"),
             "cancelled tasks are excluded from the total, got {text:?}"
         );
-    }
-
-    /// Points mode badge shows `done_pts/total_pts pts` from leaf sizes.
-    #[test]
-    fn todo_badge_points_mode_renders_pts_fraction() {
-        let theme = Theme::current();
-        let counts = super::super::todo_pane::TodoCounts {
-            in_progress: 1,
-            pending: 1,
-            completed: 1,
-            cancelled: 0,
-            completed_points: 2,
-            total_points: 5,
-            points_mode: true,
-        };
-        let spans =
-            render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
-                .expect("badge renders in points mode");
-        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "2/5 pts");
     }
     /// No todos → no badge.
     #[test]
@@ -2800,7 +2459,6 @@ mod tests {
             pending: 0,
             completed: 0,
             cancelled: 3,
-            ..Default::default()
         };
         assert!(
             render_todo_badge_spans(
@@ -2814,133 +2472,8 @@ mod tests {
         );
     }
 
-    /// Agent / subagent list and status board always-on left rail is magenta
-    /// (`accent_running`) under DOGE — not cyan system chrome and not white
-    /// `selection_border`.
-    #[test]
-    fn agent_side_pane_rail_is_magenta_under_doge() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let theme = Theme::current();
-        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
-        let cyan = ratatui::style::Color::Rgb(0, 255, 255);
-        let white = ratatui::style::Color::Rgb(255, 255, 255);
-        assert_eq!(
-            theme.accent_running, magenta,
-            "DOGE accent_running must be pure magenta under TrueColor pin"
-        );
-
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
-        let area = Rect::new(2, 2, 30, 6);
-        paint_side_pane_agent_rail(&mut buf, area, theme.accent_running);
-
-        for y in area.y..area.y + area.height {
-            let cell = buf.cell((area.x, y)).expect("rail cell");
-            assert_eq!(
-                cell.fg, theme.accent_running,
-                "agent rail y={y} must be accent_running magenta"
-            );
-            assert_ne!(cell.fg, cyan, "agent rail must not be system cyan");
-            assert_ne!(
-                cell.fg, white,
-                "agent rail must not be white selection_border"
-            );
-            assert_eq!(
-                cell.symbol(),
-                crate::glyphs::accent_bar(),
-                "agent rail paints accent_bar glyph"
-            );
-        }
-    }
-
-    /// Focused status-board / tasks chrome left border uses the caller-supplied
-    /// agent magenta, not white `selection_border`.
-    #[test]
-    fn agent_side_pane_focus_chrome_uses_magenta_not_white() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let theme = Theme::current();
-        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
-        assert_eq!(theme.accent_running, magenta);
-        assert_eq!(
-            theme.selection_border,
-            ratatui::style::Color::Rgb(255, 255, 255)
-        );
-
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
-        let area = Rect::new(2, 2, 30, 6);
-        let layout_cfg = LayoutConfig::default();
-        render_todo_chrome(
-            &mut buf,
-            area,
-            &layout_cfg,
-            true, // focused
-            false,
-            false,
-            &theme,
-            theme.accent_running,
-        )
-        .expect("focused chrome renders");
-
-        let layout = HorizontalLayout::new(area, &layout_cfg);
-        let sel = layout.selection_area();
-        let left = buf.cell((sel.x, sel.y)).expect("left border cell");
-        assert_eq!(
-            left.fg, magenta,
-            "focused agent pane left border must be magenta"
-        );
-        assert_ne!(
-            left.fg, theme.selection_border,
-            "must not use white selection_border for agent panes"
-        );
-    }
-
-    /// Hovered-but-unfocused side-pane chrome uses soft `hover_border`, not the
-    /// role `focus_border` (magenta). Focus and hover cues stay distinct.
-    #[test]
-    fn agent_side_pane_hover_chrome_uses_hover_border_not_focus_border() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let theme = Theme::current();
-        let magenta = ratatui::style::Color::Rgb(255, 0, 255);
-        assert_eq!(theme.accent_running, magenta);
-        // DOGE hover_border is pure white — distinct from magenta focus.
-        assert_eq!(
-            theme.hover_border,
-            ratatui::style::Color::Rgb(255, 255, 255)
-        );
-
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
-        let area = Rect::new(2, 2, 30, 6);
-        let layout_cfg = LayoutConfig::default();
-        render_todo_chrome(
-            &mut buf,
-            area,
-            &layout_cfg,
-            false, // not focused
-            true,  // hovered
-            false,
-            &theme,
-            theme.accent_running, // focus_border would be magenta if wrongly used
-        )
-        .expect("hovered chrome renders");
-
-        let layout = HorizontalLayout::new(area, &layout_cfg);
-        let sel = layout.selection_area();
-        let left = buf.cell((sel.x, sel.y)).expect("left border cell");
-        assert_eq!(
-            left.fg, theme.hover_border,
-            "hover-only chrome must use theme.hover_border"
-        );
-        assert_ne!(
-            left.fg, magenta,
-            "hover-only must not paint focus_border (accent_running)"
-        );
-    }
-
     /// Named contract: clear-finished label paints when supplied — focused
-    /// (next to close) **and** unfocused action-only (open board path). No
-    /// label → no chrome. Compact `[−]`, never empty-set / long label.
+    /// (next to close) and unfocused action-only (open board path).
     #[test]
     fn clear_finished_chrome_paints_when_label_supplied() {
         let _pin = crate::theme::cache::pin_theme();
@@ -2950,7 +2483,6 @@ mod tests {
         let layout_cfg = LayoutConfig::default();
         let chrome = crate::glyphs::clear_finished_button();
 
-        // Unfocused, no label: no chrome (hidden board / nothing finished).
         let unfocused_none = render_todo_chrome_with_close_label(
             &mut buf,
             area,
@@ -2970,7 +2502,6 @@ mod tests {
             "unfocused without clear label must not paint chrome"
         );
 
-        // Unfocused + clear label: action-only paints `[−]` (open board path).
         let mut buf_unf = Buffer::empty(Rect::new(0, 0, 50, 12));
         let unfocused = render_todo_chrome_with_close_label(
             &mut buf_unf,
@@ -3003,7 +2534,6 @@ mod tests {
         );
         assert!(!painted_unf.contains('\u{2205}'));
 
-        // Focused + clear label: paints icon left of close.
         let mut buf2 = Buffer::empty(Rect::new(0, 0, 50, 12));
         let focused = render_todo_chrome_with_close_label(
             &mut buf2,
@@ -3062,7 +2592,6 @@ mod tests {
             theme.accent_running,
         )
         .expect("focused");
-        // Generic path: label without focus still reserves close slot.
         let action_only = render_todo_chrome_with_close_label(
             &mut buf,
             area,

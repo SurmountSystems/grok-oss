@@ -8,10 +8,53 @@ use super::agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
+    http_status_from_error,
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
-/// Typed progress message for long-running effects (session restore, `/rebuild`).
+/// Floor for the session create/load RPCs.
+const SESSION_RPC_FLOOR: std::time::Duration = std::time::Duration::from_secs(180);
+/// Headroom over the agent-side `.envrc` budget for the rest of session setup.
+const SESSION_RPC_SLACK: std::time::Duration = std::time::Duration::from_secs(50);
+/// Always covers the agent-side `.envrc` budget so the backstop cannot fire
+/// before the agent's own deadline. Reads `GROK_ENVRC_TIMEOUT_SECS` in this
+/// process; the agent inherits the same environment.
+pub(super) fn session_rpc_timeout() -> std::time::Duration {
+    SESSION_RPC_FLOOR.max(xai_grok_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
+}
+/// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming
+/// `action` instead of an eternal spinner.
+pub(super) async fn acp_send_bounded<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    match tokio::time::timeout(timeout, acp_send(request, tx)).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            Err(
+                acp::Error::new(
+                    acp::ErrorCode::InternalError.into(),
+                    format_session_rpc_timeout(action, timeout),
+                ),
+            )
+        }
+    }
+}
+/// Operator-facing session RPC timeout copy.
+pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "{action} timed out after {}. It may still finish in the background; \
+         retrying right away can run into the same delay.",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+/// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
     pub agent_id: AgentId,
@@ -94,7 +137,8 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Rate-limit errors: free-usage paywall, else server detail (with API-key
 /// rewrite when the body pushes personal SuperGrok), else auth-aware fallback
 /// (see [`format_rate_limited_user_message`]).
-/// All other errors are sanitized to remove internal service names and jargon.
+/// All other errors render as the formatted request-failure banner text
+/// (status headline + sanitized detail).
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = err.data.as_ref().and_then(error_detail_from_data);
@@ -105,18 +149,36 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
         && let Some(msg) = error_detail_from_data(data) && !msg.is_empty()
     {
-        return msg;
+        return sanitize_user_error(&msg);
     }
-    sanitize_user_error(&err.to_string())
+    let raw = err
+        .data
+        .as_ref()
+        .and_then(error_detail_from_data)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| err.to_string());
+    crate::app::error_display::format_request_failure(
+            http_status_from_error(err),
+            None,
+            &raw,
+        )
+        .message()
 }
 /// Format a Duration for user-visible restore progress messages.
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+    xai_tty_utils::format_human_duration(d)
+}
+/// Finalize restore chrome: complete or incomplete plus elapsed wait.
+pub(super) fn format_restore_finalize_status(
+    incomplete: bool,
+    elapsed: std::time::Duration,
+) -> String {
+    let status = if incomplete {
+        "Restore incomplete"
     } else {
-        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
-    }
+        "Restore complete"
+    };
+    format!("{status} ({}).", format_restore_elapsed(elapsed))
 }
 /// CANONICAL wire parser for the worktree resume response. Any other code
 /// consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape
@@ -174,8 +236,27 @@ pub(crate) fn parse_session_load_running_prompt_id(
         .and_then(|v| v.as_str())
         .map(String::from)
 }
+/// CANONICAL wire parser for the `session/new` / `session/load` response
+/// `_meta[SCHEDULER_BACKGROUND_LOOPS_META_KEY]`.
+///
+/// Carries whether THIS session's scheduled fires run as detached background
+/// subagents, as the shell resolved it when the session's actor spawned. The
+/// pager stores it per session and must not re-resolve the setting: a
+/// mid-session flip would then make `/loop`'s wording describe a runtime the
+/// already-spawned session will never use. `None` when the shell predates the
+/// key (or for gateway chat sessions, which have no local fires), leaving the
+/// reader on the startup seed.
+pub(crate) fn parse_session_scheduler_background_loops(
+    resp_meta: Option<&acp::Meta>,
+) -> Option<bool> {
+    resp_meta
+        .and_then(|m| {
+            m.get(xai_grok_shell::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY)
+        })
+        .and_then(|v| v.as_bool())
+}
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
-fn is_disk_full_error(raw: &str) -> bool {
+pub(crate) fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)
         || raw.contains(xai_fast_worktree::ENOSPC_OS_MESSAGE)
         || raw.contains("Disk quota exceeded") || raw.contains("Out of disk space")
@@ -258,6 +339,9 @@ pub(crate) struct SessionFlags {
     /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
     /// warn is logged when plan flags are also set (K12).
     pub chat_mode: bool,
+    /// Local-workspace stamp for ACP `_meta` (scrub still strips envId / Direct hub).
+    #[cfg(feature = "local-workspace")]
+    pub local_workspace: Option<crate::app::session_startup::LocalWorkspaceConfig>,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into
     /// every `PromptRequest._meta.screenMode` for minimal-vs-regular usage
     /// telemetry. `None` (key omitted) only under `Default` in tests; real
@@ -314,6 +398,10 @@ impl SessionFlags {
         }
         if self.chat_mode {
             meta.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
+            #[cfg(feature = "local-workspace")]
+            if let Some(ref lw) = self.local_workspace {
+                stamp_local_workspace_meta(&mut meta, lw);
+            }
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
@@ -329,12 +417,25 @@ impl SessionFlags {
         if meta.is_empty() { None } else { Some(meta) }
     }
 }
-/// Workspace-bind `_meta` keys forbidden on chat create/load: backend owns
-/// workspace for `kind=chat`; the client must not bind Direct/envId/attach.
+/// Workspace-bind `_meta` keys **always** forbidden on chat create/load.
+///
+/// `x.ai/cloud_existing_workspace` is intentionally omitted: scrub keeps it
+/// iff `x.ai/local_workspace.mode == "attach"`.
+#[allow(dead_code)]
 pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
     "envId",
     "x.ai/cloud_server_id",
-    "x.ai/cloud_existing_workspace",
+];
+/// FS-only tool ids for local existing workspace (chat attach/own).
+#[cfg(feature = "local-workspace")]
+pub(super) const LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS: &[&str] = &[
+    "workspace.fs_list",
+    "workspace.fs_exists",
+    "workspace.fs_read_file",
+    "workspace.fs_write_file",
+    "workspace.fs_delete_file",
+    "workspace.put_files",
+    "workspace.get_files",
 ];
 /// Stamp `_meta["x.ai/session"].kind = "chat"` and strip Build `agentProfile` (K12).
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
@@ -342,13 +443,164 @@ pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     obj.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
+/// Stamp chat+local intent. Attach also stamps `x.ai/cloud_existing_workspace`.
+/// Own leaves `server_id` unset — shell supervisor mints before handshake.
+///
+/// Never stamps `envId` or `x.ai/cloud_server_id`.
+#[cfg(feature = "local-workspace")]
+pub(super) fn stamp_local_workspace_meta(
+    meta: &mut serde_json::Map<String, serde_json::Value>,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) {
+    use crate::app::session_startup::LocalWorkspaceMode;
+    let mut local = serde_json::Map::new();
+    let mode = match cfg.mode {
+        LocalWorkspaceMode::Attach => "attach",
+        LocalWorkspaceMode::Own => "own",
+    };
+    local.insert("mode".into(), serde_json::json!(mode));
+    if let Some(ref sid) = cfg.server_id {
+        local.insert("server_id".into(), serde_json::json!(sid));
+    }
+    if let Some(ref cwd) = cfg.cwd {
+        local
+            .insert("cwd".into(), serde_json::json!(cwd.to_string_lossy().into_owned()));
+    }
+    meta.insert("x.ai/local_workspace".into(), serde_json::Value::Object(local));
+    tracing::info!(
+        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
+        event = "acp_meta_stamped",
+        mode,
+        server_id = cfg.server_id.as_deref(),
+        cwd = cfg.cwd.as_ref().map(|p| p.display().to_string()),
+        "stamped x.ai/local_workspace onto session meta"
+    );
+    if cfg.mode == LocalWorkspaceMode::Attach && let Some(ref sid) = cfg.server_id {
+        let mut existing = serde_json::Map::new();
+        existing.insert("server_id".into(), serde_json::json!(sid));
+        if let Some(ref cwd) = cfg.cwd {
+            existing
+                .insert(
+                    "cwd".into(),
+                    serde_json::json!(cwd.to_string_lossy().into_owned()),
+                );
+        }
+        meta.insert(
+            "x.ai/cloud_existing_workspace".into(),
+            serde_json::Value::Object(existing),
+        );
+    }
+}
+/// Apply [`stamp_local_workspace_meta`] onto optional ACP meta.
+#[cfg(feature = "local-workspace")]
+pub(super) fn apply_local_workspace_meta(
+    meta: &mut Option<acp::Meta>,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) {
+    let obj = meta.get_or_insert_with(acp::Meta::new);
+    stamp_local_workspace_meta(obj, cfg);
+}
+/// Shared chat create/load/worktree meta finalize: kind + local stamp + scrub.
+pub(super) fn finalize_chat_session_meta(
+    meta: &mut Option<acp::Meta>,
+    is_chat_path: bool,
+    #[cfg_attr(not(feature = "local-workspace"), allow(unused_variables))]
+    session_flags: &SessionFlags,
+) {
+    if !is_chat_path {
+        return;
+    }
+    apply_chat_kind_meta(meta);
+    #[cfg(feature = "local-workspace")]
+    if let Some(ref lw) = session_flags.local_workspace {
+        apply_local_workspace_meta(meta, lw);
+    }
+    scrub_chat_workspace_bind_meta(meta);
+}
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
+///
+/// Narrow scrub exception: keep `x.ai/cloud_existing_workspace` when local
+/// intent is **attach**. Own stamps intent only (shell mints `server_id`).
+/// Never keep `envId` or Direct hub `x.ai/cloud_server_id`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     let Some(obj) = meta.as_mut() else {
         return;
     };
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         obj.remove(*key);
+    }
+    #[cfg(feature = "local-workspace")]
+    {
+        let allow_existing_attach = obj
+            .get("x.ai/local_workspace")
+            .and_then(|v| v.get("mode"))
+            .and_then(|m| m.as_str()) == Some("attach");
+        if !allow_existing_attach {
+            obj.remove("x.ai/cloud_existing_workspace");
+        }
+    }
+    {
+        obj.remove("x.ai/cloud_existing_workspace");
+    }
+}
+/// Params for shell ACP `x.ai/session/add_local_workspace`.
+///
+/// v1 surface is **shell ACP-only** (no pager slash/command wiring). Pager
+/// dogfood / headless clients call the extension directly with this payload.
+/// No remove path until session end.
+#[cfg(feature = "local-workspace")]
+#[allow(dead_code)]
+pub(crate) fn mid_session_add_local_workspace_params(
+    session_id: &str,
+    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
+) -> serde_json::Value {
+    let mut meta = serde_json::Map::new();
+    stamp_local_workspace_meta(&mut meta, cfg);
+    let mut opt = Some(meta);
+    scrub_chat_workspace_bind_meta(&mut opt);
+    serde_json::json!({
+        "sessionId": session_id,
+        "meta": opt.unwrap_or_default(),
+    })
+}
+/// Fail closed on operator attestation outside the FS-only allowlist.
+/// `None` / empty attested set → uncheckable → refuse. Live server is not probed.
+#[cfg(feature = "local-workspace")]
+pub(crate) fn reject_non_fs_only_advertised_tools(
+    advertised_tool_ids: Option<&[&str]>,
+) -> Result<(), String> {
+    let Some(ids) = advertised_tool_ids else {
+        return Err(
+            "operator attestation GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is unset \
+             (uncheckable); refuse attach. Live workspace_server was not inspected — set \
+             the env to a comma-separated FS-only catalog."
+                .into(),
+        );
+    };
+    if ids.is_empty() {
+        return Err(
+            "operator attestation GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is empty \
+             (uncheckable); refuse attach. Live workspace_server was not inspected."
+                .into(),
+        );
+    }
+    let forbidden: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| !LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS.contains(id))
+        .collect();
+    if forbidden.is_empty() {
+        Ok(())
+    } else {
+        Err(
+                format!(
+            "operator attestation lists tools outside the FS-only allowlist: {}. \
+             Live workspace_server was not inspected. Fix \
+             GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS or restart workspace_server \
+             with --require-explicit-toolset and an FS-only catalog.",
+            forbidden.join(", ")
+        ),
+            )
     }
 }
 /// Metadata returned from effect execution so the event loop can patch
@@ -600,6 +852,11 @@ pub(super) fn parse_session_picker_entries(
                 .or_else(|| v.get("worktree_label"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
+            let last_turn_summary = v
+                .get("lastTurnSummary")
+                .or_else(|| v.get("last_turn_summary"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
             let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
             Some(SessionPickerEntry {
                 id,
@@ -615,6 +872,7 @@ pub(super) fn parse_session_picker_entries(
                 branch,
                 repo_name,
                 worktree_label,
+                last_turn_summary,
                 card_detail: None,
             })
         })
@@ -655,6 +913,7 @@ pub(super) fn session_picker_entry_to_roster(
         model_id: e.model_id.clone(),
         yolo: false,
         activity: RosterActivity::Dormant,
+        last_turn_summary: e.last_turn_summary.clone(),
         resident: false,
         last_change_unix_ms: last_change.timestamp_millis(),
         origin: RosterOrigin {
@@ -819,14 +1078,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "hide_header" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("hide_header", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_hide_header(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
         "show_timestamps" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));
@@ -843,11 +1094,11 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "scrub_ascii_punct" => {
+        "confirm_before_rewind" => {
             let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+                return Err(kind_mismatch("confirm_before_rewind", "Bool", &value));
             };
-            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
+            xai_grok_shell::util::config::set_confirm_before_rewind(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1031,43 +1282,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "notifications.session_recap" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_notifications_session_recap(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "notifications.session_recap_threshold_secs" => {
-            let SettingValue::Int(i) = value else {
-                return Err(kind_mismatch(
-                    "notifications.session_recap_threshold_secs",
-                    "Int",
-                    &value,
-                ));
-            };
-            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "features.session_recap" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("features.session_recap", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_features_session_recap(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "bubble_copy_buttons" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
-            };
-            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())
-        }
         "vim_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("vim_mode", "Bool", &value));
@@ -1114,6 +1328,47 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "hide_header" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_header", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_header(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "scrub_ascii_punct" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "plan_approval_park" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "allow_worktree" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("allow_worktree", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_allow_worktree(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "bubble_copy_buttons" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         "group_tool_verbs" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("group_tool_verbs", "Bool", &value));
@@ -1135,6 +1390,34 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("prompt_suggestions", "Bool", &value));
             };
             xai_grok_shell::util::config::set_prompt_suggestions(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "notifications.session_recap_threshold_secs",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "features.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("features.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_features_session_recap(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1292,14 +1575,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "plan_approval_park" => {
-            let SettingValue::Enum(s) = value else {
-                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
-            };
-            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
-                .await
-                .map_err(|e| e.to_string())
-        }
         "hunk_tracker_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("hunk_tracker_mode", "Enum", &value));
@@ -1397,22 +1672,22 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "default_reasoning_effort" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("default_reasoning_effort", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_default_reasoning_effort(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }
-
-/// After a successful disk write of auto-compact threshold, notify the agent
-/// so open sessions update their `threshold_percent` / `threshold_tokens`
-/// Cells without restart.
+/// Live-apply auto-compact threshold to open sessions after disk persist.
 ///
-/// Params use the **committed Settings enum value** (not a re-resolve that
-/// can race disk). That is intentional race-safety: open sessions see the
-/// preference the user just saved. Full resolve precedence (env
-/// `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` / `_TOKENS` above session TOML) still
-/// applies on the next spawn / model-switch re-resolve — so a process env
-/// override can temporarily sit under a Settings live-apply until that next
-/// resolve. Do not add a second canonical-string parser here; reuse
-/// [`crate::settings::parse_auto_compact_threshold_canonical`].
+/// Reuses [`crate::settings::parse_auto_compact_threshold_canonical`]. A process
+/// env override can temporarily sit under this live-apply until the next spawn
+/// or model-switch re-resolve.
 pub(crate) async fn notify_auto_compact_threshold_changed(
     tx: &AcpAgentTx,
     value: &crate::settings::SettingValue,
@@ -1453,7 +1728,6 @@ pub(crate) async fn notify_auto_compact_threshold_changed(
         tracing::warn!("Failed to send auto_compact_threshold_changed notification: {e}");
     }
 }
-
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
 /// 1. Persist `ui.permission_mode` to disk.
@@ -1634,35 +1908,27 @@ pub(super) fn persist_hint(
 pub(super) fn credit_balance_from_config(
     c: xai_grok_shell::extensions::billing::BillingConfig,
 ) -> crate::views::credit_bar::CreditBalance {
-    // Honest absence (shell SSOT): no percent and no usable limit → unknown,
-    // not a silent 0% for status chrome. Read while `c` is still fully borrowed.
     let (included_opt, _) =
         xai_grok_shell::extensions::billing::included_usage_and_period_end(&c);
     let included_usage_known = included_opt.is_some();
-    let usage_pct = included_opt
-        .map(|pct| pct.clamp(0.0, 100.0))
-        .unwrap_or(0.0);
-    // Capture productUsage Build % before other fields consume `c`.
-    let grok_build_usage_pct =
-        xai_grok_shell::extensions::billing::grok_build_usage_percent(&c);
     let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
     let used = c.used.map(|v| v.val).unwrap_or(0);
     let has_credit_pct = c.credit_usage_percent.is_some();
-    let period_end_raw = c
+    // Same included SuperGrok period used percent as /limits
+    // (`credit_balance_from_billing_config`). Do not invent a second formula.
+    let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
+    let period_end_display = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end);
-    let period_end_at = period_end_raw.as_ref().and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-    });
-    let period_end_display = period_end_at.map(|dt| {
-        dt.with_timezone(&chrono::Local)
-            .format("%B %-d, %H:%M")
-            .to_string()
-    });
+        .or(c.billing_period_end)
+        .and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
+                })
+        });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1670,9 +1936,7 @@ pub(super) fn credit_balance_from_config(
         .on_demand_used
         .map(|v| v.val)
         .unwrap_or_else(|| (used - limit).max(0));
-    let effective_usage_pct = if !included_usage_known {
-        0.0
-    } else if on_demand_val > 0 {
+    let effective_usage_pct = if on_demand_val > 0 {
         if usage_pct >= 100.0 {
             (on_demand_used_cents as f64 / on_demand_val as f64 * 100.0).min(100.0)
         } else if has_credit_pct {
@@ -1693,15 +1957,14 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
-        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),
         prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
         period_type,
         is_unified_billing_user: c.is_unified_billing_user,
-        grok_build_usage_pct,
         included_usage_known,
+        ..Default::default()
     }
 }
 /// Whether the balance carries a non-zero prepaid credit balance (signed cents).
@@ -1709,69 +1972,6 @@ pub(super) fn has_prepaid_credits(
     balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> bool {
     balance.and_then(|b| b.prepaid_balance_cents).map(i64::abs).is_some_and(|c| c > 0)
-}
-
-/// Fetch OpenRouter account credits for the footer when a key is configured.
-///
-/// Returns `None` on missing key / transport / parse errors so callers keep
-/// any previously cached balance.
-pub(super) async fn fetch_openrouter_credit_balance(
-) -> Option<crate::views::credit_bar::OpenRouterCreditBalance> {
-    let cents = xai_grok_shell::auth::fetch_openrouter_credit_balance_cents().await?;
-    Some(crate::views::credit_bar::OpenRouterCreditBalance {
-        balance_cents: cents,
-    })
-}
-
-/// Fetch console team prepaid balance (Management API) when key + team_id are
-/// configured. Returns absolute remaining cents; `None` keeps prior UI cache
-/// and leaves process-cache / honest absence paths alone.
-///
-/// **Process cache policy:** background / silent `FetchBilling` must **not**
-/// call `clear_console_team_billing_meter_caches`. Honor ≤Ns process TTL
-/// ([`crate::limits_cmd::ManagementMeterCachePolicy::HonorProcessTtl`]).
-/// Force-refresh clear is owned by explicit `grok limits` collect and TUI
-/// `/limits` open ([`crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open`]).
-pub(super) async fn fetch_console_team_prepaid_cents() -> Option<i64> {
-    xai_grok_shell::auth::fetch_console_team_prepaid_balance_default()
-        .await
-        .map(|m| m.balance_cents)
-}
-
-/// Live-call Management team postpaid invoice preview into process cache.
-///
-/// No return value: `/limits` rebuilds from
-/// [`xai_grok_shell::auth::cached_console_team_postpaid_default`]. Process TTL
-/// is honored unless explicit limits open/collect cleared caches first. No-op
-/// when management key is absent (pure gate
-/// [`crate::limits_cmd::should_live_fetch_console_team_postpaid_with_billing`]).
-pub(super) async fn fetch_console_team_postpaid_into_process_cache() {
-    if !crate::limits_cmd::should_live_fetch_console_team_postpaid_with_billing(
-        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
-    ) {
-        return;
-    }
-    let _ = xai_grok_shell::auth::fetch_console_team_postpaid_preview_default().await;
-}
-
-/// Live-call Management team usage series (POST analytics) into process cache.
-///
-/// No return value: `/limits` rebuilds from
-/// [`xai_grok_shell::auth::cached_console_team_usage_series_default`]. Process
-/// TTL is honored unless explicit limits open/collect cleared caches first.
-/// No-op when management key is absent (pure gate
-/// [`crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing`]).
-/// Same practical path as prepaid/postpaid on background `FetchBilling`.
-pub(super) async fn fetch_console_team_usage_series_into_process_cache() {
-    if !crate::limits_cmd::should_live_fetch_console_team_usage_series_with_billing(
-        xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
-    ) {
-        return;
-    }
-    let _ = xai_grok_shell::auth::fetch_console_team_usage_series_default(
-        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
-    )
-    .await;
 }
 /// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps
@@ -1834,7 +2034,7 @@ pub(super) fn unregister_active_session_best_effort_in(
     root: &Path,
     session_id: &acp::SessionId,
 ) {
-    match xai_grok_shell::active_sessions::try_unregister_in(root, session_id) {
+    match xai_grok_active_sessions::try_unregister_in(root, std::process::id(), session_id) {
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(

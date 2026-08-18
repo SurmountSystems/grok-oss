@@ -6,6 +6,9 @@
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_grok_shell::session::storage::{
+    ReplayEmission, ReplayLookupFallback, ReplayPathHint, stream_replay_updates_at_hinted,
+};
 /// Enriched subagent tracking info.
 ///
 /// Keyed by `child_session_id` in `AgentView::subagent_sessions`.
@@ -29,6 +32,10 @@ pub struct SubagentInfo {
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
     pub parent_prompt_id: Option<Arc<str>>,
+    /// Session that spawned this agent. L2s name the main thread. L3s name their L2.
+    pub parent_session_id: Option<Arc<str>>,
+    /// Nesting depth from the main thread. `1` is an L2. `2` is an L3 specialist.
+    pub depth: Option<u32>,
     pub started_at: Instant,
     /// Wall-clock time of the most recent `SubagentProgress` /
     /// `SubagentFinished` update. For
@@ -107,15 +114,24 @@ struct SubagentMetaSlice {
     #[serde(default)]
     worktree_path: Option<String>,
 }
+/// Grok home for the replay path. In production this is just `grok_home()`; the
+/// whole test override below is `#[cfg(test)]`, so no thread-local or dead
+/// always-false branch ships in release.
+#[cfg(not(test))]
+fn effective_grok_home() -> std::path::PathBuf {
+    xai_grok_shell::util::grok_home::grok_home()
+}
+#[cfg(test)]
 thread_local! {
     static REPLAY_GROK_HOME: std::cell::RefCell<Option<std::path::PathBuf>> =
         const { std::cell::RefCell::new(None) };
 }
-/// Override grok home for disk-replay unit tests (thread-local; production never sets this).
+/// Override grok home for disk-replay unit tests (thread-local).
 #[cfg(test)]
 pub(crate) fn set_replay_grok_home_for_tests(home: Option<std::path::PathBuf>) {
     REPLAY_GROK_HOME.with(|h| *h.borrow_mut() = home);
 }
+#[cfg(test)]
 fn effective_grok_home() -> std::path::PathBuf {
     if let Some(home) = REPLAY_GROK_HOME.with(|h| h.borrow().clone()) {
         return home;
@@ -161,39 +177,58 @@ fn enrich_from_meta_with_home(
     info.child_cwd = meta.child_cwd.map(Arc::from);
     info.worktree_path = meta.worktree_path.map(Arc::from);
 }
-/// Best-effort replay of inherited conversation for a child subagent.
+/// Best-effort replay of a child's inherited conversation, streamed one typed
+/// update at a time. No-ops when the child session or file is missing.
 ///
-/// Reads `updates.jsonl` from the child session directory via
-/// [`load_updates_for_replay`], then feeds ACP updates through the child's
-/// tracker with replay semantics. No-ops when the child session or file is
-/// missing (typical for a live spawn before the shell has persisted updates).
+/// `child_cwd` is the worktree / custom cwd when known; lookup tries it before
+/// `parent_cwd` so children that persist under their own encoded cwd hit the
+/// fast path instead of a full RelocationView scan.
 pub(crate) fn replay_inherited_updates(
     child_view: &mut crate::app::agent_view::AgentView,
     child_session_id: &str,
+    parent_cwd: &std::path::Path,
+    child_cwd: Option<&std::path::Path>,
+) {
+    replay_inherited_updates_with_fallback(
+        child_view,
+        child_session_id,
+        parent_cwd,
+        child_cwd,
+        ReplayLookupFallback::Relocation,
+    );
+}
+pub(crate) fn replay_inherited_updates_with_fallback(
+    child_view: &mut crate::app::agent_view::AgentView,
+    child_session_id: &str,
+    parent_cwd: &std::path::Path,
+    child_cwd: Option<&std::path::Path>,
+    fallback: ReplayLookupFallback,
 ) {
     let home = effective_grok_home();
-    let updates = match xai_grok_shell::session::storage::load_updates_for_replay_at(
-        child_session_id,
-        &home,
-    ) {
-        Ok(Some(u)) => u,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::debug!(session_id = %child_session_id, error = %e, "failed to load updates for replay");
-            return;
-        }
-    };
     let replay_meta = crate::acp::meta::NotificationMeta {
         is_replay: true,
         ..Default::default()
     };
-    let replayed_any = !updates.is_empty();
-    for update in updates {
+    let hint = ReplayPathHint {
+        parent_cwd: Some(parent_cwd),
+        child_cwd,
+        fallback,
+    };
+    child_view.scrollback.begin_batch();
+    let outcome = stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| {
         child_view
             .session
             .handle_update(update, &replay_meta, &mut child_view.scrollback);
-    }
-    if replayed_any {
+    });
+    child_view.scrollback.end_batch();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::warn!(session_id = %child_session_id, error = %e, "failed to read updates for replay");
+            return;
+        }
+    };
+    if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
 }
@@ -275,8 +310,17 @@ pub(crate) fn ensure_subagent_child_replayed(
         .map(std::time::Duration::from_millis);
     let parent_turn_running =
         parent.session.state.is_turn_running() || parent.session.state.is_cancelling();
+    let child_cwd = parent
+        .subagent_sessions
+        .get(child_sid)
+        .and_then(|info| info.child_cwd.clone());
     if let Some(child_view) = parent.subagent_views.get_mut(child_sid) {
-        replay_inherited_updates(child_view, child_sid);
+        replay_inherited_updates(
+            child_view,
+            child_sid,
+            &parent.session.cwd,
+            child_cwd.as_deref().map(std::path::Path::new),
+        );
         if let Some(elapsed) = finished_elapsed {
             finalize_finished_child_view(child_view, elapsed);
         } else if !parent_turn_running {
@@ -365,7 +409,7 @@ pub(crate) fn format_context_badge(info: &SubagentInfo) -> &str {
 ///
 /// Returns `(Some(tag), rest_after_close_bracket)` if the description begins
 /// with `[<non-empty>]`, otherwise `(None, description)` unchanged.
-fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
+pub(crate) fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
     if let Some(rest) = description.strip_prefix('[')
         && let Some(close) = rest.find(']')
     {
@@ -426,6 +470,83 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     };
     (label, clean_desc.to_string())
 }
+
+/// Running, non-workflow L2 rows for the L1 Subagents list.
+///
+/// L3 specialists stay in the registry so each L2 can report a count, but they
+/// do not get their own L1 list rows. Two live L2s with the same trimmed
+/// description collapse to the earliest row. Finished children are not listed.
+pub(crate) fn live_subagent_list<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let all: Vec<_> = infos.into_iter().collect();
+    let child_ids: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|info| info.child_session_id.as_ref())
+        .collect();
+    let mut live: Vec<_> = all
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .filter(|info| is_l2_list_row(info, &child_ids))
+        .collect();
+    live.sort_by_key(|info| info.started_at);
+    let mut seen = std::collections::HashSet::<&str>::new();
+    let mut out = Vec::new();
+    for info in live {
+        let key = info.description.trim();
+        if key.is_empty() {
+            out.push(info);
+            continue;
+        }
+        if seen.insert(key) {
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// L2 for the main-thread list: spawned by the main session, not by another
+/// subagent in this registry, and not depth 2 or deeper.
+pub(crate) fn is_l2_list_row(
+    info: &SubagentInfo,
+    child_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    if info.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    !matches!(
+        info.parent_session_id.as_deref(),
+        Some(parent) if child_ids.contains(parent)
+    )
+}
+
+/// How many live L3 specialists an L2 is using.
+///
+/// Counts running, non-workflow rows whose parent session is this L2.
+pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    infos
+        .into_iter()
+        .filter(|info| {
+            info.is_running()
+                && info.workflow_run_id.is_none()
+                && info.parent_session_id.as_deref() == Some(l2_child_session_id)
+        })
+        .count()
+}
+
+/// L2 row suffix: how many L3 specialists that coordinator is using.
+pub(crate) fn format_live_l3_count(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 specialist".to_string()),
+        n => Some(format!("{n} specialists")),
+    }
+}
+
 pub(crate) fn format_subagent_meta(
     persona: Option<&str>,
     role: Option<&str>,
@@ -477,15 +598,15 @@ pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity
         TurnActivity::Retrying {
             attempt,
             max_retries,
-            reason,
+            ..
         } => {
-            // Same graceful chrome as main turn status (shared formatter).
-            crate::views::turn_status::format_retrying_activity_label(
-                *attempt,
-                *max_retries,
-                reason,
-            )
+            if *max_retries == u32::MAX {
+                format!("Retrying ({attempt})")
+            } else {
+                format!("Retrying ({attempt}/{max_retries})")
+            }
         }
+        TurnActivity::WritingToolCall(writing) => writing.label(),
         TurnActivity::Waiting(reason) => reason.label(),
     }
 }
@@ -519,6 +640,8 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,
@@ -579,7 +702,6 @@ mod tests {
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -768,6 +890,111 @@ mod tests {
             "an empty replay (zero updates parsed) must not purge"
         );
         assert!(parent.subagent_sessions[empty_sid].child_updates_replayed);
+        set_replay_grok_home_for_tests(None);
+    }
+    #[test]
+    fn replay_inherited_updates_batches_and_collapses_tools() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-batch";
+        let session_dir = home
+            .path()
+            .join("sessions")
+            .join(urlencoding::encode("/tmp").as_ref())
+            .join(child_sid);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+        let user = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"go"}}}}}}}}"#
+        );
+        let tool = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"t1","title":"bash","kind":"execute","status":"pending"}}}}}}"#
+        );
+        let ip = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress","content":[{{"type":"text","text":"out"}}]}}}}}}"#
+        );
+        let done = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{{"type":"text","text":"out"}}]}}}}}}"#
+        );
+        let agent_msg = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"ok"}}}}}}}}"#
+        );
+        std::fs::write(
+            session_dir.join("updates.jsonl"),
+            format!("{user}\n{tool}\n{ip}\n{done}\n{agent_msg}\n"),
+        )
+        .unwrap();
+        set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
+        let mut view = make_min_child_view();
+        replay_inherited_updates(&mut view, child_sid, std::path::Path::new("/tmp"), None);
+        assert!(
+            !view.scrollback.in_batch(),
+            "end_batch must run after streamed apply"
+        );
+        assert_eq!(
+            view.scrollback.turn_count(),
+            1,
+            "end_batch must rebuild turns once after the stream"
+        );
+        let tools = (0..view.scrollback.len())
+            .filter(|i| {
+                view.scrollback
+                    .entry(*i)
+                    .is_some_and(|e| matches!(e.block, RenderBlock::ToolCall(_)))
+            })
+            .count();
+        assert_eq!(tools, 1, "ToolCall+updates must collapse to one block");
+        set_replay_grok_home_for_tests(None);
+    }
+    #[test]
+    fn replay_inherited_updates_ends_batch_on_read_error() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-read-err";
+        let session_dir = home
+            .path()
+            .join("sessions")
+            .join(urlencoding::encode("/tmp").as_ref())
+            .join(child_sid);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+        std::fs::create_dir(session_dir.join("updates.jsonl")).unwrap();
+        set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
+        let mut view = make_min_child_view();
+        replay_inherited_updates(&mut view, child_sid, std::path::Path::new("/tmp"), None);
+        assert!(
+            !view.scrollback.in_batch(),
+            "end_batch must run after a read error"
+        );
+        set_replay_grok_home_for_tests(None);
+    }
+    #[test]
+    fn replay_inherited_updates_uses_child_cwd_hint() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-wt-hint";
+        let child_cwd = "/work/wt";
+        let session_dir = home
+            .path()
+            .join("sessions")
+            .join(xai_grok_config::encode_cwd_dirname(child_cwd))
+            .join(child_sid);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+        let user = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"from-wt"}}}}}}}}"#
+        );
+        std::fs::write(session_dir.join("updates.jsonl"), format!("{user}\n")).unwrap();
+        set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
+        let mut view = make_min_child_view();
+        replay_inherited_updates(
+            &mut view,
+            child_sid,
+            std::path::Path::new("/tmp"),
+            Some(std::path::Path::new(child_cwd)),
+        );
+        assert_ne!(
+            view.scrollback.len(),
+            0,
+            "child_cwd hint must locate the worktree transcript"
+        );
         set_replay_grok_home_for_tests(None);
     }
     #[test]
@@ -1051,68 +1278,158 @@ mod tests {
             "Compacting",
         );
     }
-    /// Contract: nested subagent detail / scrollback activity uses the same
-    /// graceful retry chrome as the main turn status line — never the old
-    /// `Retrying (#1): request timed out` form.
     #[test]
-    fn activity_label_retrying_matches_main_graceful_format() {
+    fn activity_label_retrying() {
         use crate::acp::tracker::TurnActivity;
-        // Finite budget: N/M + middle-dot reason + trailing ellipsis.
         assert_eq!(
             format_activity_label(&TurnActivity::Retrying {
                 attempt: 2,
                 max_retries: 5,
-                reason: "rate limited · next try in 4s".into(),
+                reason: "rate limited".into(),
             }),
-            "Retrying (2/5) · rate limited · next try in 4s…",
-        );
-        // Unlimited budget: "attempt N", not "#N", middle-dot not colon.
-        let unlimited = format_activity_label(&TurnActivity::Retrying {
-            attempt: 1,
-            max_retries: u32::MAX,
-            reason: "timed out · next try in 2s".into(),
-        });
-        assert_eq!(
-            unlimited,
-            "Retrying (attempt 1) · timed out · next try in 2s…",
-        );
-        assert!(
-            !unlimited.contains("Retrying (#"),
-            "must not use old #attempt form, got {unlimited:?}"
-        );
-        assert!(
-            !unlimited.contains(": "),
-            "must not use old colon separator, got {unlimited:?}"
-        );
-        // Soft-reconnect reason after StreamResumed.
-        assert_eq!(
-            format_activity_label(&TurnActivity::Retrying {
-                attempt: 1,
-                max_retries: u32::MAX,
-                reason: "reconnecting".into(),
-            }),
-            "Retrying (attempt 1) · reconnecting…",
-        );
-        // Stale raw timeout wording must not reappear as the nested chrome.
-        let raw = format_activity_label(&TurnActivity::Retrying {
-            attempt: 1,
-            max_retries: u32::MAX,
-            reason: "request timed out".into(),
-        });
-        assert!(
-            raw.starts_with("Retrying (attempt 1) · "),
-            "nested must share main head form, got {raw:?}"
-        );
-        assert!(
-            !raw.starts_with("Retrying (#1):"),
-            "old ungraceful nested form forbidden, got {raw:?}"
+            "Retrying (2/5)",
         );
     }
+    #[test]
+    fn format_activity_label_unlimited_retry_has_no_u32_max_fraction() {
+        use crate::acp::tracker::TurnActivity;
+        let label = format_activity_label(&TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "rate limited".into(),
+        });
+        assert!(
+            !label.contains("4294967295"),
+            "unlimited retry must not paint Retrying (1/4294967295), got {label}"
+        );
+        assert!(
+            !label.contains(&u32::MAX.to_string()),
+            "unlimited retry must not paint the u32::MAX fraction, got {label}"
+        );
+        assert!(
+            label.contains("Retrying"),
+            "unlimited retry must still say Retrying, got {label}"
+        );
+    }
+    #[test]
+    fn live_subagent_list_does_not_show_two_rows_with_the_same_description() {
+        let mut a = make_info();
+        a.subagent_id = "sa-a".into();
+        a.child_session_id = "cs-a".into();
+        a.description = "[reviewer] Review implementation".into();
+        a.finished = false;
+        let mut b = make_info();
+        b.subagent_id = "sa-b".into();
+        b.child_session_id = "cs-b".into();
+        b.description = "[reviewer] Review implementation".into();
+        b.finished = false;
+        let mut done = make_info();
+        done.subagent_id = "sa-done".into();
+        done.child_session_id = "cs-done".into();
+        done.description = "[reviewer] Review implementation".into();
+        done.finished = true;
+        let mut other = make_info();
+        other.subagent_id = "sa-other".into();
+        other.child_session_id = "cs-other".into();
+        other.description = "[implementer] Land the slice".into();
+        other.finished = false;
+        let rows = live_subagent_list([&a, &b, &done, &other]);
+        let same: Vec<_> = rows
+            .iter()
+            .filter(|info| info.description.as_ref() == "[reviewer] Review implementation")
+            .collect();
+        assert_eq!(
+            same.len(),
+            1,
+            "live Subagents list must not show two same-description rows, got {}",
+            same.len()
+        );
+        assert_eq!(rows.len(), 2, "distinct live descriptions still show");
+    }
+
+    #[test]
+    fn live_subagent_list_shows_only_l2_and_reports_live_l3_count() {
+        fn info(
+            id: &str,
+            desc: &str,
+            parent: Option<&str>,
+            depth: Option<u32>,
+            finished: bool,
+        ) -> SubagentInfo {
+            let mut row = make_info();
+            row.subagent_id = id.into();
+            row.child_session_id = id.into();
+            row.description = desc.into();
+            row.parent_session_id = parent.map(Arc::from);
+            row.depth = depth;
+            row.finished = finished;
+            row
+        }
+        let l2_a = info(
+            "l2-coord",
+            "coordinate the slice",
+            Some("sess-l1"),
+            Some(1),
+            false,
+        );
+        let l2_b = info(
+            "l2-other",
+            "second coordinator",
+            Some("sess-l1"),
+            Some(1),
+            false,
+        );
+        let l3_a = info(
+            "l3-grep",
+            "search the crate",
+            Some("l2-coord"),
+            Some(2),
+            false,
+        );
+        let l3_b = info(
+            "l3-edit",
+            "land the product fix",
+            Some("l2-coord"),
+            Some(2),
+            false,
+        );
+        let l3_done = info(
+            "l3-done",
+            "finished specialist",
+            Some("l2-other"),
+            Some(2),
+            true,
+        );
+        let l3_c = info("l3-live", "still working", Some("l2-other"), Some(2), false);
+        let rows = live_subagent_list([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.child_session_id.as_ref()).collect();
+        assert_eq!(
+            ids,
+            ["l2-coord", "l2-other"],
+            "L1 Subagents list must show only L2s and hide L3 specialists, got {ids:?}"
+        );
+        assert_eq!(
+            live_l3_count([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c], "l2-coord"),
+            2,
+            "L2 row must report two live L3 specialists"
+        );
+        assert_eq!(
+            live_l3_count([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c], "l2-other"),
+            1,
+            "L2 row must report one live L3 specialist"
+        );
+        assert_eq!(
+            format_live_l3_count(2).as_deref(),
+            Some("2 specialists"),
+            "L2 row count text is a specialist count, not a dump of L3 names"
+        );
+    }
+
     #[test]
     fn activity_label_waiting_reasons() {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         assert_eq!(
-            format_activity_label(&TurnActivity::Waiting(WaitingReason::Subagent)),
+            format_activity_label(&TurnActivity::Waiting(WaitingReason::subagent())),
             "Waiting on subagent…",
         );
         assert_eq!(

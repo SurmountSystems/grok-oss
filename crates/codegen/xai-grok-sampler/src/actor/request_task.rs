@@ -18,13 +18,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
+    ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
     error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
-use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
@@ -599,13 +599,28 @@ async fn apply_retry_decision(
     // Connection-reset / broken-pipe on body upload often means nginx
     // rejected an oversized payload before responding 413. Strip
     // images proactively before any retry of those errors so we don't
-    // burn budget re-uploading the same large body.
-    if err.is_likely_body_rejected() {
-        let stripped = request.strip_images();
-        if stripped > 0 {
+    // burn budget re-uploading the same large body. Gated on the decision
+    // actually retrying: a Fatal (budget exhausted) must not mutate the
+    // request or tell the user images were "left out of the retry".
+    let will_retry = matches!(
+        decision,
+        RetryDecision::Retry { .. }
+            | RetryDecision::RetryWithBackoff { .. }
+            | RetryDecision::RetryWithClientRebuild { .. }
+    );
+    if will_retry && err.is_likely_body_rejected() {
+        let stripped_urls = request.strip_images();
+        if !stripped_urls.is_empty() {
             tracing::warn!(
-                stripped,
-                "stripped {stripped} image(s) before retry (likely nginx 413 via connection reset)"
+                stripped = stripped_urls.len(),
+                "stripped {} image(s) before retry (likely nginx 413 via connection reset)",
+                stripped_urls.len()
+            );
+            emit_images_stripped(
+                event_tx,
+                request_id,
+                stripped_urls,
+                StripReason::PayloadHeuristic,
             );
         }
     }
@@ -648,13 +663,46 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped = request.strip_images();
-            if stripped == 0 {
+            let stripped_urls = request.strip_images();
+            if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 emit_failed(event_tx, request_id, err);
                 send_completion(completion_tx, Err(clone_error(err)));
                 return false;
             }
+            // Only the deterministic signal (a 400 stamped with the
+            // invalid-image code) is a server rejection. Everything else
+            // that reaches this arm (413 body-size verdicts, proxy-wrapped
+            // 500s, the legacy phrase match, coded mid-stream errors) is a
+            // heuristic that must stay request-local.
+            // Exhaustive: a new error variant must choose its strip label
+            // here instead of silently landing on the heuristic branch.
+            let reason = match err {
+                SamplingError::Api {
+                    status,
+                    error_code: Some(ApiErrorCode::InvalidImage),
+                    ..
+                } if status.as_u16() == 400 => StripReason::ServerRejected,
+                SamplingError::Api { .. }
+                | SamplingError::StreamError { .. }
+                | SamplingError::Auth { .. }
+                | SamplingError::InvalidConfiguration(_)
+                | SamplingError::Http(_)
+                | SamplingError::Serialization(_)
+                | SamplingError::EventStreamError(_)
+                | SamplingError::IdleTimeout { .. }
+                | SamplingError::EmptyResponse { .. }
+                | SamplingError::MaxTokensTruncation
+                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+            };
+            tracing::warn!(
+                stripped = stripped_urls.len(),
+                reason = reason.as_str(),
+                error = %err,
+                "stripped {} image(s) after an image-related error; retrying without them",
+                stripped_urls.len()
+            );
+            emit_images_stripped(event_tx, request_id, stripped_urls, reason);
             *retry_count += 1;
             emit_retrying(
                 event_tx,
@@ -986,7 +1034,10 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 .find_map(|tok| tok.strip_suffix('s').and_then(|n| n.parse::<u64>().ok()))
                 .unwrap_or(0),
         },
-        SamplingErrorKind::Auth => SamplingError::Auth(info.message.clone()),
+        SamplingErrorKind::Auth => SamplingError::Auth {
+            message: info.message.clone(),
+            credential: info.credential,
+        },
         // Must stay Serialization: EventStreamError is retryable, and a
         // response-parse failure is deterministic on retry. `info.message`
         // is the variant's rendered Display, so rebuild via the constructor
@@ -1005,7 +1056,8 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 message: info.message.clone(),
                 model_metadata: info.model_metadata.clone(),
                 retry_after_secs: info.retry_after_secs,
-                should_retry: None,
+                should_retry: info.should_retry,
+                error_code: info.error_code.clone(),
             }
         }
         SamplingErrorKind::EmptyResponse => {
@@ -1116,13 +1168,24 @@ fn retry_footer_reason(err: &SamplingError) -> String {
     }
 }
 
+/// Live retry wait chrome. Under 60 seconds stays a whole-second count so
+/// short backoff copy (`2s`, `1s`) does not become `2.0s`. At or above 60
+/// seconds uses compact minutes (`15m43s`), never `943s`.
+fn format_retry_wait(d: Duration) -> String {
+    let secs = d.as_secs().max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        xai_tty_utils::format_human_duration(Duration::from_secs(secs))
+    }
+}
+
 /// Append a short backoff hint for non-rate-limit retries (Esc still cancels
 /// the wait via `sleep_for_retry`). Rate limits use their own shared-wait copy.
 fn with_backoff_hint(reason: String, backoff: Option<Duration>) -> String {
     match backoff {
         Some(b) if !b.is_zero() => {
-            let secs = b.as_secs().max(1);
-            format!("{reason} · next try in {secs}s")
+            format!("{reason} · next try in {}", format_retry_wait(b))
         }
         _ => reason,
     }
@@ -1144,9 +1207,12 @@ fn emit_retrying(
         let key = provider_key_for_config(config);
         let rem = SharedRateLimitStore::process_default().remaining(&key);
         if let Some(secs) = err.retry_after() {
-            reason = format!("{reason} · wait {secs}s (shared across grok-oss processes)");
+            reason = format!(
+                "{reason} · wait {} (shared across grok-oss processes)",
+                format_retry_wait(Duration::from_secs(secs))
+            );
         } else if !rem.is_zero() {
-            reason = format!("{reason} · shared wait {}s", rem.as_secs().max(1));
+            reason = format!("{reason} · shared wait {}", format_retry_wait(rem));
         } else {
             reason = format!("{reason} · coordinating with other grok-oss sessions");
         }
@@ -1195,6 +1261,19 @@ fn emit_retrying_reason(
     });
 }
 
+fn emit_images_stripped(
+    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    request_id: &RequestId,
+    stripped_urls: Vec<std::sync::Arc<str>>,
+    reason: StripReason,
+) {
+    let _ = event_tx.send(SamplingEvent::ImagesStripped {
+        request_id: request_id.clone(),
+        stripped_urls,
+        reason,
+    });
+}
+
 fn handle_cancellation(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
@@ -1209,10 +1288,13 @@ fn handle_cancellation(
         message: "request cancelled".to_string(),
         is_retryable: false,
         retry_after_secs: None,
+        should_retry: None,
+        error_code: None,
         model_metadata: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_sampling_types::SentCredential::Unknown,
     };
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
@@ -1220,7 +1302,7 @@ fn handle_cancellation(
     });
     send_completion(
         completion_tx,
-        Err(SamplingError::Auth("request cancelled".to_string())),
+        Err(SamplingError::auth_unknown("request cancelled")),
     );
 }
 
@@ -1237,6 +1319,7 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+    use xai_grok_sampling_types::ApiErrorCode;
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {
@@ -1246,10 +1329,13 @@ mod tests {
             message: "inference idle timeout after 240s with no chunks".to_string(),
             is_retryable: false,
             retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1266,10 +1352,13 @@ mod tests {
             message: "boom".to_string(),
             is_retryable: true,
             retry_after_secs: None,
+            should_retry: Some(false),
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1283,6 +1372,54 @@ mod tests {
         }
     }
 
+    /// A coded invalid-image error must survive the info round trip: the
+    /// message alone would not classify, so losing the code would silently
+    /// disable strip recovery on synthesized failures.
+    #[test]
+    fn synthesize_preserves_error_code_and_image_classification() {
+        let original = SamplingError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            message: "some future wording without the legacy phrase".to_string(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(original.is_image_processing_error());
+
+        let info = SamplingErrorInfo::from(&original);
+        assert_eq!(info.error_code, Some(ApiErrorCode::InvalidImage));
+
+        let round_tripped = synthesize_from_info(&info);
+        assert!(
+            round_tripped.is_image_processing_error(),
+            "round-tripped error must still classify: {round_tripped:?}"
+        );
+    }
+
+    /// A StreamError-sourced info has `status_code: None`; synthesis falls
+    /// back to a 500 Api error. That fallback must stay inside the
+    /// classifier's 400|500 gate, or coded mid-stream image rejections
+    /// silently stop stripping after the round trip.
+    #[test]
+    fn synthesize_stream_sourced_info_still_classifies_for_strip() {
+        let original = SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(original.is_image_processing_error());
+
+        let info = SamplingErrorInfo::from(&original);
+        assert_eq!(info.status_code, None, "stream errors carry no status");
+
+        let round_tripped = synthesize_from_info(&info);
+        assert!(
+            round_tripped.is_image_processing_error(),
+            "stream-sourced round trip must still classify: {round_tripped:?}"
+        );
+    }
+
     #[test]
     fn synthesize_rate_limited_preserves_retry_after() {
         let info = SamplingErrorInfo {
@@ -1291,10 +1428,13 @@ mod tests {
             message: "slow down".to_string(),
             is_retryable: true,
             retry_after_secs: Some(7),
+            should_retry: None,
+            error_code: None,
             model_metadata: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1416,6 +1556,21 @@ mod tests {
         assert_eq!(
             with_backoff_hint("connection interrupted".into(), Some(Duration::ZERO)),
             "connection interrupted"
+        );
+    }
+
+    /// Live retry wait chrome at 60s+ uses compact minutes, not `943s`.
+    #[test]
+    fn retry_footer_long_wait_uses_minutes_not_raw_seconds() {
+        let long = with_backoff_hint("timed out".into(), Some(Duration::from_secs(943)));
+        assert_eq!(long, "timed out · next try in 15m43s");
+        assert!(!long.contains("943s"), "{long}");
+        assert!(!long.contains("943 seconds"), "{long}");
+        assert_eq!(format_retry_wait(Duration::from_secs(60)), "1m0s");
+        assert_eq!(
+            format_retry_wait(Duration::from_secs(2)),
+            "2s",
+            "short backoff stays whole seconds"
         );
     }
 
@@ -2061,6 +2216,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_retryable(), "521 soft-retries same identity");
         assert!(

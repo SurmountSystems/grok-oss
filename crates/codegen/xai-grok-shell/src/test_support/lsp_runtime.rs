@@ -19,6 +19,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
     let (tx, _rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
         lsp: None,
+        process_scope: None,
         parent_max_turns: None,
         client_hooks: Default::default(),
         sampling_config: xai_grok_sampler::SamplerConfig {
@@ -35,6 +36,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             api_backend: Default::default(),
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
+            extra_response_includes: Vec::new(),
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: 256_000,
@@ -87,6 +89,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         goal_enabled: false,
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
+        parent_non_interactive: false,
         parent_cmd_tx: None,
         parent_session_info: None,
         subagent_roles: HashMap::new(),
@@ -95,7 +98,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         available_models: indexmap::IndexMap::new(),
         subagent_model_overrides: HashMap::new(),
         subagent_toggle: toggle,
-        subagent_allow_worktree: true,
         disable_web_search: false,
         todo_gate: false,
         remote_settings: None,
@@ -111,6 +113,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         gcs_upload_method: None,
         hook_registry: None,
         parent_depth: 0,
+        subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
+        workflow_max_concurrent_agents:
+            crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
         inference_idle_timeout_secs: 600,
         auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
         permission_handle: None,
@@ -143,6 +148,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
+        allow_worktree: false,
     }
 }
 #[derive(Default)]

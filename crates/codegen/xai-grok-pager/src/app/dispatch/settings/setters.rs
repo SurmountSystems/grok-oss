@@ -448,21 +448,42 @@ pub(in crate::app::dispatch) fn set_show_thinking_blocks(
     }]
 }
 
+pub(super) fn set_hide_header_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_hide_header(new);
+    app.current_ui.hide_header = new;
+    if app.appearance.hide_header != new {
+        let mut config = app.appearance.clone();
+        config.hide_header = new;
+        app.set_appearance(config);
+    }
+}
+
+pub(in crate::app::dispatch) fn set_hide_header(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_hide_header();
+    if prev == new {
+        return vec![];
+    }
+    set_hide_header_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Hide header", new));
+    vec![Effect::PersistSetting {
+        key: "hide_header",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 pub(super) fn set_always_expand_thinking_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_always_expand_thinking(new);
+    app.current_ui.always_expand_thinking = Some(new);
     for agent in app.agents.values_mut() {
-        agent.scrollback.apply_always_expand_thinking(new);
+        agent.scrollback.invalidate_heights();
         for child in agent.subagent_views.values_mut() {
-            child.scrollback.apply_always_expand_thinking(new);
+            child.scrollback.invalidate_heights();
         }
     }
 }
 
-/// Keep thinking fully expanded and hide the Ctrl+E footer affordance.
-///
-/// SHELL-OWNED: cache mirror + `[ui].always_expand_thinking` via
-/// `Effect::PersistSetting`. Turning on expands existing thinking now and
-/// sets the sticky finish mode so new thoughts stay open.
 pub(in crate::app::dispatch) fn set_always_expand_thinking(
     app: &mut AppView,
     new: bool,
@@ -473,15 +494,107 @@ pub(in crate::app::dispatch) fn set_always_expand_thinking(
     }
     set_always_expand_thinking_inner(app, new);
     refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "always_expand_thinking",
-        value = new,
-        "setting changed",
-    );
     app.show_toast(&save_success_toast("Always expand thinking", new));
     vec![Effect::PersistSetting {
         key: "always_expand_thinking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_plan_approval_park_inner(app: &mut AppView, canonical: &str) {
+    let force = canonical.eq_ignore_ascii_case("modal");
+    crate::appearance::cache::set_plan_approval_force_modal(force);
+    app.current_ui.plan_approval_park = Some(canonical.to_string());
+}
+
+pub(in crate::app::dispatch) fn set_plan_approval_park(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let prev = if crate::appearance::cache::load_plan_approval_force_modal() {
+        "modal"
+    } else {
+        "soft"
+    };
+    if prev == new {
+        return vec![];
+    }
+    let persist_new: &'static str = if new.eq_ignore_ascii_case("modal") {
+        "modal"
+    } else {
+        "soft"
+    };
+    set_plan_approval_park_inner(app, persist_new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Plan approval park: {persist_new}"));
+    vec![Effect::PersistSetting {
+        key: "plan_approval_park",
+        value: crate::settings::SettingValue::Enum(persist_new),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+pub(super) fn set_allow_worktree_inner(_app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_allow_worktree(new);
+}
+
+pub(in crate::app::dispatch) fn set_allow_worktree(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_allow_worktree();
+    if prev == new {
+        return vec![];
+    }
+    set_allow_worktree_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Allow subagent worktrees", new));
+    vec![Effect::PersistSetting {
+        key: "allow_worktree",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_scrub_ascii_punct_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_scrub_ascii_punct(new);
+    app.current_ui.scrub_ascii_punct = Some(new);
+    xai_grok_shell::session::helpers::set_config_enabled(new);
+}
+
+pub(in crate::app::dispatch) fn set_scrub_ascii_punct(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_scrub_ascii_punct();
+    if prev == new {
+        return vec![];
+    }
+    set_scrub_ascii_punct_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("ASCII-scrub punctuation", new));
+    vec![Effect::PersistSetting {
+        key: "scrub_ascii_punct",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_bubble_copy_buttons_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_bubble_copy_buttons(new);
+    let mut config = app.appearance.clone();
+    config.scrollback.display.bubble_copy_buttons = new;
+    app.set_appearance(config);
+}
+
+pub(in crate::app::dispatch) fn set_bubble_copy_buttons(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_bubble_copy_buttons();
+    if prev == new {
+        return vec![];
+    }
+    set_bubble_copy_buttons_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Bubble copy buttons", new));
+    vec![Effect::PersistSetting {
+        key: "bubble_copy_buttons",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
@@ -607,197 +720,6 @@ pub(in crate::app::dispatch) fn set_prompt_suggestions(
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
-}
-
-pub(super) fn set_auto_run_implement_inner(app: &mut AppView, new: bool) {
-    crate::appearance::cache::set_auto_run_implement(new);
-    app.current_ui.auto_run_implement = Some(new);
-}
-
-/// Set whether a sentence-leading `/implement` in the prior user prompt is
-/// auto-queued after a successful turn.
-///
-/// SHELL-OWNED: cache mirror + `[ui].auto_run_implement` via
-/// `Effect::PersistSetting`. Read at turn end, so toggling applies without a
-/// restart. Default ON for discoverability.
-pub(in crate::app::dispatch) fn set_auto_run_implement(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_auto_run_implement();
-    if prev == new {
-        return vec![];
-    }
-    set_auto_run_implement_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "auto_run_implement",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Auto-run /implement", new));
-    vec![Effect::PersistSetting {
-        key: "auto_run_implement",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-pub(super) fn set_economic_mode_inner(app: &mut AppView, new: bool) {
-    crate::appearance::cache::set_economic_mode(new);
-    app.current_ui.economic_mode = Some(new);
-}
-
-/// Set economic mode (soft-cap context at 200K for Grok 4.5 pricing).
-///
-/// SHELL-OWNED: cache mirror + `[ui].economic_mode` via
-/// `Effect::PersistSetting`. Seeds new sessions' effective context window.
-/// Does not rewrite auto-run `/implement --effort`. Use `/economic-mode` for
-/// the current conversation. Default ON.
-pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_economic_mode();
-    if prev == new {
-        return vec![];
-    }
-    set_economic_mode_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "economic_mode",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Economic mode", new));
-    vec![Effect::PersistSetting {
-        key: "economic_mode",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-pub(super) fn set_resume_canceled_turn_on_restart_inner(app: &mut AppView, new: bool) {
-    app.current_ui.resume_canceled_turn_on_restart = Some(new);
-}
-
-/// Continue an interrupted turn once when reopening a session (default on).
-///
-/// Operator-facing name: **continue interrupted turn**. Not `/resume` session pick.
-pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = app.current_ui.resume_canceled_turn_on_restart_enabled();
-    if prev == new {
-        return vec![];
-    }
-    set_resume_canceled_turn_on_restart_inner(app, new);
-    refresh_open_settings_modals(app);
-    app.show_toast(&save_success_toast(
-        "Continue interrupted turn on restart",
-        new,
-    ));
-    vec![Effect::PersistSetting {
-        key: "resume_canceled_turn_on_restart",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-/// Persist a Token Economy boolean; updates the process live cache immediately
-/// (optimistic) and emits [`Effect::PersistSetting`] for disk.
-pub(in crate::app::dispatch) fn set_token_economy_bool(
-    app: &mut AppView,
-    field: &'static str,
-    new: bool,
-) -> Vec<Effect> {
-    let key = token_economy_setting_key(field);
-    let prev = token_economy_bool_current(field);
-    if prev == new {
-        return vec![];
-    }
-    xai_grok_shell::token_economy::set_token_economy_live_bool(field, new);
-    refresh_open_settings_modals(app);
-    app.show_toast(&save_success_toast(&token_economy_label(field), new));
-    vec![Effect::PersistSetting {
-        key,
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-/// Persist a Token Economy integer effort knob; updates the process live cache
-/// immediately (optimistic) and emits [`Effect::PersistSetting`] for disk.
-pub(in crate::app::dispatch) fn set_token_economy_int(
-    app: &mut AppView,
-    field: &'static str,
-    new: i64,
-) -> Vec<Effect> {
-    let key = token_economy_setting_key(field);
-    let prev = token_economy_int_current(field);
-    if prev == new {
-        return vec![];
-    }
-    xai_grok_shell::token_economy::set_token_economy_live_int(field, new);
-    refresh_open_settings_modals(app);
-    app.show_toast(&format!("\u{2713} {}: {new}", token_economy_label(field)));
-    vec![Effect::PersistSetting {
-        key,
-        value: crate::settings::SettingValue::Int(new),
-        rollback_value: crate::settings::SettingValue::Int(prev),
-    }]
-}
-
-fn token_economy_setting_key(field: &'static str) -> &'static str {
-    match field {
-        "cap_implement_effort_when_economic" => "token_economy.cap_implement_effort_when_economic",
-        "max_implement_effort" => "token_economy.max_implement_effort",
-        "min_implement_effort" => "token_economy.min_implement_effort",
-        "desired_implement_effort" => "token_economy.desired_implement_effort",
-        "lock_implement_effort" => "token_economy.lock_implement_effort",
-        "show_period_pacing" => "token_economy.show_period_pacing",
-        "local_spend_ledger" => "token_economy.local_spend_ledger",
-        "reconcile_management_usage" => "token_economy.reconcile_management_usage",
-        other => other,
-    }
-}
-
-fn token_economy_label(field: &str) -> String {
-    match field {
-        "cap_implement_effort_when_economic" => {
-            "Cap implement effort when economic mode is on".into()
-        }
-        "max_implement_effort" => "Maximum implement-loop effort".into(),
-        "min_implement_effort" => "Minimum implement-loop effort".into(),
-        "desired_implement_effort" => "Desired implement-loop effort".into(),
-        "lock_implement_effort" => "Lock implement-loop effort".into(),
-        "show_period_pacing" => "Show free SuperGrok period pacing".into(),
-        "local_spend_ledger" => "Local spend ledger".into(),
-        "reconcile_management_usage" => "Reconcile Management usage".into(),
-        other => other.replace('_', " "),
-    }
-}
-
-fn token_economy_bool_current(field: &str) -> bool {
-    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-    match field {
-        "cap_implement_effort_when_economic" => cfg.cap_implement_effort_when_economic,
-        "show_period_pacing" => cfg.show_period_pacing,
-        "local_spend_ledger" => cfg.local_spend_ledger,
-        "reconcile_management_usage" => cfg.reconcile_management_usage,
-        _ => true,
-    }
-}
-
-fn token_economy_int_current(field: &str) -> i64 {
-    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-    match field {
-        "max_implement_effort" => i64::from(cfg.max_implement_effort),
-        "min_implement_effort" => i64::from(cfg.min_implement_effort),
-        "desired_implement_effort" => i64::from(cfg.desired_implement_effort),
-        "lock_implement_effort" => i64::from(cfg.lock_implement_effort.unwrap_or(0)),
-        _ => 0,
-    }
 }
 
 pub(super) fn set_keep_text_selection_inner(kind: crate::appearance::TextSelection) {
@@ -1007,194 +929,6 @@ pub(in crate::app::dispatch) fn set_respect_manual_folds(
     }]
 }
 
-pub(super) fn set_bubble_copy_buttons_inner(app: &mut AppView, new: bool) {
-    let mut config = app.appearance.clone();
-    config.scrollback.display.bubble_copy_buttons = new;
-    app.set_appearance(config);
-}
-
-/// Set always-on bubble ⧉ copy chrome.
-///
-/// PAGER-OWNED: live-applied via `AppView::set_appearance` and persisted to
-/// `[scrollback.display].bubble_copy_buttons` in pager.toml.
-pub(in crate::app::dispatch) fn set_bubble_copy_buttons(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = app.appearance.scrollback.display.bubble_copy_buttons;
-    if prev == new {
-        return vec![];
-    }
-    set_bubble_copy_buttons_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "bubble_copy_buttons",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Bubble copy buttons", new));
-    vec![Effect::PersistSetting {
-        key: "bubble_copy_buttons",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-/// Set sticky cancel-subagents preference (`ask` | `always_stop` | `always_continue`).
-pub(in crate::app::dispatch) fn set_cancel_subagents_on_turn_cancel(
-    app: &mut AppView,
-    new: String,
-) -> Vec<Effect> {
-    let canonical = match new.as_str() {
-        "always_stop" => "always_stop",
-        "always_continue" => "always_continue",
-        _ => "ask",
-    };
-    let prev = match app.current_ui.cancel_subagents_on_turn_cancel.as_deref() {
-        Some("always_stop") => "always_stop",
-        Some("always_continue") => "always_continue",
-        _ => "ask",
-    };
-    if prev == canonical {
-        return vec![];
-    }
-    match canonical {
-        "ask" => {
-            app.current_ui.cancel_subagents_on_turn_cancel = None;
-            for agent in app.agents.values_mut() {
-                agent.cancel_subagents_preference = None;
-            }
-        }
-        "always_stop" => {
-            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, true);
-        }
-        "always_continue" => {
-            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, false);
-        }
-        _ => unreachable!(),
-    }
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "cancel_subagents_on_turn_cancel",
-        value = canonical,
-        "setting changed",
-    );
-    app.show_toast(&format!("\u{2713} Cancel subagents: {canonical}"));
-    vec![Effect::PersistSetting {
-        key: "cancel_subagents_on_turn_cancel",
-        value: crate::settings::SettingValue::Enum(canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev),
-    }]
-}
-
-pub(super) fn set_notifications_session_recap_inner(app: &mut AppView, new: bool) {
-    app.notification_service.set_session_recap(new);
-    app.current_ui.notifications.session_recap = Some(new);
-}
-
-/// Auto return-from-away session recap (`[ui.notifications] session_recap`).
-pub(in crate::app::dispatch) fn set_notifications_session_recap(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = app.notification_service.config().session_recap;
-    if prev == new {
-        return vec![];
-    }
-    set_notifications_session_recap_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "notifications.session_recap",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Auto session recap", new));
-    vec![Effect::PersistSetting {
-        key: "notifications.session_recap",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-pub(super) fn set_notifications_session_recap_threshold_secs_inner(app: &mut AppView, secs: u64) {
-    app.notification_service
-        .set_session_recap_threshold_secs(secs);
-    app.current_ui.notifications.session_recap_threshold_secs = Some(secs);
-}
-
-/// Auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
-pub(in crate::app::dispatch) fn set_notifications_session_recap_threshold_secs(
-    app: &mut AppView,
-    new: i64,
-) -> Vec<Effect> {
-    let clamped = new.clamp(5, 3600) as u64;
-    let prev = app
-        .notification_service
-        .config()
-        .session_recap_threshold_secs;
-    if prev == clamped {
-        return vec![];
-    }
-    set_notifications_session_recap_threshold_secs_inner(app, clamped);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "notifications.session_recap_threshold_secs",
-        value = clamped,
-        "setting changed",
-    );
-    app.show_toast(&format!("\u{2713} Auto recap after: {clamped}s"));
-    vec![Effect::PersistSetting {
-        key: "notifications.session_recap_threshold_secs",
-        value: crate::settings::SettingValue::Int(clamped as i64),
-        rollback_value: crate::settings::SettingValue::Int(prev as i64),
-    }]
-}
-
-pub(super) fn set_features_session_recap_inner(app: &mut AppView, new: bool) {
-    app.features_session_recap = new;
-    // Optimistic client gate: off hides /recap UI immediately; on still needs
-    // shell re-advertise (restart) for full ACP availability.
-    if !new {
-        app.session_recap_available = false;
-        for agent in app.agents.values_mut() {
-            agent.set_session_recap_available(false);
-        }
-    }
-}
-
-/// Master `[features] session_recap` (manual `/recap` + auto). Restart-required
-/// for shell ACP re-advertise when turning on.
-pub(in crate::app::dispatch) fn set_features_session_recap(
-    app: &mut AppView,
-    new: bool,
-) -> Vec<Effect> {
-    let prev = app.features_session_recap;
-    if prev == new {
-        return vec![];
-    }
-    set_features_session_recap_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "features.session_recap",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&format!(
-        "{} (restart to fully apply)",
-        save_success_toast("Master session recap", new),
-    ));
-    vec![Effect::PersistSetting {
-        key: "features.session_recap",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
 /// Set the cursor preselection canonical (registry-driven path).
 ///
 /// SHELL-OWNED: persisted to `[ui].default_selected_permission` via
@@ -1308,34 +1042,6 @@ pub(in crate::app::dispatch) fn set_compact_mode(app: &mut AppView, new: bool) -
     }]
 }
 
-/// State-only mutation for `hide_header`. Updates `current_ui` + appearance.
-pub(super) fn set_hide_header_inner(app: &mut AppView, new: bool) {
-    app.current_ui.hide_header = new;
-    if app.appearance.hide_header == new {
-        return;
-    }
-    let mut config = app.appearance.clone();
-    config.hide_header = new;
-    app.set_appearance(config);
-}
-
-/// Set hide-header. Idempotent: skips if `new == prev`.
-pub(in crate::app::dispatch) fn set_hide_header(app: &mut AppView, new: bool) -> Vec<Effect> {
-    let prev = app.current_ui.hide_header;
-    if prev == new {
-        return vec![];
-    }
-    set_hide_header_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(target: "settings", key = "hide_header", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Hide header", new));
-    vec![Effect::PersistSetting {
-        key: "hide_header",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
 /// State-only mutation for `show_timestamps`. Idempotent fast path
 /// mirrors `set_compact_mode_inner`.
 pub(super) fn set_timestamps_inner(app: &mut AppView, new: bool) {
@@ -1422,59 +1128,27 @@ pub(in crate::app::dispatch) fn set_page_flip_on_send(app: &mut AppView, new: bo
     }]
 }
 
-pub(super) fn set_scrub_ascii_punct_inner(app: &mut AppView, new: bool) {
-    app.current_ui.scrub_ascii_punct = Some(new);
-    crate::appearance::cache::set_scrub_ascii_punct(new);
+pub(in crate::app::dispatch) fn set_confirm_before_rewind_inner(app: &mut AppView, new: bool) {
+    app.current_ui.confirm_before_rewind = Some(new);
 }
 
-/// SHARED: cache + `[ui].scrub_ascii_punct` via `Effect::PersistSetting`.
-pub(in crate::app::dispatch) fn set_scrub_ascii_punct(app: &mut AppView, new: bool) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_scrub_ascii_punct();
+/// SHARED: `[ui].confirm_before_rewind` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_confirm_before_rewind(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.confirm_before_rewind_enabled();
     if prev == new {
         return vec![];
     }
-    set_scrub_ascii_punct_inner(app, new);
+    set_confirm_before_rewind_inner(app, new);
     refresh_open_settings_modals(app);
-    tracing::info!(target: "settings", key = "scrub_ascii_punct", value = new, "setting changed");
-    app.show_toast(&save_success_toast("ASCII-safe assistant punctuation", new));
+    tracing::info!(target: "settings", key = "confirm_before_rewind", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Confirm before rewind", new));
     vec![Effect::PersistSetting {
-        key: "scrub_ascii_punct",
+        key: "confirm_before_rewind",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-/// SHARED: `[ui].plan_approval_park` (`soft` | `modal`) via `Effect::PersistSetting`.
-pub(in crate::app::dispatch) fn set_plan_approval_park(
-    app: &mut AppView,
-    new: String,
-) -> Vec<Effect> {
-    let canonical: &'static str = match new.trim() {
-        "modal" => "modal",
-        _ => "soft",
-    };
-    let prev = app.current_ui.plan_approval_park_mode();
-    if prev == canonical {
-        return vec![];
-    }
-    app.current_ui.plan_approval_park = Some(canonical.to_owned());
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "plan_approval_park",
-        value = canonical,
-        "setting changed"
-    );
-    let label = if canonical == "modal" {
-        "Plan approval park: modal"
-    } else {
-        "Plan approval park: soft (toast)"
-    };
-    app.show_toast(label);
-    vec![Effect::PersistSetting {
-        key: "plan_approval_park",
-        value: crate::settings::SettingValue::Enum(canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev),
     }]
 }
 
@@ -2241,7 +1915,11 @@ pub(in crate::app::dispatch) fn set_default_model(
         // No session id yet — stash for
         // `EventLoop::on_session_created` to apply once the session
         // id materialises. Mirrors `Action::SwitchModel` line 586.
-        agent.session.deferred_model_switch = Some((new_id, None));
+        agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+            model_id: new_id,
+            effort: None,
+            prev_model_id: prev_id,
+        });
     }
     effects
 }
@@ -2422,9 +2100,48 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     }]
 }
 
-// `web_search_model`, `session_summary_model`, and
-// `default_reasoning_effort` setters were removed alongside their
-// registry entries. Mirror fields and TOML schema stay for compat.
+// `web_search_model` and `session_summary_model` setters were removed
+// alongside their registry entries. Mirror fields and TOML schema stay
+// for compat.
+//
+// `default_reasoning_effort` is back on the Settings registry
+// (`[models].default_reasoning_effort`).
+
+/// State-only mutation for `[models].default_reasoning_effort`.
+/// Updates the `AppView` mirror so `current_value_for` + snapshot
+/// refresh see the override without a restart.
+pub(super) fn set_default_reasoning_effort_inner(app: &mut AppView, canonical: &str) {
+    app.default_reasoning_effort = Some(canonical.to_string());
+}
+
+/// Persist `[models].default_reasoning_effort` (`low` | `medium` | `high`).
+/// SHELL-owned. Live-applied on `AppView`.
+pub(in crate::app::dispatch) fn set_default_reasoning_effort(
+    app: &mut AppView,
+    value: String,
+) -> Vec<Effect> {
+    let canonical = crate::settings::canonical_default_reasoning_effort(Some(&value));
+    let prev = crate::settings::canonical_default_reasoning_effort(
+        app.default_reasoning_effort.as_deref(),
+    );
+    if prev == canonical && app.default_reasoning_effort.as_deref() == Some(canonical) {
+        return vec![];
+    }
+    set_default_reasoning_effort_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "default_reasoning_effort",
+        value = canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Default reasoning effort: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "default_reasoning_effort",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
 
 // ---------------------------------------------------------------------------
 // max_thoughts_width — Int-valued setting. Registry surface is `i64`;
@@ -2474,8 +2191,353 @@ pub(in crate::app::dispatch) fn set_max_thoughts_width(app: &mut AppView, new: i
     }]
 }
 
+pub(super) fn set_auto_run_implement_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_auto_run_implement(new);
+    app.current_ui.auto_run_implement = Some(new);
+}
+
+/// Set whether a sentence-leading `/implement` in the prior user prompt is
+/// auto-queued after a successful turn.
+///
+/// SHELL-OWNED: cache mirror + `[ui].auto_run_implement` via
+/// `Effect::PersistSetting`. Read at turn end, so toggling applies without a
+/// restart. Default ON for discoverability.
+pub(in crate::app::dispatch) fn set_auto_run_implement(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_auto_run_implement();
+    if prev == new {
+        return vec![];
+    }
+    set_auto_run_implement_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "auto_run_implement",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Auto-run /implement", new));
+    vec![Effect::PersistSetting {
+        key: "auto_run_implement",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_economic_mode_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_economic_mode(new);
+    app.current_ui.economic_mode = Some(new);
+}
+
+/// Set economic mode (soft-cap context at 200K for Grok 4.5 pricing).
+///
+/// SHELL-OWNED: cache mirror + `[ui].economic_mode` via
+/// `Effect::PersistSetting`. Seeds new sessions' effective context window.
+/// Does not rewrite auto-run `/implement --effort`. Use `/economic-mode` for
+/// the current conversation. Default ON.
+pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_economic_mode();
+    if prev == new {
+        return vec![];
+    }
+    set_economic_mode_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "economic_mode",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Economic mode", new));
+    vec![Effect::PersistSetting {
+        key: "economic_mode",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_resume_canceled_turn_on_restart_inner(app: &mut AppView, new: bool) {
+    app.current_ui.resume_canceled_turn_on_restart = Some(new);
+}
+
+/// Continue an interrupted turn once when reopening a session (default on).
+///
+/// Operator-facing name: **continue interrupted turn**. Not `/resume` session pick.
+pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.resume_canceled_turn_on_restart_enabled();
+    if prev == new {
+        return vec![];
+    }
+    set_resume_canceled_turn_on_restart_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast(
+        "Continue interrupted turn on restart",
+        new,
+    ));
+    vec![Effect::PersistSetting {
+        key: "resume_canceled_turn_on_restart",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Persist a Token Economy boolean; updates the process live cache immediately
+/// (optimistic) and emits [`Effect::PersistSetting`] for disk.
+pub(in crate::app::dispatch) fn set_token_economy_bool(
+    app: &mut AppView,
+    field: &'static str,
+    new: bool,
+) -> Vec<Effect> {
+    let key = token_economy_setting_key(field);
+    let prev = token_economy_bool_current(field);
+    if prev == new {
+        return vec![];
+    }
+    xai_grok_shell::token_economy::set_token_economy_live_bool(field, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast(&token_economy_label(field), new));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Persist a Token Economy integer effort knob; updates the process live cache
+/// immediately (optimistic) and emits [`Effect::PersistSetting`] for disk.
+pub(in crate::app::dispatch) fn set_token_economy_int(
+    app: &mut AppView,
+    field: &'static str,
+    new: i64,
+) -> Vec<Effect> {
+    let key = token_economy_setting_key(field);
+    let prev = token_economy_int_current(field);
+    if prev == new {
+        return vec![];
+    }
+    xai_grok_shell::token_economy::set_token_economy_live_int(field, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} {}: {new}", token_economy_label(field)));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::Int(new),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+fn token_economy_setting_key(field: &'static str) -> &'static str {
+    match field {
+        "cap_implement_effort_when_economic" => "token_economy.cap_implement_effort_when_economic",
+        "max_implement_effort" => "token_economy.max_implement_effort",
+        "min_implement_effort" => "token_economy.min_implement_effort",
+        "desired_implement_effort" => "token_economy.desired_implement_effort",
+        "lock_implement_effort" => "token_economy.lock_implement_effort",
+        "show_period_pacing" => "token_economy.show_period_pacing",
+        "local_spend_ledger" => "token_economy.local_spend_ledger",
+        "reconcile_management_usage" => "token_economy.reconcile_management_usage",
+        other => other,
+    }
+}
+
+fn token_economy_label(field: &str) -> String {
+    match field {
+        "cap_implement_effort_when_economic" => {
+            "Cap implement effort when economic mode is on".into()
+        }
+        "max_implement_effort" => "Maximum implement-loop effort".into(),
+        "min_implement_effort" => "Minimum implement-loop effort".into(),
+        "desired_implement_effort" => "Desired implement-loop effort".into(),
+        "lock_implement_effort" => "Lock implement-loop effort".into(),
+        "show_period_pacing" => "Show included SuperGrok period pacing".into(),
+        "local_spend_ledger" => "Local spend ledger".into(),
+        "reconcile_management_usage" => "Reconcile Management usage".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn token_economy_bool_current(field: &str) -> bool {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    match field {
+        "cap_implement_effort_when_economic" => cfg.cap_implement_effort_when_economic,
+        "show_period_pacing" => cfg.show_period_pacing,
+        "local_spend_ledger" => cfg.local_spend_ledger,
+        "reconcile_management_usage" => cfg.reconcile_management_usage,
+        _ => false,
+    }
+}
+
+fn token_economy_int_current(field: &str) -> i64 {
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    match field {
+        "max_implement_effort" => i64::from(cfg.max_implement_effort),
+        "min_implement_effort" => i64::from(cfg.min_implement_effort),
+        "desired_implement_effort" => i64::from(cfg.desired_implement_effort),
+        "lock_implement_effort" => i64::from(cfg.lock_implement_effort.unwrap_or(0)),
+        _ => 0,
+    }
+}
+
+/// Set sticky cancel-subagents preference (`ask` | `always_stop` | `always_continue`).
+pub(in crate::app::dispatch) fn set_cancel_subagents_on_turn_cancel(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let canonical = match new.as_str() {
+        "always_stop" => "always_stop",
+        "always_continue" => "always_continue",
+        _ => "ask",
+    };
+    let prev = match app.current_ui.cancel_subagents_on_turn_cancel.as_deref() {
+        Some("always_stop") => "always_stop",
+        Some("always_continue") => "always_continue",
+        _ => "ask",
+    };
+    if prev == canonical {
+        return vec![];
+    }
+    match canonical {
+        "ask" => {
+            app.current_ui.cancel_subagents_on_turn_cancel = None;
+            for agent in app.agents.values_mut() {
+                agent.cancel_subagents_preference = None;
+            }
+        }
+        "always_stop" => {
+            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, true);
+        }
+        "always_continue" => {
+            crate::app::dispatch::turn::apply_cancel_subagents_preference_global(app, false);
+        }
+        _ => unreachable!(),
+    }
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "cancel_subagents_on_turn_cancel",
+        value = canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Cancel subagents: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "cancel_subagents_on_turn_cancel",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+pub(super) fn set_notifications_session_recap_inner(app: &mut AppView, new: bool) {
+    app.notification_service.set_session_recap(new);
+    app.current_ui.notifications.session_recap = Some(new);
+}
+
+/// Auto return-from-away session recap (`[ui.notifications] session_recap`).
+pub(in crate::app::dispatch) fn set_notifications_session_recap(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.notification_service.config().session_recap;
+    if prev == new {
+        return vec![];
+    }
+    set_notifications_session_recap_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "notifications.session_recap",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Auto session recap", new));
+    vec![Effect::PersistSetting {
+        key: "notifications.session_recap",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_notifications_session_recap_threshold_secs_inner(app: &mut AppView, secs: u64) {
+    app.notification_service
+        .set_session_recap_threshold_secs(secs);
+    app.current_ui.notifications.session_recap_threshold_secs = Some(secs);
+}
+
+/// Auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
+pub(in crate::app::dispatch) fn set_notifications_session_recap_threshold_secs(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let clamped = new.clamp(5, 3600) as u64;
+    let prev = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    if prev == clamped {
+        return vec![];
+    }
+    set_notifications_session_recap_threshold_secs_inner(app, clamped);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "notifications.session_recap_threshold_secs",
+        value = clamped,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Auto recap after: {clamped}s"));
+    vec![Effect::PersistSetting {
+        key: "notifications.session_recap_threshold_secs",
+        value: crate::settings::SettingValue::Int(clamped as i64),
+        rollback_value: crate::settings::SettingValue::Int(prev as i64),
+    }]
+}
+
+pub(super) fn set_features_session_recap_inner(app: &mut AppView, new: bool) {
+    app.features_session_recap = new;
+    // Optimistic client gate: off hides /recap UI immediately; on still needs
+    // shell re-advertise (restart) for full ACP availability.
+    if !new {
+        app.session_recap_available = false;
+        for agent in app.agents.values_mut() {
+            agent.set_session_recap_available(false);
+        }
+    }
+}
+
+/// Master `[features] session_recap` (manual `/recap` + auto). Restart-required
+/// for shell ACP re-advertise when turning on.
+pub(in crate::app::dispatch) fn set_features_session_recap(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.features_session_recap;
+    if prev == new {
+        return vec![];
+    }
+    set_features_session_recap_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "features.session_recap",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "{} (restart to fully apply)",
+        save_success_toast("Master session recap", new),
+    ));
+    vec![Effect::PersistSetting {
+        key: "features.session_recap",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 // ---------------------------------------------------------------------------
-// auto_compact_threshold — SHELL-OWNED dual preference (percent or tokens).
+// auto_compact_threshold: SHELL-OWNED dual preference (percent or tokens).
 // Live-applied: PersistSetting writes disk, then ACP
 // `x.ai/auto_compact_threshold_changed` updates open session Cells.
 // ---------------------------------------------------------------------------

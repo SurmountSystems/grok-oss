@@ -19,9 +19,8 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 const DESCRIPTION: &str = r#"Create or overwrite a file.
 
-- Writing to an existing path replaces the file — read it first with the ${{ tools.by_kind.read }} tool.
-- Parent directories are created for you.
-- Trailing spaces/tabs on each line are stripped by default (disable with env `GROK_STRIP_TRAILING_WHITESPACE=0`)."#;
+- Writing to an existing path replaces the file${%- if tools.by_kind.read %} — read it first with the ${{ tools.by_kind.read }} tool${%- endif %}.
+- Parent directories are created for you."#;
 
 // ─── Input ───────────────────────────────────────────────────────────
 
@@ -79,7 +78,7 @@ impl xai_tool_runtime::Tool for WriteTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "write",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -112,6 +111,11 @@ impl xai_tool_runtime::Tool for WriteTool {
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &path, &ctx, &resources, "write",
+            )
+            .await?;
 
         // ── Check if file exists and read old content ────────────
         let (existed, old_content) = match fs.read_file(&path).await {
@@ -132,9 +136,8 @@ impl xai_tool_runtime::Tool for WriteTool {
             })?;
         }
 
-        // ── Write the file (post-edit trailing-ws strip, default ON) ──
-        let content = crate::util::trailing_ws::prepare_for_write(input.content);
-        fs.write_file(&path, content.as_bytes())
+        // ── Write the file ───────────────────────────────────────
+        fs.write_file(&path, input.content.as_bytes())
             .await
             .map_err(|e| {
                 xai_tool_runtime::ToolError::execution(
@@ -143,17 +146,29 @@ impl xai_tool_runtime::Tool for WriteTool {
                 )
             })?;
 
+        let written =
+            crate::util::rust_edit_verify::after_structured_rust_write(&path, &input.content);
+        if written != input.content
+            && let Err(e) = fs.write_file(&path, written.as_bytes()).await
+        {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "ACP filesystem sync of rustfmt output failed; disk already formatted"
+            );
+        }
+
         // ── Send FileWritten notification ────────────────────────
         notification_handle.send_file_written(FileWritten {
             tool_call_id,
             absolute_path: path.clone(),
-            content: content.clone(),
+            content: written.clone(),
             previous_content: old_content.clone(),
             is_new_file: !existed,
         });
 
         let old_string = old_content.unwrap_or_default();
-        let new_string = content;
+        let new_string = written;
 
         let edits = vec![SearchReplaceEditDetail {
             old_string: old_string.clone(),
@@ -465,55 +480,5 @@ mod tests {
     fn notification_fields() {
         // Notification verification requires capturing handle.
         // Covered at integration layer.
-    }
-
-    // ── Trailing-whitespace strip ─────────────────────────────
-
-    #[tokio::test]
-    async fn write_strips_trailing_whitespace_by_default() {
-        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
-        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("1"))]);
-
-        let tmp = TempDir::new().unwrap();
-        let tool = WriteTool;
-        let resources = test_resources(tmp.path());
-        let file_path = tmp.path().join("ws.txt");
-        let input = WriteInput {
-            file_path: file_path.to_string_lossy().into_owned(),
-            content: "a  \nb\t\n".to_string(),
-        };
-        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "a\nb\n");
-    }
-
-    #[tokio::test]
-    async fn write_preserves_trailing_whitespace_when_env_off() {
-        use crate::util::trailing_ws::ENV_STRIP_TRAILING_WHITESPACE;
-        use crate::util::trailing_ws::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[(ENV_STRIP_TRAILING_WHITESPACE, Some("0"))]);
-
-        let tmp = TempDir::new().unwrap();
-        let tool = WriteTool;
-        let resources = test_resources(tmp.path());
-        let file_path = tmp.path().join("ws.txt");
-        let input = WriteInput {
-            file_path: file_path.to_string_lossy().into_owned(),
-            content: "a  \nb\t\n".to_string(),
-        };
-        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "a  \nb\t\n");
     }
 }

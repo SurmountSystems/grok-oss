@@ -22,34 +22,6 @@ use std::sync::OnceLock;
 /// [`take_screen_mode_env_override`]; not a public user interface.
 pub(crate) const GROK_SCREEN_MODE_ENV: &str = "GROK_SCREEN_MODE";
 
-/// Default user-facing CLI name for Surmount Grok OSS (`cargo install` artifact).
-///
-/// Upstream xAI prints `grok`; this fork's binary is `grok-oss`. Resume and
-/// relaunch hints must match what the user can actually type after quit.
-pub(crate) const DEFAULT_CLI_HINT_NAME: &str = crate::client_identity::PRODUCT_CLI_NAME;
-
-/// Basename for resume / relaunch command lines shown after quit.
-///
-/// Prefers the running executable's file name when it looks like a product
-/// install (`grok-oss`, `grok`, versioned `grok-*` downloads). Cargo-test
-/// harness binaries fall through to [`DEFAULT_CLI_HINT_NAME`].
-pub(crate) fn cli_hint_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .filter(|name| is_product_cli_name(name))
-        .unwrap_or_else(|| DEFAULT_CLI_HINT_NAME.to_owned())
-}
-
-fn is_product_cli_name(name: &str) -> bool {
-    if name == "grok-oss" || name == "grok" || name.starts_with("grok-oss") {
-        return true;
-    }
-    // Versioned release artifacts: `grok-0.2.101-…` (not crate test bins).
-    name.strip_prefix("grok-")
-        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-}
-
 /// Argv tokens (`--long`, `-s`, and their aliases) of [`super::cli::PagerArgs`]
 /// flags that consume a following value token when not written as
 /// `--flag=value`.
@@ -230,15 +202,7 @@ pub(crate) fn screen_mode_env_value(want_minimal: bool) -> &'static str {
     }
 }
 
-/// Shell command a user can paste when auto re-exec fails.
-///
-/// Includes [`GROK_SCREEN_MODE_ENV`] so the resume hits the same override path
-/// as a successful `exec` — plain `{cli} --resume <id>` (or even
-/// `{cli} --minimal --resume <id>`) is not enough after `/fullscreen` when
-/// config/CLI would pick minimal or inline alt-screen policy. The explicit
-/// `--minimal`/`--fullscreen` flag is included too so following the hint also
-/// persists the sticky `[ui] screen_mode` preference, exactly like a
-/// successful `exec` would have.
+/// Pasteable shell command when auto re-exec fails (env + flag + `--resume`).
 pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: bool) -> String {
     let mode = screen_mode_env_value(want_minimal);
     let flag = if want_minimal {
@@ -246,8 +210,10 @@ pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: b
     } else {
         "--fullscreen"
     };
-    let cli = cli_hint_name();
-    format!("{GROK_SCREEN_MODE_ENV}={mode} {cli} {flag} --resume {session_id}")
+    format!(
+        "{GROK_SCREEN_MODE_ENV}={mode} {} {flag} --resume {session_id}",
+        crate::client_identity::PRODUCT_CLI_NAME
+    )
 }
 
 /// Replace the current process with a relaunch into the requested screen mode.
@@ -322,6 +288,7 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
         // reader competes with the child for console records and swallows its
         // first keystrokes.
         std::thread::sleep(std::time::Duration::from_millis(150));
+        #[allow(clippy::disallowed_methods)] // the parent waits and exits with its status
         let mut child = cmd.spawn()?;
         let status = child.wait()?;
         std::process::exit(status.code().unwrap_or(0));
@@ -868,34 +835,19 @@ mod tests {
         // Recovery command must carry GROK_SCREEN_MODE so following the
         // hint after a failed `/fullscreen` does not reopen minimal/inline. The
         // explicit flag keeps the resume in the right mode if the env is dropped.
-        let cli = cli_hint_name();
-        let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(
-            full,
-            format!("GROK_SCREEN_MODE=fullscreen {cli} --fullscreen --resume abc-sid")
+            screen_mode_relaunch_resume_hint("abc-sid", false),
+            "GROK_SCREEN_MODE=fullscreen grok-oss --fullscreen --resume abc-sid"
         );
-        assert!(
-            !full.contains(" grok "),
-            "must not use upstream binary name: {full}"
-        );
-        let min = screen_mode_relaunch_resume_hint("abc-sid", true);
         assert_eq!(
-            min,
-            format!("GROK_SCREEN_MODE=minimal {cli} --minimal --resume abc-sid")
+            screen_mode_relaunch_resume_hint("abc-sid", true),
+            "GROK_SCREEN_MODE=minimal grok-oss --minimal --resume abc-sid"
         );
+        let fullscreen = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert!(
-            !min.contains(" grok "),
-            "must not use upstream binary name: {min}"
+            !fullscreen.contains(" grok --"),
+            "must not tell operators to run upstream grok --resume:\n{fullscreen}"
         );
-    }
-
-    #[test]
-    fn is_product_cli_name_accepts_install_and_versioned_names() {
-        assert!(is_product_cli_name("grok-oss"));
-        assert!(is_product_cli_name("grok"));
-        assert!(is_product_cli_name("grok-0.2.101-linux-x86_64"));
-        assert!(!is_product_cli_name("xai_grok_pager-abc123"));
-        assert!(!is_product_cli_name("deps"));
     }
 
     // ── effective_minimal_preference ─────────────────────────────────────

@@ -7,6 +7,9 @@ use std::fmt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use xai_circuit_breaker::RetryPolicy;
+
+use crate::provider_error::{parse_provider_error, parse_provider_error_str};
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
@@ -76,6 +79,65 @@ pub struct ResponseModelMetadata {
     pub models_etag: Option<String>,
 }
 
+/// Whether the rejected request actually carried a credential on the wire.
+///
+/// A 401 for a request that went out with **no** credential header (a
+/// fail-closed send while the bearer resolver had nothing wire-valid) is
+/// not evidence against the credential itself; retry policies use this to
+/// avoid charging credential-rejection budgets for such sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SentCredential {
+    /// The request carried a credential; the server rejected it.
+    Sent,
+    /// The request went out with no credential header at all.
+    Missing,
+    /// Provenance unknown (synthesized or legacy errors). Retry policies
+    /// treat this like [`SentCredential::Sent`] — fail closed toward
+    /// terminating rather than retrying forever.
+    #[default]
+    Unknown,
+}
+
+/// Hand-written so an unrecognized value from a newer peer degrades to
+/// `Unknown` instead of failing the whole containing payload
+/// (`#[serde(other)]` is not available on externally-tagged enums).
+impl<'de> Deserialize<'de> for SentCredential {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(
+            match std::borrow::Cow::<str>::deserialize(deserializer)?.as_ref() {
+                "sent" => Self::Sent,
+                "missing" => Self::Missing,
+                _ => Self::Unknown,
+            },
+        )
+    }
+}
+
+impl SentCredential {
+    /// Classify from the credential fragment captured when the request was
+    /// built (`None` = no credential header was stamped on the wire).
+    pub fn from_sent_fragment(fragment: Option<&str>) -> Self {
+        if fragment.is_some() {
+            Self::Sent
+        } else {
+            Self::Missing
+        }
+    }
+
+    pub fn is_missing(self) -> bool {
+        matches!(self, Self::Missing)
+    }
+
+    /// By reference so it can serve as a serde `skip_serializing_if`.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the
 /// variant's `#[error(...)]` template so [`SamplingError::serialization_from_rendered`]
 /// can never drift from what Display actually emits.
@@ -83,8 +145,12 @@ const SERIALIZATION_DISPLAY_PREFIX: &str = "serialization error: ";
 
 #[derive(Debug, Error)]
 pub enum SamplingError {
-    #[error("{0}")]
-    Auth(String),
+    #[error("{message}")]
+    Auth {
+        message: String,
+        /// Whether the rejected request actually carried a credential.
+        credential: SentCredential,
+    },
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
     #[error("request error: {0}")]
@@ -105,12 +171,23 @@ pub enum SamplingError {
         /// `Some(false)` = request-content error, don't retry.
         /// `None` = header absent (old server or non-proxy origin).
         should_retry: Option<bool>,
+        /// The error envelope's `code` slot, parsed via [`ApiErrorCode`].
+        /// Dedicated code slots — nested envelopes, Responses-stream error
+        /// events — pass through verbatim; the flat envelope's overloaded
+        /// slot surfaces only semantic values. `None` when the body has no
+        /// envelope or carries no code.
+        error_code: Option<ApiErrorCode>,
     },
     #[error("reqwest error stream: {0}")]
     EventStreamError(String),
     /// Server-side stream error (sent as JSON within the SSE stream)
     #[error("stream error ({error_type}): {message}")]
-    StreamError { error_type: String, message: String },
+    StreamError {
+        error_type: String,
+        message: String,
+        /// The stream error envelope's `code` slot, when present.
+        code: Option<ApiErrorCode>,
+    },
     /// Per-chunk idle timeout — no SSE chunk received from the model within the
     /// configured deadline. NOT retryable: the model (or network path) is stuck,
     /// and replaying the same request would likely stall again.
@@ -133,7 +210,74 @@ pub enum SamplingError {
     },
 }
 
+/// Semantic `error.code` the server stamps on invalid-image rejections, on
+/// both non-stream error bodies and mid-stream SSE error events.
+pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
+
+/// A wire `error.code`, parsed once at the boundary so classification
+/// compares variants instead of strings. `#[non_exhaustive]`: the next
+/// semantic code is a new variant, not another const and `||` chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ApiErrorCode {
+    /// The server rejected an image ([`INVALID_IMAGE_ERROR_CODE`]).
+    InvalidImage,
+    /// Any other wire code, preserved verbatim (Responses-stream error
+    /// events pass arbitrary codes through).
+    Other(String),
+}
+
+impl ApiErrorCode {
+    pub fn parse(code: &str) -> Self {
+        match code {
+            INVALID_IMAGE_ERROR_CODE => Self::InvalidImage,
+            _ => Self::Other(code.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::InvalidImage => INVALID_IMAGE_ERROR_CODE,
+            Self::Other(code) => code,
+        }
+    }
+}
+
+/// Serializes as the plain wire string, so `Option<ApiErrorCode>` fields are
+/// byte-identical on the wire to the `Option<String>` they replaced.
+impl Serialize for ApiErrorCode {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiErrorCode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(Self::parse(&String::deserialize(d)?))
+    }
+}
+
 impl SamplingError {
+    /// Auth error of unknown wire provenance — for paths that never sent a
+    /// request (config validation, cancellation, actor teardown) or that
+    /// lost the provenance (legacy round trips).
+    pub fn auth_unknown(message: impl Into<String>) -> Self {
+        Self::Auth {
+            message: message.into(),
+            credential: SentCredential::Unknown,
+        }
+    }
+
+    /// Auth error with known wire provenance (request did / did not carry a
+    /// credential header). Prefer this over [`Self::auth_unknown`] at every
+    /// site that saw the outbound request headers.
+    pub fn auth(message: impl Into<String>, credential: SentCredential) -> Self {
+        Self::Auth {
+            message: message.into(),
+            credential,
+        }
+    }
+
     /// Rebuild a `Serialization` error from a rendered message for non-`Clone`
     /// contexts; it must stay `Serialization` so it remains non-retryable.
     pub fn serialization_message(msg: impl fmt::Display) -> Self {
@@ -161,7 +305,7 @@ impl SamplingError {
         // class as 401 and must refresh / re-auth, not Internal error.
         // Credit-exhausted 403 wording is not auth (failover / plain credits).
         match self {
-            SamplingError::Auth(_) => true,
+            SamplingError::Auth { .. } => true,
             SamplingError::Api {
                 status, message, ..
             } => {
@@ -182,6 +326,36 @@ impl SamplingError {
                 ..
             }
         )
+    }
+
+    /// True when the model or gateway reports capacity / overload.
+    ///
+    /// Stream errors classify on `error_type` only (`overloaded_error`,
+    /// `service_unavailable_error`). HTTP 529 is always capacity. Other 5xx
+    /// bodies classify when the message names those same types or
+    /// "overloaded". A 4xx that merely mentions the word is a request
+    /// error, not capacity.
+    pub fn is_overloaded(&self) -> bool {
+        match self {
+            SamplingError::StreamError { error_type, .. } => {
+                error_type == "overloaded_error" || error_type == "service_unavailable_error"
+            }
+            SamplingError::Api {
+                status, message, ..
+            } => {
+                status.as_u16() == 529
+                    || (status.is_server_error() && api_message_is_overloaded(message))
+            }
+            SamplingError::Auth { .. }
+            | SamplingError::InvalidConfiguration(_)
+            | SamplingError::Http(_)
+            | SamplingError::Serialization(_)
+            | SamplingError::EventStreamError(_)
+            | SamplingError::IdleTimeout { .. }
+            | SamplingError::EmptyResponse { .. }
+            | SamplingError::MaxTokensTruncation
+            | SamplingError::DoomLoopDetected { .. } => false,
+        }
     }
 
     pub fn is_payload_too_large(&self) -> bool {
@@ -219,38 +393,57 @@ impl SamplingError {
     /// a new session.
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
-                    self,
-                    SamplingError::Api {
-                        status: StatusCode::BAD_REQUEST,
-                        message,
-                        ..
-                    }
-        if message.contains("encrypted_content")
-                )
+            self,
+            SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message,
+                ..
+            } if message.contains("encrypted_content")
+        )
     }
 
-    /// The API rejected the request because an inline image could not be
-    /// processed. Matches both direct 400 and proxy-wrapped 500 responses.
-    /// Exact-case match — consistent with `is_encrypted_content_error`.
+    /// The server rejected the request because an image could not be
+    /// processed. [`INVALID_IMAGE_ERROR_CODE`] is the signal; the legacy
+    /// phrase match covers pre-code servers and relayed provider messages
+    /// that carry the same wording (they arrive as `Api` errors, so the
+    /// phrase arm applies to them too). Providers emitting neither the code
+    /// nor the phrase get no recovery. The `400 | 500` gate is deliberate
+    /// insurance against a mis-stamping server: recovery destroys request
+    /// images, so unexpected statuses (422, 415, ...) fail closed.
     pub fn is_image_processing_error(&self) -> bool {
-        matches!(
-                    self,
-                    SamplingError::Api {
-                        status,
-                        message,
-                        ..
-                    }
-        if matches!(status.as_u16(), 400 | 500) && message.contains("Could not process image")
-                )
+        match self {
+            SamplingError::Api {
+                status,
+                message,
+                error_code,
+                ..
+            } if matches!(status.as_u16(), 400 | 500) => {
+                *error_code == Some(ApiErrorCode::InvalidImage)
+                    || message.contains("Could not process image")
+            }
+            SamplingError::StreamError { code, .. } => *code == Some(ApiErrorCode::InvalidImage),
+            // Explicit like `is_retryable`: a new variant must state its
+            // image classification instead of silently defaulting to false.
+            SamplingError::Api { .. }
+            | SamplingError::Auth { .. }
+            | SamplingError::InvalidConfiguration(_)
+            | SamplingError::Http(_)
+            | SamplingError::Serialization(_)
+            | SamplingError::EventStreamError(_)
+            | SamplingError::IdleTimeout { .. }
+            | SamplingError::EmptyResponse { .. }
+            | SamplingError::MaxTokensTruncation
+            | SamplingError::DoomLoopDetected { .. } => false,
+        }
     }
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            SamplingError::Auth(_) => false,
+            SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
-            SamplingError::Api { status, .. } => is_transient_api_status(status.as_u16()),
+            SamplingError::Api { status, .. } => is_retryable_api_status(*status),
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
@@ -258,6 +451,16 @@ impl SamplingError {
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
         }
+    }
+
+    /// Whether retry is explicitly vetoed: auth, credits exhausted, a
+    /// `x-should-retry: false` header, or a context-length overflow.
+    /// Do not auto-retry these as transport flakiness.
+    pub fn is_retry_vetoed(&self) -> bool {
+        matches!(self, Self::Auth { .. })
+            || self.is_credit_exhausted()
+            || self.should_retry_header() == Some(false)
+            || self.is_context_length_error()
     }
 
     pub fn model_metadata(&self) -> Option<&ResponseModelMetadata> {
@@ -307,7 +510,7 @@ impl SamplingError {
                 status, message, ..
             } => is_credit_exhausted_status_and_message(status.as_u16(), message),
             SamplingError::StreamError { message, .. } => is_credit_exhausted_message(message),
-            SamplingError::Auth(message) => is_credit_exhausted_message(message),
+            SamplingError::Auth { message, .. } => is_credit_exhausted_message(message),
             _ => false,
         }
     }
@@ -337,9 +540,18 @@ struct ErrorBody {
     message: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// Semantic code (e.g. [`INVALID_IMAGE_ERROR_CODE`]), distinct from the
+    /// `type` slot.
+    #[serde(default, deserialize_with = "lenient_code")]
+    code: Option<String>,
 }
 
 /// Flat error from the Grok proxy/gateway: `{"code": "...", "error": "..."}`.
+/// The `code` slot stays strict (`Option<String>`) on purpose: flat bodies
+/// with a non-string code (e.g. `{"code":429,"error":"... [WKE=...]"}`) must
+/// keep failing this parse so they reach the provider fallback, which strips
+/// `[WKE=...]` markers and lifts slugs — routing them through the rigid path
+/// would leak raw markers to users.
 #[derive(Debug, Deserialize)]
 struct FlatErrorResponse {
     error: String,
@@ -347,23 +559,64 @@ struct FlatErrorResponse {
     code: Option<String>,
 }
 
-/// Extract `(error_type, message)` from either error format.
-fn try_parse_error(data: &str) -> Option<(String, String)> {
+/// Some provider dialects put non-strings in the nested `code` slot (e.g.
+/// `"code": 429`). A strict `Option<String>` would fail the whole envelope
+/// parse and demote a retryable stream error to a fatal `Serialization`
+/// error, so swallow non-string codes instead of rejecting the envelope.
+fn lenient_code<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+/// Fields extracted from an error payload by [`try_parse_error`].
+struct ParsedError {
+    error_type: String,
+    message: String,
+    /// The envelope's `code` slot: nested envelopes pass through verbatim;
+    /// the flat envelope's slot is overloaded (gRPC kebab codes, type slots),
+    /// so only semantic values surface from it.
+    code: Option<ApiErrorCode>,
+}
+
+/// Extract the error fields from either error format.
+fn try_parse_error(data: &str) -> Option<ParsedError> {
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
-        return Some((
-            resp.error.kind.unwrap_or_else(|| "unknown".to_string()),
-            resp.error
+        return Some(ParsedError {
+            error_type: resp.error.kind.unwrap_or_else(|| "unknown".to_string()),
+            message: resp
+                .error
                 .message
                 .unwrap_or_else(|| "unknown error".to_string()),
-        ));
+            code: resp.error.code.as_deref().map(ApiErrorCode::parse),
+        });
     }
     if let Ok(flat) = serde_json::from_str::<FlatErrorResponse>(data) {
-        return Some((
-            flat.code.unwrap_or_else(|| "server_error".to_string()),
-            flat.error,
-        ));
+        let code = flat
+            .code
+            .as_deref()
+            .map(ApiErrorCode::parse)
+            .filter(|c| !matches!(c, ApiErrorCode::Other(_)));
+        return Some(ParsedError {
+            code,
+            error_type: flat.code.unwrap_or_else(|| "server_error".to_string()),
+            message: flat.error,
+        });
     }
     None
+}
+
+/// Semantic `error.code` from a raw error body. Nested envelopes yield their
+/// code verbatim; the flat envelope overloads its `code` slot with gRPC kebab
+/// codes and type slots, so only exact semantic values surface from it.
+pub fn parse_error_code(bytes: &[u8]) -> Option<ApiErrorCode> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(try_parse_error)?
+        .code
 }
 
 /// Max chars of a structured (JSON) error message shown to users.
@@ -414,6 +667,14 @@ pub fn is_transient_api_status(code: u16) -> bool {
     matches!(code, 429 | 500 | 502..=504 | 520..=527 | 530)
 }
 
+/// Whether an HTTP status is worth retrying: the same 429 + any 5xx rule CCP
+/// publishes in `x-should-retry`, minus Cloudflare's origin-TLS 525/526.
+/// See [xAI Rate Limits](https://docs.x.ai/developers/rate-limits)
+/// (accessed: 2026-08-12) for retry-after / 429; 52x pages are Cloudflare edge.
+pub fn is_retryable_api_status(status: StatusCode) -> bool {
+    RetryPolicy::edge_client().should_retry(status.as_u16())
+}
+
 /// True when the status is a Cloudflare-style origin/edge outage (52x), not
 /// a normal app 5xx. Used for operator messaging.
 pub fn is_edge_outage_status(code: u16) -> bool {
@@ -441,11 +702,23 @@ pub fn status_user_message(status: StatusCode) -> String {
         code @ 502..=504 => {
             format!("Grok is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare edge: origin down (521), connect fail, timeout, …
+        // Cloudflare 521 origin down. See
+        // https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/
+        // (accessed: 2026-08-12).
         521 => {
             "xAI is temporarily unreachable (origin down). Please try again shortly. (HTTP 521)."
                 .to_string()
         }
+        // Upstream capacity, not an edge failure. See [`SamplingError::is_overloaded`].
+        code @ 529 => {
+            format!("Grok is temporarily overloaded. Please try again in a moment. (HTTP {code}).")
+        }
+        // Cloudflare origin TLS (handshake / invalid certificate) is not transient.
+        code @ 525 | code @ 526 => {
+            format!("Secure connection to Grok failed. (HTTP {code}).")
+        }
+        // Cloudflare edge: origin unreachable or timed out (520-524, 527), or
+        // an edge-side 1xxx failure (530). 521 / 525 / 526 match above.
         code @ 520..=527 | code @ 530 => {
             format!(
                 "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
@@ -454,7 +727,6 @@ pub fn status_user_message(status: StatusCode) -> String {
         code if status.is_server_error() => {
             format!("Something went wrong on the server (HTTP {code}).")
         }
-        code if status.is_client_error() => format!("Request failed (HTTP {code})."),
         code => format!("Request failed (HTTP {code})."),
     }
 }
@@ -472,19 +744,39 @@ fn truncate_user_error(s: &str) -> String {
 
 /// Format a known JSON error envelope; `None` if the body is not structured.
 fn structured_error_message(bytes: &[u8]) -> Option<String> {
-    let (error_type, message) = std::str::from_utf8(bytes).ok().and_then(try_parse_error)?;
-    let msg = if error_type == "unknown" || error_type == "server_error" {
-        message
-    } else {
-        format!("{error_type}: {message}")
-    };
-    Some(truncate_user_error(&msg))
+    let rigid = std::str::from_utf8(bytes).ok().and_then(try_parse_error);
+    if let Some(ParsedError {
+        error_type,
+        message,
+        ..
+    }) = &rigid
+        && message != "unknown error"
+    {
+        if let Some(inner) = parse_provider_error_str(message)
+            && inner.message != *message
+            && !inner.message_is_markup()
+        {
+            return Some(inner.display_message());
+        }
+        let msg = if error_type == "unknown" || error_type == "server_error" {
+            message.clone()
+        } else {
+            format!("{error_type}: {message}")
+        };
+        return Some(truncate_user_error(&msg));
+    }
+    if let Some(parsed) = parse_provider_error(bytes)
+        && !parsed.message_is_markup()
+    {
+        return Some(parsed.display_message());
+    }
+    rigid.map(|parsed| truncate_user_error(&parsed.message))
 }
 
 /// Parse an API error body into a short string.
 ///
 /// Only structured JSON error envelopes are surfaced. Non-JSON bodies
-/// (HTML edge pages, plain text dumps) return a fixed placeholder — never
+/// (HTML edge pages, plain text dumps) return a fixed placeholder, never
 /// the raw bytes. Prefer [`user_facing_api_error_message`] when a status
 /// code is available.
 pub fn parse_error_bytes(bytes: &[u8]) -> String {
@@ -494,18 +786,23 @@ pub fn parse_error_bytes(bytes: &[u8]) -> String {
 /// User-facing message for a failed API call.
 ///
 /// Structured JSON error envelopes keep their message. Everything else
-/// (including Cloudflare HTML) maps to a status-based string — no body
+/// (including Cloudflare HTML) maps to a status-based string. No body
 /// content matching.
 pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String {
     structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
-    let (error_type, message) = try_parse_error(data)?;
+    let ParsedError {
+        error_type,
+        message,
+        code,
+    } = try_parse_error(data)?;
     tracing::warn!(error_type, message, "Server-side stream error");
     Some(SamplingError::StreamError {
         error_type,
         message,
+        code,
     })
 }
 
@@ -617,16 +914,18 @@ const TEAM_CREDIT_FALLBACK: &str = "Your team has either used all available cred
 reached its monthly spending limit. Add credits or raise the monthly spend limit on console.x.ai.";
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
+fn api_message_is_overloaded(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("overloaded") || lower.contains("service_unavailable_error")
+}
+
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() {
         return true;
     }
 
     if err.is_status() {
-        return matches!(
-            err.status(),
-            Some(status) if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
-        );
+        return err.status().is_some_and(is_retryable_api_status);
     }
 
     if err.is_request() || err.is_body() {
@@ -639,6 +938,166 @@ pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overloaded_detects_stream_and_api_shapes() {
+        assert!(
+            SamplingError::StreamError {
+                error_type: "overloaded_error".into(),
+                message: "Overloaded".into(),
+                code: None,
+            }
+            .is_overloaded()
+        );
+        assert!(
+            SamplingError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "stream error (overloaded_error): Overloaded".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+            }
+            .is_overloaded()
+        );
+        assert!(
+            SamplingError::Api {
+                status: StatusCode::from_u16(529).unwrap(),
+                message: "capacity".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+            }
+            .is_overloaded()
+        );
+        assert!(
+            SamplingError::Api {
+                status: StatusCode::from_u16(529).unwrap(),
+                message: "capacity".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+            }
+            .is_retryable()
+        );
+        assert!(!SamplingError::auth_unknown("nope").is_overloaded());
+        assert!(
+            !SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message: "invalid json".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+            }
+            .is_overloaded()
+        );
+        // Only server errors classify on message text — a 4xx that merely
+        // mentions "overloaded" is a request error, not capacity.
+        assert!(
+            !SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message: "field `overloaded` is not a valid parameter".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+            }
+            .is_overloaded()
+        );
+        // Stream errors classify on the parsed error_type only — a
+        // request-shaped stream error mentioning "overloaded" is not capacity.
+        assert!(
+            !SamplingError::StreamError {
+                error_type: "invalid_request_error".into(),
+                message: "tool result mentions overloaded".into(),
+                code: None,
+            }
+            .is_overloaded()
+        );
+        assert!(
+            SamplingError::StreamError {
+                error_type: "service_unavailable_error".into(),
+                message: "upstream capacity".into(),
+                code: None,
+            }
+            .is_overloaded()
+        );
+    }
+
+    #[test]
+    fn overloaded_message_matches_backend_variants() {
+        // 5xx messages that classify as capacity.
+        for msg in [
+            "Overloaded",
+            "stream error (overloaded_error): Overloaded",
+            "overloaded_error",
+            "service_unavailable_error: try again",
+        ] {
+            assert!(
+                SamplingError::Api {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    message: msg.into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                }
+                .is_overloaded(),
+                "expected overloaded for message: {msg}"
+            );
+        }
+        // 5xx messages that do not.
+        for msg in ["upstream connect timeout", "internal error"] {
+            assert!(
+                !SamplingError::Api {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    message: msg.into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                }
+                .is_overloaded(),
+                "expected not overloaded for message: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_veto_covers_header_and_context_length() {
+        let vetoed_by_header = SamplingError::Api {
+            status: StatusCode::from_u16(529).unwrap(),
+            message: "capacity".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+            error_code: None,
+        };
+        assert!(vetoed_by_header.is_retry_vetoed());
+
+        let vetoed_by_context = SamplingError::Api {
+            status: StatusCode::from_u16(529).unwrap(),
+            message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(vetoed_by_context.is_retry_vetoed());
+
+        let not_vetoed = SamplingError::Api {
+            status: StatusCode::from_u16(529).unwrap(),
+            message: "capacity".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(!not_vetoed.is_retry_vetoed());
+    }
 
     #[test]
     fn context_length_error_matches_backend_variants() {
@@ -662,16 +1121,18 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(api.is_context_length_error());
         assert!(
             SamplingError::StreamError {
                 error_type: "overloaded_error".into(),
                 message: "prompt is too long".into(),
+                code: None,
             }
             .is_context_length_error()
         );
-        assert!(!SamplingError::Auth("nope".into()).is_context_length_error());
+        assert!(!SamplingError::auth_unknown("nope").is_context_length_error());
     }
 
     #[test]
@@ -738,11 +1199,16 @@ mod tests {
             SamplingError::StreamError {
                 error_type,
                 message,
+                code,
             } => {
                 assert_eq!(error_type, "The service is currently unavailable");
                 assert_eq!(
                     message,
                     "Service temporarily unavailable. The model did not respond to this request."
+                );
+                assert_eq!(
+                    code, None,
+                    "flat-format code is a type slot, not this contract"
                 );
             }
             other => panic!("expected StreamError, got {other:?}"),
@@ -806,6 +1272,107 @@ mod tests {
         assert_eq!(msg, "rate_limit_error: rate limit exceeded");
     }
 
+    /// Non-string `code` slots (numeric HTTP codes from provider dialects)
+    /// must not fail the envelope parse: mid-stream, a failed parse falls
+    /// through to the chunk parse and surfaces a fatal `Serialization` error
+    /// where a retryable `StreamError` is correct.
+    #[test]
+    fn numeric_code_dialects_still_parse_as_envelopes() {
+        // Nested envelope: the code is swallowed, the message surfaces.
+        let bytes = br#"{"error":{"message":"Provider returned error","code":429}}"#;
+        let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
+        assert_eq!(msg, "Provider returned error");
+        assert_eq!(parse_error_code(bytes), None);
+
+        // Mid-stream: still a retryable StreamError.
+        let data =
+            r#"{"error":{"message":"upstream overloaded","type":"overloaded_error","code":503}}"#;
+        let err = try_parse_stream_error(data).expect("numeric-code envelope must still parse");
+        assert!(err.is_retryable(), "stream errors must stay retryable");
+        match err {
+            SamplingError::StreamError {
+                error_type, code, ..
+            } => {
+                assert_eq!(error_type, "overloaded_error");
+                assert_eq!(code, None);
+            }
+            other => panic!("expected StreamError, got {other:?}"),
+        }
+
+        // Flat envelope with a non-string code: stays STRICT. It must keep
+        // failing the rigid parse so the provider fallback runs — that path
+        // strips `[WKE=...]` machine markers; the rigid path would leak them.
+        let bytes =
+            br#"{"code":429,"error":"You ran out of credits. [WKE=personal-team-blocked:spending-limit]"}"#;
+        assert_eq!(parse_error_code(bytes), None);
+        let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
+        assert!(
+            !msg.contains("[WKE="),
+            "flat numeric-code bodies must reach the WKE-stripping fallback, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_facing_surfaces_dialects_the_rigid_parse_rejects() {
+        let bytes = br#"{"message":"The model is not ready for inference"}"#;
+        let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
+        assert_eq!(msg, "The model is not ready for inference");
+
+        let bytes =
+            br#"[{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}]"#;
+        let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
+        assert_eq!(msg, "Quota exceeded");
+
+        let bytes = br#""A request may either be streaming or deferred, but not both.""#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(
+            msg,
+            "A request may either be streaming or deferred, but not both."
+        );
+    }
+
+    #[test]
+    fn user_facing_unwraps_double_encoded_relay_bodies() {
+        let bytes = br#"{"error":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Values detected in request that violate rules: JWT Token\"}}"}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(
+            msg,
+            "invalid_request_error: Values detected in request that violate rules: JWT Token"
+        );
+    }
+
+    #[test]
+    fn user_facing_never_surfaces_double_encoded_html() {
+        let bytes = br#"{"error":"<html><body>502 Bad Gateway</body></html>"}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_GATEWAY, bytes);
+        assert_eq!(msg, "<html><body>502 Bad Gateway</body></html>");
+    }
+
+    #[test]
+    fn user_facing_rigid_shapes_are_unchanged_by_the_fallback() {
+        for (body, expected) in [
+            (
+                r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+                "rate_limit_error: rate limit exceeded",
+            ),
+            (
+                r#"{"code":"The service is currently unavailable","error":"Service temporarily unavailable."}"#,
+                "The service is currently unavailable: Service temporarily unavailable.",
+            ),
+            (
+                r#"{"error":{"message":"Overloaded","type":"overloaded_error"}}"#,
+                "overloaded_error: Overloaded",
+            ),
+            (r#"{"error":{"message":"boom","type":"unknown"}}"#, "boom"),
+        ] {
+            assert_eq!(
+                user_facing_api_error_message(StatusCode::INTERNAL_SERVER_ERROR, body.as_bytes()),
+                expected,
+                "body: {body}"
+            );
+        }
+    }
+
     #[test]
     fn structured_error_message_is_length_capped() {
         let long_msg = "x".repeat(MAX_USER_ERROR_BODY_CHARS + 50);
@@ -831,6 +1398,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !err.is_auth_error(),
@@ -856,6 +1424,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             err.is_auth_error(),
@@ -877,6 +1446,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!policy.is_auth_error());
     }
@@ -889,6 +1459,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             err.is_auth_error(),
@@ -898,7 +1469,7 @@ mod tests {
 
     #[test]
     fn auth_variant_is_auth_error() {
-        let err = SamplingError::Auth("bad key".into());
+        let err = SamplingError::auth_unknown("bad key");
         assert!(err.is_auth_error());
     }
 
@@ -910,6 +1481,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_rate_limited());
         assert!(err.is_retryable(), "429 should be retryable");
@@ -929,6 +1501,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(payment.is_credit_exhausted());
         assert!(!payment.is_auth_error());
@@ -939,6 +1512,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(or_body.is_credit_exhausted());
         assert!(!or_body.is_auth_error());
@@ -949,6 +1523,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(build.is_credit_exhausted());
 
@@ -958,6 +1533,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!plain_403.is_credit_exhausted());
 
@@ -967,6 +1543,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !unauthorized.is_credit_exhausted(),
@@ -990,6 +1567,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             heavy_403.is_credit_exhausted(),
@@ -1002,6 +1580,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(60),
             should_retry: None,
+            error_code: None,
         };
         assert!(
             heavy_429.is_credit_exhausted(),
@@ -1016,6 +1595,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             plan_limit.is_credit_exhausted(),
@@ -1029,6 +1609,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!bare_403.is_credit_exhausted());
 
@@ -1038,6 +1619,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !guidelines.is_credit_exhausted(),
@@ -1059,6 +1641,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             err.is_credit_exhausted(),
@@ -1073,6 +1656,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!bare.is_credit_exhausted());
         let guidelines = SamplingError::Api {
@@ -1081,6 +1665,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!guidelines.is_credit_exhausted());
 
@@ -1110,14 +1695,46 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!server_error.is_rate_limited());
 
-        let auth_error = SamplingError::Auth("bad key".into());
+        let auth_error = SamplingError::auth_unknown("bad key");
         assert!(!auth_error.is_rate_limited());
 
         let timeout = SamplingError::IdleTimeout { elapsed_secs: 30 };
         assert!(!timeout.is_rate_limited());
+    }
+
+    #[test]
+    fn is_likely_body_rejected_is_http_only() {
+        // Coded 413 / invalid_image are ServerRejected, not this heuristic.
+        let payload_too_large = SamplingError::Api {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: "too large".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(!payload_too_large.is_likely_body_rejected());
+        assert!(payload_too_large.is_payload_too_large());
+
+        let invalid_image = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "nope".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert!(!invalid_image.is_likely_body_rejected());
+        assert!(invalid_image.is_image_processing_error());
+
+        assert!(
+            !SamplingError::EventStreamError("connection reset".into()).is_likely_body_rejected()
+        );
+        assert!(!SamplingError::IdleTimeout { elapsed_secs: 5 }.is_likely_body_rejected());
     }
 
     #[test]
@@ -1128,6 +1745,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(42),
             should_retry: None,
+            error_code: None,
         };
         assert_eq!(err.retry_after(), Some(42));
     }
@@ -1140,13 +1758,14 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert_eq!(err.retry_after(), None);
     }
 
     #[test]
     fn retry_after_returns_none_for_non_api_errors() {
-        assert_eq!(SamplingError::Auth("x".into()).retry_after(), None);
+        assert_eq!(SamplingError::auth_unknown("x").retry_after(), None);
         assert_eq!(
             SamplingError::IdleTimeout { elapsed_secs: 10 }.retry_after(),
             None
@@ -1161,6 +1780,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_encrypted_content_error());
         assert!(
@@ -1177,6 +1797,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -1192,6 +1813,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -1207,6 +1829,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_image_processing_error());
         assert!(!err.is_encrypted_content_error());
@@ -1220,6 +1843,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_image_processing_error());
     }
@@ -1232,6 +1856,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!err.is_image_processing_error());
     }
@@ -1244,6 +1869,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!err.is_image_processing_error());
     }
@@ -1256,6 +1882,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !err.is_image_processing_error(),
@@ -1271,6 +1898,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !err.is_retryable(),
@@ -1285,14 +1913,160 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
+        }
+    }
+
+    fn api_400(message: &str) -> SamplingError {
+        api_status(400, message)
+    }
+
+    fn api_400_with_code(message: &str, code: &str) -> SamplingError {
+        SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: Some(ApiErrorCode::parse(code)),
+        }
+    }
+
+    /// The semantic code classifies on its own, whatever the message says; a
+    /// different code with the same wording never does.
+    #[test]
+    fn image_processing_error_code_is_the_signal() {
+        let unknown_wording = "some future wording without the legacy phrase";
+        assert!(
+            api_400_with_code(unknown_wording, INVALID_IMAGE_ERROR_CODE)
+                .is_image_processing_error()
+        );
+        // 500 + code: the shape every synthesized mid-stream failure takes
+        // (Responses-stream events, info round trips land on 500) — the
+        // status gate must admit it or mid-stream recovery silently dies.
+        assert!(
+            SamplingError::Api {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: unknown_wording.into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: Some(ApiErrorCode::InvalidImage),
+            }
+            .is_image_processing_error()
+        );
+        assert!(
+            !api_400_with_code(unknown_wording, "context_length_exceeded")
+                .is_image_processing_error()
+        );
+        // Deliberate: server prose without the code does not strip — any
+        // server new enough to emit these rejections stamps the code.
+        assert!(!api_400("Invalid base64-encoded image.").is_image_processing_error());
+    }
+
+    /// Mid-stream rejections strip only on the code — the server stamps
+    /// stream errors too, and there is no legacy phrase to honor there.
+    #[test]
+    fn image_processing_error_stream_requires_code() {
+        let stream = |code: Option<&str>, message: &str| SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: message.into(),
+            code: code.map(ApiErrorCode::parse),
+        };
+        assert!(stream(Some(INVALID_IMAGE_ERROR_CODE), "anything").is_image_processing_error());
+        assert!(!stream(Some("context_length_exceeded"), "anything").is_image_processing_error());
+        // Deliberate flip from the prose-matching era: message text alone
+        // must not trigger a destructive strip.
+        assert!(
+            !stream(None, "Base64 string of provided image cannot be decoded.")
+                .is_image_processing_error()
+        );
+    }
+
+    #[test]
+    fn parse_error_code_extracts_semantic_codes() {
+        // Nested envelope with a code.
+        assert_eq!(
+            parse_error_code(
+                br#"{"error":{"message":"bad image","type":"invalid_request_error","code":"invalid_image"}}"#
+            ),
+            Some(ApiErrorCode::InvalidImage)
+        );
+        // Nested envelope without a code.
+        assert_eq!(
+            parse_error_code(br#"{"error":{"message":"boom","type":"server_error"}}"#),
+            None
+        );
+        // Flat envelope — the server's non-stream image rejections arrive in
+        // this shape; only the exact semantic code is surfaced.
+        assert_eq!(
+            parse_error_code(br#"{"code":"invalid_image","error":"Invalid PNG image."}"#),
+            Some(ApiErrorCode::InvalidImage)
+        );
+        // Flat envelope's usual occupants (gRPC kebab codes, type slots)
+        // never surface.
+        assert_eq!(
+            parse_error_code(br#"{"code":"invalid-argument","error":"bad request"}"#),
+            None
+        );
+        assert_eq!(
+            parse_error_code(br#"{"code":"server_error","error":"Service unavailable."}"#),
+            None
+        );
+        // Unstructured bodies.
+        assert_eq!(parse_error_code(b"<html>502</html>"), None);
+    }
+
+    #[test]
+    fn try_parse_stream_error_captures_code() {
+        let data = r#"{"error":{"message":"bad image","type":"invalid_request_error","code":"invalid_image"}}"#;
+        match try_parse_stream_error(data) {
+            Some(SamplingError::StreamError { code, .. }) => {
+                assert_eq!(code, Some(ApiErrorCode::InvalidImage));
+            }
+            other => panic!("expected StreamError, got {other:?}"),
+        }
+    }
+
+    fn api_status_err(code: u16) -> SamplingError {
+        SamplingError::Api {
+            status: StatusCode::from_u16(code).unwrap(),
+            message: status_user_message(StatusCode::from_u16(code).unwrap()),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        }
+    }
+
+    #[test]
+    fn transient_5xx_is_retryable_but_origin_tls_is_not() {
+        // Cloudflare edge pages (520-524, 530), upstream overload (529), and
+        // non-CF 5xx like 501/507 — the rule is any 5xx, not a code list.
+        for code in [501u16, 507, 520, 521, 522, 523, 524, 529, 530] {
+            assert!(
+                api_status_err(code).is_retryable(),
+                "{code} must be retried"
+            );
+        }
+        // Origin TLS: a broken certificate never clears on its own.
+        for code in [525u16, 526] {
+            assert!(
+                !api_status_err(code).is_retryable(),
+                "origin-TLS {code} must not be retried"
+            );
         }
     }
 
     /// Cloudflare 521 (origin down) and sibling edge outages must soft-retry
     /// with backoff — not Fatal on first sight as "unknown status".
+    ///
+    /// `is_transient_api_status` covers the classify helper used by the
+    /// sampler (includes 525/526). `SamplingError::is_retryable` follows the
+    /// 1.0.3 edge-client policy: 525/526 origin TLS is not retried.
     #[test]
     fn cloudflare_edge_outage_statuses_are_retryable() {
-        for code in [520u16, 521, 522, 523, 524, 525, 526, 527, 530] {
+        for code in [520u16, 521, 522, 523, 524, 527, 530] {
             assert!(
                 is_transient_api_status(code),
                 "status {code} must be transient"
@@ -1307,6 +2081,16 @@ mod tests {
                 "HTTP {code} is network/outage, not credit exhaust"
             );
             assert!(!err.is_rate_limited(), "HTTP {code} is not a 429 throttle");
+        }
+        for code in [525u16, 526] {
+            assert!(
+                is_transient_api_status(code),
+                "status {code} must stay transient for sampler classify"
+            );
+            assert!(
+                !api_status(code, "tls").is_retryable(),
+                "origin-TLS {code} must not be SamplingError::is_retryable"
+            );
         }
     }
 
@@ -1362,9 +2146,10 @@ mod tests {
     }
 
     #[test]
-    fn non_transient_5xx_like_501_not_retryable() {
-        let err = api_status(501, "not implemented");
+    fn non_transient_helper_does_not_list_501() {
+        // Sampler classify helper is a narrower list than 1.0.3 edge-client
+        // is_retryable (any 5xx except origin TLS).
         assert!(!is_transient_api_status(501));
-        assert!(!err.is_retryable());
+        assert!(api_status(501, "not implemented").is_retryable());
     }
 }

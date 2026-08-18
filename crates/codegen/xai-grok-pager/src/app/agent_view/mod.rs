@@ -27,11 +27,11 @@
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → ArmPending CancelTurn (2× within 800ms,
-//!         hint "press again to cancel"; draft preserved, unlike Ctrl+C)
+//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
+//!         is preserved, unlike Ctrl+C's clear-first gesture)
 //!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
 //!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit; no double-Esc arm)
+//!         Ctrl+C escalates to Quit)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
@@ -151,7 +151,7 @@ use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::{PermissionViewState, SubagentInfo};
-use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
+use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment, PlanFeedbackInFlight};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
 use crate::views::queue_pane::QueuePane;
@@ -170,6 +170,8 @@ mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
 mod jump;
+mod key_owner;
+pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
 mod links;
 mod media;
 mod modals;
@@ -285,23 +287,26 @@ pub struct HitArea {
 /// Privacy upsell banner state on the agent view: whether the banner owns
 /// the banner slot this frame (`active`, set at draw start like
 /// `session_banner_active`; persists until acted on, so it is a tip
-/// occluder AND a tip-tick freezer) plus the three click targets.
+/// occluder AND a tip-tick freezer) plus the four click targets.
 #[derive(Debug, Default)]
 pub struct PrivacyBannerState {
     pub(crate) active: bool,
-    /// `[Accept]` (opt in; ack after ACP success).
-    pub(crate) hit_accept: HitArea,
-    /// `[Customize in settings]` (ack + open settings on coding_data_sharing).
-    pub(crate) hit_customize: HitArea,
-    /// Legal links line (opens the legal URL).
-    pub(crate) hit_legal: HitArea,
+    /// `[Opt in]` (opt in; ack only after ACP success).
+    pub(crate) hit_opt_in: HitArea,
+    /// `[Opt out]` (ack now; record the decline).
+    pub(crate) hit_opt_out: HitArea,
+    /// "Terms" link (opens the terms of service).
+    pub(crate) hit_terms: HitArea,
+    /// "Privacy Policy" link (opens the privacy policy).
+    pub(crate) hit_policy: HitArea,
 }
 impl PrivacyBannerState {
     /// Drop all click targets (slot not painted this frame).
     pub fn clear_hits(&mut self) {
-        self.hit_accept.clear();
-        self.hit_customize.clear();
-        self.hit_legal.clear();
+        self.hit_opt_in.clear();
+        self.hit_opt_out.clear();
+        self.hit_terms.clear();
+        self.hit_policy.clear();
     }
 }
 /// Banner-slot inputs to [`AgentView::draw`]. Slot precedence is computed
@@ -359,49 +364,6 @@ impl HitArea {
         self.hovered = false;
     }
 }
-
-/// Soft-park plan-approval footer CTAs (mouse primary; keys remain accelerators).
-///
-/// Painted on the shortcuts row when plan approval is soft-parked (no side
-/// panel). Hit-tested independently of the empty-prompt keyboard gate.
-#[derive(Debug, Default)]
-pub struct SoftParkCtaHits {
-    pub approve: HitArea,
-    pub notes: HitArea,
-    pub clarify: HitArea,
-    pub revise: HitArea,
-    pub quit: HitArea,
-}
-
-impl SoftParkCtaHits {
-    pub fn clear(&mut self) {
-        self.approve.clear();
-        self.notes.clear();
-        self.clarify.clear();
-        self.revise.clear();
-        self.quit.clear();
-    }
-
-    /// Update hover for all five buttons. Returns true if any hover flipped.
-    pub fn update_hover(&mut self, col: u16, row: u16) -> bool {
-        let mut changed = false;
-        changed |= self.approve.update_hover(col, row);
-        changed |= self.notes.update_hover(col, row);
-        changed |= self.clarify.update_hover(col, row);
-        changed |= self.revise.update_hover(col, row);
-        changed |= self.quit.update_hover(col, row);
-        changed
-    }
-
-    pub fn apply_areas(&mut self, areas: crate::views::plan_approval_view::SoftParkCtaAreas) {
-        self.approve.set(areas.approve);
-        self.notes.set(areas.notes);
-        self.clarify.set(areas.clarify);
-        self.revise.set(areas.revise);
-        self.quit.set(areas.quit);
-    }
-}
-
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 ///
@@ -417,9 +379,7 @@ pub enum PromptInputMode {
     Normal,
     /// Bash mode (`!` prefix): Enter sends `Action::SendBashCommand`.
     Bash,
-    /// Feedback mode (`~` prefix, teal accent): Enter sends `Action::SendFeedback`.
-    Feedback,
-    /// Remember mode (`#` prefix, green accent): Enter sends `Action::SendRememberNote`.
+    /// Remember mode (`#` prefix): Enter sends `Action::SendRememberNote`.
     Remember,
 }
 impl PromptInputMode {
@@ -427,7 +387,6 @@ impl PromptInputMode {
         match self {
             PromptInputMode::Normal => None,
             PromptInputMode::Bash => Some(theme.command),
-            PromptInputMode::Feedback => Some(theme.accent_feedback),
             PromptInputMode::Remember => Some(theme.accent_remember),
         }
     }
@@ -435,14 +394,12 @@ impl PromptInputMode {
         match self {
             PromptInputMode::Normal => None,
             PromptInputMode::Bash => Some(("! ", theme.command)),
-            PromptInputMode::Feedback => Some(("~ ", theme.accent_feedback)),
             PromptInputMode::Remember => Some(("# ", theme.accent_remember)),
         }
     }
     pub fn placeholder_override(self, multiline: bool) -> Option<&'static str> {
         match self {
             PromptInputMode::Normal | PromptInputMode::Bash => None,
-            PromptInputMode::Feedback => Some("Type your feedback..."),
             PromptInputMode::Remember => {
                 if multiline {
                     Some("Save a memory note... (Enter for newline, Shift+Enter to save)")
@@ -456,7 +413,6 @@ impl PromptInputMode {
         match self {
             PromptInputMode::Normal => None,
             PromptInputMode::Bash => Some("Run shell command"),
-            PromptInputMode::Feedback => Some("Send feedback"),
             PromptInputMode::Remember => Some("Save memory note"),
         }
     }
@@ -464,7 +420,6 @@ impl PromptInputMode {
         match self {
             PromptInputMode::Normal => Action::SendPrompt(text),
             PromptInputMode::Bash => Action::SendBashCommand(text),
-            PromptInputMode::Feedback => Action::SendFeedback(text),
             PromptInputMode::Remember => Action::SendRememberNote(text),
         }
     }
@@ -481,7 +436,6 @@ impl PromptInputMode {
                     || ctrl_u
                     || ctrl_c
             }
-            PromptInputMode::Feedback => key.code == KeyCode::Backspace || key.code == KeyCode::Esc,
         }
     }
 }
@@ -518,11 +472,6 @@ const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 const MODE_BANNER_FADE_TICKS: u8 = 9;
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
-///
-/// Runs on every OS: terminals often deliver Ctrl+V as bracketed paste rather
-/// than a key event (especially Linux Wayland). Otty IME origin gating lives
-/// in the off-thread probe (`ProbeClipboardAttachment`), not here — so short
-/// IME commits still do not attach an unrelated clipboard image.
 pub(super) fn bracketed_paste_should_probe(text: &str) -> bool {
     crate::clipboard::paste_payload_needs_clipboard_attachment_probe(text)
 }
@@ -570,143 +519,6 @@ fn supports_osc22() -> bool {
         .hyperlink_capabilities()
         .osc22_cursor
 }
-
-/// Whether the mouse is over a hit target that should request OSC 22 pointer
-/// (hand) cursor. Links already did; one-click copy chrome (selection-box ⧉,
-/// always-on bubble ⧉, prompt draft ⧉, plan/line-viewer ⧉) must match so hover
-/// reads as clickable like other CTAs.
-///
-/// Pure flags so unit tests do not need a live terminal OSC 22 capability bit.
-pub(crate) fn wants_pointer_cursor(
-    on_link: bool,
-    selection_copy_hovered: bool,
-    bubble_copy_hovered: bool,
-    prompt_copy_hovered: bool,
-    line_viewer_copy_hovered: bool,
-) -> bool {
-    on_link
-        || selection_copy_hovered
-        || bubble_copy_hovered
-        || prompt_copy_hovered
-        || line_viewer_copy_hovered
-}
-
-impl AgentView {
-    /// Live hover state → OSC 22 pointer request (links + one-click copy chrome
-    /// + status/todo CTAs: Clear finished, limits meter).
-    pub(crate) fn mouse_wants_pointer_cursor(&self) -> bool {
-        wants_pointer_cursor(
-            self.hovered_link_idx.is_some(),
-            self.hit_sb_copy.hovered,
-            self.hovered_bubble_copy.is_some(),
-            self.prompt.copy_hovered(),
-            self.line_viewer.as_ref().is_some_and(|v| v.copy_hovered),
-        ) || self.hit_todo_clear_done.hovered
-            || self.hit_credits.hovered
-    }
-}
-
-#[cfg(test)]
-mod pointer_cursor_tests {
-    use super::{test_agent_view, wants_pointer_cursor};
-
-    #[test]
-    fn link_hover_wants_pointer() {
-        assert!(wants_pointer_cursor(true, false, false, false, false));
-    }
-
-    #[test]
-    fn idle_pointer_is_default() {
-        assert!(!wants_pointer_cursor(false, false, false, false, false));
-    }
-
-    /// Named contract: mouse over any one-click copy chrome hit requests pointer.
-    #[test]
-    fn selection_box_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, true, false, false, false),
-            "selection-box ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn bubble_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, true, false, false),
-            "always-on bubble ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn prompt_draft_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, false, true, false),
-            "prompt top-bar ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn line_viewer_plan_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, false, false, true),
-            "plan/line-viewer ⧉ hover must request pointer cursor"
-        );
-    }
-
-    /// Field wiring: agent hover flags feed the same contract as the pure helper.
-    #[test]
-    fn agent_view_copy_hover_fields_request_pointer() {
-        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        assert!(
-            !agent.mouse_wants_pointer_cursor(),
-            "idle agent must not request pointer"
-        );
-
-        agent.hit_sb_copy.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "selection-box ⧉ hover field must request pointer"
-        );
-        agent.hit_sb_copy.hovered = false;
-
-        agent.hovered_bubble_copy = Some(0);
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "bubble ⧉ hover field must request pointer"
-        );
-        agent.hovered_bubble_copy = None;
-
-        // Prompt draft ⧉: set hit rect then move mouse onto it.
-        agent
-            .prompt
-            .force_copy_button_area_for_test(ratatui::layout::Rect::new(10, 5, 3, 1));
-        assert!(agent.prompt.update_copy_hover(11, 5));
-        assert!(
-            agent.prompt.copy_hovered(),
-            "update_copy_hover must mark prompt ⧉ hovered"
-        );
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "prompt ⧉ hover field must request pointer"
-        );
-        assert!(agent.prompt.update_copy_hover(0, 0));
-        assert!(!agent.mouse_wants_pointer_cursor());
-
-        // Clear finished + limits meter CTAs also request pointer.
-        agent.hit_todo_clear_done.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "Clear finished hover must request pointer"
-        );
-        agent.hit_todo_clear_done.hovered = false;
-        agent.hit_credits.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "limits meter hover must request pointer"
-        );
-    }
-}
-
 pub(super) fn has_native_link_hover() -> bool {
     crate::terminal::terminal_context()
         .hyperlink_capabilities()
@@ -770,6 +582,42 @@ pub(crate) struct PendingTurnEnd {
     /// When the broadcast arrived; the reconcile fires after
     /// [`super::dispatch::TURN_END_RECONCILE_GRACE`].
     pub received_at: std::time::Instant,
+}
+/// The wake turn currently streaming on this session. A wake turn is a turn
+/// the shell starts on its own when background work finishes, to tell the
+/// model about it; the pager never adopts one (`AgentState` stays `Idle`),
+/// so this is the only record that one is in flight. Drives the [stop]/Esc/Ctrl+C cancel
+/// affordance and the status-row chrome; lifecycle on
+/// [`AgentView::note_streaming_wake_turn`].
+#[derive(Debug, Clone)]
+pub(crate) struct RunningWakeTurn {
+    /// The wake turn's synthetic prompt id (`task-completed-…` family).
+    pub prompt_id: String,
+    /// True once a cancel was sent for it: the status row reads Cancelling
+    /// and the cancel-resend reconcile stays armed until the terminal lands.
+    pub cancel_sent: bool,
+}
+/// A cancel sent while the pane is in a cancelling state, awaiting proof the
+/// shell received it. See [`AgentView::pending_cancel_resend`].
+#[derive(Debug, Clone)]
+pub(crate) struct PendingCancelResend {
+    /// The turn the cancel targeted (the wake prompt id or the adopted
+    /// prompt id; `None` for cancels with no adopted prompt, such as
+    /// `/compact`); a record from another target is never reused.
+    pub prompt_id: Option<String>,
+    /// When the cancel was (last) sent.
+    pub sent_at: std::time::Instant,
+    /// Sends so far, capped at [`crate::app::dispatch::turn::CANCEL_RESEND_MAX_ATTEMPTS`].
+    pub attempts: u8,
+    /// The turn-end broadcast arrived, proving the cancel landed: the
+    /// auto-resend stops, but the record stays so a manual retry can reuse
+    /// the recorded subagent choice.
+    pub confirmed: bool,
+    /// The first cancel's subagent decision; retries replay it instead of
+    /// escalating past a one-shot "Continue to run".
+    pub cancel_subagents: bool,
+    /// Replayed so a resend still arms the shell's task-wake barrier.
+    pub trigger: crate::app::actions::CancelTrigger,
 }
 /// Stop/stop_failure hook runs held for the live turn's terminal marker.
 /// See [`AgentView::pending_stop_hooks`].
@@ -931,35 +779,6 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
-/// How the parked-marker slot was consumed. Both variants carry the turn's
-/// prompt id and both keep the parked (idle) chrome. `Rendered` is **one
-/// parked "Worked for" row per prompt turn** — mid-park epoch noise and
-/// re-parks refresh elapsed in place rather than stacking rows (see
-/// `maybe_push_parked_marker`). `Forgone` (an interjection continued the
-/// parked turn) is final — a later "Worked for" line would land below the
-/// interjected message, flipping the transcript.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ParkedMarkerSlot {
-    /// A "Worked for X" marker block was pushed (at most one per prompt turn).
-    Rendered {
-        prompt_id: String,
-        /// Tracker epoch at last push/refresh (bookkeeping only; re-push is
-        /// never driven by epoch mismatch while this slot is live).
-        agent_output_epoch: u64,
-    },
-    /// The marker was forgone: an interjection continued the parked turn.
-    Forgone(String),
-}
-impl ParkedMarkerSlot {
-    /// The prompt id the slot was consumed for, regardless of variant.
-    pub(crate) fn prompt_id(&self) -> &str {
-        match self {
-            ParkedMarkerSlot::Rendered { prompt_id, .. } | ParkedMarkerSlot::Forgone(prompt_id) => {
-                prompt_id
-            }
-        }
-    }
-}
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -1034,6 +853,11 @@ pub struct AgentView {
     /// drop log to one `warn!` per incident (a late replay is one line per
     /// event — thousands for a large transcript).
     pub(crate) unexpected_replay_drops: u32,
+    /// After `SessionLoaded` clears `loading_replay`, keep accepting this-session
+    /// `isReplay` until this instant (or the first this-session live update).
+    /// The load barrier may release on an Unrelated firehose timeout while
+    /// remaining replay still sits behind the ACP peek.
+    pub(crate) late_replay_until: Option<std::time::Instant>,
     /// Prompt ids whose durable `TurnCompleted` terminal arrived during THIS
     /// load's replay window (`loading_replay`). The running turn is not adopted
     /// until replay finishes, so a terminal seen mid-replay can't be finalized
@@ -1042,34 +866,21 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
-    /// During load replay, durable primary-user `TurnCompleted` is recorded in
-    /// [`Self::replayed_terminal_prompts`] and is **not** pushed as a
-    /// `SessionEvent` into scrollback. History recovery used to treat "agent
-    /// work after last user prompt with no SessionEvent terminal" as an open
-    /// turn, which false-fired auto-resume on every clean completed session.
-    /// This flag is true when the most recent primary-user turn (origin
-    /// [`xai_grok_shell::session::PromptOrigin::User`]) saw a durable terminal
-    /// with a **non-`cancelled`** stop reason in this load's replay (success,
-    /// error, rate_limit, end_turn, …). `cancelled` leaves the flag false so
-    /// Esc cancel-resume markers still auto-start. Also gates dropping **stale**
-    /// `canceled_turn_resume.json` after a finished primary (rebuild/reopen
-    /// must not re-fire a **successful** completed prompt). Cleared when a
-    /// resumable user prompt is applied during replay. Reset at every load
-    /// window start.
-    pub(crate) last_primary_user_turn_completed_in_replay: bool,
-    /// During load replay, true when the most recent primary-user turn ended
-    /// with durable `stop_reason == "error"` (API failure, Internal error,
-    /// 403 mapped as turn failure, …). Distinct from clean success: session
-    /// load / rebuild relaunch **auto-resumes** the last user prompt for
-    /// error-class terminals (operator contract: do not leave the session
-    /// quiet with only the yellow error lines). Not set for `rate_limit`
-    /// (dedicated paywall UX) or user `cancelled`. Reset with the completed
-    /// flag at every load window start.
-    pub(crate) last_primary_user_turn_failed_in_replay: bool,
+    /// Wake prompt id whose failure marker already rendered — a re-delivered
+    /// errored wake terminal must not stack a second "Turn failed" row (the
+    /// output-epoch dedupe only covers chatty closes; failures bypass it).
+    pub(crate) failed_wake_marker_for: Option<String>,
+    /// Wake prompts whose terminals landed; a late delta for one must not
+    /// revive the stop affordance (see `note_streaming_wake_turn`). Cleared
+    /// at replay-window entry; a queue broadcast naming one as running again
+    /// removes that entry.
+    pub(crate) finished_wake_prompts: std::collections::HashSet<String>,
+    /// The wake turn currently streaming, if any. See [`RunningWakeTurn`].
+    pub(crate) running_wake_turn: Option<RunningWakeTurn>,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
-    /// Current special prompt input mode (Normal/Bash/Feedback/Remember).
+    /// Current special prompt input mode (Normal/Bash/Remember).
     pub prompt_input_mode: PromptInputMode,
     /// Multiline input mode: swap Enter (insert newline) and Shift+Enter (send).
     /// Toggled by `Ctrl+M` or `/multiline`. Not persisted across sessions.
@@ -1111,30 +922,37 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    /// Live session sampling window AUTO compact gates on. Distinct from the
+    /// model-card catalog total in `context_state.total` after a used-token
+    /// refresh. Set from GetSessionInfo / AutoCompactStarted.
+    pub session_sampling_window: Option<u64>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
     /// resume). Suppresses Build credits / local sampler context telemetry so the
     /// status bar and prompt never imply remote usage from wrong metrics.
+    /// OR'd with sticky `--chat` for UI/focus matching — not the ACP rename
+    /// `kind` bit; see [`Self::conversation_entry`].
     pub chat_kind: bool,
+    /// Whether this session opened on the chat lane (ACP `kind=chat`).
+    /// True for conversation-entry loads, `/chat` create, and sticky
+    /// `--chat` gateway resumes. False for history-bypass local-disk
+    /// Build rows (those keep [`Self::chat_kind`] for UI only).
+    pub conversation_entry: bool,
     /// Process-wide `--chat` (mirrors `AppView::chat_mode`; set via
     /// [`Self::apply_app_scoped_gates`]). UI policy only: hides picker
     /// source filter / delete / deep search on a conversations-only list.
     /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
     /// a Build process, whose picker still lists local sessions.
     pub app_chat_mode: bool,
+    /// Durable workspace mode for the in-session status indicator (`--chat`).
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
+    /// True when CLI/env locked local workspace at startup for this session.
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode_cli_locked: bool,
     /// Mocked credit balance for the status bar indicator.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the prompt warning.
     pub auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-    /// OpenRouter account credits for the prompt footer when the active model
-    /// is OpenRouter-backed.
-    pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
-    /// Console team prepaid remaining USD cents (Management API). Distinct from
-    /// SuperGrok session extras and OpenRouter. `None` = honest absence.
-    pub console_team_prepaid_cents: Option<i64>,
-    /// Live sampling identity for meter honesty (SuperGrok session vs console
-    /// key). Updated on dual-auth hop toasts and when billing marks SuperGrok
-    /// out of allowance so the next sample stays on the console key.
-    pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,
@@ -1144,10 +962,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// The consumed parked-wait marker slot for the current turn, if any.
-    /// Keyed by prompt id: a new turn naturally invalidates the slot with no
-    /// explicit clear site. See [`ParkedMarkerSlot`].
-    pub(crate) parked_wait_marker_for: Option<ParkedMarkerSlot>,
     /// Live `stop`/`stop_failure` hook runs held for the turn's terminal
     /// marker (driver order: the hooks arrive before the `PromptResponse`
     /// that pushes it). Consumed or flushed by `push_turn_terminal_marker`;
@@ -1166,6 +980,10 @@ pub struct AgentView {
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.
     pub turn_start_ms: Option<i64>,
+    /// Prompt id the stored `turn_start_ms` belongs to (stamped together from
+    /// the same delta meta): wake markers may only claim an elapsed whose
+    /// anchor is provably their own turn's.
+    pub turn_start_ms_prompt: Option<String>,
     /// Local wall-clock time when the current turn started.
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
@@ -1175,6 +993,11 @@ pub struct AgentView {
     /// Accumulated duration the turn timer was paused (while the user was
     /// answering questions via `AskUserQuestion`). Reset when the turn ends.
     pub turn_paused_duration: std::time::Duration,
+    /// Wall-clock twin of `turn_paused_duration`: the same pauses measured on
+    /// the wall clock, which keeps counting through OS suspend while `Instant`
+    /// does not. Netted against the wall-anchored turn span so a suspend
+    /// during an open question isn't reported as worked time.
+    pub turn_paused_wall: std::time::Duration,
     /// IDs of interjections this client sent and already rendered locally
     /// (optimistic echo). The shell broadcasts `x.ai/session/interjection` to
     /// every attached pane; when our own broadcast echoes back carrying an id
@@ -1277,8 +1100,7 @@ pub struct AgentView {
     /// Link index under the mouse cursor (for hover highlight).
     pub hovered_link_idx: Option<usize>,
     /// Last emitted OSC 22 pointer state (avoids re-emitting every frame).
-    /// True when the previous frame requested the hand/pointer shape.
-    pub last_pointer_cursor: bool,
+    pub last_pointer_on_link: bool,
     /// Selection model for the /btw overlay panel (populated each frame).
     pub last_btw_selection_model: ResolvedSelectionModel,
     /// Cached screen rect of the /btw overlay panel from the last render.
@@ -1319,7 +1141,8 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
-    /// Todo pane chrome **Clear finished** (archives completed/cancelled).
+    /// Compact `[−]` Clear finished control in the todo header (open board +
+    /// finished rows). Empty when the board is hidden or nothing is finished.
     pub hit_todo_clear_done: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
@@ -1334,21 +1157,22 @@ pub struct AgentView {
     pub hit_queue_badge: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
-    /// Soft-park footer CTA buttons (Approve / Notes / Clarify / Revise / Quit).
-    pub hit_soft_park_ctas: SoftParkCtaHits,
     pub hit_follow_indicator: HitArea,
+    /// ▲ jump-to-response-top indicator in the sticky header's gap row
+    /// (click snaps the answer's first line to the top, same as `K`).
+    pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
-    /// Cancel / hard-stop button in turn status line (`[stop]`).
+    /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
     /// Global pause / resume button in turn status line (`[pause]` / `[resume]`).
     pub hit_pause_button: HitArea,
-    /// Still-running watcher cue on the turn-status row (click opens the
-    /// tasks pane, same as `Ctrl+G`).
-    pub hit_watching_cue: HitArea,
     /// Snapshot of process-level global work pause for this frame (set by
     /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
     pub(crate) global_work_paused: bool,
+    /// Still-running watcher cue on the turn-status row (click opens the
+    /// tasks pane, same as `Ctrl+G`).
+    pub hit_watching_cue: HitArea,
     /// One-time Ctrl+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click == `/announcements hide`).
@@ -1464,11 +1288,6 @@ pub struct AgentView {
     /// Tuple of (message, remaining_ticks). Decremented each tick, removed at 0.
     /// Does **not** carry sticky status banners — see [`Self::sticky_toast`].
     pub(crate) toast: Option<(String, u8)>,
-    /// Live `/rebuild` progress strip (bar + percent + stage). Set by
-    /// [`crate::app::actions::TaskResult::RebuildProgress`]; cleared on
-    /// rebuild done/fail. When present, render paints a full-width bar at the
-    /// bottom of the scrollback instead of a short-lived toast only.
-    pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box
     /// submit (prompt/interject/bash/feedback/remember), or explicit clear.
@@ -1510,13 +1329,12 @@ pub struct AgentView {
     pub(crate) scrollback_search: Option<ScrollbackSearchState>,
     /// Hit area for scrollback selection box copy button.
     pub(crate) hit_sb_copy: HitArea,
+    /// Always-on bubble copy ⧉ hit rects from the last frame: `(rect, entry_idx)`.
+    pub(crate) hit_bubble_copy: Vec<(Rect, usize)>,
+    /// True when the pointer is over a bubble copy ⧉ (hover style + pointer cursor).
+    pub(crate) hovered_bubble_copy: bool,
     /// Hit area for scrollback selection box view button.
     pub(crate) hit_sb_view: HitArea,
-    /// Always-on per-bubble ⧉ hit targets: `(entry_idx, rect)` for visible
-    /// user/assistant messages. Cleared each paint; emptied while drag active.
-    pub(crate) bubble_copy_hits: Vec<(usize, Rect)>,
-    /// Hovered bubble-copy entry index (for highlight).
-    pub(crate) hovered_bubble_copy: Option<usize>,
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the
     /// prompt area shows a structured question UI and input is modal.
     pub(crate) question_view: Option<QuestionViewState>,
@@ -1550,17 +1368,16 @@ pub struct AgentView {
     pub(crate) plan_mode_pending: Option<bool>,
     /// After a decisive Approve / Quit, suppress idle / draw / `/view-plan`
     /// re-park of decision CTAs for the same plan. Cleared only on a new
-    /// `exit_plan_mode` soft-park present. Stops dogfood where
+    /// `exit_plan_mode` soft-park present. Stops the case where
     /// `CurrentModeUpdate` clears `plan_mode_pending` while plan mode is still
-    /// active (or disk still has `plan.md` with "approved and implemented")
-    /// and turn-end re-arms Approve for a plan the operator already decided.
+    /// active and turn-end re-arms Approve for a plan the operator already
+    /// decided.
     pub(crate) plan_decision_resolved: bool,
     /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
     /// Click or /view-plan" status and local idle decision re-park until a new
     /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."
-    /// or "Waiting for updated plan..." instead (P2 continuous revise loop).
-    pub(crate) plan_feedback_in_flight:
-        Option<crate::views::plan_approval_view::PlanFeedbackInFlight>,
+    /// or "Waiting for updated plan..." instead.
+    pub(crate) plan_feedback_in_flight: Option<PlanFeedbackInFlight>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -1573,6 +1390,12 @@ pub struct AgentView {
     /// shortcuts cheatsheet so the overlay-scoped shortcuts
     /// (`When::DashboardOverlay`) are lit in the overlay and dimmed elsewhere.
     pub(crate) in_dashboard_overlay: bool,
+    /// Whether that overlay's cycle order holds more than one agent, i.e.
+    /// whether the header shows its `[‹]`/`[›]` chips. Updated every frame by
+    /// `draw` beside [`Self::in_dashboard_overlay`], and read from the same
+    /// place: the shortcuts bar builds the pane's hints once for both the bar
+    /// and the cheatsheet, neither of which can see `draw`'s arguments.
+    pub(crate) overlay_can_cycle: bool,
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
@@ -1598,17 +1421,14 @@ pub struct AgentView {
     pub permission_stashed_prompt: Option<StashedPrompt>,
     /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
     pub permission_stashed_pane: Option<AgentPane>,
+    /// Free-form "Always allow" pattern editor buffer for the front request.
+    /// `Some` only in `PermissionFocus::PatternEdit`; cleared when the request
+    /// resolves or the edit is cancelled.
+    pub permission_pattern_edit: Option<crate::views::permission_view::PatternEditState>,
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
     pub(crate) latest_inline_plan_content: Option<String>,
-    /// `tool_call_id` of the last plan-approval card pushed into scrollback
-    /// (option C soft park). Dedupes so a re-draw / second soft park of the
-    /// same request does not spam the transcript.
-    pub(crate) plan_card_committed_id: Option<String>,
-    /// Scrollback entry for the soft-park card so FileBacked rewrites can
-    /// refresh the body in place without pushing a second card.
-    pub(crate) plan_card_entry_id: Option<crate::scrollback::entry::EntryId>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,
@@ -1678,8 +1498,25 @@ pub struct AgentView {
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
+    /// Whether THIS session's scheduled fires run as detached background
+    /// subagents, as resolved by the shell when the session's actor spawned and
+    /// delivered on the `session/new` / `session/load` response. `/loop` reads
+    /// it to describe the runtime a fire will get. `None` until that response
+    /// lands (or against a shell that predates the key), where readers fall
+    /// back to `AppView::scheduler_background_loops_seed`. Deliberately NOT
+    /// refreshed by `x.ai/settings/update`: the fire side is pinned for the
+    /// session's lifetime, so a live mirror would drift out of agreement.
+    pub scheduler_background_loops: Option<bool>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered. Mirrors `!AppView::has_external_auth_provider`.
+    pub usage_command_visible: bool,
+    /// Live sampling identity for meter honesty.
+    pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
+    /// Console team prepaid remaining (USD cents) for this agent.
+    pub console_team_prepaid_cents: Option<i64>,
+    /// Live `/rebuild` progress bar.
+    pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -1726,15 +1563,31 @@ pub struct AgentView {
     /// rename flow), as distinct from the auto-generated
     /// `generated_session_title` below. Set optimistically at dispatch,
     /// persisted by the shell as `Summary.title_is_manual`, and restored
-    /// from disk on resume (`TaskResult::SessionTitleFromDisk`). Drives the
+    /// from disk on resume (`TaskResult::SessionMetaFromDisk`). Drives the
     /// prompt-border inline title and wins precedence for the dashboard
     /// modal label and the OSC terminal title. The on-disk write is
-    /// best-effort (failure surfaces a toast through the existing
+    /// best-effort (failure surfaces a system block through the existing
     /// `RenameSessionFailed` arm).
     pub display_name: Option<String>,
     /// Short title from shell `SessionSummaryGenerated` or `summary.json` on load/resume.
     /// Precedence in the dashboard title is below `display_name`, above first-prompt text.
     pub generated_session_title: Option<String>,
+    /// Shell already fanned out `titleIsManual: false` for this unpin. A
+    /// dropped RPC then surfaces `ResetSessionTitleFailed`; restoring the
+    /// pin would stick a manual title that later absent-meta auto titles
+    /// refuse to clear.
+    pub title_unpin_committed: bool,
+    /// Ultra-short summary of the most recent successful turn (shell
+    /// `LastTurnSummary`), preferred over the last-message preview for the
+    /// idle dashboard row's secondary line. Shown until replaced by the next
+    /// successful turn's summary; cleared only by a conversation rewind
+    /// (which removes the work it describes).
+    pub last_turn_summary: Option<String>,
+    /// Bumped on every live mutation of [`Self::last_turn_summary`] (notification
+    /// apply or rewind clear). Disk hydration captures this at enqueue and
+    /// applies only when it still matches, so a rewind that cleared the field
+    /// while the read was in flight is not undone by a stale disk value.
+    pub last_turn_summary_gen: u64,
     /// Effects queued by input handlers that cannot return `InputOutcome::Action`.
     /// Drained by `AppView.handle_input` after each event.
     pub(crate) pending_effects: Vec<super::actions::Effect>,
@@ -1757,12 +1610,16 @@ pub struct AgentView {
     /// (a lost response would otherwise leave the TUI on "Cancelling…" with
     /// Esc and the input dead until a restart).
     pub(crate) pending_turn_end_reconcile: Option<PendingTurnEnd>,
-    /// Send-now cancel expectation: the client-minted id of a cancel-and-send
-    /// prompt this client dispatched into a running turn (send-now chord /
-    /// queue-row "Send now" / a plain prompt sent into a held blocking wait,
-    /// which the shell auto-routes onto send-now). The running turn's imminent
-    /// cancel is the silent half of cancel-and-send, so the turn-end rails
-    /// suppress the "Turn cancelled by user …" marker.
+    /// Armed whenever `Effect::CancelTurn` leaves the pane cancelling:
+    /// `session/cancel` is fire-and-forget with known loss windows, so the
+    /// event loop re-sends the idempotent cancel after
+    /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
+    pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
+    /// Send-now cancel expectation: the client-minted id of an explicit
+    /// cancel-and-send this client dispatched into a running turn (send-now
+    /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
+    /// imminent cancel is the silent half of cancel-and-send, so the turn-end
+    /// rails suppress the "Turn cancelled by user …" marker.
     ///
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is
     /// trusted over this flag (`"send_now"` suppresses, anything else
@@ -1773,10 +1630,10 @@ pub struct AgentView {
     /// replay-window entry, so a stale expectation can never eat a later real
     /// Ctrl+C marker.
     pub(crate) expect_send_now_cancel: Option<String>,
-    /// Send-now promote id pin (mirrors [`Self::expect_send_now_cancel`]).
-    /// Cleared on adopt / clear; no longer skips scroll — send-now jumps to
-    /// the painted user prompt like a normal turn. Kept for failure-path
-    /// identity checks that survive cancel-rail `take()` of the expect flag.
+    /// Cleared at turn start; set on the first live non-echo update. Defaults true.
+    pub(crate) front_message_committed: bool,
+    /// Send-now promote: skip `scroll_to_entry_top` on next matching adoption.
+    /// Survives cancel-rail `take()` of [`Self::expect_send_now_cancel`].
     pub(crate) follow_without_jump_prompt_id: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes — the `session/prompt` RPC is in flight and no
@@ -1926,22 +1783,6 @@ fn translate_local_submit(
     skipped: bool,
 ) -> InputOutcome {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
-    if let LocalQuestionKind::ProjectSelect {
-        resolved_paths,
-        original_cwd,
-        stashed_prompt,
-        dont_ask_index,
-    } = kind
-    {
-        return translate_project_select(
-            qv,
-            resolved_paths,
-            original_cwd,
-            stashed_prompt,
-            dont_ask_index,
-            skipped,
-        );
-    }
     if skipped {
         return InputOutcome::Changed;
     }
@@ -2016,82 +1857,15 @@ fn translate_local_submit(
                 InputOutcome::Action(Action::DoctorFixCancelled(target))
             }
         }
-        LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
+        LocalQuestionKind::DeleteCurrentSession => {
+            InputOutcome::Action(Action::DeleteCurrentSessionAnswered {
+                confirmed: *idx == 0,
+            })
+        }
+        LocalQuestionKind::Feedback => {
+            unreachable!("feedback submits through submit_feedback_pane, which returns first")
+        }
     }
-}
-fn translate_project_select(
-    qv: &crate::views::question_view::QuestionViewState,
-    resolved_paths: Vec<std::path::PathBuf>,
-    original_cwd: std::path::PathBuf,
-    stashed_prompt: String,
-    dont_ask_index: usize,
-    skipped: bool,
-) -> InputOutcome {
-    use crate::views::question_view::QuestionSelection;
-    use xai_grok_telemetry::events::{ProjectPickerOutcome, ProjectPickerSelected};
-    let project_dir_options = resolved_paths.len().saturating_sub(1);
-    let emit = |outcome: ProjectPickerOutcome| {
-        xai_grok_telemetry::session_ctx::log_event(ProjectPickerSelected {
-            outcome,
-            picked_project: outcome.picked_project(),
-            project_dir_options,
-        });
-    };
-    if skipped {
-        emit(ProjectPickerOutcome::Dismissed);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path: original_cwd,
-            stashed_prompt,
-            disable_picker: false,
-        });
-    }
-    let freeform_path = qv
-        .per_question_freeform_selected
-        .first()
-        .copied()
-        .unwrap_or(false)
-        .then(|| qv.per_question_freeform.first())
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            let expanded = shellexpand::tilde(s.trim());
-            std::path::PathBuf::from(expanded.as_ref())
-        });
-    if let Some(path) = freeform_path {
-        emit(ProjectPickerOutcome::CustomPath);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path,
-            stashed_prompt,
-            disable_picker: false,
-        });
-    }
-    let selected_idx = qv.selections.first().and_then(|s| match s {
-        QuestionSelection::Single(Some(idx)) => Some(*idx),
-        _ => None,
-    });
-    if selected_idx == Some(dont_ask_index) {
-        emit(ProjectPickerOutcome::DontAskAgain);
-        return InputOutcome::Action(Action::ProjectSelected {
-            path: original_cwd,
-            stashed_prompt,
-            disable_picker: true,
-        });
-    }
-    let picked_recent =
-        matches!(selected_idx, Some(idx) if (1..resolved_paths.len()).contains(&idx));
-    emit(if picked_recent {
-        ProjectPickerOutcome::RecentProject
-    } else {
-        ProjectPickerOutcome::CurrentDir
-    });
-    let path = selected_idx
-        .and_then(|idx| resolved_paths.get(idx).cloned())
-        .unwrap_or(original_cwd);
-    InputOutcome::Action(Action::ProjectSelected {
-        path,
-        stashed_prompt,
-        disable_picker: false,
-    })
 }
 /// Convert an [`OverlayAction`] to an [`InputOutcome`].
 fn overlay_action_to_outcome(action: crate::views::overlay::OverlayAction) -> InputOutcome {
@@ -2297,6 +2071,10 @@ pub(super) fn apply_settings_outcome(
         }
         SettingsKeyOutcome::Action(a) => InputOutcome::Action(a),
         SettingsKeyOutcome::ActionPair(a, b) => InputOutcome::ActionPair(a, b),
+        SettingsKeyOutcome::ActionThenClose(a) => {
+            agent.active_modal = None;
+            InputOutcome::Action(a)
+        }
         SettingsKeyOutcome::Changed => InputOutcome::Changed,
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }
@@ -2366,8 +2144,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::NextModel => Action::NextModel,
         ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
-        | ActionId::ToggleGlobalPause
-        | ActionId::ToggleSoftStop
         | ActionId::Quit
         | ActionId::ExitSession
         | ActionId::NewSession
@@ -2385,10 +2161,9 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
             }
             Action::VoiceToggle
         }
-        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
-        ActionId::ClearCompletedTodos => Action::ClearCompletedTodos,
+        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal
@@ -2480,14 +2255,12 @@ fn collect_citation_links(
                     });
                 }
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
-                if !wf.url.is_empty() {
-                    links.push(VisibleLink {
-                        rects: vec![block_geom.content_area],
-                        target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
-                        id: None,
-                    });
-                }
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) if !wf.url.is_empty() => {
+                links.push(VisibleLink {
+                    rects: vec![block_geom.content_area],
+                    target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
+                    id: None,
+                });
             }
             _ => {}
         }
@@ -2507,6 +2280,62 @@ pub(crate) mod test_fixtures {
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol as acp;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    pub(crate) fn make_followup_permission_state()
+    -> crate::views::permission_view::PermissionViewState {
+        let (response_tx, _rx) = tokio::sync::oneshot::channel();
+        let request = agent_client_protocol::RequestPermissionRequest::new(
+            agent_client_protocol::SessionId::new(std::sync::Arc::from("test")),
+            agent_client_protocol::ToolCallUpdate::new(
+                agent_client_protocol::ToolCallId::new(std::sync::Arc::from("call-1")),
+                agent_client_protocol::ToolCallUpdateFields::default(),
+            ),
+            vec![],
+        );
+        let perm = xai_acp_lib::AcpArgs {
+            request,
+            response_tx,
+        };
+        crate::views::permission_view::PermissionViewState {
+            request: perm,
+            id: 0,
+            focus: crate::views::permission_view::PermissionFocus::FollowupInput,
+            options: vec![],
+            active_idx: 0,
+            bash_highlights: None,
+            bash_selection_count: 0,
+            bash_deny_selection_count: 0,
+            bash_command_raw: None,
+            mcp_scope: None,
+            title: String::new(),
+            description: vec![],
+            args_expanded: false,
+            desc_scroll: 0,
+            subagent_label: None,
+            options_area_height: 0,
+            options_scroll_offset: 0,
+        }
+    }
+    pub(crate) fn make_plan_approval_view_state()
+    -> crate::views::plan_approval_view::PlanApprovalViewState {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-1".into(),
+            plan_content: Some("# Plan\n\n## Step 1\nDo something".into()),
+        };
+        crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        )
+    }
     /// Drive the agent's tracker into a task-output wait via the real update
     /// path. `timeout_ms > 0` advertises a blocking (sendable/parked) wait;
     /// `0` is an instant poll that must NOT advertise one.
@@ -2523,6 +2352,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(
@@ -2597,6 +2427,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(
@@ -2630,6 +2461,7 @@ pub(crate) mod test_fixtures {
         use crate::acp::meta::NotificationMeta;
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use std::sync::Arc;
+        agent.front_message_committed = true;
         let meta = NotificationMeta::default();
         agent.session.handle_update(
             acp::SessionUpdate::ToolCall(
@@ -2646,7 +2478,7 @@ pub(crate) mod test_fixtures {
         assert!(
             matches!(
                 activity,
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "expected Subagent wait, got {activity:?}"
         );
@@ -2670,6 +2502,8 @@ pub(crate) mod test_fixtures {
             workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
+            parent_session_id: None,
+            depth: None,
             started_at: Instant::now(),
             last_progress_at: Instant::now(),
             finished: false,
@@ -2696,15 +2530,17 @@ pub(crate) mod test_fixtures {
             child_updates_replayed: false,
         }
     }
-    /// Count of parked ("Worked for X") marker blocks in the agent's
-    /// scrollback.
-    pub fn count_parked(agent: &AgentView) -> usize {
+    /// Count of "Worked for X" (`TurnCompleted`) marker blocks in the
+    /// agent's scrollback.
+    pub fn count_turn_markers(agent: &AgentView) -> usize {
         use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
         (0..agent.scrollback.len())
             .filter(|i| {
                 matches!(
                     agent.scrollback.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::SessionEvent(b)) if b.parked
+                    Some(RenderBlock::SessionEvent(b))
+                        if matches!(b.event, SessionEvent::TurnCompleted { .. })
                 )
             })
             .count()
@@ -2796,7 +2632,6 @@ pub(crate) mod test_fixtures {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2861,7 +2696,6 @@ pub(crate) mod test_fixtures {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
-                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -3684,7 +3518,6 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -3797,10 +3630,6 @@ mod prompt_input_mode_tests {
             Some(theme.command)
         );
         assert_eq!(
-            PromptInputMode::Feedback.accent_color(&theme),
-            Some(theme.accent_feedback)
-        );
-        assert_eq!(
             PromptInputMode::Remember.accent_color(&theme),
             Some(theme.accent_remember)
         );
@@ -3814,10 +3643,6 @@ mod prompt_input_mode_tests {
             Some(("! ", theme.command))
         );
         assert_eq!(
-            PromptInputMode::Feedback.prefix_override(&theme),
-            Some(("~ ", theme.accent_feedback))
-        );
-        assert_eq!(
             PromptInputMode::Remember.prefix_override(&theme),
             Some(("# ", theme.accent_remember))
         );
@@ -3828,14 +3653,6 @@ mod prompt_input_mode_tests {
         assert_eq!(PromptInputMode::Normal.placeholder_override(true), None);
         assert_eq!(PromptInputMode::Bash.placeholder_override(false), None);
         assert_eq!(PromptInputMode::Bash.placeholder_override(true), None);
-        assert_eq!(
-            PromptInputMode::Feedback.placeholder_override(false),
-            Some("Type your feedback...")
-        );
-        assert_eq!(
-            PromptInputMode::Feedback.placeholder_override(true),
-            Some("Type your feedback...")
-        );
         assert_eq!(
             PromptInputMode::Remember.placeholder_override(false),
             Some("Save a memory note... (Shift+Enter for multiline)")
@@ -3853,10 +3670,6 @@ mod prompt_input_mode_tests {
             Some("Run shell command")
         );
         assert_eq!(
-            PromptInputMode::Feedback.prompt_info_override(),
-            Some("Send feedback")
-        );
-        assert_eq!(
             PromptInputMode::Remember.prompt_info_override(),
             Some("Save memory note")
         );
@@ -3872,11 +3685,6 @@ mod prompt_input_mode_tests {
         assert!(matches!(
             PromptInputMode::Bash.send_action(t2.clone()),
             Action::SendBashCommand(t) if t == t2
-        ));
-        let t3 = "this is feedback".to_string();
-        assert!(matches!(
-            PromptInputMode::Feedback.send_action(t3.clone()),
-            Action::SendFeedback(t) if t == t3
         ));
         let t4 = "remember this".to_string();
         assert!(matches!(
@@ -3905,18 +3713,6 @@ mod prompt_input_mode_tests {
             assert!(mode.is_exit_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
             assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
             assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
-            assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
         }
-    }
-    #[test]
-    fn is_exit_key_feedback_uses_stricter_set() {
-        let mode = PromptInputMode::Feedback;
-        assert!(mode.is_exit_key(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
-        assert!(mode.is_exit_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
-        assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
-        assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-        assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(!mode.is_exit_key(&KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)));
     }
 }

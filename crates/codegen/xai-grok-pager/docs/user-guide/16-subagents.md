@@ -15,7 +15,7 @@ Agents and personas both customize behavior, but they operate at different level
 | **What they configure** | The whole session: model, tools, prompt mode, system prompt | A behavioral overlay added to a subagent's prompt |
 | **Scope** | Primary session or subagent | Subagents only |
 | **How you set them** | At startup, or with agent definitions (`.md` files in `.grok/agents/` or `~/.grok/agents/`) | In `config.toml` (`[subagents.personas]`) or `.toml` files under `.grok/personas/`; applied during subagent resolution |
-| **What they control** | Model, tool availability, prompt text, skills | Tone, output format, task focus, and input/output contracts |
+| **What they control** | Model, tool availability, prompt body, skills | Tone, output format, task focus, and input/output contracts |
 | **Who edits them** | You -- create, delete, or toggle them in the agents modal or by editing files | You -- define custom personas in config or files; bundled personas are read-only |
 | **Examples** | `grok-build`, `explore`, `plan` | `researcher`, `concise` |
 
@@ -227,23 +227,26 @@ By default, subagents share the parent workspace (`isolation: none`). For tasks 
 - Its changes stay isolated from the parent until you merge them.
 - The subagent's result includes the worktree path.
 
-Grok Build manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
+Grok OSS manages worktrees through the `x.ai/git/worktree/*` extension methods, including an apply operation that merges changes back into the main working directory.
 
-**Prefer no worktree** when parallel children edit disjoint paths or when you want simpler git state. Skills that orchestrate subagents should default to `isolation: none` unless the user asks for a worktree.
+Prefer no worktree when parallel subagents edit disjoint paths or when you want simpler git state.
 
 ### Worktree isolation is off by default
 
-Surmount OSS defaults `[subagents] allow_worktree` to **`false`**. Empty config means spawn **forces** `isolation = none` even if the agent requested `worktree` or a role/persona defaulted to worktree. Resume of a child that already has a worktree still reuses that path.
+Grok OSS defaults `[subagents] allow_worktree` to **`false`**. Empty config means spawn **forces** `isolation = none` even if the agent requested `worktree` or a role or persona defaulted to worktree. Resume of a subagent that already has a worktree still reuses that path.
 
-To **opt in** to worktree isolation:
+To opt in to worktree isolation:
 
 ```toml
-# ~/.grok/config.toml
 [subagents]
 allow_worktree = true
 ```
 
-**Migration:** earlier releases defaulted `allow_worktree` to `true`. If you relied on that, set the key above explicitly. Force-none still applies whenever the value is `false` (default or explicit).
+This row is also in `/settings` → Agent (**Allow Isolated Agent worktrees**). Earlier releases defaulted `allow_worktree` to `true`. If you relied on that, set the key above explicitly. Force-none still applies whenever the value is `false` (default or explicit).
+
+See [Configuration](05-configuration.md) for the same key.
+
+Mid-turn interject injects into the current turn and never cancels. Cancel is Esc or **[stop]** only. Keys and the composer Enter cue (send / queue / interject) are in [Keyboard shortcuts](03-keyboard-shortcuts.md).
 
 ---
 
@@ -299,18 +302,6 @@ To view the available agent types and personas, open the command palette with `C
 
 Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
 
-### Main chat while subagents run
-
-Background subagents alone do **not** block or queue-only the main composer.
-
-- **Primary idle + live background subagents:** footer shows `Enter: send`. Plain Enter starts a **normal main turn**; children keep running in parallel. Status may show `N subagent(s) still running` with `[pause]` / `[stop]`, without `Enter queues` or force-drain language.
-- **Primary busy** (thinking, tools, streaming, or a blocked wait): plain Enter **queues** a follow-up; soft **Interject** steers the current turn. Cancel is Esc / stop only.
-- **Monitors** and long-running background commands alone also never force queue-only.
-
-For **annotations that must not become a turn at all**, use [`/note`](04-slash-commands.md#note) instead of typing into the composer or queue. Session notes are operator-local and never drain as prompts.
-
-See also [keyboard shortcuts — during an active turn](03-keyboard-shortcuts.md#during-an-active-turn-agent-running).
-
 ---
 
 ## Viewing Subagents in the TUI
@@ -328,17 +319,11 @@ While running, the block shows a live activity suffix (e.g. "Running: cargo test
 
 Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
 
-For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in Xs: "..."` block is appended.
+For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in 15m43s: "..."` block is appended when the wait is a minute or more. Times under 60 seconds stay in seconds (`11.7s`). Do not write 943 seconds or `943s` in status or agent reports. SuperGrok is a paid product. When the prepaid SuperGrok top-up meter is meant, say SuperGrok dollar credits.
 
 ### Tasks pane (Ctrl+G)
 
 As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
-
-**Click to open:** on a subagent row, click the top-right **model name, elapsed
-timer, or `[↗]` enlarge control** to open that child's fullscreen transcript
-(same result as Enter / Ctrl-F on the scrollback block). The kill control
-(`[x]`) stays separate and does not open the view. Todo pane clear-finished
-icon (`[−]`, open board with finished rows) is laid out so it does not cover or steal those open/kill hits.
 
 ### Fullscreen framed view (the child transcript)
 
@@ -354,49 +339,31 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 
 ## Depth Limits
 
-Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
-
----
+The default nesting limit is two. The main thread (L1) can spawn subagents (L2). An L2 can spawn specialists (L3). An L3 at that default cannot spawn further (no L4). If the current depth is already at `max_depth`, `spawn_subagent` fails with a depth-limit error. Set `[subagents] max_depth = 1` if only the main thread should spawn. The main-thread Subagents list, watching counts, and similar live chrome show only L2 coordinators. Each L2 row shows how many live L3 specialists it is using, as a count, not a list of specialist names.
 
 ## Token efficiency
 
-The parent session’s context is expensive. Filling it with logs, greps, and long file reads hurts quality long before the hard limit, and a parent compact can wipe coordination detail. Use subagents so heavy work runs in a fresh window; keep the parent as coordinator.
+Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, agents are three layers deep. That includes implement loops. A simple implement job is not an exception.
 
-### Parent coordinates; children do the heavy work
+**Hierarchical fast path.** The main thread may do these three things without spawning a subagent:
 
-- **Parent keeps:** goals, spawn/wait, short on-disk reports, status to you.
-- **Children own:** multi-file search, CI log fetch, root-cause reads, implementation, and review loops.
-- Prefer **tight prompts** (goal, paths, acceptance, where to write a short summary). Prefer **short returns** (verdict, paths, residuals) over pasting whole transcripts into the parent.
+1. A one-command host question (for example `journalctl` or `last`).
+2. A single known-path read that you or the prompt already named.
+3. Read and quote the short on-disk report that this thread asked for.
 
-### Parent is coordinator only (spawn first)
+Write the short report under `~/.agents/reports/` on this machine. Do not add report files to the git tree.
 
-On a **CI failure**, **regression**, or **multi-file diagnosis**, the parent’s **first** tool use should be spawning a tightly scoped subagent — not pulling CI logs, opening failing tests, or grepping the hot path in the parent.
+That is not a license to diagnose or implement in the main thread.
 
-| Parent may | Parent should not (even “just a quick look”) |
-| ---------- | --------------------------------------------- |
-| Set goals, spawn/wait children | Pull CI logs or open failing test files first |
-| Read short on-disk summaries children wrote | Re-run the child’s greps “to be sure” |
-| One-line status to you | Solo marathons of multi-file research or fix work |
+| Depth | Does | Does not |
+| ----- | ---- | -------- |
+| **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
+| **L2 subagent** | Parallelize. Spawn L3 specialists. Stay token-efficient. Discard context after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
+| **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (forbidden) |
 
-**Failure mode to avoid:** parent greps docs + fetches logs + finds the test file, *then* spawns. That already burned the parent context. Spawn first; children own fetch/read/fix.
+L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing the work on L2 fills L2 and causes compaction. The older softer rule (spawn L3 only when there are many greps, or after half the window) is too weak and is replaced.
 
-### Write a short report on disk
-
-Children write short summary or review files. The parent reads those only — not full child transcripts and not whole hot modules after a summary already named the set. After compaction, reseed from on-disk artifacts rather than re-exploring from zero.
-
-### Depth is one
-
-Children cannot spawn children (see [Depth Limits](#depth-limits)). Hierarchical work means the **parent** layers specialists in sequence or parallel (inventory → root cause → fix → verify), each with a tight prompt and an on-disk artifact.
-
-### Soft quality band
-
-Treat the parent as a **coordinator budget**, not a place to hoard tool output. Soft guidance: keep parent context lighter when you can (quality often drops well before the hard cap). Child isolation is the win: each subagent starts fresh so deep loops do not force an early parent compact.
-
-### Parallelism without waste
-
-Spawn for **independent**, **disjoint** scopes when combining results is cheap. Do not fan out many identical explores over the same files, or spawn for pure status checks with no real work. Cap concurrent children when scopes would otherwise overlap.
-
-Skills and project agent rules (for example `AGENTS.md` in a repo, or your host agent config) may pin a stricter “hard stop” for operators — this section is the product-facing summary those rules link to.
+See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the parent stays small.
 
 ---
 
@@ -404,14 +371,12 @@ Skills and project agent rules (for example `AGENTS.md` in a repo, or your host 
 
 **Good use cases:**
 
-- Researching a codebase while the parent continues other work
-- Running tests in parallel while the parent implements changes
+- Researching a codebase while the main thread stays free for you
+- Running tests in parallel with other specialists
 - Reviewing generated changes before you commit them
 - Delegating independent tasks that do not depend on each other
-- CI failures, regressions, and multi-file root cause (spawn first; join on short summaries)
 
 **When not to use:**
 
-- Simple tasks that the parent can handle directly
 - Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the context setup cost exceeds the parallelism benefit
+- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one-command host question, a single known-path read already named, or reading the asked-for report). Implement work, multi-file diagnosis, CI, and regressions still stay three layers deep.

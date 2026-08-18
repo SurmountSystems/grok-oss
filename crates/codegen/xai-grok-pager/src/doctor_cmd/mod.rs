@@ -61,7 +61,10 @@ fn run_report(json_output: bool, writer: &mut impl Write) -> Result<()> {
 
 pub fn collect_report() -> DiagnosticReport {
     let terminal = crate::terminal::standalone_terminal_context();
-    let report = collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal));
+    let mut report = collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal));
+    // Live mic lookup is host-dependent. Keep it on the real `grok doctor`
+    // path only so snapshot composition stays a pure function of the facts.
+    crate::diagnostics::apply_voice_probe(&mut report, true);
     configured_report_for_terminal(report, &terminal)
 }
 
@@ -81,9 +84,7 @@ fn configured_report_for_terminal(
 fn collect_report_with(
     snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
 ) -> DiagnosticReport {
-    let mut report = crate::diagnostics::view(snapshot.into());
-    crate::diagnostics::apply_voice_probe(&mut report, true);
-    report
+    crate::diagnostics::view(snapshot.into())
 }
 
 fn write_report(
@@ -95,17 +96,6 @@ fn write_report(
         json::write(report, writer)
     } else {
         write!(writer, "{}", human::format(report))?;
-        // Dual-auth discoverability (counts + fingerprints only; no secrets).
-        // Human doctor only — keep JSON schema free of auth side effects.
-        let home = xai_grok_shell::util::grok_home::grok_home();
-        let status = xai_grok_shell::auth::collect_dual_auth_status(&home);
-        write!(writer, "\n{}", status.format_human())?;
-        // Wrong browser page vs right dogfood proof (license zeros expected).
-        write!(
-            writer,
-            "\n{}",
-            crate::views::limits_honesty::dogfood_burn_proof_doctor_block()
-        )?;
         Ok(())
     }
 }

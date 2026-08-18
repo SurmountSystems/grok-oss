@@ -1,0 +1,665 @@
+//! Mouse-routing tests for the line viewer's plan preview: the scrollbar
+//! must own a click+drag gesture end-to-end. A press on the track was
+//! previously also treated as a comment-gutter anchor (row-only hit test),
+//! so dragging the thumb selected plan lines for a comment instead of
+//! scrolling (GB-4579: "can't click and drag scrollbar to view plan").
+
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
+
+use crate::actions::ActionRegistry;
+use crate::app::agent_view::AgentView;
+use crate::app::agent_view::test_fixtures::make_agent;
+use crate::views::plan_approval_view::PlanApprovalFocus;
+
+const POPUP: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 80,
+    height: 10,
+};
+/// Scrollbar track column as split off by the list pane render
+/// (`maybe_split_for_scrollbar`): last column of the popup area.
+const TRACK_X: u16 = 79;
+
+fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    })
+}
+
+/// Agent showing a plan-approval preview whose plan overflows the
+/// viewport, with the render-time areas planted so mouse dispatch works.
+fn agent_with_scrollable_plan() -> AgentView {
+    let mut agent = make_agent();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let plan: String = (1..=60).fold(String::new(), |mut acc, i| {
+        acc.push_str(&format!("step {i}\n"));
+        acc
+    });
+    let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+        session_id: "test-session".into(),
+        tool_call_id: "call-1".into(),
+        plan_content: Some(plan),
+    };
+    agent.plan_approval_view = Some(
+        crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        ),
+    );
+    agent.show_plan_preview();
+
+    let viewer = agent
+        .line_viewer
+        .as_mut()
+        .expect("plan preview opens the line viewer");
+    viewer.prepare_layout(POPUP.width, POPUP.height);
+    viewer.last_popup_area = Some(POPUP);
+    viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    viewer
+        .list_state
+        .set_scrollbar_area(Some(Rect::new(TRACK_X, POPUP.y, 1, POPUP.height)));
+    assert!(
+        viewer.list_state.total_height() > POPUP.height as usize,
+        "plan must overflow the viewport so the scrollbar is live"
+    );
+    agent
+}
+
+/// Presses on the modal border column next to the track (users read the
+/// thumb + border as one two-column scrollbar) used to fall into the
+/// click-outside-modal path instead of grabbing the thumb.
+#[test]
+fn border_column_press_grabs_scrollbar() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X + 1, 5),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().expect("viewer stays open");
+    assert!(
+        viewer.list_state.is_scrollbar_dragging(),
+        "press one column right of the track (modal border) must grab the thumb"
+    );
+    assert!(
+        viewer.list_state.scroll_offset() > 0,
+        "the press must scroll toward the clicked track position"
+    );
+    assert!(
+        viewer
+            .plan_ref()
+            .and_then(|p| p.gutter_drag_start)
+            .is_none(),
+        "a border-column press must not anchor a comment-gutter drag"
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    let offset_after_press = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .scroll_offset();
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), TRACK_X + 1, 9),
+        &registry,
+    );
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        viewer.list_state.scroll_offset() > offset_after_press,
+        "dragging on the border column must keep scrolling (offset {} -> {})",
+        offset_after_press,
+        viewer.list_state.scroll_offset()
+    );
+}
+
+#[test]
+fn gap_column_press_grabs_scrollbar() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X - 1, 5),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        viewer.list_state.is_scrollbar_dragging(),
+        "press on the gap column must grab the thumb"
+    );
+    assert!(
+        viewer
+            .plan_ref()
+            .and_then(|p| p.gutter_drag_start)
+            .is_none(),
+        "a gap-column press must not anchor a comment-gutter drag"
+    );
+}
+
+#[test]
+fn border_column_press_does_not_close_casual_preview() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.plan_approval_view = None;
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X + 1, 5),
+        &registry,
+    );
+
+    let viewer = agent
+        .line_viewer
+        .as_ref()
+        .expect("a border-column press must not close the casual preview");
+    assert!(viewer.list_state.is_scrollbar_dragging());
+}
+
+#[test]
+fn press_beyond_grab_zone_still_closes_casual_preview() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.plan_approval_view = None;
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X + 2, 5),
+        &registry,
+    );
+
+    assert!(
+        agent.line_viewer.is_none(),
+        "a click two columns right of the track is outside the modal and must close it"
+    );
+}
+
+#[test]
+fn scrollbar_press_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 5),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        viewer.list_state.is_scrollbar_dragging(),
+        "press on the track must latch a scrollbar drag"
+    );
+    assert!(
+        viewer
+            .plan_ref()
+            .and_then(|p| p.gutter_drag_start)
+            .is_none(),
+        "press on the track must not anchor a comment-gutter drag"
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "press on the track must not enter commenting"
+    );
+}
+
+#[test]
+fn scrollbar_drag_scrolls_plan_instead_of_selecting_lines() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 2),
+        &registry,
+    );
+    let offset_after_press = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .scroll_offset();
+
+    // Drag the thumb to the bottom of the track.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), TRACK_X, 9),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        viewer.list_state.scroll_offset() > offset_after_press,
+        "dragging the thumb down must scroll the plan (offset {} -> {})",
+        offset_after_press,
+        viewer.list_state.scroll_offset()
+    );
+    assert!(
+        viewer.plan_ref().and_then(|p| p.gutter_drag_end).is_none(),
+        "thumb drag must not extend a comment line selection"
+    );
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), TRACK_X, 9),
+        &registry,
+    );
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        !viewer.list_state.is_scrollbar_dragging(),
+        "release must end the scrollbar drag"
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.commenting_range, None,
+        "releasing the thumb must not open a comment on the dragged lines"
+    );
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+}
+
+/// The thumb must keep following the pointer when a drag drifts off the
+/// popup rect (standard scrollbar behavior in every toolkit).
+#[test]
+fn scrollbar_drag_outside_popup_keeps_scrolling() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 8),
+        &registry,
+    );
+    let offset_after_press = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .scroll_offset();
+    assert!(offset_after_press > 0, "press near the bottom scrolls down");
+
+    // Pointer drifts left of the track and above the popup while dragging.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 40, 0),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        viewer.list_state.scroll_offset() < offset_after_press,
+        "drag toward the top of the track must scroll back up (offset {} -> {})",
+        offset_after_press,
+        viewer.list_state.scroll_offset()
+    );
+    assert!(
+        viewer.plan_ref().and_then(|p| p.gutter_drag_end).is_none(),
+        "scrollbar drag must never turn into a comment line selection"
+    );
+}
+
+/// A gutter line-selection whose Up was lost must not survive a later
+/// scrollbar gesture: the track press drops the stale anchor, so a stray
+/// release afterwards cannot commit the leftover lines as a comment.
+#[test]
+fn scrollbar_gesture_drops_stale_gutter_anchor() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    // Anchor + extend a comment line selection, then lose the Up.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 10, 6),
+        &registry,
+    );
+    {
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        let start = viewer.plan_ref().and_then(|p| p.gutter_drag_start);
+        let end = viewer.plan_ref().and_then(|p| p.gutter_drag_end);
+        assert!(
+            start.is_some() && end.is_some() && start != end,
+            "precondition: a multi-line gutter drag is live (start {start:?}, end {end:?})"
+        );
+    }
+    // Scrollbar click + release: the track press must drop the stale anchor.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 5),
+        &registry,
+    );
+    {
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(viewer.list_state.is_scrollbar_dragging());
+        assert!(
+            viewer
+                .plan_ref()
+                .and_then(|p| p.gutter_drag_start)
+                .is_none()
+                && viewer.plan_ref().and_then(|p| p.gutter_drag_end).is_none(),
+            "track press must drop a stale comment-gutter anchor"
+        );
+    }
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), TRACK_X, 5),
+        &registry,
+    );
+
+    // The track press also discarded the in-progress comment draft
+    // (same rule as clicking back into the modal).
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.commenting_range, None);
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    // A stray release on content must not commit the leftover lines.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), 10, 6),
+        &registry,
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.commenting_range, None,
+        "stale gutter lines must not be committed as a comment range"
+    );
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "a stray release must not re-enter commenting"
+    );
+}
+
+/// A single click on a plan body row focuses or scrolls. It must not
+/// enter Commenting or wipe the composer.
+#[test]
+fn plan_row_click_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("keep typing");
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "clicking a plan row must not steal the composer into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typing",
+        "clicking a plan row must leave the composer typeable"
+    );
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &registry,
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "`c` remains the explicit line-comment gesture"
+    );
+}
+
+/// Empty Enter on the default parked Preview stays on Preview.
+/// Commenting is explicit `c` only.
+#[test]
+fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    let viewer = agent.line_viewer.as_ref().expect("preview is open");
+    assert!(
+        viewer.selected_line_range().is_some(),
+        "fixture must have a selected line so Enter would enter Commenting if routed there"
+    );
+    assert!(agent.prompt.text().trim().is_empty());
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("empty Enter must leave the parked plan open");
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "empty Enter on Preview must not enter Commenting"
+    );
+}
+
+/// A lost mouse-up after a track press must not make the next plan-line
+/// click skip gutter / click-to-comment (sticky `is_scrollbar_dragging`).
+#[test]
+fn lost_scrollbar_up_does_not_block_next_line_click() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 5),
+        &registry,
+    );
+    assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .is_scrollbar_dragging(),
+        "precondition: track press latched a thumb drag"
+    );
+
+    // No Up — simulate a dropped release, then click a plan line.
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+
+    let viewer = agent.line_viewer.as_ref().unwrap();
+    assert!(
+        !viewer.list_state.is_scrollbar_dragging(),
+        "content Down must clear the stale scrollbar latch"
+    );
+    assert!(
+        viewer
+            .plan_ref()
+            .and_then(|p| p.gutter_drag_start)
+            .is_some(),
+        "content Down must still anchor a comment-gutter drag"
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "content Down must not steal the composer into Commenting"
+    );
+}
+
+#[test]
+fn wheel_on_border_column_scrolls_plan() {
+    let mut agent = agent_with_scrollable_plan();
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X + 1, 9),
+        &registry,
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), TRACK_X + 1, 9),
+        &registry,
+    );
+    let off = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .scroll_offset();
+    assert!(off > 0, "border click near track bottom scrolls down");
+
+    agent.handle_scroll(-3, TRACK_X + 1, 5);
+    let off_after = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .scroll_offset();
+    assert!(
+        off_after < off,
+        "wheel-up on the border column must scroll up ({off} -> {off_after})"
+    );
+}
+
+/// Overlay router is skipped: empty-composer Ctrl+C in the line viewer must
+/// abandon plan approval, not return Changed and swallow the chord.
+#[test]
+fn line_viewer_empty_ctrl_c_abandons_plan_approval() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let outcome = agent.handle_line_viewer_key(&ctrl_c);
+    assert!(
+        matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Changed
+                | crate::app::app_view::InputOutcome::Action(_)
+        ),
+        "empty Ctrl+C must be consumed as plan quit; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "line-viewer empty Ctrl+C must abandon, not swallow as Changed"
+    );
+    assert!(
+        agent.plan_decision_resolved,
+        "line-viewer Ctrl+C abandon must set the same sticky as q / Quit"
+    );
+}
+
+/// Non-empty composer: line-viewer Ctrl+C clears the draft first. Second
+/// empty press then abandons.
+#[test]
+fn line_viewer_ctrl_c_clears_draft_then_second_abandons() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("draft notes");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let first = agent.handle_line_viewer_key(&ctrl_c);
+    assert!(
+        matches!(first, crate::app::app_view::InputOutcome::Changed),
+        "first Ctrl+C with draft must clear; got {first:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "first Ctrl+C must not abandon while draft existed"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "first Ctrl+C must clear composer draft"
+    );
+
+    let second = agent.handle_line_viewer_key(&ctrl_c);
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "second empty Ctrl+C must abandon; got {second:?}"
+    );
+    assert!(agent.plan_decision_resolved);
+}
+
+/// Isolated plan.md viewer: a mid-compose draft means `a` is text, not Approve.
+#[test]
+fn plan_md_preview_mid_compose_a_types_does_not_approve() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("oh you interrupted my typing");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "plan.md Preview must not Approve while the composer has a draft"
+    );
+    assert!(
+        agent.prompt.text().contains("oh you interrupted my typing"),
+        "draft must stay in the composer, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.text().contains('a'),
+        "typed `a` must land in the composer, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Empty-prompt `a` on the isolated plan.md Preview path types.
+#[test]
+fn plan_md_preview_empty_a_still_approves() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "empty-prompt `a` on plan.md Preview must type, not Approve"
+    );
+    assert_eq!(agent.prompt.text(), "a");
+}
+
+/// Isolated plan.md Preview is non-capturing: a non-accelerator letter types.
+#[test]
+fn plan_md_preview_empty_printable_goes_to_composer() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&h, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "a non-accelerator letter must not decide the plan"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "printable keys go to the composer while plan.md is open, got {:?}",
+        agent.prompt.text()
+    );
+}

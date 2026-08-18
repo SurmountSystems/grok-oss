@@ -19,9 +19,21 @@ const DEFAULT_LOCALE: &str = "en";
 /// and early UI seed the chat `/rest/modes` catalog instead of build models.
 pub const GROK_CHAT_MODE_ENV: &str = "GROK_CHAT_MODE";
 /// True when the process is a gateway light-frontend (`--chat`) agent.
-/// Hard-off in release builds so it can't be enabled via env.
+/// Debug builds honor `$GROK_CHAT_MODE` (`1` / `true` / `yes`) so tests can
+/// exercise the named contract. Release stays hard-off so the flag cannot
+/// be flipped via env.
 pub fn process_chat_mode_enabled() -> bool {
-    false
+    if cfg!(debug_assertions) {
+        match std::env::var(GROK_CHAT_MODE_ENV) {
+            Ok(v) => {
+                let t = v.trim();
+                t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+            }
+            Err(_) => false,
+        }
+    } else {
+        false
+    }
 }
 #[derive(Clone)]
 struct CachedModes {
@@ -33,7 +45,7 @@ struct CachedModes {
 }
 /// Thread-safe, cheaply-cloneable manager. Cloning bumps the inner `Arc`.
 #[derive(Clone)]
-pub struct ChatModesManager {
+pub(crate) struct ChatModesManager {
     inner: Arc<Inner>,
 }
 struct Inner {
@@ -43,7 +55,7 @@ struct Inner {
     fetch_lock: tokio::sync::Mutex<()>,
 }
 impl ChatModesManager {
-    pub fn new(auth: Arc<AuthManager>) -> Self {
+    pub(crate) fn new(auth: Arc<AuthManager>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 auth,
@@ -59,7 +71,7 @@ impl ChatModesManager {
     }
     /// Chat model state for a `session/load` response. On missing auth or fetch
     /// failure, serves last-good cache else empty — never the build catalog.
-    pub async fn model_state(&self) -> acp::SessionModelState {
+    pub(crate) async fn model_state(&self) -> acp::SessionModelState {
         let Some(user_id) = self.current_user_id() else {
             return empty_state();
         };
@@ -151,7 +163,7 @@ impl ChatModesManager {
     }
     /// Kick a background `/rest/modes` fill when auth is already present so
     /// `--chat` initialize / first `session/new` hit a warm cache.
-    pub fn warm_in_background(&self) {
+    pub(crate) fn warm_in_background(&self) {
         let Some(user_id) = self.current_user_id() else {
             return;
         };
@@ -164,7 +176,7 @@ fn empty_state() -> acp::SessionModelState {
 /// Maps grok.com modes → `SessionModelState`: keeps only `available` modes,
 /// reconciles `current_model_id` (default → first available → empty, never
 /// out-of-set), and stashes `badgeText`/`iconHint`/`tags` in `_meta`.
-pub fn modes_to_model_state(resp: &ListModesResponse) -> acp::SessionModelState {
+pub(crate) fn modes_to_model_state(resp: &ListModesResponse) -> acp::SessionModelState {
     let available_models: Vec<acp::ModelInfo> = resp
         .modes
         .iter()

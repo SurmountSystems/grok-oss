@@ -1,6 +1,10 @@
 //! `run_terminal_cmd` (Bash) tool — new architecture (`Tool` trait).
 //!
-//! Executes bash commands in a persistent shell session with optional timeout.
+//! Executes bash commands with optional timeout. Whether shell state (cwd,
+//! env vars, aliases) persists between calls depends on the `Terminal`
+//! backend: the local backend emulates persistence by capturing and
+//! replaying state across commands (see [`crate::computer::local::shell_state`]);
+//! other backends may run each command in a fresh session.
 //! Supports both foreground (blocking) and background (returns task_id) execution.
 //!
 //! Optional `find`→`bfs` / `grep`→`ugrep` shadows: see
@@ -41,6 +45,8 @@ use crate::types::resources::{
 };
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
+
+mod dangerous_cargo;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BashError {
@@ -259,12 +265,12 @@ pub struct BashToolInput {
     #[cfg_attr(not(unix), schemars(description = "The command to run."))]
     pub command: String,
 
-    /// Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes).
-    /// `timeout: 0` in background mode disables the wrapper timeout entirely;
-    /// the task runs until it exits or is killed via the kill task tool.
+    /// Optional timeout in milliseconds (max 300000). Default: 120000
+    /// (2 minutes), enforced for foreground commands only. Background
+    /// semantics live in the tool-description usage notes.
     // keep in sync with the rustdoc above
     #[schemars(
-        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes). `timeout: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool.",
+        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes), enforced for foreground commands only.",
         default = "schema_default_timeout_ms"
     )]
     // Some models serialize numeric tool args
@@ -289,8 +295,11 @@ pub struct BashToolInput {
     /// Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it.
     // "task id" stays plain English: the kill/get-output input params are
     // renameable, so naming a literal key here goes stale after randomization.
+    // The notification sentence renders only when the client delivers system
+    // reminders (`system_reminders_enabled` template flag); otherwise it
+    // points at the get-output tool when one is served.
     #[schemars(
-        description = "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
+        description = "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background${%- if system_reminders_enabled %}; you are notified on completion, so do not poll or sleep-wait for it${%- elif tools.by_kind.background_task_action %}; check on it later with the ${{ tools.by_kind.background_task_action }} tool${%- endif %}."
     )]
     #[serde(
         default,
@@ -396,8 +405,8 @@ impl std::fmt::Display for KillReason {
 fn annotations(bash: &BashOutput) -> String {
     let mut s = String::new();
     if bash.truncated {
-        let shown = format_bytes(bash.output.len());
-        let total = format_bytes(bash.total_bytes);
+        let shown = format_bytes(bash.output.len() as u64);
+        let total = format_bytes(bash.total_bytes as u64);
         s.push_str(&format!(
             " [truncated: showing first/last {} of {} - full output at: {}]",
             shown, total, bash.output_file
@@ -456,10 +465,8 @@ fn is_pure_status_print(trimmed: &str) -> bool {
 /// - Normal: `exit: N [annotations]\n<stripped_output>`
 /// - Killed by harness/signal: `exit: killed (reason) [annotations]\n<stripped_output>`
 /// - Backgrounded: verbose `[Command moved to background]...` format.
-///
-/// `append_noop_reminder` gates the no-op-command end-turn `<system-reminder>`.
-/// Callers pass the session's `SystemRemindersEnabled` value so the nudge
-/// follows the same switch as every other system reminder.
+/// - When `append_noop_reminder` is true and the command is a pure wait/noop,
+///   appends a system reminder to end the turn.
 pub(crate) fn format_default_prompt(bash: &BashOutput, append_noop_reminder: bool) -> String {
     let output_str = if bash.output_for_prompt.is_empty() {
         let raw = String::from_utf8_lossy(&bash.output);
@@ -470,8 +477,8 @@ pub(crate) fn format_default_prompt(bash: &BashOutput, append_noop_reminder: boo
     let is_backgrounded = bash.signal.as_deref() == Some("backgrounded");
 
     if is_backgrounded {
-        let shown = format_bytes(bash.output.len());
-        let total = format_bytes(bash.total_bytes);
+        let shown = format_bytes(bash.output.len() as u64);
+        let total = format_bytes(bash.total_bytes as u64);
         format!(
             "[Command moved to background]\n\n\
              Partial output ({} of {} total):\n\n\
@@ -1251,7 +1258,11 @@ impl BashTool {
     /// without the floor the schema would advertise `max 0` while timeout
     /// resolution enforces a 1ms ceiling — a model-visible mismatch. Flooring
     /// here keeps the advertised max equal to the enforced max (≥1ms).
-    pub(crate) fn effective_max_timeout_ms(params: &BashParams) -> u64 {
+    ///
+    /// `pub` (not `pub(crate)`): the cursor `Shell` adapter
+    /// (xai-grok-cursor) uses this ceiling to report the true FG wait in
+    /// its auto-background template.
+    pub fn effective_max_timeout_ms(params: &BashParams) -> u64 {
         let configured = params
             .max_timeout_secs
             .filter(|s| *s > 0.0)
@@ -1403,14 +1414,17 @@ impl BashTool {
     ) -> Result<String, xai_tool_runtime::ToolError> {
         let res = resources.lock().await;
         let renderer = res.require::<TemplateRenderer>()?;
+        // Presence-aware lookup (not a template render): a missing kind
+        // renders as empty-`Ok`, so a `Result` fallback never fires.
         let get_task_name = renderer
-            .render("${{ tools.by_kind.background_task_action }}")
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            .tool_for_kind(ToolKind::BackgroundTaskAction)
+            .unwrap_or("get_task_output")
+            .to_string();
         let task_ids_param = renderer
             .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
             .unwrap_or("task_ids");
         Ok(format!(
-            "Use {get_task_name} tool with {task_ids_param}=[\"{task_id}\"] to retrieve the output."
+            "Use {get_task_name} with {task_ids_param}=[\"{task_id}\"] when you need the output."
         ))
     }
 
@@ -1433,22 +1447,24 @@ impl BashTool {
                 {
                     let max_ms = Self::effective_max_timeout_ms(params);
                     let default_ms = Self::effective_default_timeout_ms(params);
-                    // `max_timeout_secs` is a foreground-only ceiling; background
-                    // `{name}: 0` is always unbounded, so this note is
-                    // unconditional.
-                    let bg_zero = format!(
-                        "`{timeout_param_name}: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool."
-                    );
+                    // The default and max ceiling are foreground-only.
+                    // Background semantics live in the tool-description usage
+                    // notes (single copy); the "foreground only" scoping here
+                    // keeps the property from contradicting them.
                     // Keep main-style auto-bg wording (no FG-budget ms advertised).
                     // Follow-up: surface effective_auto_bg_wait_ms / FG budget here
                     // once we deliberately change model-facing copy.
-                    let desc = if auto_bg {
+                    let desc = if !background_enabled {
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. If not specified, commands exceeding the default timeout will be automatically backgrounded. {bg_zero}"
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}."
+                        )
+                    } else if auto_bg {
+                        format!(
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}; foreground commands exceeding it are automatically backgrounded."
                         )
                     } else {
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. {bg_zero}"
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}, enforced for foreground commands only."
                         )
                     };
                     timeout_prop.insert("description".to_string(), serde_json::json!(desc));
@@ -1488,8 +1504,7 @@ impl BashTool {
         renderer
             .render_with_extra(raw_desc, &extras)
             .unwrap_or_else(|e| {
-                tracing::warn!("Description template render failed, using raw: {e}");
-                raw_desc.to_string()
+                crate::types::template_renderer::strip_markers_on_render_failure(raw_desc, &e)
             })
     }
 
@@ -1508,10 +1523,10 @@ impl BashTool {
         r#"Run a ${%- if is_windows %} shell command${%- else %} bash command${%- endif %} and return its output.
 
 Usage notes:
-  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %}
-  - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}.
-  - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
-  - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it.${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
+  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
+  - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely${%- if tools.by_kind.kill_task_action %}; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}${%- endif %}.
+  - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
+  - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
@@ -1679,7 +1694,7 @@ impl xai_tool_runtime::Tool for BashTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "run_terminal_cmd",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -1946,13 +1961,16 @@ impl xai_tool_runtime::Tool for BashTool {
             is_legacy,
         ) {
             // `is_background` is the canonical param key (the input-schema
-            // property name); `background` has no entry and resolves to "".
-            let bg_param_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ params.execute.is_background }}",
-            )
-            .await
-            .unwrap_or_else(|_| "is_background".to_string());
+            // property name). Presence-aware lookup (not a template render):
+            // a missing entry renders as empty-`Ok`, so a `Result` fallback
+            // never fires.
+            let bg_param_name = {
+                let res = resources.lock().await;
+                res.get::<TemplateRenderer>()
+                    .and_then(|r| r.param_for_kind(ToolKind::Execute, "is_background"))
+                    .unwrap_or("is_background")
+                    .to_string()
+            };
             let message = match violation {
                 BackgroundOpViolation::Bash => Self::background_operator_validation_message(
                     is_legacy,
@@ -1994,6 +2012,13 @@ impl xai_tool_runtime::Tool for BashTool {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(
                 "Background execution is disabled.".to_string(),
             ));
+        }
+
+        // --- Refuse crate-wide / workspace cargo (do not spawn cargo) ---
+        // Same intercept style as memory.py: decide before TerminalBackend.
+        // Do not rewrite argv into a guessed file list.
+        if let Some(message) = dangerous_cargo::try_parse_dangerous_cargo_refuse(&input.command) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
         }
 
         // --- Skill-script intercepts (embedded Rust; never spawn python) ---
@@ -2325,10 +2350,6 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_delta: None,
                 was_bare_echo: false,
             };
-            // Gate the no-op end-turn reminder on the same switch as every other
-            // system reminder (absent resource => enabled, mirroring
-            // `finalize_output`), so toolsets with `system_reminders_enabled=false`
-            // don't receive it.
             let append_noop_reminder = resources
                 .lock()
                 .await
@@ -3488,6 +3509,39 @@ mod tests {
         }
     }
 
+    /// The get-output tool is absent from the finalized toolset (no
+    /// `BackgroundTaskAction` mapping): the retrieval hint must fall back to
+    /// the canonical `get_task_output` name instead of rendering an empty
+    /// tool name. A missing kind renders as empty-`Ok` (lenient undefined),
+    /// so the old `Result`-based fallback never fired.
+    #[tokio::test]
+    async fn background_hint_falls_back_when_get_output_tool_absent() {
+        let mut resources = make_resources(MockTerminal::background_ok("t2"));
+        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
+
+        let tool = BashTool;
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_bg_input("sleep 60"),
+        )
+        .await
+        .unwrap();
+
+        match result {
+            BashToolOutput::Background(bg) => {
+                assert!(
+                    bg.retrieval_hint.contains(
+                        "Use get_task_output with task_ids=[\"t2\"] when you need the output."
+                    ),
+                    "Hint should fall back to canonical names: {}",
+                    bg.retrieval_hint
+                );
+            }
+            BashToolOutput::Foreground(_) => panic!("Expected background output"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // format_default_prompt tests
     // -----------------------------------------------------------------------
@@ -3508,7 +3562,8 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         bash
     }
 
@@ -3561,7 +3616,8 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3607,7 +3663,7 @@ mod tests {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
             bash.output_for_prompt =
-                format_default_prompt(&bash, /* append_noop_reminder */ true);
+                format_default_prompt(&bash, /* append_noop_reminder */ false);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3627,7 +3683,7 @@ mod tests {
 
         let mut oom = make_bash_output(137, "killed\n");
         oom.signal = Some("oom".to_string());
-        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ true);
+        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ false);
         assert!(oom.output_for_prompt.starts_with("exit: 137 [signal=oom]"));
     }
 
@@ -3637,7 +3693,8 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")
@@ -3646,91 +3703,6 @@ mod tests {
             bash.output_for_prompt
                 .contains("still running in the background")
         );
-    }
-
-    fn bash_output_with_command(command: &str, output: &str) -> BashOutput {
-        BashOutput {
-            output: output.as_bytes().to_vec(),
-            output_for_prompt: BashOutput::make_output_for_prompt(output),
-            exit_code: 0,
-            command: command.to_string(),
-            truncated: false,
-            signal: None,
-            timed_out: false,
-            description: None,
-            current_dir: "/tmp".to_string(),
-            output_file: String::new(),
-            total_bytes: output.len(),
-            output_delta: None,
-            was_bare_echo: false,
-        }
-    }
-
-    #[test]
-    fn default_prompt_noop_command_appends_end_turn_reminder() {
-        for cmd in [
-            "true",
-            ":",
-            "",
-            "   ",
-            "\t\n",
-            "echo ok",
-            "echo \"Healthy.\"",
-            "echo \"s14=198; s11 full. Healthy.\"",
-            "printf hi",
-            "printf 'done\\n'",
-        ] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, ""),
-                /* append_noop_reminder */ true,
-            );
-            assert!(
-                prompt.contains(NOOP_END_TURN_REMINDER),
-                "no-op command {cmd:?} should append the end-turn reminder, got: {prompt:?}"
-            );
-        }
-    }
-
-    /// With `append_noop_reminder = false` (session `system_reminders_enabled=false`),
-    /// the no-op end-turn reminder is suppressed even for no-op commands. Mirrors
-    /// gating the reminder on the shared `SystemRemindersEnabled` switch.
-    #[test]
-    fn default_prompt_noop_reminder_suppressed_when_disabled() {
-        for cmd in ["true", ":", "", "echo ok", "printf hi"] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, ""),
-                /* append_noop_reminder */ false,
-            );
-            assert!(
-                !prompt.contains("<system-reminder>"),
-                "no-op command {cmd:?} must not append the reminder when disabled, got: {prompt:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn default_prompt_normal_command_has_no_end_turn_reminder() {
-        for cmd in [
-            "true && echo hi",
-            "run-true",
-            "grep : file",
-            "cat file",
-            "echo $VAR",
-            "echo x > f",
-            "echo a | cat",
-            "echo $(date)",
-            "echo hi; ls",
-            "printf '%s' \"$x\"",
-        ] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, "hi\n"),
-                /* append_noop_reminder */ true,
-            );
-            assert!(
-                !prompt.contains("<system-reminder>"),
-                "normal command {cmd:?} must not append the end-turn reminder, got: {prompt:?}"
-            );
-        }
     }
 
     // ─── contains_background_operator unit tests ───
@@ -4426,13 +4398,11 @@ mod tests {
                 .as_str()
                 .expect("max_wait description");
             assert!(
-                desc.contains("Optional max_wait in milliseconds")
-                    && desc.contains("`max_wait: 0`"),
+                desc.contains("Optional max_wait in milliseconds"),
                 "renamed timeout must appear in property description:\n{desc}"
             );
             assert!(
-                !desc.contains("`timeout: 0`")
-                    && !desc.contains("Optional timeout in milliseconds"),
+                !desc.contains("Optional timeout in milliseconds"),
                 "canonical timeout must not remain in property description:\n{desc}"
             );
         }
@@ -4476,7 +4446,7 @@ mod tests {
                 .as_str()
                 .expect("timeout description");
             assert!(
-                desc.contains("Optional timeout in milliseconds") && desc.contains("`timeout: 0`"),
+                desc.contains("Optional timeout in milliseconds"),
                 "property description must match schema key, not kind-wide alias:\n{desc}"
             );
             assert!(
@@ -5207,11 +5177,17 @@ mod tests {
     }
 
     fn make_tracking_resources() -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        // If shell is wrongly used for memory.py, surface a distinctive error.
+        make_tracking_resources_with(MockTerminal::failing())
+    }
+
+    fn make_tracking_resources_with(
+        inner: MockTerminal,
+    ) -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mock = TrackingTerminal {
             called: called.clone(),
-            // If shell is wrongly used for memory.py, surface a distinctive error.
-            inner: MockTerminal::failing(),
+            inner,
         };
         let mut resources = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
@@ -5385,6 +5361,148 @@ mod tests {
                 let v: serde_json::Value = serde_json::from_str(text.trim()).expect("list JSON");
                 assert_eq!(v["tool"], "claude");
                 assert!(v["sessions"].is_array());
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    // ─── Dangerous crate-wide cargo refuse ───
+    //
+    // Agents must not spawn crate-wide / workspace cargo from bash. The
+    // structured edit hook formats the files it wrote; bash must refuse
+    // the old mop argv and must not start cargo. Honest
+    // `cargo test -p <crate> --lib <filter>` stays allowed.
+
+    async fn run_bash_tracking_success(
+        cmd: &str,
+    ) -> (
+        Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (resources, called) =
+            make_tracking_resources_with(MockTerminal::success("should-not-run-cargo\n", 0));
+        let tool = BashTool;
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await;
+        (result, called)
+    }
+
+    fn refuse_message_from_result(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        cmd: &str,
+    ) -> String {
+        match result {
+            Err(err) => err.to_string(),
+            Ok(BashToolOutput::Foreground(bash)) => {
+                assert_ne!(
+                    bash.exit_code, 0,
+                    "dangerous cargo `{cmd}` must be refused, not exit 0; output={}",
+                    bash.output_for_prompt
+                );
+                let out = String::from_utf8_lossy(&bash.output);
+                format!("{}\n{out}", bash.output_for_prompt)
+            }
+            Ok(BashToolOutput::Background(_)) => {
+                panic!("dangerous cargo `{cmd}` must not start a background task")
+            }
+        }
+    }
+
+    fn assert_dangerous_cargo_refused(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        called: &std::sync::atomic::AtomicBool,
+        cmd: &str,
+    ) {
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "dangerous cargo must not reach TerminalBackend (cargo must not spawn): {cmd}"
+        );
+        let message = refuse_message_from_result(result, cmd);
+        assert!(
+            !message.contains("should-not-run-cargo"),
+            "refuse for `{cmd}` leaked the mock shell output: {message}"
+        );
+        let lower = message.to_lowercase();
+        assert!(
+            lower.contains("cargo"),
+            "refuse for `{cmd}` should mention cargo: {message}"
+        );
+        assert!(
+            lower.contains("refuse")
+                || lower.contains("not spawn")
+                || lower.contains("do not run")
+                || lower.contains("crate-wide")
+                || lower.contains("workspace-wide"),
+            "refuse for `{cmd}` should say why (refuse / do not run crate-wide cargo): {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt --all";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_package_without_file_list_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt -p xai-grok-pager";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --all-targets";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy -p xai-grok-pager --all-targets -- -D warnings";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo test --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_nextest_run_without_package_or_filter_is_refused_and_does_not_spawn_shell()
+     {
+        let cmd = "cargo nextest run";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_package_lib_filter_is_not_refused() {
+        let cmd = "cargo test -p xai-grok-tools --lib implement_memory_snapshot_intercept";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "honest cargo test -p <crate> --lib <filter> must still reach TerminalBackend: {cmd}"
+        );
+        match result.expect("honest cargo test must not be refused as invalid arguments") {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                assert_eq!(
+                    String::from_utf8_lossy(&bash.output),
+                    "should-not-run-cargo\n"
+                );
             }
             BashToolOutput::Background(_) => panic!("expected foreground"),
         }

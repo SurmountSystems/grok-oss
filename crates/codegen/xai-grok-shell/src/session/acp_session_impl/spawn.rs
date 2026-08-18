@@ -1,5 +1,10 @@
 //! Session bring-up concern for `acp_session`: `spawn_session_actor`, the
 //! per-session OS thread (`SessionThread` / `spawn_session_on_thread`), and
+//!
+//! Chat+local `own` supervisor (`gateway_bridge::local_workspace_supervisor`) is
+//! started in `session/new` *before* handshake stamp and stored on `MvpAgent`
+//! (not `SessionActor`). Crash-restart issues
+//! `BridgeCommand::UpdateComputerSessions` through the bridge slot seeded here.
 //! the MCP auto-restart wiring (`SessionRestartActions`).
 #![allow(clippy::items_after_test_module)]
 use super::*;
@@ -30,6 +35,37 @@ fn drop_cli_catchall_allows(
     }
     (kept, dropped)
 }
+/// Build the per-session current-thread tokio runtime.
+///
+/// Construction acquires fds (epoll/kqueue, waker) and fails with
+/// `EMFILE`/`EAGAIN` under resource pressure. Cap only — pre-warm is
+/// process-lifetime (`xai_tty_utils::runtime`).
+/// First sampling window for chat-state AUTO compact.
+///
+/// Economic mode caps the catalog window at the 200k price cliff before any
+/// response-header upgrade. `GROK_DEBUG_CONTEXT_WINDOW` still wins.
+pub(crate) fn seed_sampling_context_window(
+    catalog: std::num::NonZeroU64,
+    debug_override: Option<std::num::NonZeroU64>,
+    economic_mode: bool,
+) -> std::num::NonZeroU64 {
+    if let Some(ovr) = debug_override {
+        return ovr;
+    }
+    std::num::NonZeroU64::new(crate::util::config::apply_economic_context_cap(
+        catalog.get(),
+        economic_mode,
+    ))
+    .unwrap_or(catalog)
+}
+
+pub(crate) fn build_session_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    xai_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
+}
+#[cfg(all(test, unix))]
+#[path = "spawn_runtime_containment_tests.rs"]
+mod runtime_containment_tests;
 #[cfg(test)]
 mod cli_catchall_drop_tests {
     use super::drop_cli_catchall_allows;
@@ -119,7 +155,6 @@ pub(crate) async fn spawn_session_actor(
     mut startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
-    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -152,7 +187,6 @@ pub(crate) async fn spawn_session_actor(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -169,6 +203,8 @@ pub(crate) async fn spawn_session_actor(
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
+    subagents_max_depth: u32,
+    workflow_max_concurrent_agents: usize,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -202,6 +238,7 @@ pub(crate) async fn spawn_session_actor(
     >,
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
+    is_chat_kind: bool,
 ) -> Result<
     (
         SessionHandle,
@@ -326,10 +363,7 @@ pub(crate) async fn spawn_session_actor(
             session_yolo_mode,
         ) {
             permissions.set_auto_mode(true);
-            let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
-            if !turns.is_empty() {
-                permissions.set_classifier_transcript(turns);
-            }
+            refresh_classifier_transcript(&permissions, &conversation);
         }
         (permissions, permission_events_rx, deny_read_globs)
     };
@@ -338,6 +372,9 @@ pub(crate) async fn spawn_session_actor(
         .filter(|item| matches!(item, ConversationItem::User(_)))
         .count();
     let initial_conversation_len = conversation.len();
+    let initial_last_recap_main_turn = crate::session::helpers::session_recap::load_recap_watermark(
+        &crate::session::persistence::session_dir(&session_info),
+    );
     let initial_user_count = initial_prompt_index.saturating_sub(1) as u32;
     let initial_assistant_count = conversation
         .iter()
@@ -405,31 +442,14 @@ pub(crate) async fn spawn_session_actor(
             std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                 .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
         });
-    let economic_mode = crate::util::config::economic_mode_from_disk();
-    // Seed assistant ASCII-scrub config preference from `[ui] scrub_ascii_punct`
-    // (default ON). Env `GROK_SCRUB_ASCII_PUNCT=0` still force-disables.
-    crate::session::helpers::assistant_ascii_scrub::seed_from_effective_config();
-    let effective_context_window = context_window_override.unwrap_or_else(|| {
-        let capped = crate::util::config::apply_economic_context_cap(
-            baseline_context_window.get(),
-            economic_mode,
-        );
-        std::num::NonZeroU64::new(capped).unwrap_or(baseline_context_window)
-    });
     if let Some(cw) = context_window_override {
         tracing::warn!(
             override_context_window = cw.get(),
             original_context_window = baseline_context_window.get(),
             "GROK_DEBUG_CONTEXT_WINDOW override active"
         );
-    } else if economic_mode && effective_context_window.get() < baseline_context_window.get() {
-        tracing::info!(
-            catalog_context_window = baseline_context_window.get(),
-            effective_context_window = effective_context_window.get(),
-            cap = crate::util::config::ECONOMIC_CONTEXT_CAP,
-            "economic mode: effective context window capped for pricing"
-        );
     }
+    let economic_mode = crate::util::config::economic_mode_from_disk();
     let chat_state_sampling_config = xai_grok_sampling_types::SamplingConfig {
         base_url: sampling_config.base_url.clone(),
         model: sampling_config.model.clone(),
@@ -440,7 +460,11 @@ pub(crate) async fn spawn_session_actor(
         extra_headers: sampling_config.extra_headers.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
-        context_window: effective_context_window,
+        context_window: seed_sampling_context_window(
+            baseline_context_window,
+            context_window_override,
+            economic_mode,
+        ),
         reasoning_effort: sampling_config.reasoning_effort,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
@@ -480,17 +504,14 @@ pub(crate) async fn spawn_session_actor(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
+        front_message_committed: false,
         nudges_used_this_session: 0,
     });
-    let mcp_strategy = match std::env::var("MCP_INIT_STRATEGY") {
-        Ok(v) if !v.trim().is_empty() => McpInitStrategy::from(v),
-        _ if startup_hints.non_interactive => McpInitStrategy::Blocking,
-        _ => McpInitStrategy::Progressive,
-    };
+    let mcp_strategy = startup_hints.resolve_mcp_strategy();
     let file_state_tracker = Arc::new(match rewind_points_path {
         Some(path) => FileStateTracker::with_lazy_source(path),
         None => FileStateTracker::new(),
@@ -538,8 +559,9 @@ pub(crate) async fn spawn_session_actor(
         };
         Arc::new(parking_lot::Mutex::new(tracker))
     };
-    let current_prompt_mode = Arc::new(parking_lot::Mutex::new(PromptMode::Agent));
-    let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(PromptMode::Agent));
+    let restored_prompt_mode = plan_mode.lock().session_prompt_mode();
+    let current_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
+    let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
     let queue_exit_reminder_on_approved_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -611,6 +633,7 @@ pub(crate) async fn spawn_session_actor(
                 std::sync::Arc::new(LocalTerminalBackend::new_local_with_persistent_shell(
                     resolve_search_shadows(),
                     resolve_policy(),
+                    tool_context.process_scope.clone(),
                 ))
             }
             TerminalBackendKind::LocalNonPersistent => {
@@ -621,6 +644,7 @@ pub(crate) async fn spawn_session_actor(
                     resolve_search_shadows(),
                     login_shell_capture,
                     resolve_policy(),
+                    tool_context.process_scope.clone(),
                 ))
             }
         };
@@ -643,47 +667,8 @@ pub(crate) async fn spawn_session_actor(
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
-    let initial_agent_type = Some(agent_definition.name.clone());
-    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
-        let plugin_names = plugin_registry
-            .as_ref()
-            .map(|reg| {
-                reg.active_plugins()
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(super::telemetry::SessionHarnessMetrics {
-            session_id: session_info.id.0.to_string(),
-            client_identifier: session_client_identifier.clone(),
-            model_id: session_model_id.0.to_string(),
-            agent_name: agent_definition.name.clone(),
-            permission_mode: if session_yolo_mode {
-                xai_grok_telemetry::enums::PermissionMode::AlwaysApprove
-            } else if session_auto_mode
-                && crate::util::config::auto_permission_mode_enabled_from_disk()
-            {
-                xai_grok_telemetry::enums::PermissionMode::Auto
-            } else {
-                xai_grok_telemetry::enums::PermissionMode::Ask
-            },
-            mcp_server_names: mcp_servers
-                .iter()
-                .map(|s| mcp_server_name(s).to_owned())
-                .collect(),
-            lsp_server_names: tool_context.lsp_server_names.clone(),
-            memory_enabled: memory_config.is_some(),
-            auto_update,
-            cwd: tool_context.cwd.as_str().to_owned(),
-            skills_config: skills_config.clone(),
-            compat,
-            plugin_registry: plugin_registry.clone(),
-            plugin_names,
-        })
-    } else {
-        None
-    };
+    let initial_agent_name = agent_definition.name.clone();
+    let initial_agent_type = Some(initial_agent_name.clone());
     let compaction_policy = xai_grok_agent::CompactionPolicy {
         auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
         compact_model: None,
@@ -839,6 +824,11 @@ pub(crate) async fn spawn_session_actor(
     let context_window_tokens = context_window_override
         .map(|c| c.get())
         .unwrap_or(sampling_config.context_window);
+    let scheduler_background_loops = crate::util::config::resolve_scheduler_background_loops(
+        remote_settings
+            .as_ref()
+            .and_then(|r| r.scheduler_background_loops),
+    );
     let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
         xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(
             ShellManagedGatewayToolClient {
@@ -917,15 +907,12 @@ pub(crate) async fn spawn_session_actor(
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
+        subagents_max_depth,
         session_id_str: session_info.id.0.to_string(),
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
         path_not_found_hints,
-        scheduler_background_loops: crate::util::config::resolve_scheduler_background_loops(
-            remote_settings
-                .as_ref()
-                .and_then(|r| r.scheduler_background_loops),
-        ),
+        scheduler_background_loops,
         mcp_state: mcp_state.clone(),
         managed_gateway_tool_client: managed_gateway_tool_client.clone(),
         is_non_interactive: startup_hints.non_interactive,
@@ -963,6 +950,46 @@ pub(crate) async fn spawn_session_actor(
         .tool_bridge()
         .update_resource(task_wake_suppressed)
         .await;
+    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
+        let plugin_names = plugin_registry
+            .as_ref()
+            .map(|reg| {
+                reg.active_plugins()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(super::telemetry::SessionHarnessMetrics {
+            session_id: session_info.id.0.to_string(),
+            client_identifier: session_client_identifier.clone(),
+            model_id: session_model_id.0.to_string(),
+            agent_name: initial_agent_name,
+            permission_mode: if session_yolo_mode {
+                xai_grok_telemetry::enums::PermissionMode::AlwaysApprove
+            } else if session_auto_mode
+                && crate::util::config::auto_permission_mode_enabled_from_disk()
+            {
+                xai_grok_telemetry::enums::PermissionMode::Auto
+            } else {
+                xai_grok_telemetry::enums::PermissionMode::Ask
+            },
+            mcp_server_names: mcp_servers
+                .iter()
+                .map(|s| mcp_server_name(s).to_owned())
+                .collect(),
+            lsp_server_names: tool_context.lsp_server_names.clone(),
+            memory_enabled: memory_config.is_some(),
+            auto_update,
+            cwd: tool_context.cwd.as_str().to_owned(),
+            skill_names: agent.tool_bridge().skill_discovery_snapshot_names().await,
+            compat,
+            plugin_registry: plugin_registry.clone(),
+            plugin_names,
+        })
+    } else {
+        None
+    };
     let resolved_task_output =
         xai_grok_tools::reminders::task_completion::resolve_task_output_tool_name(
             agent.tool_bridge(),
@@ -996,6 +1023,7 @@ pub(crate) async fn spawn_session_actor(
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
+    let session_non_interactive = startup_hints.non_interactive;
     install_system_prompt(
         &mut conversation,
         &mut startup_hints.inherited_prefix_len,
@@ -1226,6 +1254,7 @@ pub(crate) async fn spawn_session_actor(
             }),
             cmd_tx.clone(),
             std::collections::HashMap::new(),
+            workflow_max_concurrent_agents,
         ),
     ));
     let (workflow_launch_tx, mut workflow_launch_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -1454,17 +1483,19 @@ pub(crate) async fn spawn_session_actor(
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback,
         auth_manager,
+        is_chat_kind,
         state,
         notifications: NotificationSender {
             gateway: gateway.clone(),
             gateway_enabled: gateway_enabled.clone(),
             persistence_tx: persistence.tx.clone(),
+            disk_full: persistence.subscribe_disk_full(),
         },
         permissions,
         tool_context,
         deny_read_globs,
         mcp_state: mcp_state.clone(),
-        mcp_strategy,
+        mcp_strategy: std::cell::Cell::new(mcp_strategy),
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
@@ -1480,23 +1511,27 @@ pub(crate) async fn spawn_session_actor(
         doom_loop_turn_tally: Default::default(),
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
+        delivery_tools: std::cell::RefCell::new(startup_hints.delivery_tools.clone()),
+        attach_non_interactive: std::cell::Cell::new(startup_hints.non_interactive),
         startup_hints,
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
-            threshold_tokens: std::cell::Cell::new(auto_compact_threshold_tokens),
+            threshold_tokens: std::cell::Cell::new(None),
             force_compact: force_compact.clone(),
             context_window_override,
             economic_mode: std::cell::Cell::new(economic_mode),
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
             previous_model: std::cell::Cell::new(None),
             compaction_mode,
             verbatim_input: compaction_verbatim_input,
             tool_choice: compaction_tool_choice,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(
@@ -1571,7 +1606,7 @@ pub(crate) async fn spawn_session_actor(
         queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: current_prompt_mode.clone(),
-        turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
+        turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
         turn_prompt_mode: turn_prompt_mode.clone(),
         plan_mode: plan_mode.clone(),
         goal_enabled,
@@ -1609,7 +1644,6 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        managed_mcp_expires_at: std::sync::Mutex::new(managed_mcp_expires_at),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
@@ -1627,6 +1661,7 @@ pub(crate) async fn spawn_session_actor(
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
+        last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
         extension_registry: session_extension_registry(weak.clone()),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -1653,12 +1688,17 @@ pub(crate) async fn spawn_session_actor(
         ),
         observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
-        last_recap_main_turn: std::cell::Cell::new(0),
+        last_recap_main_turn: std::cell::Cell::new(initial_last_recap_main_turn),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
+        turn_summary_task: std::cell::RefCell::new(None),
+        turn_summary_generation: std::cell::Cell::new(0),
+        // Product default: generate turn summaries unless config later adds a kill switch.
+        turn_summary_enabled: true,
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle,
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,
@@ -1667,6 +1707,9 @@ pub(crate) async fn spawn_session_actor(
         workspace_ops: workspace_ops.clone(),
         trace_config_template: std::cell::RefCell::new(None),
     });
+    if owns_permission_manager {
+        session.wire_permission_prompt_notification();
+    }
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);
@@ -2002,11 +2045,13 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
+            scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
+            non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
@@ -2083,7 +2128,6 @@ pub(crate) async fn spawn_session_on_thread(
     startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
-    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -2116,7 +2160,6 @@ pub(crate) async fn spawn_session_on_thread(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -2133,6 +2176,8 @@ pub(crate) async fn spawn_session_on_thread(
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
+    subagents_max_depth: u32,
+    workflow_max_concurrent_agents: usize,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -2167,6 +2212,7 @@ pub(crate) async fn spawn_session_on_thread(
     >,
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
+    is_chat_kind: bool,
 ) -> Result<
     (
         SessionHandle,
@@ -2207,10 +2253,17 @@ pub(crate) async fn spawn_session_on_thread(
                 };
                 (initial_last_compaction, initial_prompt_texts)
             };
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("session runtime");
+            let rt = match build_session_runtime() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to build session runtime (resource exhaustion?)"
+                    );
+                    let _ = init_tx.send(Err(xai_grok_agent::AgentBuildError::RuntimeBuild(e)));
+                    return;
+                }
+            };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _trace_span = parent_traceparent.as_ref().map(|tp| {
@@ -2249,7 +2302,6 @@ pub(crate) async fn spawn_session_on_thread(
                         startup_hints,
                         client_type,
                         auto_compact_threshold_percent,
-                        auto_compact_threshold_tokens,
                         system_prompt_label,
                         compaction_mode,
                         compaction_verbatim_input,
@@ -2282,7 +2334,6 @@ pub(crate) async fn spawn_session_on_thread(
                         loc_tracking_enabled,
                         feedback_flags,
                         managed_mcp_handle,
-                        managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,
@@ -2299,6 +2350,8 @@ pub(crate) async fn spawn_session_on_thread(
                         goal_enabled,
                         background_workflows_enabled,
                         subagents_enabled,
+                        subagents_max_depth,
+                        workflow_max_concurrent_agents,
                         ask_user_question_enabled,
                         client_hooks,
                         prompt_display_cwd,
@@ -2328,6 +2381,7 @@ pub(crate) async fn spawn_session_on_thread(
                         parent_scheduler_handle,
                         max_turns,
                         forked_tool_override,
+                        is_chat_kind,
                     )
                     .await
                     {
@@ -2344,15 +2398,28 @@ pub(crate) async fn spawn_session_on_thread(
                 }));
                 let _ = session_done_rx.await;
             });
-        })
-        .expect("spawn session thread");
+        });
+    let join_handle = match join_handle {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "failed to spawn session thread (thread/PID limit or memory pressure?)"
+            );
+            return Err(
+                acp::Error::internal_error().data(format!("failed to spawn session thread: {e}"))
+            );
+        }
+    };
     let init = init_rx
         .await
         .map_err(|_| {
             tracing::error!("Session thread panicked during initialization");
             acp::Error::internal_error().data("session thread panicked during initialization")
         })?
-        .map_err(|e| acp::Error::internal_error().data(format!("agent building failed: {e}")))?;
+        .map_err(|e| {
+            acp::Error::internal_error().data(format!("session initialization failed: {e}"))
+        })?;
     Ok((
         init.handle,
         init.permission_events_rx,
@@ -2508,6 +2575,30 @@ mod resumed_prefix_fallback_tests {
         ));
         assert!(resumed_prefix_carries_fallback_date(false, &leading_noise));
         assert!(!resumed_prefix_carries_fallback_date(true, &with_date));
+    }
+}
+
+#[cfg(test)]
+mod seed_sampling_window_tests {
+    use super::seed_sampling_context_window;
+    use crate::util::config::ECONOMIC_CONTEXT_CAP;
+
+    #[test]
+    fn spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on() {
+        let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
+        let seeded = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            seeded.get(),
+            ECONOMIC_CONTEXT_CAP,
+            "first pre-header sampling window must be the economic cap"
+        );
+        assert_eq!(seeded.get(), 200_000);
+        let uncapped = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            uncapped.get(),
+            500_000,
+            "economic off keeps the catalog window"
+        );
     }
 }
 #[cfg(test)]

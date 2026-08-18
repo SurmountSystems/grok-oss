@@ -22,7 +22,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::resources::resolve_model_path;
 use crate::util::format_not_found_error;
 
-const DESCRIPTION: &str = r#"Edit a file using anchors from ${{ tools.by_kind.read }} or ${{ tools.by_kind.search }}.
+const DESCRIPTION: &str = r#"Edit a file using anchors${%- if tools.by_kind.read and tools.by_kind.search %} from ${{ tools.by_kind.read }} or ${{ tools.by_kind.search }}${%- elif tools.by_kind.read %} from ${{ tools.by_kind.read }}${%- elif tools.by_kind.search %} from ${{ tools.by_kind.search }}${%- endif %}.
 
 Operations (use the "op" field):
 
@@ -65,7 +65,7 @@ Follow-up edits:
   (e.g. "{example_anchor}"). Always include the line number. Do NOT include → or
   the line content after it.
 - Never fabricate or modify anchors — only use exact anchors as returned by
-  previous read, grep, or edit calls."#;
+  previous tool outputs."#;
 
 /// `hashline_edit` tool — edits files using anchor references.
 #[derive(Debug, Default)]
@@ -264,7 +264,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "hashline_edit",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -317,6 +317,14 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &joined_path,
+                &ctx,
+                &resources,
+                "hashline_edit",
+            )
+            .await?;
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,
@@ -357,6 +365,24 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                                     format!("Failed to write file: {e}"),
                                 ),
                             });
+                        }
+                        if let Some(ref mut new_content) = r.new_content {
+                            let formatted =
+                                crate::util::rust_edit_verify::after_structured_rust_write(
+                                    &joined_path,
+                                    new_content,
+                                );
+                            if formatted != *new_content
+                                && let Err(e) =
+                                    fs.write_file(&joined_path, formatted.as_bytes()).await
+                            {
+                                tracing::debug!(
+                                    path = %joined_path.display(),
+                                    error = %e,
+                                    "ACP filesystem sync of rustfmt output failed; disk already formatted"
+                                );
+                            }
+                            *new_content = formatted;
                         }
                         // Only canonicalize after a successful write (file exists).
                         let abs = if r.new_content.is_some() {
@@ -440,6 +466,20 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 None,
                 vec![],
             ));
+        }
+        if let Some(ref mut new_content) = apply_result.new_content {
+            let formatted =
+                crate::util::rust_edit_verify::after_structured_rust_write(&path, new_content);
+            if formatted != *new_content
+                && let Err(e) = fs.write_file(&path, formatted.as_bytes()).await
+            {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "ACP filesystem sync of rustfmt output failed; disk already formatted"
+                );
+            }
+            *new_content = formatted;
         }
 
         let edit_details = apply_result.edit_details;

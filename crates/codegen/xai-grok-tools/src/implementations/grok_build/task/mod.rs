@@ -9,10 +9,12 @@
 //!
 //! - `SubagentBackendResource` — backend for spawn/query/cancel (required)
 //! - `SubagentDepthCounter` — current nesting depth (optional, defaults to 0)
+//! - `MaxSubagentDepth` — max nesting (optional, defaults to [`MAX_SUBAGENT_DEPTH`])
 //! - `SessionIdResource` — current session ID for parent scoping (optional)
 //! - `SubagentForegroundWait` — host wait-window guard factory (optional)
 //! - `TaskModelValidator` — validates explicit model slugs before spawn
 
+pub mod admission;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
@@ -26,13 +28,148 @@ use self::types::*;
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
-use crate::types::resources::SharedResources;
+use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
+use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
-/// Maximum nesting depth for subagents. A top-level session is depth 0;
-/// the first subagent is depth 1. Subagents cannot spawn further subagents.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+pub const TASK_TOOL_NAME: &str = "task";
+
+/// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
+/// `2` is L1 → L2 → L3 (a first-level subagent may spawn specialists).
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
+
+pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
+    resources
+        .get::<MaxSubagentDepth>()
+        .map(|d| d.0)
+        .unwrap_or(MAX_SUBAGENT_DEPTH)
+}
+
+fn user_text_from_json(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| {
+                b.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+                    .or_else(|| b.as_str().map(str::to_string))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn normalize_user_ask(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(start) = t.find("<user_query>") {
+        let after = &t[start + "<user_query>".len()..];
+        let body = after.split("</user_query>").next().unwrap_or(after).trim();
+        if body.is_empty() {
+            return None;
+        }
+        return Some(body.to_string());
+    }
+    if t.starts_with("<system")
+        || t.starts_with("<user_info>")
+        || t.starts_with("<git_status>")
+        || t.starts_with("<open_and_recently")
+    {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// Recent parent user asks from `chat_history.jsonl` (oldest → newest).
+async fn recent_user_asks(resources: &SharedResources) -> Vec<String> {
+    let folder = {
+        let guard = resources.lock().await;
+        guard.get::<SessionFolder>().map(|s| s.0.clone())
+    };
+    let Some(folder) = folder else {
+        return Vec::new();
+    };
+    let path = folder.join("chat_history.jsonl");
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let mut asks = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = v
+            .get("type")
+            .or_else(|| v.get("role"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if kind != "user" {
+            continue;
+        }
+        // Auto-continue / stop-hook / recovery injections are typed `user`
+        // but are not parent asks. Counting them burns lookback and can
+        // drop leftover exec outside the window (common after compaction).
+        if v.get("synthetic_reason").is_some_and(|x| !x.is_null()) {
+            continue;
+        }
+        let Some(content) = v.get("content") else {
+            continue;
+        };
+        if let Some(ask) = normalize_user_ask(&user_text_from_json(content)) {
+            asks.push(ask);
+        }
+    }
+    const KEEP: usize = 12;
+    if asks.len() > KEEP {
+        asks[asks.len() - KEEP..].to_vec()
+    } else {
+        asks
+    }
+}
+
+async fn detect_continue_parent_work(
+    resources: &SharedResources,
+    description: &str,
+    prompt: &str,
+) -> bool {
+    let asks = recent_user_asks(resources).await;
+    xai_tool_types::should_continue_parent_work(&asks, description, prompt)
+}
+
+/// Resolve the model-facing get-output tool and param names for the
+/// background notices. Kind-wide resolution is correct here: these name the
+/// retrieval tool's schema (which the host may rename), not task's own.
+async fn resolve_background_notice_names(resources: &SharedResources) -> (String, String, String) {
+    let canonical = xai_tool_types::BackgroundNoticeNaming::CANONICAL;
+    let res = resources.lock().await;
+    let Some(renderer) = res.get::<crate::types::template_renderer::TemplateRenderer>() else {
+        return (
+            canonical.task_output_tool.to_string(),
+            canonical.task_ids_param.to_string(),
+            canonical.timeout_ms_param.to_string(),
+        );
+    };
+    (
+        renderer
+            .tool_for_kind(ToolKind::BackgroundTaskAction)
+            .unwrap_or(canonical.task_output_tool)
+            .to_string(),
+        renderer
+            .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
+            .unwrap_or(canonical.task_ids_param)
+            .to_string(),
+        renderer
+            .param_for_kind(ToolKind::BackgroundTaskAction, "timeout_ms")
+            .unwrap_or(canonical.timeout_ms_param)
+            .to_string(),
+    )
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Tool implementation
@@ -40,6 +177,16 @@ pub const MAX_SUBAGENT_DEPTH: u32 = 1;
 
 #[derive(Debug, Default)]
 pub struct TaskTool;
+
+/// True when `name` is a wire name of the subagent-spawn ("task") tool.
+///
+/// Accepts every spelling regardless of enabled features: names arrive over
+/// the wire from arbitrary toolsets. Spellings other than [`TASK_TOOL_NAME`]
+/// are defined downstream and pinned to this predicate by tests at their
+/// definition sites.
+pub fn is_task_tool_id(name: &str) -> bool {
+    matches!(name, TASK_TOOL_NAME | "Task" | "spawn_subagent")
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Tests
@@ -55,14 +202,59 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     }
 
     fn description_template(&self) -> &str {
-        // The Task tool description for Grok Build is *never* taken from here.
-        // It is always supplied via `ToolConfig::with_description(...)` using
-        // the dynamically built string from `build_task_description()` in
-        // xai-grok-agent/src/builder.rs (HEADER + per-subagent blocks + FOOTER).
-        //
-        // This path is only hit by low-level ToolsetBuilder registration or
-        // direct calls to ToolMetadata::description_template in tests.
-        "<see build_task_description() in xai-grok-agent>"
+        // Grok Build normally supplies the description via
+        // `ToolConfig::with_description(...)` using `build_task_description()`
+        // in xai-grok-agent/src/builder.rs (live subagent roster). But a
+        // registration without an override must still ship a real
+        // description, never a placeholder: default to the built-in roster
+        // with templated tool/param names, resolved by the registry renderer
+        // at finalize time.
+        /// Wrap each `${{ tools.by_kind.X }}` token in an if/else so kinds
+        /// absent from the registry render as the bare kind name instead of
+        /// an empty slot ("read, , and plan"), mirroring the bare-kind
+        /// fallback of `BuiltinSubagent::render_tools`.
+        ///
+        /// These guards sit inline in the roster, so they use the
+        /// non-stripping `${% %}` form: `${%-` would eat the ", " before
+        /// each token and render "has access to:read,grep".
+        fn guard_kind_tokens(template: &str) -> String {
+            static TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+                Regex::new(r"\$\{\{\s*tools\.by_kind\.([a-z_]+)\s*\}\}").expect("valid regex")
+            });
+            TOKEN
+                .replace_all(template, |caps: &regex::Captures| {
+                    let kind = &caps[1];
+                    format!(
+                        "${{% if tools.by_kind.{kind} %}}${{{{ tools.by_kind.{kind} }}}}\
+                         ${{% else %}}{kind}${{% endif %}}"
+                    )
+                })
+                .into_owned()
+        }
+
+        static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let subagents: Vec<xai_tool_types::SubagentDescriptor> =
+                xai_tool_types::BUILTIN_SUBAGENTS
+                    .iter()
+                    .map(|b| xai_tool_types::SubagentDescriptor {
+                        name: b.name.to_owned(),
+                        description: b.description.to_owned(),
+                        tools: Some(guard_kind_tokens(b.tools_template)),
+                    })
+                    .collect();
+            xai_tool_types::build_task_description(
+                &subagents,
+                &xai_tool_types::TaskToolNaming {
+                    task_tool: "${{ tools.by_kind.task }}",
+                    subagent_type_param: "${{ params.task.subagent_type }}",
+                    run_in_background_param: "${{ params.task.run_in_background }}",
+                    resume_from_param: "${{ params.task.resume_from }}",
+                    background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
+                    isolation_param: "${{ params.task.isolation }}",
+                },
+            )
+        });
+        &DESC
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -85,7 +277,7 @@ impl xai_tool_runtime::Tool for TaskTool {
     type Output = ToolOutput;
 
     fn id(&self) -> xai_tool_protocol::ToolId {
-        xai_tool_protocol::ToolId::new("task").expect("valid tool id")
+        xai_tool_protocol::ToolId::new(TASK_TOOL_NAME).expect("valid tool id")
     }
 
     fn description(
@@ -94,7 +286,7 @@ impl xai_tool_runtime::Tool for TaskTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "task",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -125,10 +317,20 @@ impl xai_tool_runtime::Tool for TaskTool {
             .map(|cancellation| cancellation.0.clone());
 
         // 1. Depth check
-        let (depth, backend, model_validator, parent_session_id, parent_prompt_id, foreground_wait) = {
+        let (
+            depth,
+            max_depth,
+            backend,
+            model_validator,
+            parent_session_id,
+            parent_prompt_id,
+            implement_loop_effort,
+            foreground_wait,
+        ) = {
             let res = resources.lock().await;
 
             let depth = res.get::<SubagentDepthCounter>().map(|d| d.0).unwrap_or(0);
+            let max_depth = effective_max_subagent_depth(&res);
 
             let backend = res
                 .get::<SubagentBackendResource>()
@@ -151,21 +353,26 @@ impl xai_tool_runtime::Tool for TaskTool {
                 .get::<CurrentPromptIdResource>()
                 .map(|p| p.0.clone())
                 .filter(|prompt_id| !prompt_id.is_empty());
+            let implement_loop_effort = res
+                .get::<ImplementLoopEffortResource>()
+                .and_then(|effort| effort.0);
             let foreground_wait = res.get::<SubagentForegroundWait>().cloned();
 
             (
                 depth,
+                max_depth,
                 backend,
                 model_validator,
                 parent_session_id,
                 parent_prompt_id,
+                implement_loop_effort,
                 foreground_wait,
             )
         };
 
-        if depth >= MAX_SUBAGENT_DEPTH {
+        if depth >= max_depth {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Subagent depth limit exceeded (current depth: {depth}, max: {MAX_SUBAGENT_DEPTH}). \
+                "Subagent depth limit exceeded (current depth: {depth}, max: {max_depth}). \
                  Cannot spawn further nested subagents."
             )));
         }
@@ -343,6 +550,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort,
             cancel_token: child_cancellation,
         };
 
@@ -375,19 +583,23 @@ impl xai_tool_runtime::Tool for TaskTool {
                 }
             });
 
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            let (task_output_tool, task_ids_param, timeout_ms_param) =
+                resolve_background_notice_names(&resources).await;
+            let naming = xai_tool_types::BackgroundNoticeNaming {
+                task_output_tool: &task_output_tool,
+                task_ids_param: &task_ids_param,
+                timeout_ms_param: &timeout_ms_param,
+            };
 
+            let continue_parent =
+                detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
             return Ok(ToolOutput::Text(
                 xai_tool_types::format_subagent_started_background(
                     &id,
                     &input.subagent_type,
                     &input.description,
-                    &task_output_name,
+                    &naming,
+                    continue_parent,
                 )
                 .into(),
             ));
@@ -405,26 +617,32 @@ impl xai_tool_runtime::Tool for TaskTool {
         // still-running child — return a task_id to poll, like the background
         // branch above (the result arrives via auto-wake or a later poll).
         if result.backgrounded {
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            let (task_output_tool, task_ids_param, timeout_ms_param) =
+                resolve_background_notice_names(&resources).await;
+            let naming = xai_tool_types::BackgroundNoticeNaming {
+                task_output_tool: &task_output_tool,
+                task_ids_param: &task_ids_param,
+                timeout_ms_param: &timeout_ms_param,
+            };
+            // Only promise a completion notification when the client
+            // actually delivers system reminders.
+            let notified_on_completion = resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0);
+            let continue_parent =
+                detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
 
-            return Ok(ToolOutput::Text(
-                format!(
-                    "Subagent took longer than the foreground budget and was moved to the \
-                 background to keep the conversation responsive. It is still running — you \
-                 will be notified when it completes.\n\
-                 subagent_id: {id}\n\
-                 type: {}\n\
-                 description: {}\n\n\
-                 Use {task_output_name} with task_ids=[\"{id}\"] and timeout_ms to wait for results.",
-                    input.subagent_type, input.description,
-                )
-                .into(),
-            ));
+            let text = xai_tool_types::format_subagent_auto_backgrounded(
+                &id,
+                &input.subagent_type,
+                &input.description,
+                &naming,
+                notified_on_completion,
+                continue_parent,
+            );
+            return Ok(ToolOutput::Text(text.into()));
         }
 
         // 6. Return result
@@ -559,11 +777,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subagent_cannot_spawn_nested_subagent() {
-        let (backend, _rx) = make_backend();
+    async fn raised_max_depth_allows_nested_spawn() {
+        let (backend, mut rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
-        resources.insert(SubagentDepthCounter(1)); // first-level subagent
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(MaxSubagentDepth(2));
+        resources.insert(SessionIdResource("child-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-nested".to_string()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "nested ok".into(),
+                prompt: "should be allowed at max_depth=2".into(),
+                subagent_type: "explore".into(),
+                run_in_background: true,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok at depth 1 with max 2: {result:?}"
+        );
+        let _ = rx.try_recv();
+    }
+
+    #[tokio::test]
+    async fn default_max_allows_l2_to_spawn_l3() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(1));
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
@@ -572,7 +825,42 @@ mod tests {
             test_ctx(resources.into_shared()),
             TaskToolInput {
                 description: "nested spawn".into(),
-                prompt: "should be rejected".into(),
+                prompt: "L2 must be able to spawn L3 at the default max".into(),
+                subagent_type: "explore".into(),
+                run_in_background: true,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "default max must allow depth 1 to spawn L3: {result:?}"
+        );
+        let _ = rx.try_recv();
+    }
+
+    #[tokio::test]
+    async fn explicit_max_one_rejects_l2_spawn() {
+        let (backend, _rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(MaxSubagentDepth(1));
+        resources.insert(SessionIdResource("child-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "nested spawn".into(),
+                prompt: "explicit max 1 still rejects L2 spawn".into(),
                 subagent_type: "explore".into(),
                 run_in_background: false,
                 capability_mode: None,
@@ -589,7 +877,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("depth limit exceeded"),
-            "subagent at depth 1 must not spawn: {err}"
+            "explicit max 1 must still reject L2 spawn: {err}"
         );
     }
 
@@ -785,7 +1073,10 @@ mod tests {
     #[tokio::test]
     async fn auto_backgrounded_result_returns_task_id_text() {
         let (backend, mut rx) = make_backend();
-        let mut resources = resources_for_task(backend);
+        let (mut resources, _dir) = resources_with_parent_exec(
+            backend,
+            "run bazel test //hw5:op_chain then spawn a skill agent",
+        );
         let wait_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         struct WaitProbe(Arc<std::sync::atomic::AtomicBool>);
         impl Drop for WaitProbe {
@@ -838,6 +1129,12 @@ mod tests {
                     "should instruct the model to wait: {}",
                     text.text
                 );
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "auto-bg result must keep in-flight parent work: {}",
+                    text.text
+                );
             }
             other => panic!("expected Text output, got {other:?}"),
         }
@@ -879,6 +1176,38 @@ mod tests {
         resources.insert(CurrentPromptIdResource("prompt-123".to_string()));
         resources.insert(TaskModelValidator::new(|_| None));
         resources
+    }
+
+    /// Seed `chat_history.jsonl` so leftover-parent detection can fire.
+    fn resources_with_parent_exec(
+        backend: SubagentBackendResource,
+        user_ask: &str,
+    ) -> (Resources, tempfile::TempDir) {
+        resources_with_chat_history(
+            backend,
+            &[serde_json::json!({
+                "type": "user",
+                "content": format!("<user_query>{user_ask}</user_query>"),
+            })],
+        )
+    }
+
+    fn resources_with_chat_history(
+        backend: SubagentBackendResource,
+        rows: &[serde_json::Value],
+    ) -> (Resources, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut body = String::new();
+        for row in rows {
+            body.push_str(&row.to_string());
+            body.push('\n');
+        }
+        std::fs::write(dir.path().join("chat_history.jsonl"), body).expect("write chat_history");
+        let mut resources = resources_for_task(backend);
+        resources.insert(crate::types::resources::SessionFolder(
+            dir.path().to_path_buf(),
+        ));
+        (resources, dir)
     }
 
     #[tokio::test]
@@ -1013,7 +1342,8 @@ mod tests {
     #[tokio::test]
     async fn background_spawn_succeeds_when_coordinator_accepts() {
         let (backend, mut rx) = make_backend();
-        let resources = resources_for_task(backend);
+        let (resources, _dir) =
+            resources_with_parent_exec(backend, "CI still fails, fix and gt submit /pr-babysit");
 
         let drain = tokio::spawn(async move {
             if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
@@ -1038,6 +1368,113 @@ mod tests {
         match result {
             ToolOutput::Text(text) => {
                 assert!(text.text.contains("Subagent started in background"));
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "background spawn must keep in-flight parent work: {}",
+                    text.text
+                );
+            }
+            other => panic!("expected text output, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
+    }
+
+    #[tokio::test]
+    async fn background_spawn_omits_cta_when_review_is_the_only_ask() {
+        let (backend, mut rx) = make_backend();
+        let (resources, _dir) =
+            resources_with_parent_exec(backend, "review this PR https://github.com/x/y/pull/1");
+
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("general-purpose", true),
+        )
+        .await
+        .expect("background spawn should succeed");
+
+        match result {
+            ToolOutput::Text(text) => {
+                assert!(text.text.contains("Subagent started in background"));
+                assert!(
+                    !text
+                        .text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "review-only ask must not get continue-parent CTA: {}",
+                    text.text
+                );
+            }
+            other => panic!("expected text output, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
+    }
+
+    #[tokio::test]
+    async fn background_spawn_ignores_synthetic_user_rows_in_lookback() {
+        let (backend, mut rx) = make_backend();
+        let (resources, _dir) = resources_with_chat_history(
+            backend,
+            &[
+                serde_json::json!({
+                    "type": "user",
+                    "content": "<user_query>CI still fails, fix and gt submit</user_query>",
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "synthetic_reason": "auto_continue",
+                    "content": "Continue with the work described in the summary above.",
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "synthetic_reason": "stop_hook_feedback",
+                    "content": "hook: stop",
+                }),
+            ],
+        );
+
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("general-purpose", true),
+        )
+        .await
+        .expect("background spawn should succeed");
+
+        match result {
+            ToolOutput::Text(text) => {
+                assert!(
+                    text.text
+                        .contains(xai_tool_types::BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
+                    "synthetic rows must not hide leftover exec: {}",
+                    text.text
+                );
             }
             other => panic!("expected text output, got {other:?}"),
         }
@@ -1178,6 +1615,33 @@ mod tests {
         let seen = capture_rx.try_recv().expect("must fire at least once");
         assert_eq!(seen, "special-session-id");
         assert!(capture_rx.try_recv().is_err(), "must fire exactly once");
+    }
+
+    #[test]
+    fn task_tool_id_predicate_accepts_all_wire_spellings() {
+        assert!(is_task_tool_id(
+            xai_tool_runtime::Tool::id(&TaskTool).as_str()
+        ));
+        for name in ["task", "Task", "spawn_subagent"] {
+            assert!(is_task_tool_id(name), "must accept {name:?}");
+        }
+    }
+
+    #[test]
+    fn task_tool_id_predicate_rejects_lookalikes() {
+        for name in [
+            "",
+            "TASK",
+            "tasks",
+            "spawn_subagents",
+            "Spawn_Subagent",
+            "task_output",
+            "kill_task",
+            "subagent",
+            " task",
+        ] {
+            assert!(!is_task_tool_id(name), "must reject {name:?}");
+        }
     }
 
     // ── Runtime overrides serde tests ─────────────────
@@ -2303,6 +2767,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn implement_loop_effort_resource_threads_onto_subagent_request() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        resources.insert(ImplementLoopEffortResource(Some(3)));
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(
+                request.implement_loop_effort,
+                Some(3),
+                "Task tool must copy live Token Economy --effort onto SubagentRequest"
+            );
+            let id = request.id.clone();
+            request
+                .result_tx
+                .send(SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: id.clone(),
+                    child_session_id: id,
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            task_input("general-purpose", false),
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+        match result {
+            ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("ok")),
+            other => panic!("Expected SubagentCompleted, got {other:?}"),
+        }
+    }
+
     // ── model override tests ─────────────────────────────────────
 
     #[tokio::test]
@@ -2553,5 +3058,41 @@ mod tests {
             ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("resumed")),
             other => panic!("Expected SubagentCompleted, got {other:?}"),
         }
+    }
+
+    /// Blocking spawn last-answer uses the same 40k parent ToolResult policy
+    /// as the completed-poll arm. A 200k body must not land verbatim on
+    /// `to_prompt_format`.
+    #[test]
+    fn blocking_spawn_subagent_completed_to_prompt_format_is_capped() {
+        let last_answer = "Z".repeat(200_000);
+        let output = ToolOutput::SubagentCompleted(SubagentCompletedOutput {
+            output: last_answer.clone(),
+            subagent_id: "sub-huge".into(),
+            subagent_type: "general-purpose".into(),
+            tool_calls: 20,
+            turns: 6,
+            duration_ms: 12_000,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sub-huge".into(),
+            persona_hint: None,
+        });
+        let prompt = output.to_prompt_format();
+        assert!(
+            prompt.len() < 80_000,
+            "parent prompt_text must not store a 200k last answer verbatim ({} bytes)",
+            prompt.len()
+        );
+        assert!(
+            !prompt.contains(&last_answer),
+            "200k-char last answer must not appear verbatim in to_prompt_format"
+        );
+        assert!(
+            prompt.to_ascii_lowercase().contains("report")
+                || prompt.to_ascii_lowercase().contains("truncated")
+                || prompt.contains("read_file"),
+            "capped last answer must mark truncated or point at a report: {prompt}"
+        );
     }
 }

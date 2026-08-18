@@ -29,6 +29,7 @@ pub(crate) fn manual_auth_reason(err: &AuthError) -> Option<ManualAuthReason> {
     Some(match err {
         AuthError::Refresh(RefreshTokenError::Permanent(e)) => match e.reason {
             RefreshTokenFailedReason::RefreshTokenRejected => R::RefreshTokenRejected,
+            RefreshTokenFailedReason::ProviderInteractiveRequired => R::ProviderInteractiveRequired,
             // Self-healing via the TTL, not a manual re-auth.
             RefreshTokenFailedReason::ClientRejected | RefreshTokenFailedReason::Other => {
                 return None;
@@ -83,6 +84,18 @@ impl RecoverySource {
             RecoverySource::Turn => Some(ManualAuthSurface::Turn),
             RecoverySource::Relay => Some(ManualAuthSurface::Relay),
             RecoverySource::Background => None,
+        }
+    }
+
+    /// How aggressively this recovery's refresh may behave in a dark wake:
+    /// `Background` recoveries fail soft; Turn/Relay have a user (or a live
+    /// connection) waiting and force through.
+    fn urgency(self) -> crate::auth::manager::RefreshUrgency {
+        match self {
+            RecoverySource::Turn | RecoverySource::Relay => {
+                crate::auth::manager::RefreshUrgency::UserFacing
+            }
+            RecoverySource::Background => crate::auth::manager::RefreshUrgency::Background,
         }
     }
 }
@@ -217,10 +230,13 @@ enum RecoveryStep {
 }
 
 /// State machine that walks through recovery strategies after a 401.
-pub struct UnauthorizedRecovery {
+pub(crate) struct UnauthorizedRecovery {
     auth_manager: Arc<AuthManager>,
     /// The token that was rejected by the server.
     rejected_token: String,
+    /// Where this recovery was initiated; drives the KPI (via `emit`) and
+    /// the refresh urgency (background recoveries defer in dark wake).
+    source: RecoverySource,
     /// Current step in the recovery sequence.
     step: RecoveryStep,
     /// Error from `RefreshFromAuthority`, propagated as fallback when
@@ -250,6 +266,7 @@ impl UnauthorizedRecovery {
         Self {
             auth_manager,
             rejected_token,
+            source,
             step: RecoveryStep::ReloadFromDisk,
             authority_error: None,
             authority_was_transient: false,
@@ -265,7 +282,7 @@ impl UnauthorizedRecovery {
         skip(self),
         fields(step = ?self.step, token_type = tracing::field::Empty),
     )]
-    pub async fn next(&mut self) -> Result<GrokAuth, AuthError> {
+    pub(crate) async fn next(&mut self) -> Result<GrokAuth, AuthError> {
         let span = tracing::Span::current();
         if !span.is_disabled() {
             // Only acquire the inner-lock when tracing actually
@@ -324,7 +341,10 @@ impl UnauthorizedRecovery {
                     // preferred_method=api_key forbids automatic OIDC mint.
                     if !self.auth_manager.grok_com_config().blocks_automatic_oidc()
                         && self.auth_manager.is_devbox_environment()
-                        && let Ok(auth) = self.auth_manager.try_devbox_recovery().await
+                        && let Ok(auth) = self
+                            .auth_manager
+                            .try_devbox_recovery(Some(&self.rejected_token))
+                            .await
                     {
                         return Ok(auth);
                     }
@@ -373,7 +393,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: disk token expired",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": crate::auth::token_suffix(&disk_auth.key),
+                    "disk_key_prefix": xai_grok_auth::bearer_suffix(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -385,7 +405,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: adopted disk token",
                 None,
                 Some(serde_json::json!({
-                    "adopted_key_prefix": crate::auth::token_suffix(&disk_auth.key),
+                    "adopted_key_prefix": xai_grok_auth::bearer_suffix(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -428,7 +448,7 @@ impl UnauthorizedRecovery {
             "auth recovery: fresh mint, refresh skipped",
             None,
             Some(serde_json::json!({
-                "key_prefix": crate::auth::token_suffix(&auth.key),
+                "key_prefix": xai_grok_auth::bearer_suffix(&auth.key),
                 "mint_age_seconds": mint_age_seconds,
                 "guard_seconds": FRESH_MINT_GUARD_SECS,
                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
@@ -463,7 +483,11 @@ impl UnauthorizedRecovery {
                 }
                 let result = self
                     .auth_manager
-                    .refresh_chain(tt, crate::auth::manager::RefreshReason::ServerRejected)
+                    .refresh_chain(
+                        tt,
+                        crate::auth::manager::RefreshReason::ServerRejected,
+                        self.source.urgency(),
+                    )
                     .await;
                 match &result {
                     Ok(auth) => {
@@ -472,7 +496,7 @@ impl UnauthorizedRecovery {
                             None,
                             Some(serde_json::json!({
                                 "token_type": format!("{tt:?}"),
-                                "new_key_prefix": crate::auth::token_suffix(&auth.key),
+                                "new_key_prefix": xai_grok_auth::bearer_suffix(&auth.key),
                                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                             })),
                         );

@@ -6,9 +6,7 @@ use std::time::Duration as StdDuration;
 use super::AuthManager;
 use super::lock::try_lock_auth_file_async;
 use crate::auth::manager::AUTH_LOCK_TIMEOUT;
-use crate::auth::model::{
-    GrokAuth, UserInfo, is_supergrok_session_mode, lookup_auth, upsert_supergrok_session,
-};
+use crate::auth::model::{GrokAuth, UserInfo, lookup_auth};
 use crate::auth::storage::{read_auth_json, write_auth_json};
 
 /// `/user` fetch budget, shared by the inline (login) and background paths.
@@ -141,14 +139,24 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
     };
     let user_elapsed_ms = started.elapsed().as_millis() as u64;
 
-    // R-M-W file lock. On timeout, fall through to an unlocked write
-    // rather than drop the enrichment.
+    // R-M-W file lock. On timeout, drop the write rather than proceed
+    // unlocked: an unlocked R-M-W can silently revert a freshly rotated
+    // AT/RT on disk (a rolled-back RT is a future `invalid_grant` → forced
+    // re-login). Enrichment is cosmetic; it re-runs on the next refresh.
     let lock_started = std::time::Instant::now();
     let lock_guard = try_lock_auth_file_async(&manager.path, AUTH_LOCK_TIMEOUT).await;
     let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
-    if lock_guard.is_none() {
-        tracing::warn!("auth: enrichment proceeding without auth.json.lock");
-    }
+    let Some(_lock_guard) = lock_guard else {
+        xai_grok_telemetry::unified_log::warn(
+            "auth update enrichment skipped",
+            None,
+            Some(serde_json::json!({
+                "reason": "lock_timeout",
+                "lock_wait_ms": lock_wait_ms,
+            })),
+        );
+        return;
+    };
 
     let Ok(mut map) = read_auth_json(&manager.path) else {
         xai_grok_telemetry::unified_log::warn(
@@ -184,8 +192,8 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
             None,
             Some(serde_json::json!({
                 "reason": "sibling_rotated",
-                "written_key_prefix": crate::auth::token_suffix(&auth.key),
-                "disk_key_prefix": crate::auth::token_suffix(&disk.key),
+                "written_key_prefix": xai_grok_auth::bearer_suffix(&auth.key),
+                "disk_key_prefix": xai_grok_auth::bearer_suffix(&disk.key),
             })),
         );
         return;
@@ -193,14 +201,7 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
 
     apply_user_info_enrichment(&mut disk, user_info);
 
-    // Keep SuperGrok multi-slot in lockstep with base (same identity). A
-    // base-only write left stale multi-slot JWTs that `auto_use_included_limits`
-    // preferred as exhausted → console API instead of SuperGrok Heavy.
-    if is_supergrok_session_mode(disk.auth_mode) {
-        upsert_supergrok_session(&mut map, &manager.scope, disk.clone());
-    } else {
-        map.insert(manager.scope.clone(), disk.clone());
-    }
+    map.insert(manager.scope.clone(), disk.clone());
     let write_started = std::time::Instant::now();
     if let Err(e) = write_auth_json(&manager.path, &map) {
         xai_grok_telemetry::unified_log::error(

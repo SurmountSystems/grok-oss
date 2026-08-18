@@ -6,12 +6,12 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `grok login` or an API key, then start a session.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `grok-oss login` or an API key, then start a session.
 
 List all available models:
 
 ```bash
-grok models
+grok-oss models
 ```
 
 ---
@@ -21,7 +21,7 @@ grok models
 ### CLI Flag
 
 ```bash
-grok -p "Hello" -m grok-build
+grok-oss -p "Hello" -m grok-build
 ```
 
 ### Slash Command
@@ -97,34 +97,8 @@ Grok resolves the API key in this order:
 
 1. The `api_key` field in the model config
 2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding)
-3. Your signed-in session token (from `grok login`), for a model with no `api_key`/`env_key` of its own
+3. Your signed-in session token (from `grok-oss login`), for a model with no `api_key`/`env_key` of its own
 4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility)
-
-### Credit failover (multi-account)
-
-When the active credential is rejected for **credit / spending-limit** reasons (HTTP 402, or bodies like “out of credits”), **or** a plain HTTP **429** rate limit, Grok OSS automatically retries the same request with the next configured identity on that model’s host (when a failover list is configured). Provide multiple keys by:
-
-- Comma- or newline-separating values in `api_key` or in an env var
-  (`api_key = "sk-a,sk-b"` or `export OPENROUTER_API_KEY="sk-a,sk-b"`)
-- Listing several env names: `env_key = ["KEY_A", "KEY_B"]` (first set wins as primary; other set values are failover)
-- For OpenRouter: `OPENROUTER_API_KEYS` plus optional secret-store key from `grok-oss login --openrouter`
-- **First-party xAI dual-auth:** a SuperGrok OAuth session (`grok login`) plus console / Business API key(s) (`XAI_API_KEY`, secret store, or `auth.json`). Default order without free-period ranking is **session first**, then console keys in collect order (`XAI_API_KEY` list → store multi-add order → `auth.json`). Set `[auth] preferred_method = "api_key"` to make the first console key primary and keep SuperGrok session **last** after remaining console keys (intentional console pin even when free SuperGrok period allowance remains). **New/empty Grok home config defaults** `[auth] auto_use_included_limits = true` so the product prefers the **free SuperGrok allowance for the current billing period** (personal and/or Business) before SuperGrok prepaid top-up dollars and console API spend, ranks multi SuperGrok by sooner reset plus free-period headroom, and **omits console keys from primary and silent failover while any SuperGrok still has free period allowance left**. After every SuperGrok free period is full, if SuperGrok **top-up dollars** remain positive, SuperGrok session stays primary with console as failover; if top-ups are 0 or unknown, console becomes primary. Set `auto_use_included_limits = false` for classic dual-auth without free-period-first ranking (existing explicit false is preserved). This is **not** a `preferred_method` value (`preferred_method` stays `api_key` / `oidc` only). Hard pins still win: `api_key` stays console-primary; the flag only ranks SuperGrok when SuperGrok-session-first is allowed. Put Business first by adding that key first or `XAI_API_KEY=<business>,…`. Hop session→key clears the live bearer resolver so the exhausted JWT is not re-injected; hop key→session uses the session JWT from the failover list only when it is still live. Never attaches the xAI session to OpenRouter.
-
-**Credit / SuperGrok Heavy usage-limit switch** remembers the dead identity is out of allowance (~1h memo under `$GROK_HOME/exhausted_credits/` plus process cache; cleared on a later successful **console-key** request with that fingerprint — SuperGrok session success does not clear, so paid top-ups do not put SuperGrok back) and toast says “out of allowance.” **Free SuperGrok period allowance full (dual-auth):** when free SuperGrok period used percent reports **100%**, a console key is configured, and SuperGrok top-up dollars are 0 or unknown, SuperGrok is marked out of allowance **before** the next request so sampling prefers console (no HTTP 402 required). With free-period-first ranking on (`auto_use_included_limits`) and **positive** SuperGrok top-up dollars, SuperGrok session stays primary and console is only failover. Memo clears when used percent drops below 100% (period reset) or when that after-full path clears a prior mark. Switching identity also switches the API host when needed (SuperGrok proxy ↔ `api.x.ai`). **Rate-limit switch** uses a temporary shared cooldown on the left key only (not the allowance memo) so the preferred primary can be tried again when cool; toast says “rate limited.” Without failover keys, plain 429 still waits and retries on the same key. Enterprise `disable_api_key_auth` keeps a single session identity (no console-key failover).
-
-### Multi-process shared rate limits
-
-When several `grok` / `grok-oss` processes hit the same provider at once, they coordinate cooldowns under `$GROK_HOME/rate_limits/` (default `~/.grok/rate_limits/`). After an HTTP **429** (or **403** that carries a retry hint such as `Retry-After`), the client records a wait so peers do not stampede the same API. Wait duration prefers server headers (`Retry-After`, then `x-ratelimit-reset`) over hardcoding provider tier tables.
-
-Cooldowns are **type-appropriate**: chat inference, Imagine image, Imagine video, Voice STT, Responses (`web_search`), SuperGrok billing, Management API, and GitHub update use separate keys even when the host is the same, because providers often publish separate buckets per product. OpenRouter and other BYOK chat base URLs participate through the same chat/inference path (host + key fingerprint).
-
-Disable shared coordination for debugging with `GROK_DISABLE_SHARED_RATE_LIMIT=1`.
-
-Public reference (accessed 2026-08-03):
-
-- [xAI rate limits](https://docs.x.ai/developers/rate-limits) (per-model RPS/TPM; Imagine image/video have separate RPS)
-- [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) (honor `Retry-After` / `X-RateLimit-*` on 429)
-- [GitHub REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
 
 ### Context Window
 
@@ -331,7 +305,7 @@ When you use `[endpoints]` with partial model overrides, Grok inherits the `base
 
 ### Auth Behavior
 
-When you set `models_base_url`, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. You do not need `grok login` -- the API key is enough.
+When you set `models_base_url`, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. You do not need `grok-oss login`. The API key is enough.
 
 ---
 
@@ -367,13 +341,13 @@ supports_backend_search = true
 
 ```bash
 # List available models (including custom)
-grok models
+grok-oss models
 
 # Use in the TUI via slash command
 /model my-model
 
 # Use in headless mode
-grok -p "Hello" -m my-model
+grok-oss -p "Hello" -m my-model
 
 # Set as default in config.toml:
 [models]
@@ -416,7 +390,7 @@ telemetry = false
 
 ```bash
 # List available models
-grok models
+grok-oss models
 
 # Check config.toml for typos in [model.*] sections
 ```
@@ -433,7 +407,7 @@ curl -s https://api.example.com/v1/models \
 ### Debug Logging
 
 ```bash
-RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok
+RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok-oss
 tail -f /tmp/grok.log
 ```
 

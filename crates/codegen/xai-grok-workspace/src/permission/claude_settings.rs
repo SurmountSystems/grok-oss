@@ -89,6 +89,16 @@ impl ParsedPermissions {
 ///     the vendor schema) and are used only when the nested key is **absent** —
 ///     not when it is present but the wrong type.
 pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
+    // Opening a FIFO for read blocks until a writer appears; this runs on the
+    // session actor, so refuse non-regular files up front.
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => {
+            tracing::warn!(?path, "refusing to read non-regular settings file");
+            return None;
+        }
+        Err(_) => return None,
+    }
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -450,10 +460,8 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
         if current.join(".git").exists() {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        let parent = current.parent()?;
+        current = parent.to_path_buf();
     }
 }
 

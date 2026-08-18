@@ -33,13 +33,13 @@ use similar::ChangeTag;
 use syntect::highlighting::Style as SyntectStyle;
 use tempfile::TempDir;
 
-use xai_grok_pager::diff::{DiffHunk, DiffLine};
 use xai_grok_pager::scrollback::blocks::tool::{
     DiffRenderConfig, EDIT_HL_MAX_BYTES, EDIT_HL_MAX_LINES, compute_file_scoped_styles,
     render_diff_hunks_highlighted, render_diff_hunks_with_styles,
 };
 use xai_grok_pager::syntax::{Syntect, get_syntect};
 use xai_grok_pager::theme::Theme;
+use xai_grok_pager_diff::{DiffHunk, DiffLine};
 
 const SAMPLE_SIZE: usize = 20;
 const SAMPLE_SIZE_HEAVY: usize = 10;
@@ -149,9 +149,8 @@ fn make_hunk_at(file_lines: &[&str], close_i: usize) -> Option<DiffHunk> {
     let start = close_i.saturating_sub(1);
     let end = (close_i + 6).min(file_lines.len());
     let mut hunk = Vec::new();
-    for idx in start..end {
+    for (idx, text) in file_lines.iter().enumerate().take(end).skip(start) {
         let ln = idx + 1;
-        let text = file_lines[idx];
         let tag = if text.contains("field_b:") {
             ChangeTag::Insert
         } else {

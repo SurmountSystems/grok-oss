@@ -28,7 +28,7 @@ use crate::session::goal_planner::{
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xai_file_utils::events::EventWriter;
+use xai_grok_session_events::EventWriter;
 use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
@@ -168,7 +168,7 @@ impl GoalStrategistSpawner for ChannelSpawner {
                     message,
                 )
             }
-            Err(SpawnError::Transport(_)) => {}
+            Err(SpawnError::Transport(_) | SpawnError::Interrupted) => {}
         }
         outcome
     }
@@ -207,6 +207,7 @@ impl ChannelSpawner {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
@@ -340,6 +341,15 @@ pub(crate) async fn run_goal_strategist(
             tracing::warn!(error = %detail, "goal strategist: transport error; failing open");
             return record_fail_open(
                 GoalStrategistFailReason::Transport,
+                inputs.attempt,
+                inputs.consecutive_failures,
+                started,
+                emit_event,
+            );
+        }
+        Err(SpawnError::Interrupted) => {
+            return record_fail_open(
+                GoalStrategistFailReason::Aborted,
                 inputs.attempt,
                 inputs.consecutive_failures,
                 started,
@@ -800,6 +810,7 @@ mod tests {
                     message: message.clone(),
                     cancelled: *cancelled,
                 }),
+                Err(SpawnError::Interrupted) => Err(SpawnError::Interrupted),
             }
         }
     }

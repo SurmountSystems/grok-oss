@@ -10,13 +10,13 @@ Sandbox mode is off by default.
 
 ```bash
 # Run with workspace sandbox (read everywhere, write to CWD + temp dirs + ~/.grok/)
-grok --sandbox workspace
+grok-oss --sandbox workspace
 
 # Read-only mode (read everywhere, write only to ~/.grok/ + temp dirs)
-grok --sandbox read-only
+grok-oss --sandbox read-only
 
 # Most restrictive profile (read CWD + system paths, write CWD + temp dirs + ~/.grok/, no child network)
-grok --sandbox strict
+grok-oss --sandbox strict
 ```
 
 ---
@@ -82,7 +82,7 @@ deny = ["/data/shared-secrets", "**/.env", "**/*.pem"]
 Use the custom profile:
 
 ```bash
-grok --sandbox project
+grok-oss --sandbox project
 ```
 
 A custom profile can't reuse a built-in name. `--sandbox devbox` always runs the built-in `devbox` profile, shadowing any `[profiles.devbox]` you define.
@@ -98,6 +98,16 @@ If the user and project files define the same custom profile differently, Grok u
 | `read_only`        | String[] | Additional read-only paths                           |
 | `read_write`       | String[] | Additional read-write paths                          |
 | `deny`             | String[] | Paths or globs to kernel-deny (read + write/rename; see notes). An entry with `*`, `?`, or `[` is a glob |
+
+> **Note on `read_only` / `read_write`:** These are **literal directory grants**,
+> not globs. A trailing `/**` (or `/*`) is treated as the parent directory, so
+> `…/cache/**` grants `…/cache` (and a bare `/**` grants `/`). Any entry that
+> still contains `*`, `?`, or `[` after that (e.g. `/home/**/cache`, or a
+> directory literally named `dir[1]`) is skipped with a warning — list the
+> concrete directories you need, or put globs under `deny`. Entries with
+> leading or trailing whitespace are also skipped with a warning: whitespace
+> is significant in literal paths, so fix the entry rather than relying on
+> trimming.
 
 > **Note on `deny`:** A non-empty `deny` list is **kernel-enforced**. Denied paths
 > are **read-denied and write/rename-denied** via Seatbelt on macOS and a bwrap
@@ -121,25 +131,34 @@ If the user and project files define the same custom profile differently, Grok u
 > - `[abc]` / `[a-z]` — character classes; a leading `!` **or** `^` negates
 >   (`[!a]` and `[^a]` both mean "not `a`")
 >
-> Brace alternation (`{a,b}`), backslash-escapes, and the unusual class forms
-> `[]…]` (literal `]` first) and POSIX `[[:…:]]` are **not** supported, so the two
-> platforms can never interpret a glob differently. A glob using an unsupported
+> Brace alternation (`{a,b}`), backslash-escapes, empty path segments (a
+> doubled `//` or a trailing `/`), `.` or `..` segments, and the unusual class
+> forms `[]…]` (literal `]` first) and POSIX `[[:…:]]` are **not** supported,
+> so the two platforms
+> can never interpret a glob differently. A glob using an unsupported
 > metacharacter, or one that is malformed, makes Grok **refuse to start** (fail
 > closed) on **both** platforms — write `*.pem` and `*.key` as separate entries
 > rather than `*.{pem,key}`.
 >
 > Relative globs are anchored at the workspace; absolute globs (e.g.
 > `/home/**/.ssh`) at their literal prefix. Non-glob entries keep exact-path
-> matching. Enforcement otherwise differs by platform:
+> matching. A relative glob matches **only inside the workspace**. To deny
+> files elsewhere, write the entry as an absolute path. Enforcement otherwise
+> differs by platform:
 >
 > - **macOS is airtight:** each glob becomes a Seatbelt regex applied at runtime,
 >   so matching files are denied **even if created after Grok starts**.
 > - **Linux is best-effort:** a mount namespace can't glob at runtime, so each
 >   glob is expanded to the files that **exist at launch** and those are bound
 >   over. Files created **later** that match a glob are **not** covered — name
->   exact paths for anything that must be airtight on Linux. A glob that matches
->   too many files, or whose tree is too deep/broad to walk, makes Grok **refuse
->   to start** rather than under-enforce.
+>   exact paths for anything that must be airtight on Linux. A matched symlink
+>   is masked together with its resolved target. A glob that matches too many
+>   files, or whose tree is too deep or broad to scan, makes Grok **refuse to
+>   start** rather than under-enforce; the error names the globs and the
+>   directory where the scan stopped. The launch scan starts at each glob's
+>   literal prefix and includes gitignored and hidden files, so on very large
+>   workspaces prefer anchored globs (`certs/**/*.pem` scans only `certs/`)
+>   over bare `**` patterns.
 
 ---
 
@@ -151,6 +170,14 @@ The sandbox is applied to the **entire grok process** at startup using kernel pr
 - `bash` commands, `grep` (rg) -- child processes inherit FS restrictions automatically
 - Network -- on Linux, child processes can be blocked via seccomp; on macOS this is a no-op
 
+When a non-`off` sandbox profile is **requested** (CLI, `GROK_SANDBOX`, config, or a managed requirement):
+
+- The agent runs **in-process**, not through the shared leader, so tool calls stay in this process when the profile is enforced. If leader mode would otherwise have been on, a one-line note at startup says so
+- If a built-in profile fails to apply, Grok warns and continues without enforcement (see [Platform Support](#platform-support)), but still refuses the leader so tools are not delegated elsewhere
+- `grok-oss workspace start`, `restart`, and `resume` are unavailable; `pause`, `stop`, and `status` still work
+
+Disable the profile at the source that selected it to use the refused commands.
+
 The sandbox is **irreversible** once applied. The agent cannot relax restrictions at runtime.
 
 ---
@@ -158,8 +185,8 @@ The sandbox is **irreversible** once applied. The agent cannot relax restriction
 ## Resuming Sessions
 
 The profile a session was started with is saved with the session and is **fixed
-for the life of the session**. When you resume it (`grok --resume <id>`,
-`grok --continue`, or `grok -r`), Grok restores that same profile automatically —
+for the life of the session**. When you resume it (`grok-oss --resume <id>`,
+`grok-oss --continue`, or `grok-oss -r`), Grok OSS restores that same profile automatically.
 so a session started with `--sandbox workspace` won't silently come back under a
 stricter default and break commands that previously worked.
 

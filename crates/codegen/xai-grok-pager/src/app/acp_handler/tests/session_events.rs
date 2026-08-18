@@ -18,7 +18,7 @@
             tokens_used: 90000,
             context_window: 131072,
             percentage: 85,
-            threshold_percent: Some(95),
+            threshold_percent: None,
             threshold_tokens: None,
             reason: "threshold".into(),
         };
@@ -32,6 +32,40 @@
             Some("hi"),
             "hold prompt text for re-auth auto-resubmit if compact fails with auth"
         );
+    }
+
+    #[test]
+    fn apply_compaction_started_names_sampling_window_when_catalog_differs() {
+        let mut session = make_session(Some("s1"));
+        session.models.override_context_window(500_000);
+        let mut scrollback = ScrollbackState::new();
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 200_000,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        match last_session_event(&scrollback) {
+            Some(event) => {
+                let msg = event.message();
+                assert!(
+                    msg.contains("sampling window"),
+                    "started banner must name the sampling window AUTO uses: {msg}"
+                );
+                assert!(
+                    msg.contains("200") && msg.to_ascii_lowercase().contains("token"),
+                    "started banner must include the 200k sampling window size: {msg}"
+                );
+                assert!(
+                    !msg.starts_with("Context 100% full."),
+                    "must not say bare Context 100% full when catalog is 500k: {msg}"
+                );
+            }
+            other => panic!("expected CompactionStarted, got {other:?}"),
+        }
     }
 
     /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
@@ -147,177 +181,6 @@
         assert!(
             session.in_flight_prompt.is_none(),
             "RetryState bypasses session/update in_flight hook"
-        );
-    }
-
-    /// Contract: after a timeout/transport retry, StreamResumed must keep soft
-    /// reconnect chrome (not fall through to zombie "Waiting for response…")
-    /// for the post-retry headers/TTFB window. Real stream content still
-    /// clears via `handle_update` → `retry_activity = None`.
-    #[test]
-    fn retry_chrome_soft_reconnects_when_retry_stream_starts() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Retrying {
-                attempt: 1,
-                max_retries: u32::MAX,
-                reason: "timed out · next try in 2s".into(),
-            },
-            &mut session,
-            &mut scrollback,
-            false,
-        );
-        match session.tracker.activity() {
-            Some(TurnActivity::Retrying { attempt: 1, .. }) => {}
-            other => panic!("expected Retrying attempt 1, got {other:?}"),
-        }
-
-        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
-        match session.tracker.activity() {
-            Some(TurnActivity::Retrying {
-                attempt: 1,
-                max_retries,
-                reason,
-            }) => {
-                assert_eq!(max_retries, u32::MAX);
-                assert_eq!(
-                    reason, "reconnecting",
-                    "StreamResumed after Retrying must soft-reconnect, not hard-clear"
-                );
-            }
-            other => panic!("expected soft reconnect Retrying, got {other:?}"),
-        }
-    }
-
-    /// Contract: StreamResumed with no prior Retrying (first stream open) does
-    /// not invent retry chrome.
-    #[test]
-    fn stream_resumed_without_prior_retry_clears_activity() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
-        assert!(
-            session.tracker.activity().is_none(),
-            "first-stream StreamResumed must not invent Retrying chrome, got {:?}",
-            session.tracker.activity()
-        );
-    }
-
-    /// Dual-auth D3: hop reason is status chrome (and toast-eligible) with no raw keys.
-    #[test]
-    fn dual_auth_hop_reason_is_status_chrome_not_raw_key() {
-        let reason = "Switched SuperGrok session → console key (out of allowance)";
-        assert!(
-            xai_grok_shell::sampling::is_credential_hop_reason(reason),
-            "hop copy must be toast/status eligible"
-        );
-        assert!(!reason.contains("sk-") && !reason.contains("jwt"));
-
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Retrying {
-                attempt: 1,
-                max_retries: 5,
-                reason: reason.into(),
-            },
-            &mut session,
-            &mut scrollback,
-            false,
-        );
-        match session.tracker.activity() {
-            Some(TurnActivity::Retrying { reason: r, .. }) => {
-                assert_eq!(r, reason);
-            }
-            other => panic!("expected Retrying activity with hop reason, got {other:?}"),
-        }
-    }
-
-    /// Dual-auth D3: the x.ai session-notification RetryState arm must toast
-    /// hop copy (status chrome alone is a different path).
-    #[test]
-    fn dual_auth_hop_retry_state_shows_toast() {
-        let mut app = make_app_with_agent("sess-1");
-        let reason = "Switched SuperGrok session → console key (out of allowance)";
-        assert!(xai_grok_shell::sampling::is_credential_hop_reason(reason));
-
-        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
-            attempt: 1,
-            max_retries: 5,
-            reason: reason.into(),
-        });
-        let changed = handle(
-            make_ext_session_notification("sess-1", update),
-            &mut app,
-        );
-        assert!(changed, "hop RetryState must redraw");
-
-        let agent = app.agents.get(&AgentId(0)).expect("agent");
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some(reason),
-            "hop must show toast with label copy (no raw keys)"
-        );
-        assert!(!reason.contains("sk-") && !reason.contains("jwt"));
-        // Meter honesty: destination identity drives footer (not SuperGrok extras).
-        assert_eq!(
-            agent.sampling_identity,
-            crate::views::credit_bar::SamplingIdentityKind::ConsoleKey,
-            "hop to console must set sampling identity for meter"
-        );
-        // Status chrome still set.
-        match agent.session.tracker.activity() {
-            Some(TurnActivity::Retrying { reason: r, .. }) => assert_eq!(r, reason),
-            other => panic!("expected Retrying activity, got {other:?}"),
-        }
-    }
-
-    /// Non-hop Retrying must not toast (bare transport copy, not hop chrome).
-    #[test]
-    fn non_hop_retry_state_does_not_toast() {
-        let mut app = make_app_with_agent("sess-1");
-        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
-            attempt: 1,
-            max_retries: 3,
-            reason: "rate limited".into(),
-        });
-        let _ = handle(
-            make_ext_session_notification("sess-1", update),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).expect("agent");
-        assert!(
-            agent.toast.is_none(),
-            "non-hop retry must not toast, got {:?}",
-            agent.toast
-        );
-    }
-
-    /// Rate-limit identity hop uses distinct allow-listed toast (not credit copy).
-    #[test]
-    fn rate_limit_hop_retry_state_shows_toast() {
-        let mut app = make_app_with_agent("sess-1");
-        let reason = "Switched SuperGrok session → console key (rate limited)";
-        assert!(xai_grok_shell::sampling::is_credential_hop_reason(reason));
-        assert!(!reason.contains("credit"));
-
-        let update = XaiSessionUpdate::RetryState(RetryState::Retrying {
-            attempt: 1,
-            max_retries: 5,
-            reason: reason.into(),
-        });
-        let changed = handle(
-            make_ext_session_notification("sess-1", update),
-            &mut app,
-        );
-        assert!(changed, "rate-limit hop RetryState must redraw");
-
-        let agent = app.agents.get(&AgentId(0)).expect("agent");
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some(reason),
-            "rate-limit hop must toast with distinct copy"
         );
     }
 
@@ -474,6 +337,31 @@
     }
 
     #[test]
+    fn apply_retry_state_disk_full_pushes_session_event() {
+        use xai_grok_shell::extensions::notification::{
+            DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE,
+        };
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.into(),
+                message: DISK_FULL_USER_MESSAGE.into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match scrollback.last().map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => {
+                assert!(matches!(ev.event, SessionEvent::DiskFull));
+                assert_eq!(ev.event.message(), DISK_FULL_USER_MESSAGE);
+            }
+            other => panic!("expected DiskFull session event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn apply_retry_state_credit_limit_exhausted_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -516,7 +404,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "proxy_error".into(),
+                error_type: "api".into(),
                 message: "status 403: run out of credits".into(),
             },
             &mut session,
@@ -545,7 +433,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "proxy_error".into(),
+                error_type: "api".into(),
                 message:
                     "API error (status 402 Payment Required): Grok Build usage balance exhausted"
                         .into(),
@@ -572,7 +460,7 @@
         });
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "server_error".into(),
+                error_type: "api".into(),
                 message: "internal server error".into(),
             },
             &mut session,
@@ -595,32 +483,24 @@
             "Unauthorized (401) from https://proxy/v1/responses"
         ));
         assert!(is_reauthable_failure(None, "Unauthorized (401)"));
-        // Gateway may return invalid OAuth as HTTP 403 bad-credentials.
-        assert!(is_reauthable_failure(
-            Some("api"),
-            "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
-             The OAuth2 access token could not be validated."
-        ));
-        assert!(is_reauthable_failure(
-            None,
-            "unauthenticated:bad-credentials: The OAuth2 access token could not be validated."
-        ));
         // legacy_auth carries its own migration guidance — excluded.
         assert!(!is_reauthable_failure(
             Some("legacy_auth"),
             "Unauthorized (401) ... deprecated authentication method"
         ));
+        // auth_transient = the shell says the failure self-heals (refreshable
+        // credential, no sticky verdict — e.g. post-wake network gap). Even
+        // with a 401 in the message, the `/login` banner must not fire.
+        assert!(!is_reauthable_failure(
+            Some("auth_transient"),
+            "Unauthorized (401)\n\nAuthentication is temporarily unavailable"
+        ));
         // Unrelated failures must not be treated as re-authable.
         assert!(!is_reauthable_failure(
-            Some("server_error"),
+            Some("api"),
             "internal server error"
         ));
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
-        // Bare policy 403 is not re-authable.
-        assert!(!is_reauthable_failure(
-            Some("api"),
-            "Content violates usage guidelines."
-        ));
     }
 
     /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
@@ -695,32 +575,6 @@
         ));
     }
 
-    /// Dogfood: 403 bad-credentials with error_type "api" must still push
-    /// ReAuthRequired (not raw Retry failed / Internal error JSON).
-    #[test]
-    fn apply_retry_state_403_bad_credentials_prompts_reauth() {
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "api".into(),
-                message: "API error (status 403 Forbidden): unauthenticated:bad-credentials: \
-                          The OAuth2 access token could not be validated."
-                    .into(),
-            },
-            &mut session,
-            &mut scrollback,
-            false,
-        );
-        assert!(
-            matches!(
-                last_session_event(&scrollback),
-                Some(SessionEvent::ReAuthRequired)
-            ),
-            "403 bad-credentials must surface re-auth, not Retry failed dump"
-        );
-    }
-
     /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /
     /// `grok login` guidance), not the generic re-auth prompt.
     #[test]
@@ -742,22 +596,62 @@
         ));
     }
 
-    /// Non-auth terminal failures still render the standard RetryFailed.
+    /// Non-auth terminal failures render the formatted RequestFailed banner
+    /// (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
     #[test]
-    fn apply_retry_state_generic_failure_still_shows_retry_failed() {
+    fn apply_retry_state_generic_failure_shows_request_failed_banner() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "server_error".into(),
-                message: "internal server error".into(),
+                error_type: "api".into(),
+                message: r#"API error (status 500 Internal Server Error): {"error":"upstream exploded"}"#.into(),
             },
             &mut session,
             &mut scrollback, false);
-        assert!(matches!(
-            last_session_event(&scrollback),
-            Some(SessionEvent::RetryFailed { .. })
-        ));
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                assert_eq!(status, Some(500));
+                assert_eq!(headline, "Server error (500)");
+                assert_eq!(
+                    detail,
+                    "Something went wrong on our side. Wait a minute and send again."
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_retry_state_403_shows_clean_denied_banner() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 403 Forbidden): Access to the chat endpoint is denied"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                assert_eq!(status, Some(403));
+                assert_eq!(headline, "Request denied (403)");
+                assert_eq!(detail, "Access to the chat endpoint is denied");
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
     }
 
     /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
@@ -781,6 +675,32 @@
                 Some(SessionEvent::ContextTooLarge)
             ),
             "context overflow must surface the actionable ContextTooLarge prompt"
+        );
+    }
+
+    /// Overflow-shaped copy without `error_type=context_length` must not take
+    /// the ContextTooLarge path — the shell is what tags overflow.
+    #[test]
+    fn apply_retry_state_overflow_copy_without_type_is_not_context_too_large() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "API error (status 500): the prompt is too long for this model's \
+                          context window"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        assert!(
+            matches!(
+                last_session_event(&scrollback),
+                Some(SessionEvent::RequestFailed { .. })
+            ),
+            "without error_type=context_length this is a generic banner, not overflow UX"
         );
     }
 
@@ -819,6 +739,7 @@
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         assert_eq!(
@@ -856,6 +777,7 @@
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         session.finish_turn(&mut scrollback,
@@ -881,6 +803,7 @@
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         match last_session_event(&scrollback) {
@@ -906,6 +829,7 @@
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_session_event(
             &update,
@@ -932,6 +856,50 @@
             }
             other => panic!("expected deferred CompactionCompleted, got {other:?}"),
         }
+    }
+
+    /// Token refreshes must not copy the model-card catalog into
+    /// `session_sampling_window`. After that poison the chip treats windows
+    /// as equal and paints unlabeled `201K / 500K`.
+    #[test]
+    fn refresh_context_used_does_not_copy_catalog_into_session_sampling() {
+        let mut agent = make_agent(Some("s1"));
+        agent.session.models.override_context_window(500_000);
+        assert!(
+            agent.session_sampling_window.is_none(),
+            "fixture starts with no GetSessionInfo window"
+        );
+
+        refresh_context_used(&mut agent, 201_000);
+        refresh_context_used(&mut agent, 201_000);
+
+        let window = agent.session_sampling_window;
+        assert!(
+            window.is_none() || window.filter(|&w| w != 500_000).is_some(),
+            "two catalog-only token refreshes must leave session_sampling_window \
+             empty or a real session window, not catalog 500k, got {window:?}"
+        );
+        assert_ne!(
+            window,
+            Some(500_000),
+            "must not copy catalog 500k into session_sampling_window"
+        );
+
+        let sampling = crate::views::context_bar::footer_sampling_window(
+            window,
+            Some(500_000),
+            true,
+        );
+        let text = crate::views::context_bar::context_chip_token_text(
+            201_000,
+            sampling,
+            Some(500_000),
+        )
+        .expect("token data");
+        assert!(
+            !text.starts_with("201K / 500K"),
+            "economic-on chip must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {text}"
+        );
     }
 
     #[test]
@@ -961,6 +929,7 @@
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,
+            saved_too_little: false,
         };
         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
         assert!(changed);
@@ -1000,7 +969,7 @@
             tokens_used: 95_000,
             context_window: 131_072,
             percentage: 72,
-            threshold_percent: Some(95),
+            threshold_percent: None,
             threshold_tokens: None,
             reason: "threshold".into(),
         };
@@ -1021,7 +990,7 @@
             tokens_used: 90000,
             context_window: 131072,
             percentage: 85,
-            threshold_percent: Some(95),
+            threshold_percent: None,
             threshold_tokens: None,
             reason: "threshold".into(),
         };
@@ -1043,6 +1012,7 @@
             tokens_after: 25000,
             elapsed_ms: Some(300),
             summary_preview: None,
+            saved_too_little: false,
         };
         let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
         // No child_view means nothing visible changed — must not trigger redraw.
@@ -1059,6 +1029,181 @@
         let update = XaiSessionUpdate::MemoryFlushStarted;
         let changed = handle_child_session_notification(update, "child-1", &mut agent, false);
         assert!(!changed);
+    }
+
+    #[test]
+    fn tool_call_delta_chunk_sets_writing_activity() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+
+        let changed = handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("spawn_subagent".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(changed, "first delta must request a redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let Some(TurnActivity::WritingToolCall(writing)) = agent.session.tracker.activity() else {
+            panic!("expected WritingToolCall activity");
+        };
+        assert_eq!(writing.label(), "Writing subagent prompt…");
+    }
+
+    /// A delta-first turn still counts as first activity: stash drops, TTFA stamps.
+    #[test]
+    fn tool_call_delta_chunk_clears_in_flight_prompt() {
+        let mut app = make_app_with_agent("sess-1");
+        let started = Instant::now();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.turn_started_at = Some(started);
+            agent.session.in_flight_prompt = Some(InFlightPrompt {
+                text: "hi".into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.in_flight_prompt.is_none(),
+            "first activity on the delta rail must drop the rewind stash"
+        );
+        assert_eq!(
+            agent.first_activity_logged_for,
+            Some(started),
+            "TTFA must be stamped for a delta-first turn"
+        );
+    }
+
+    /// Deltas carry no prompt id — while a wake turn is in flight the chunk is
+    /// dropped whole: no tracker write, no rewind-stash consumption, no TTFA.
+    #[test]
+    fn wake_gated_delta_chunk_is_fully_inert() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.turn_started_at = Some(Instant::now());
+            agent.session.in_flight_prompt = Some(InFlightPrompt {
+                text: "hi".into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            agent
+                .session
+                .tracker
+                .set_retry_activity(Some(crate::acp::tracker::TurnActivity::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "overloaded".into(),
+                }));
+            agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                prompt_id: "task-completed-1".into(),
+                cancel_sent: false,
+            });
+        }
+
+        let changed = handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.in_flight_prompt.is_some(),
+            "a dropped delta must not eat the rewind stash"
+        );
+        assert_eq!(agent.first_activity_logged_for, None);
+        assert!(
+            matches!(
+                agent.session.tracker.activity(),
+                Some(TurnActivity::Retrying { .. })
+            ),
+            "wake-attributable delta must not clear the local turn's retry override"
+        );
+    }
+
+    /// Defense-in-depth: the shell never emits replay-marked deltas.
+    #[test]
+    fn tool_call_delta_chunk_ignored_during_replay() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.loading_replay = true;
+            agent.session.in_flight_prompt = Some(InFlightPrompt {
+                text: "hi".into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::ToolCallDeltaChunk {
+                tool_call_id: Some("call_1".into()),
+                tool_index: 0,
+                name: Some("write".into()),
+                arguments_delta: Some("{".into()),
+            },
+            meta: Some(serde_json::json!({ "isReplay": true })),
+        };
+        let raw = serde_json::value::to_raw_value(&payload).unwrap();
+        let request = acp::ExtNotification::new("x.ai/session_notification", raw.into());
+        let changed = handle(
+            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.tracker.activity(),
+            None,
+            "replayed delta must not set a writing label"
+        );
+        assert!(
+            agent.session.in_flight_prompt.is_some(),
+            "a dropped delta must not eat the rewind stash"
+        );
     }
 
     // ── apply_retry_state ─────────────────────────────────────────────
@@ -1099,6 +1244,365 @@
         assert!(
             !session.model_incompatible,
             "non-encrypted_content error types must not set model_incompatible"
+        );
+    }
+
+    /// Named contract: hop-to-console plus SuperGrok dollar credits still on
+    /// the account must not keep the SuperGrok dollar credits chip. Default
+    /// AgentView identity is SuperGrok session; compact paint must follow the
+    /// hop destination (console key).
+    #[test]
+    fn active_driver_console_does_not_paint_supergrok_dollar_credits_chip() {
+        use crate::theme::Theme;
+        use crate::views::credit_bar::{
+            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
+            resolve_console_team_prepaid_gap_default,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.sampling_identity,
+                SamplingIdentityKind::SuperGrokSession,
+                "new AgentView must default to SuperGrok session"
+            );
+            agent.credit_balance = Some(CreditBalance {
+                prepaid_balance_cents: Some(26_264),
+                included_usage_known: true,
+                usage_pct: 100.0,
+                effective_usage_pct: 100.0,
+                ..CreditBalance::default()
+            });
+            agent.console_team_prepaid_cents = Some(22_675);
+        }
+
+        handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::RetryState(RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "Switched SuperGrok session → console key (rate limited)".into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.sampling_identity,
+            SamplingIdentityKind::ConsoleKey,
+            "hop-to-console must flip AgentView.sampling_identity so chrome follows the live key"
+        );
+
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            agent.credit_balance.as_ref(),
+            agent.sampling_identity,
+            agent.console_team_prepaid_cents,
+            resolve_console_team_prepaid_gap_default(),
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session must paint a compact credits chip");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("SuperGrok dollar credits")
+                && !text.to_ascii_lowercase().contains("extras"),
+            "after hop to console, compact must not keep SuperGrok dollar credits (or extras): {text}"
+        );
+        assert_eq!(
+            crate::views::credit_bar::active_spend_driver(
+                agent.sampling_identity,
+                true,
+                100.0,
+                Some(26_264),
+            ),
+            crate::views::credit_bar::ActiveSpendDriver::ConsoleKey,
+            "active driver must be the console key after hop, not SuperGrok dollar credits"
+        );
+    }
+
+    /// Named contract: when console is the live key, compact status and
+    /// /limits human copy name console team prepaid / console API credits.
+    #[test]
+    fn compact_status_names_console_team_prepaid_when_console_is_live() {
+        use crate::theme::Theme;
+        use crate::views::credit_bar::{
+            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
+            resolve_console_team_prepaid_gap_default,
+        };
+        use crate::views::limits_snapshot::{
+            LimitsSnapshot, active_driver_line_for_snapshot, format_limits_detail,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.credit_balance = Some(CreditBalance {
+                prepaid_balance_cents: Some(26_264),
+                included_usage_known: true,
+                usage_pct: 100.0,
+                effective_usage_pct: 100.0,
+                ..CreditBalance::default()
+            });
+            agent.console_team_prepaid_cents = Some(22_675);
+        }
+
+        handle(
+            make_ext_session_notification(
+                "sess-1",
+                XaiSessionUpdate::RetryState(RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 3,
+                    reason: "Switched SuperGrok session → console key (out of allowance)".into(),
+                }),
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.sampling_identity, SamplingIdentityKind::ConsoleKey);
+
+        let theme = Theme::default();
+        let line = credit_status_line_for_live_session(
+            agent.credit_balance.as_ref(),
+            agent.sampling_identity,
+            agent.console_team_prepaid_cents,
+            resolve_console_team_prepaid_gap_default(),
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session must paint a compact credits chip");
+        let compact: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            compact.contains("console") && compact.contains("226.75"),
+            "compact must name console team prepaid when console is live: {compact}"
+        );
+        assert!(
+            !compact.contains("SuperGrok dollar credits")
+                && !compact.to_ascii_lowercase().contains("extras"),
+            "console-live compact must not paint SuperGrok dollar credits: {compact}"
+        );
+
+        let snap = LimitsSnapshot::from_billing(
+            agent.credit_balance.as_ref(),
+            None,
+            agent.sampling_identity,
+        )
+        .with_console_balance_cents(agent.console_team_prepaid_cents);
+        let active = active_driver_line_for_snapshot(&snap);
+        assert_eq!(active, "Active: console key");
+        let limits = format_limits_detail(&snap);
+        assert!(
+            limits.contains("Team prepaid remaining") && limits.contains("$226.75"),
+            "/limits must name console team prepaid when console is live: {limits}"
+        );
+        assert!(
+            !limits.contains("Active: SuperGrok dollar credits"),
+            "/limits Active must not stay on SuperGrok dollar credits after console hop: {limits}"
+        );
+    }
+
+    fn summary_generated_ext(
+        session_id: &str,
+        title: &str,
+        title_is_manual: bool,
+    ) -> acp::ExtNotification {
+        let meta = if title_is_manual {
+            Some(xai_grok_shell::extensions::notification::title_is_manual_meta())
+        } else {
+            None
+        };
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::SessionSummaryGenerated {
+                session_summary: title.into(),
+            },
+            meta,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    }
+
+    #[test]
+    fn manual_title_notification_sets_display_name_without_entity_decode() {
+        let mut app = make_app_with_agent("sess-1");
+        let changed = handle_session_notification(
+            &summary_generated_ext("sess-1", "a &amp; b", true),
+            &mut app,
+        );
+        assert!(changed);
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            agent.display_name.as_deref(),
+            Some("a &amp; b"),
+            "manual meta must set display_name from the raw title"
+        );
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some("a &amp; b"),
+            "manual meta must skip HTML-entity decode"
+        );
+    }
+
+    #[test]
+    fn auto_title_blank_after_sanitize_does_not_clear_existing() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().generated_session_title =
+            Some("Keep Me".into());
+        assert!(handle_session_notification(
+            &summary_generated_ext("sess-1", "\u{1b}\u{07}", false),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents[&AgentId(0)]
+                .generated_session_title
+                .as_deref(),
+            Some("Keep Me"),
+            "control-only auto replay must not wipe an existing title"
+        );
+    }
+
+    #[test]
+    fn auto_title_notification_does_not_set_display_name() {
+        let mut app = make_app_with_agent("sess-1");
+        let changed = handle_session_notification(
+            &summary_generated_ext("sess-1", "a &amp; b", false),
+            &mut app,
+        );
+        assert!(changed);
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.display_name.is_none(),
+            "auto titles must not promote to display_name"
+        );
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some("a & b"),
+            "auto titles still HTML-entity-decode"
+        );
+    }
+
+    #[test]
+    fn auto_title_notification_does_not_clobber_existing_display_name() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().display_name = Some("Pinned".into());
+        let changed = handle_session_notification(
+            &summary_generated_ext("sess-1", "a &amp; b", false),
+            &mut app,
+        );
+        assert!(changed);
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.display_name.as_deref(), Some("Pinned"));
+        assert_eq!(agent.generated_session_title.as_deref(), Some("a & b"));
+    }
+
+    #[test]
+    fn manual_meta_false_clears_display_name() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().display_name = Some("Pinned".into());
+        app.agents.get_mut(&AgentId(0)).unwrap().generated_session_title =
+            Some("Pinned".into());
+        let n = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::SessionSummaryGenerated {
+                session_summary: String::new(),
+            },
+            meta: Some(serde_json::json!({ "x.ai/titleIsManual": false })),
+        };
+        let raw = serde_json::value::to_raw_value(&n).unwrap();
+        let notif = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
+        assert!(handle_session_notification(&notif, &mut app));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.display_name.is_none(),
+            "explicit unpin meta must clear display_name"
+        );
+        assert!(
+            agent.generated_session_title.is_none(),
+            "empty unpin summary must drop the follower's manual generated title"
+        );
+    }
+
+    #[test]
+    fn manual_meta_false_empty_summary_keeps_leftover_auto_title() {
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().display_name = Some("Pinned".into());
+        app.agents.get_mut(&AgentId(0)).unwrap().generated_session_title =
+            Some("Auto".into());
+        let n = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::SessionSummaryGenerated {
+                session_summary: String::new(),
+            },
+            meta: Some(serde_json::json!({ "x.ai/titleIsManual": false })),
+        };
+        let raw = serde_json::value::to_raw_value(&n).unwrap();
+        let notif = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
+        assert!(handle_session_notification(&notif, &mut app));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.display_name.is_none(),
+            "explicit unpin meta must still clear display_name"
+        );
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some("Auto"),
+            "empty unpin fan-out must not wipe a leftover auto title"
+        );
+    }
+
+    #[test]
+    fn auto_title_notification_strips_controls_and_caps() {
+        use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS;
+        let mut app = make_app_with_agent("sess-1");
+        let dirty = format!(
+            "ok\u{1b}]0;PWNED\u{07}{}",
+            "é".repeat(MAX_TITLE_SCALARS + 5)
+        );
+        assert!(handle_session_notification(
+            &summary_generated_ext("sess-1", &dirty, false),
+            &mut app,
+        ));
+        const PREFIX: &str = "ok]0;PWNED";
+        let expected = format!(
+            "{PREFIX}{}",
+            "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.display_name.is_none(),
+            "auto titles must not promote to display_name"
+        );
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn manual_title_notification_strips_controls_and_caps() {
+        use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS;
+        let mut app = make_app_with_agent("sess-1");
+        let dirty = format!("ok\u{1b}]0;PWNED\u{07}{}", "é".repeat(MAX_TITLE_SCALARS + 5));
+        assert!(handle_session_notification(
+            &summary_generated_ext("sess-1", &dirty, true),
+            &mut app,
+        ));
+        const PREFIX: &str = "ok]0;PWNED";
+        let expected = format!(
+            "{PREFIX}{}",
+            "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.display_name.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            agent.generated_session_title.as_deref(),
+            Some(expected.as_str())
         );
     }
 

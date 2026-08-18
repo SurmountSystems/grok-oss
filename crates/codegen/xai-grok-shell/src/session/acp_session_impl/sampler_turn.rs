@@ -2,6 +2,10 @@
 //! facts/gates and retry, sampler config reconstruction, sampling-failure
 //! recovery, and per-response usage recording.
 use super::*;
+const CLASSIFIER_REQUEST_TOKEN_RESERVE: u64 = 16_384;
+fn classifier_request_fits_context(input_tokens: u64, context_window: u64) -> bool {
+    input_tokens <= context_window.saturating_sub(CLASSIFIER_REQUEST_TOKEN_RESERVE)
+}
 /// Auth-failure detector for tool errors. Matches strictly on HTTP 401
 /// when the error carries a structured status code, mirroring
 /// `SamplingError::is_auth_error` in xai-grok-sampling-types: 403 is
@@ -107,10 +111,36 @@ where
         result
     }
 }
+/// Rebuild primary + failover from ranked auto-use order.
+///
+/// `prepare_sampler_for_turn` / `reconstruct_full_config` must not keep a
+/// sticky personal JWT (or console-in-failover) when a sibling SuperGrok
+/// login still has included SuperGrok period limits. Hermetic: no network.
+pub(crate) fn apply_ranked_auto_turn_credentials(
+    grok_home: &Path,
+    api_key: &mut Option<String>,
+    failover_api_keys: &mut Vec<String>,
+    session_identity_key: &mut Option<String>,
+) {
+    let sessions = crate::auth::load_supergrok_session_candidates(grok_home);
+    if sessions.is_empty() {
+        return;
+    }
+    let console = crate::agent::config::collect_xai_console_api_keys();
+    let order = crate::auth::order_credentials_for_preferred_auto(&sessions, &console);
+    if let Some(primary) = order.primary {
+        *api_key = Some(primary);
+    }
+    *failover_api_keys = order.failover;
+    if let Some(sk) = order.session_identity_key {
+        *session_identity_key = Some(sk);
+    }
+}
+
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
-        match self.mcp_strategy {
+        match self.mcp_strategy.get() {
             McpInitStrategy::Blocking => {
                 if !self.mcp_state.lock().await.is_initialized() {
                     tracing::info!(
@@ -408,18 +438,6 @@ impl SessionActor {
                 }
             }
         }
-        #[allow(clippy::items_after_statements)]
-        struct AuthManagerBearerResolver(std::sync::Arc<crate::auth::AuthManager>);
-        impl std::fmt::Debug for AuthManagerBearerResolver {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("AuthManagerBearerResolver").finish()
-            }
-        }
-        impl xai_grok_sampler::BearerResolver for AuthManagerBearerResolver {
-            fn current_bearer(&self) -> Option<String> {
-                self.0.current_wire_valid().map(|a| a.key)
-            }
-        }
         let cfg = self
             .chat_state_handle
             .get_sampling_config()
@@ -446,27 +464,9 @@ impl SessionActor {
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
-            // Free SuperGrok period dual-identity rank must drive SessionToken
-            // bearer. Without this, sticky AuthManager Team base keeps sampling
-            // business JWT while rank preferred personal free SuperGrok period.
+            let _ = am.auth().await;
             if am.grok_com_config().auto_use_included_limits {
                 let _ = am.align_to_ranked_free_period_primary();
-            }
-            let _ = am.auth().await;
-            // Path-trace every SessionToken reconstruct: principal_type + team_id
-            // prove which SuperGrok identity is wire-active (User/personal vs
-            // Team/business) without dumping the JWT. Dogfood for free SuperGrok
-            // period debit needs this next to flat creditUsagePercent evidence.
-            if let Some(trace) = am.session_wire_bearer_trace() {
-                tracing::info!(
-                    ?trace,
-                    "auth: SessionToken wire bearer for free SuperGrok period path"
-                );
-                xai_grok_telemetry::unified_log::info(
-                    "auth: SessionToken wire bearer for free SuperGrok period path",
-                    None,
-                    Some(trace),
-                );
             }
         }
         let api_key = if use_bearer_resolver {
@@ -507,12 +507,13 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
-        let mut full = SamplingConfig {
+        let extra_response_includes = crate::agent::config::response_include_extensions(
+            self.supports_backend_search.get(),
+            &cfg.api_backend,
+            &cfg.base_url,
+        );
+        let mut sampling = SamplingConfig {
             api_key,
-            failover_api_keys: creds.failover_api_keys,
-            failover_base_url: creds.failover_base_url,
-            session_base_url: creds.session_base_url,
-            session_identity_key: creds.session_identity_key,
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -521,6 +522,7 @@ impl SessionActor {
             api_backend: cfg.api_backend,
             auth_scheme,
             extra_headers,
+            extra_response_includes,
             query_params: cfg.query_params.clone(),
             env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
@@ -543,42 +545,37 @@ impl SessionActor {
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
             bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> xai_grok_sampler::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
+                self.auth_manager.as_ref().map(|am| {
+                    crate::auth::credential_provider::WireValidBearerResolver::shared(am.clone())
+                })
             } else {
                 None
             },
-            stashed_bearer_resolver: None,
-            // Durable live re-bind for hop-to-session without prior stash
-            // (key-primary dual-auth mid-hop; next turn also re-resolves here).
-            session_bearer_resolver: self.auth_manager.as_ref().map(|am| {
-                std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    as xai_grok_sampler::SharedBearerResolver
-            }),
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            failover_api_keys: creds.failover_api_keys.clone(),
+            failover_base_url: creds.failover_base_url.clone(),
+            session_base_url: creds.session_base_url.clone(),
+            session_identity_key: creds.session_identity_key.clone(),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
         };
-        // Dual-auth sticky: resolve always re-pins SuperGrok session as primary.
-        // When that identity is memoized credit-exhausted, prefer console key
-        // *here* so first attempt (main turn, compaction, aux clients built from
-        // this config) never hits SuperGrok extras and never shows per-turn hop
-        // Retrying chrome. Silent when already sticky.
-        if let Some(hop_reason) =
-            xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut full)
+        if use_bearer_resolver
+            && let Some(am) = self.auth_manager.as_ref()
+            && am.grok_com_config().auto_use_included_limits
+            && let Some(home) = am.auth_json_path().parent()
         {
-            tracing::info!(
-                target: "xai_grok_shell::session",
-                %hop_reason,
-                "reconstruct_full_config: sticky credit preference → console primary"
+            apply_ranked_auto_turn_credentials(
+                home,
+                &mut sampling.api_key,
+                &mut sampling.failover_api_keys,
+                &mut sampling.session_identity_key,
             );
         }
-        full
+        sampling
     }
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +
@@ -607,7 +604,7 @@ impl SessionActor {
         let effective_supports_re = crate::agent::config::effective_classifier_supports_re(
             aux_classifier_sampler
                 .as_ref()
-                .map(|(_, model)| model.as_str()),
+                .map(|(_, model, _)| model.as_str()),
             &session_model,
             &models,
         );
@@ -624,22 +621,20 @@ impl SessionActor {
         tokio::task::spawn_local(async move {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let result = async {
-                    let (sampling_client, model) = match &aux_classifier_sampler {
-                        Some((client, model)) => (client.clone(), model.clone()),
+                    let (sampling_client, model, context_window) = match &aux_classifier_sampler {
+                        Some((client, model, context_window)) => {
+                            (client.clone(), model.clone(), *context_window)
+                        }
                         None => {
-                            let client = session
-                                .prepare_chat_completion(false)
-                                .await
+                            session.refresh_token_if_expired().await;
+                            let config = session.reconstruct_full_config().await;
+                            let context_window = config.context_window;
+                            let model = config.model.clone();
+                            let client = xai_grok_sampler::SamplingClient::new(config)
                                 .map_err(|e| xai_grok_workspace::permission::ClassifierFailure::TransportError(
                                     e.to_string(),
                                 ))?;
-                            let model = session
-                                .chat_state_handle
-                                .get_sampling_config()
-                                .await
-                                .map(|c| c.model)
-                                .unwrap_or_default();
-                            (client, model)
+                            (client, model, context_window)
                         }
                     };
                     let session_id = session.session_info.id.to_string();
@@ -654,6 +649,17 @@ impl SessionActor {
                             }
                         })
                         .collect::<Vec<_>>();
+                    let input_tokens = xai_chat_state::estimate_conversation_tokens(
+                        &items,
+                    );
+                    if !classifier_request_fits_context(input_tokens, context_window) {
+                        return Err(
+                            xai_grok_workspace::permission::ClassifierFailure::TransportError(
+                                "permission auto classifier request exceeds context window"
+                                    .to_owned(),
+                            ),
+                        );
+                    }
                     let request = ConversationRequest {
                         items,
                         tools: vec![],
@@ -722,19 +728,12 @@ impl SessionActor {
             .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (disable_api_key_auth, preferred_method, auto_use_included_limits) = self
+        let disable_api_key_auth = self
             .auth_manager
             .as_ref()
-            .map(|am| {
-                let gc = am.grok_com_config();
-                (
-                    gc.api_key_auth_disabled(),
-                    gc.preferred_method,
-                    gc.auto_use_included_limits,
-                )
-            })
-            .unwrap_or((false, None, false));
-        crate::agent::config::resolve_aux_model_sampling_config_preferring(
+            .map(|am| am.grok_com_config().api_key_auth_disabled())
+            .unwrap_or(false);
+        crate::agent::config::resolve_aux_model_sampling_config(
             slug,
             &models,
             &endpoints,
@@ -742,8 +741,6 @@ impl SessionActor {
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
             creds.client_version.clone(),
-            preferred_method,
-            auto_use_included_limits,
         )
     }
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
@@ -754,7 +751,7 @@ impl SessionActor {
     async fn resolve_auto_classifier_sampler(
         &self,
         slug: &str,
-    ) -> Option<(xai_grok_sampler::SamplingClient, String)> {
+    ) -> Option<(xai_grok_sampler::SamplingClient, String, u64)> {
         let active_session_config = self.reconstruct_full_config().await;
         let mut cfg = self.resolve_aux_sampler_config(slug).await?;
         crate::agent::config::stamp_session_local_sampler_fields(
@@ -764,12 +761,13 @@ impl SessionActor {
             Some(self.max_retries),
         );
         let model = cfg.model.clone();
+        let context_window = cfg.context_window;
         let client = xai_grok_sampler::SamplingClient::new(cfg)
             .map_err(|e| {
                 tracing::warn!(error = %e, "auto classifier aux sampler build failed; using session model")
             })
             .ok()?;
-        Some((client, model))
+        Some((client, model, context_window))
     }
     #[tracing::instrument(
         name = "session.prepare_chat_completion",
@@ -799,6 +797,11 @@ impl SessionActor {
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
+        if let Some(am) = self.auth_manager.as_ref()
+            && am.grok_com_config().auto_use_included_limits
+        {
+            let _ = am.align_to_ranked_free_period_primary();
+        }
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -808,6 +811,61 @@ impl SessionActor {
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
+    }
+    /// Fold an auth remedy into a turn failure: its advice becomes the tail of
+    /// the message, and its `turn_error_type` the classification the client
+    /// keys its re-auth prompt off.
+    fn apply_auth_remedy(
+        &self,
+        remedy: &crate::auth::AuthRemedy,
+        message: String,
+        status_code: Option<u16>,
+    ) -> (&'static str, String) {
+        xai_grok_telemetry::unified_log::info(
+            "auth: turn failure classified",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "status_code": status_code,
+                "remedy": format!("{remedy:?}"),
+            })),
+        );
+        let message = match remedy.advice() {
+            Some(advice) => format!("{message}\n\n{advice}"),
+            None => message,
+        };
+        (remedy.turn_error_type(), message)
+    }
+    /// Terminal failure for a turn the auth-retry budget gave up on — the one
+    /// terminal path that lives outside [`Self::handle_sampling_failure`].
+    ///
+    /// Every terminal path owes the client one `RetryState::Failed`: it is
+    /// what raises the pager's re-auth prompt and its turn-failed block. This
+    /// arm used to return its `acp::Error` without one, so a turn that died on
+    /// repeated 401s ended in silence.
+    pub(crate) async fn fail_turn_auth_budget_exhausted(&self, message: String) -> acp::Error {
+        const STATUS: Option<u16> = Some(401);
+        let (error_type, message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) => {
+                auth_manager.note_terminal_inference_auth_rejection();
+                self.apply_auth_remedy(
+                    &auth_manager.auth_remedy().after_retries_exhausted(),
+                    message,
+                    STATUS,
+                )
+            }
+            None => ("auth", message),
+        };
+        self.log_terminal_failure(error_type, STATUS, &message);
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: error_type.to_owned(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        acp::Error::internal_error().data(crate::sampling::error::error_data_with_status(
+            message, STATUS,
+        ))
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
         let auth = self
@@ -823,7 +881,7 @@ impl SessionActor {
                 "status_code": status_code,
                 "reauthable": reauthable,
                 "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
-                "key_prefix": auth.as_ref().map(|a| crate::auth::token_suffix(&a.key).to_owned()),
+                "key_prefix": auth.as_ref().map(|a| xai_grok_auth::bearer_suffix(&a.key).to_owned()),
                 "expires_at": auth
                     .as_ref()
                     .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
@@ -874,14 +932,7 @@ impl SessionActor {
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
-                    if new_cw.get() > self.compaction.model_context_window.get() {
-                        self.compaction.model_context_window.set(new_cw.get());
-                    }
-                    let effective = crate::util::config::apply_economic_context_cap(
-                        self.compaction.model_context_window.get().max(new_cw.get()),
-                        self.compaction.economic_mode.get(),
-                    );
-                    cfg.context_window = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
+                    cfg.context_window = new_cw;
                     self.chat_state_handle.update_sampling_config(cfg);
                 }
                 let trigger_info = compaction::AutoCompactTriggerInfo {
@@ -893,34 +944,14 @@ impl SessionActor {
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }
+                    // Cancelled compact must not CompactAndResubmit (that
+                    // re-arms AUTO while the operator is trying to type).
                     return Err(e);
                 }
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
         }
-        // Edge / gateway outages: plain English for RetryFailed + ACP data,
-        // not raw "API error (status 521 <unknown status code>)" Internal JSON.
-        // Team credit / monthly spending limit 403: same plain-English path
-        // (not Internal error JSON envelope).
-        let detailed_message = match error.status_code {
-            Some(code)
-                if xai_grok_sampling_types::is_edge_outage_status(code)
-                    || matches!(code, 502..=504) =>
-            {
-                let status =
-                    reqwest::StatusCode::from_u16(code).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-                xai_grok_sampling_types::outage_exhausted_user_message(status, 1)
-            }
-            Some(code)
-                if matches!(code, 402 | 403 | 429 | 400)
-                    && xai_grok_sampling_types::is_credit_exhausted_message(&error.message) =>
-            {
-                xai_grok_sampling_types::credit_exhausted_user_message(&error.message)
-            }
-            _ => error.message.clone(),
-        };
-        let credit_exhausted_terminal = matches!(error.status_code, Some(402 | 403 | 429 | 400))
-            && xai_grok_sampling_types::is_credit_exhausted_message(&error.message);
+        let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")
@@ -1012,34 +1043,6 @@ impl SessionActor {
                 })),
             );
         }
-        if auth_recovery_eligible
-            && crate::auth::devbox_login::is_devbox_environment()
-            && let Some(ref am) = self.auth_manager
-        {
-            match am.try_devbox_recovery().await {
-                Ok(auth) => {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        user_id = %auth.user_id,
-                        "auth recovery: sampler 401, devbox re-mint, retrying"
-                    );
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %self.session_info.id.0,
-                        error = %e,
-                        "auth recovery: sampler 401, devbox re-mint failed"
-                    );
-                    xai_grok_telemetry::unified_log::warn(
-                        "auth recovery: sampler 401, devbox re-mint failed",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({ "error": format!("{e}") })),
-                    );
-                }
-            }
-        }
         if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
@@ -1052,7 +1055,10 @@ impl SessionActor {
                     None,
                 );
                 self.prepare_sampler_for_turn().await;
-                return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                    credential: error.credential,
+                    store: RecoveredStore::SessionToken,
+                });
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
             xai_grok_telemetry::unified_log::warn(
@@ -1065,7 +1071,10 @@ impl SessionActor {
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
-            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+            return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                credential: error.credential,
+                store: RecoveredStore::AuthProvider,
+            });
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -1099,7 +1108,7 @@ impl SessionActor {
         let auth_mode = self
             .auth_manager
             .as_ref()
-            .and_then(|am| am.current())
+            .and_then(|am| am.current_or_expired())
             .map(|a| a.auth_mode)
             .unwrap_or(crate::auth::AuthMode::ApiKey);
         let auth_mode_str = format!("{auth_mode:?}");
@@ -1109,7 +1118,7 @@ impl SessionActor {
                 "{detailed_message}\n\n\
                  You are using a deprecated authentication method (WebLogin).\n\
                  This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grok logout` then `grok login` to re-authenticate with OAuth2.\n\n\
+                 To fix: run `grok update`, then `grok logout`, then `grok login` to re-authenticate with OAuth2.\n\n\
                  Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);
@@ -1172,6 +1181,17 @@ impl SessionActor {
         } else {
             error.kind.as_str()
         };
+        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
+            Some(auth_manager) if error_type == "auth" => {
+                auth_manager.note_terminal_inference_auth_rejection();
+                self.apply_auth_remedy(
+                    &auth_manager.auth_remedy(),
+                    detailed_message,
+                    error.status_code,
+                )
+            }
+            _ => (error_type, detailed_message),
+        };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -1180,11 +1200,6 @@ impl SessionActor {
             },
         ))
         .await;
-        // Credit-exhausted team 403: plain string data (operator-readable), not
-        // `{"message":"API error (status …)","http_status":403}` envelope only.
-        if credit_exhausted_terminal {
-            return Err(acp::Error::internal_error().data(detailed_message));
-        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,
@@ -1209,35 +1224,6 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
-        // Free SuperGrok period debit unproven (flat poll): default **allows**
-        // turns (dogfood). Opt-in hard block via
-        // [auth] allow_spend_when_free_period_debit_unproven = false.
-        // Honesty: warn when unproven with headroom even when not blocking.
-        let unproven_guard = crate::auth::evaluate_free_period_unproven_spend_guard();
-        if unproven_guard.honesty_unproven_allowed() {
-            tracing::warn!(
-                target: "auth.free_period_unproven_guard",
-                allow = unproven_guard.allow_spend_when_unproven,
-                unproven = unproven_guard.flat_poll_unproven,
-                headroom = unproven_guard.free_period_has_headroom,
-                "free SuperGrok period limits not debiting (flat poll); turns allowed by default; team settlement can still move"
-            );
-        }
-        if let Some(msg) = unproven_guard.block_message() {
-            tracing::warn!(
-                target: "auth.free_period_unproven_guard",
-                allow = unproven_guard.allow_spend_when_unproven,
-                unproven = unproven_guard.flat_poll_unproven,
-                headroom = unproven_guard.free_period_has_headroom,
-                "blocking sampler turn (opt-in hard block): free SuperGrok period debit unproven"
-            );
-            // Product message as primary ACP message so the UI does not show
-            // "Internal error: …" for this intentional operator gate.
-            return Err(acp::Error::new(
-                i32::from(acp::Error::internal_error().code),
-                msg,
-            ));
-        }
         self.prepare_sampler_for_turn().await;
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1282,8 +1268,8 @@ impl SessionActor {
                     SamplerFailureRecovery::CompactAndResubmit => {
                         Ok(SamplerTurnOutcome::CompactAndResubmit)
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                    SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
+                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
                     }
                 }
             }
@@ -1310,31 +1296,7 @@ impl SessionActor {
             if self.auth_gate(&model_id, &base_url).active() {
                 match am.get_valid_token().await {
                     Ok(key) => {
-                        // Dual-auth: after hop / prefer_live the live primary may
-                        // be the console API key while ACP auth method stays
-                        // session-based. session_identity_key holds the SuperGrok
-                        // JWT; when live api_key differs, do **not** clobber the
-                        // console key with a fresh session JWT (that left JWT on
-                        // api.x.ai and kept draining the wrong pool / subagents).
-                        let live_is_console_after_hop = creds
-                            .session_identity_key
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .zip(
-                                creds
-                                    .api_key
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty()),
-                            )
-                            .is_some_and(|(sess, live)| sess != live);
-                        if live_is_console_after_hop {
-                            tracing::debug!(
-                                model = %model_id,
-                                "pre-flight: keep console primary (session JWT still in memo); skip session token overwrite"
-                            );
-                        } else if creds.api_key.as_deref() != Some(&key) {
+                        if creds.api_key.as_deref() != Some(&key) {
                             let mut creds = creds;
                             creds.api_key = Some(key);
                             self.chat_state_handle.update_credentials(creds);
@@ -1496,89 +1458,47 @@ impl SessionActor {
             self.chat_state_handle
                 .record_token_usage(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
-            let model_id = response.assistant().and_then(|a| a.model_id.clone());
             self.chat_state_handle.record_model_call_usage(
-                model_id.clone(),
+                response.assistant().and_then(|a| a.model_id.clone()),
                 u.clone(),
                 api_duration_ms,
                 response.cost_usd_ticks,
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
-            // Durable per-call bill row (fail-open). Main vs subagent identity.
-            self.append_usage_jsonl(model_id, u, api_duration_ms, response.cost_usd_ticks);
+            let identity = if self.startup_hints.is_subagent {
+                crate::session::usage_log::UsageIdentity::agent_turn(
+                    self.startup_hints.subagent_type.clone().unwrap_or_default(),
+                    self.startup_hints.work_ulid.clone(),
+                )
+            } else {
+                crate::session::usage_log::UsageIdentity::main()
+            };
+            let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+            crate::session::usage_log::record_model_call(
+                &crate::session::persistence::session_dir(&self.session_info),
+                identity,
+                self.session_info.id.0.as_ref(),
+                prompt_id,
+                response.assistant().and_then(|a| a.model_id.clone()),
+                u,
+                api_duration_ms,
+                response.cost_usd_ticks,
+            );
         } else if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
             let handle = self.chat_state_handle.clone();
             tokio::spawn(async move {
                 let _ = handle.mark_usage_incomplete(true, true).await;
             });
-            self.append_usage_jsonl_incomplete(None);
         } else if self.tool_context.sampler_retry_only_before_output {
             let handle = self.chat_state_handle.clone();
             tokio::spawn(async move {
                 let _ = handle.mark_usage_incomplete(true, true).await;
             });
-            self.append_usage_jsonl_incomplete(None);
         }
-    }
-
-    /// Main vs subagent row identity for `usage.jsonl`.
-    fn usage_jsonl_identity(&self) -> crate::session::usage_log::UsageIdentity {
-        use crate::session::usage_log::UsageIdentity;
-        if self.startup_hints.is_subagent {
-            let kind = self
-                .subagent_type_label()
-                .unwrap_or_else(|| crate::session::usage_log::AGENT_KIND_SUBAGENT.to_owned());
-            UsageIdentity::agent_turn(kind, self.startup_hints.work_ulid.clone())
-        } else {
-            let mut id = UsageIdentity::main();
-            // Main sessions rarely mint a work_ulid; pass through when set.
-            id.work_ulid = self.startup_hints.work_ulid.clone();
-            id
-        }
-    }
-
-    /// Append one model-call row to session `usage.jsonl`. Fail-open.
-    fn append_usage_jsonl(
-        &self,
-        model_id: Option<String>,
-        usage: &xai_grok_sampling_types::TokenUsage,
-        api_duration_ms: Option<u64>,
-        cost_usd_ticks: Option<i64>,
-    ) {
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
-        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
-        crate::session::usage_log::record_model_call(
-            &session_dir,
-            self.usage_jsonl_identity(),
-            self.session_info.id.0.as_ref(),
-            prompt_id,
-            model_id,
-            usage,
-            api_duration_ms,
-            cost_usd_ticks,
-        );
-    }
-
-    /// Append an incomplete model-call row when usage was omitted. Fail-open.
-    fn append_usage_jsonl_incomplete(&self, model_id: Option<String>) {
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
-        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
-        crate::session::usage_log::record_incomplete(
-            &session_dir,
-            self.usage_jsonl_identity(),
-            self.session_info.id.0.as_ref(),
-            prompt_id,
-            model_id,
-        );
     }
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
-        // Align chat_state / next-turn context with scrubbed stream UI text.
-        let assistant_item =
-            crate::session::helpers::assistant_ascii_scrub::scrub_assistant_conversation_item(
-                assistant_item,
-            );
         self.signals_handle().record_assistant_message();
         if let ConversationItem::Assistant(ref a) = assistant_item {
             tracing::info!(model_id = ?a.model_id, "DEBUG record_assistant_response model_id");
@@ -1616,6 +1536,24 @@ fn resolve_configured_cutoff(
     ToolOverrides {
         x_search: prefer_non_empty(over_x, seed_x, XSearchOptions::is_empty),
         web_search: prefer_non_empty(over_w, seed_w, WebSearchOptions::is_empty),
+    }
+}
+#[cfg(test)]
+mod classifier_request_bound_tests {
+    use super::{CLASSIFIER_REQUEST_TOKEN_RESERVE, classifier_request_fits_context};
+    #[test]
+    fn enforces_reserved_threshold_with_saturating_arithmetic() {
+        let window = 12_000 + CLASSIFIER_REQUEST_TOKEN_RESERVE;
+        for (input, context_window, expected) in [
+            (12_000, window, true),
+            (12_001, window, false),
+            (u64::MAX, u64::MAX, false),
+        ] {
+            assert_eq!(
+                classifier_request_fits_context(input, context_window),
+                expected
+            );
+        }
     }
 }
 #[cfg(test)]
@@ -1702,5 +1640,270 @@ mod configured_cutoff_tests {
             let inherited = super::resolve_configured_cutoff(seed.clone(), base.as_ref());
             assert_eq!(wire_echo, inherited, "seed={seed:?} base={base:?}");
         }
+    }
+}
+
+/// Hermetic: per-turn reconstruct must align to ranked included SuperGrok
+/// period primary (Business sibling) before SuperGrok dollar credits on a
+/// full personal login. No live network.
+#[cfg(test)]
+mod ranked_auto_turn_tests {
+    use super::apply_ranked_auto_turn_credentials;
+    use crate::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
+    use crate::auth::xai_console::add_console_api_key;
+    use crate::auth::{
+        AuthMode, GrokAuth, clear_included_billing_cache, remember_supergrok_dollar_extras,
+        remember_supergrok_included_billing, upsert_supergrok_session,
+    };
+    use xai_grok_test_support::EnvGuard;
+
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_aligns_to_ranked_included_primary() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-full-extras".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-wait").unwrap());
+
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            40.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let mut api_key = Some("tok-personal-full-extras".into());
+        let mut failover = vec!["console-must-wait".into()];
+        let mut session_identity = Some("tok-personal-full-extras".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-business-included"),
+            "per-turn reconstruct must hop to Business included SuperGrok period limits"
+        );
+        assert_eq!(
+            failover,
+            vec!["tok-personal-full-extras".to_string()],
+            "personal usagePct 100 without SuperGrok Heavy keeps included remaining; console omitted: {failover:?}"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
+        clear_included_billing_cache();
+    }
+
+    /// False 100% / missing SuperGrok Heavy on both stored logins must not
+    /// flatten Team included remaining to zero and keep the personal SuperGrok
+    /// dollar-credit JWT. SuperGrok Heavy is a distinct weekly pool.
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-team-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-false-100".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-not-win").unwrap());
+
+        // Snapshot shape: both usagePct 100.0, no Heavy field.
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            100.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let mut api_key = Some("tok-personal-false-100".into());
+        let mut failover = vec!["console-must-not-win".into()];
+        let mut session_identity = Some("tok-personal-false-100".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-team-included"),
+            "missing Heavy / false 100% must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+        );
+        assert_eq!(
+            failover,
+            vec!["tok-personal-false-100".to_string()],
+            "personal included remaining is next; console omitted: {failover:?}"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        clear_included_billing_cache();
+    }
+
+    /// Sister snapshot shape: SuperGrok dollar credits remembered on both
+    /// stored logins, `creditUsagePercent` 100.0, SuperGrok Heavy missing.
+    /// Next model turn must hop to Team included remaining, not SuperGrok
+    /// dollar credits.
+    #[test]
+    #[serial_test::serial]
+    fn prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both() {
+        clear_included_billing_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("GROK_HOME", dir.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::test-client";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-team-included".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-b".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-biz".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal-dollars".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-p".into(),
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let store = CredentialsStore::at_grok_home(dir.path());
+        assert!(add_console_api_key(&store, "console-must-not-win").unwrap());
+
+        remember_supergrok_included_billing(
+            "user-p",
+            100.0,
+            Some("2026-08-20T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_included_billing(
+            "team-biz",
+            100.0,
+            Some("2026-08-21T00:00:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_dollar_extras("team-biz", 10_029);
+
+        let mut api_key = Some("tok-personal-dollars".into());
+        let mut failover = vec!["console-must-not-win".into()];
+        let mut session_identity = Some("tok-personal-dollars".into());
+        apply_ranked_auto_turn_credentials(
+            dir.path(),
+            &mut api_key,
+            &mut failover,
+            &mut session_identity,
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("tok-team-included"),
+            "100% + SuperGrok dollar credits on both + missing Heavy must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+        );
+        assert_eq!(
+            failover,
+            vec!["tok-personal-dollars".to_string()],
+            "personal included remaining is next; SuperGrok dollar credits and console are not primary: {failover:?}"
+        );
+        assert!(
+            !failover.iter().any(|k| k == "console-must-not-win"),
+            "must not hop to console while any stored SuperGrok identity has included remaining"
+        );
+        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        clear_included_billing_cache();
     }
 }

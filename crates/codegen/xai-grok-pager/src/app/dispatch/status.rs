@@ -3,6 +3,7 @@
 use agent_client_protocol as acp;
 
 use super::ctx::get_active_agent;
+use super::queue::push_and_page_flip;
 use super::settings::ui::refresh_open_settings_modals;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
@@ -11,44 +12,113 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 
-/// Toggle YOLO mode (auto-approve all permissions).
-///
-/// When turning ON: auto-approve all currently queued permissions and
-/// restore the stashed prompt. Future incoming permissions will be
-/// auto-approved in `handle_permission_request`.
-///
-/// Share the current session via a public URL.
-///
-/// Produces Effect::ShareSession which spawns an async ACP ext request.
-/// On completion, TaskResult::ShareSessionComplete shows the URL in scrollback.
+/// Temporary kill switch: client share links are disabled.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    if !app.sharing_enabled {
-        app.show_toast("Sharing is disabled");
-        return vec![];
+    app.show_toast("Session sharing is temporarily disabled");
+    vec![]
+}
+
+/// Monotonic generation for usage-modal fetches. Each open stamps the modal
+/// and its effects with a fresh value so a reply from a previous open (same
+/// session, modal closed and reopened) can't overwrite newer results. `0` is
+/// reserved for the minimal-mode paths, which never touch the modal.
+static USAGE_FETCH_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_usage_fetch_nonce() -> u64 {
+    USAGE_FETCH_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// The agent's open usage modal state, if any.
+pub(super) fn usage_modal_state_mut(
+    agent: &mut AgentView,
+) -> Option<&mut crate::views::usage_modal::UsageInfoModalState> {
+    match agent.active_modal.as_mut() {
+        Some(crate::views::modal::ActiveModal::UsageInfo { state }) => Some(state),
+        _ => None,
     }
+}
+
+/// Open (or re-tab) the usage/session-info modal and fire the fetch effects
+/// that populate it. Full-TUI only — minimal mode keeps scrollback blocks.
+pub(super) fn open_usage_info_modal(
+    app: &mut AppView,
+    tab: crate::views::usage_modal::UsageInfoTab,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
+
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let usage_visible = app.usage_visible;
+    let redirect_url = app.usage_billing_redirect_url.clone();
+    let tier = app.subscription_tier.clone();
+    let show_resolved_model = app.show_resolved_model;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        // No active session — error should have been caught by slash command,
-        // but guard here just in case.
-        return vec![];
-    };
+    let session_id = agent.session.session_id.clone();
 
-    vec![Effect::ShareSession {
-        agent_id: id,
-        session_id,
-    }]
+    if let Some(state) = usage_modal_state_mut(agent) {
+        state.set_tab(tab);
+        return vec![];
+    }
+
+    let billing_reachable = usage_visible && !agent.chat_kind && redirect_url.is_none();
+    let nonce = next_usage_fetch_nonce();
+    let mut state = UsageInfoModalState::new(
+        tab,
+        UsageInfoContext {
+            session_id: session_id.as_ref().map(|s| s.0.to_string()),
+            usage_visible,
+            chat_kind: agent.chat_kind,
+            billing_redirect_url: redirect_url,
+            subscription_tier: tier,
+        },
+    );
+    state.fetch_nonce = nonce;
+
+    let mut effects = Vec::new();
+    if let Some(session_id) = session_id {
+        effects.push(Effect::ShowContextInfo {
+            agent_id: id,
+            session_id: session_id.clone(),
+            nonce,
+        });
+        effects.push(Effect::ShowSessionInfo {
+            agent_id: id,
+            session_id: session_id.clone(),
+            show_resolved_model,
+            nonce,
+        });
+        effects.push(Effect::FetchSessionUsage {
+            agent_id: id,
+            session_id,
+            nonce,
+        });
+    }
+    // Silent refresh of the cached billing mirrors the modal renders from.
+    if billing_reachable {
+        state.billing_loading = true;
+        effects.push(Effect::FetchBilling {
+            agent_id: id,
+            silent: true,
+            nonce,
+            force_refresh: false,
+        });
+    }
+    agent.active_modal = Some(ActiveModal::UsageInfo {
+        state: Box::new(state),
+    });
+    effects
 }
 
-/// Show session info: fetch via x.ai/session/info and display in scrollback.
-///
-/// Produces Effect::ShowSessionInfo which spawns an async ACP ext request.
-/// On completion, TaskResult::SessionInfoComplete shows the formatted info.
+/// `/session-info` — open the usage modal on its "Session info" tab, or
+/// fetch-and-show in scrollback in minimal mode.
 pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
+    if !app.screen_mode.is_minimal() {
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::SessionInfo);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -65,49 +135,8 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
         agent_id: id,
         session_id,
         show_resolved_model: app.show_resolved_model,
+        nonce: 0,
     }]
-}
-
-/// Show privacy and data retention status as a system message in scrollback.
-///
-/// Three-state display: Enterprise ZDR, coding data sharing opted out,
-/// or opted in. Labels align with `CODING_DATA_SHARING_CHOICES` in
-/// `settings/defs.rs` and the `coding_data_sharing_toast` format.
-///
-/// Also lists config knobs that `/privacy` does not change (technical
-/// pointers only; no policy claims).
-pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
-    let mut lines = Vec::new();
-
-    if app.is_zdr {
-        // Enterprise ZDR -- the team has disabled retention entirely.
-        lines.push("  Zero Data Retention: enabled");
-        lines.push("  Your data is not retained or used for training (ZDR enabled).");
-    } else if app.coding_data_retention_opt_out {
-        // Coding data sharing opted out -- matches desktop's "Privacy mode" state.
-        lines.push("  Privacy: privacy mode");
-        lines.push("  Your code data will not be trained on or used to improve the product.");
-        lines.push("");
-        lines.push("  Use /privacy opt-in to share data and help improve the product.");
-    } else {
-        // Coding data sharing opted in -- matches desktop's "Share data" state.
-        lines.push("  Privacy: share data");
-        lines.push("  Usage and code data may be used by SpaceXAI to improve the product.");
-        lines.push("");
-        lines.push("  Use /privacy opt-out to enable privacy mode.");
-    }
-
-    // Config keys only; do not describe retention/training/analytics policy here.
-    lines.push("");
-    lines.push("  Other settings (not changed by /privacy):");
-    lines.push("  - [features] telemetry / GROK_TELEMETRY_ENABLED");
-    lines.push("  - [telemetry] trace_upload / GROK_TELEMETRY_TRACE_UPLOAD");
-    lines.push("  - GROK_EXTERNAL_OTEL / OTEL_*");
-    lines.push("");
-    lines.push("  Learn more: https://x.ai/legal");
-    let text = lines.join("\n");
-    push_system_to_any_agent(app, &text);
-    vec![]
 }
 
 /// State-only mutation for `coding_data_sharing`. SHELL-owned.
@@ -115,9 +144,64 @@ pub(super) fn set_coding_data_sharing_inner(app: &mut AppView, opted_in: bool) {
     app.coding_data_retention_opt_out = !opted_in;
 }
 
+/// Agent the coding-data ACP write is attributed to. Privacy is app-level,
+/// so the id only routes the result back; `AgentId(0)` is the synthetic
+/// stand-in for the welcome screen, where the banner is reachable before a
+/// session exists.
+fn coding_data_sharing_agent_id(app: &AppView) -> AgentId {
+    match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => app.agents.keys().next().copied().unwrap_or(AgentId(0)),
+    }
+}
+
+/// Claim the next write generation. Every `SetCodingDataSharing` must take
+/// one so its reply can be matched against the newest write.
+fn next_coding_data_write_seq(app: &mut AppView) -> u64 {
+    app.coding_data_write_seq += 1;
+    app.coding_data_write_seq
+}
+
+/// Is this reply from the newest write? Writes to this endpoint run
+/// concurrently and can land out of order, so an older reply must not touch
+/// state: its `rollback_to_opted_in` predates the newer write, and applying
+/// it would silently undo whatever the user did since.
+fn is_current_coding_data_write(app: &AppView, seq: u64, agent_id: AgentId) -> bool {
+    if seq == app.coding_data_write_seq {
+        return true;
+    }
+    tracing::debug!(
+        target: "settings",
+        key = "coding_data_sharing",
+        ?agent_id,
+        seq,
+        current = app.coding_data_write_seq,
+        "dropping superseded coding-data reply",
+    );
+    false
+}
+
+fn log_coding_data_consent_selected(
+    source: xai_grok_telemetry::events::CodingDataConsentSource,
+    opted_in: bool,
+    previous_opted_in: bool,
+) {
+    use xai_grok_telemetry::events::{CodingDataConsentChoice, CodingDataConsentSelected};
+    xai_grok_telemetry::session_ctx::log_event(CodingDataConsentSelected {
+        source,
+        choice: CodingDataConsentChoice::from_opted_in(opted_in),
+        previous_choice: CodingDataConsentChoice::from_opted_in(previous_opted_in),
+        changed: opted_in != previous_opted_in,
+    });
+}
+
 /// Set coding-data-sharing preference. SHELL-owned, auth-metadata-backed
 /// (persists via ACP ext-request, NOT `~/.grok/config.toml`).
-pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<Effect> {
+pub(super) fn set_coding_data_sharing(
+    app: &mut AppView,
+    opted_in: bool,
+    source: xai_grok_telemetry::events::CodingDataConsentSource,
+) -> Vec<Effect> {
     // ── Guard 1: Enterprise ZDR ──────────────────────────────────────
     if app.is_zdr {
         app.show_toast("\u{2717} Cannot change: Zero Data Retention enabled");
@@ -134,29 +218,28 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
             return vec![];
         }
     }
-    // Synthetic AgentId(0) when no agents (welcome banner Accept).
-    let agent_id = match app.active_view {
-        crate::app::app_view::ActiveView::Agent(id) => id,
-        _ => app
-            .agents
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or(crate::app::agent::AgentId(0)),
-    };
-
+    let agent_id = coding_data_sharing_agent_id(app);
     let prev = !app.coding_data_retention_opt_out;
+    log_coding_data_consent_selected(source, opted_in, prev);
 
-    // ── Idempotent path: toast but skip the ACP round-trip. ──────────
+    // Opt-out always acks now. Unchanged opt-in acks only when idle:
+    // an inflight write still owns that ack.
+    let mut effects = Vec::new();
+    if !opted_in || (prev == opted_in && !app.privacy_banner_opt_in_inflight) {
+        effects.extend(ack_privacy_banner(app));
+    }
     if prev == opted_in {
-        app.show_toast(&coding_data_sharing_toast(opted_in));
-        return vec![];
+        return effects;
     }
 
-    // ── Optimistic mutation: state, then UI feedback, then effect. ───
+    if opted_in {
+        app.privacy_banner_opt_in_inflight = true;
+    }
+
+    // Optimistic mutation. Success is silent; only the refusals above and
+    // the failure handler toast.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    app.show_toast(&coding_data_sharing_toast(opted_in));
 
     tracing::info!(
         target: "settings",
@@ -165,34 +248,13 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
         "setting changed",
     );
 
-    vec![Effect::SetCodingDataSharing {
+    effects.push(Effect::SetCodingDataSharing {
         agent_id,
         opted_in,
         rollback_to_opted_in: prev,
-    }]
-}
-
-/// Format the `Coding data sharing` toast. Asymmetric: opt-in
-/// (privacy-degrading) uses ⚠ + consequence text; opt-out (safe
-/// default) uses ✓. Uses display names from the registry catalog.
-pub(super) fn coding_data_sharing_toast(opted_in: bool) -> String {
-    let display = display_for_coding_data_sharing_canonical(opted_in);
-    if opted_in {
-        // Privacy-degrading: warn glyph + spelled-out consequence.
-        format!(
-            "\u{26A0} Coding data sharing: {display} \u{2014} code samples may be retained \
-             for training"
-        )
-    } else {
-        // Safe default — uniform ✓ glyph.
-        format!("\u{2713} Coding data sharing: {display}")
-    }
-}
-
-/// Display string for the canonical bool. Keep aligned with
-/// `CODING_DATA_SHARING_CHOICES` in `settings/defs.rs`.
-fn display_for_coding_data_sharing_canonical(opted_in: bool) -> &'static str {
-    if opted_in { "Opt in" } else { "Opt out" }
+        seq: next_coding_data_write_seq(app),
+    });
+    effects
 }
 
 /// Scrub an untrusted error string for toast display. Substitutes a
@@ -212,26 +274,12 @@ pub(super) fn scrub_error_for_toast(error: &str) -> String {
     }
 }
 
-/// Push a system message to the active agent's scrollback, or to any available
-/// agent if on the welcome screen.
-fn push_system_to_any_agent(app: &mut AppView, msg: &str) {
-    let block = crate::scrollback::block::RenderBlock::system(msg.to_string());
-    if let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get_mut(&id)
-    {
-        agent.scrollback.push_block(block);
-        return;
-    }
-    if let Some(agent) = app.agents.values_mut().next() {
-        agent.scrollback.push_block(block);
-    }
-}
-
-/// Show context info: fetch via x.ai/session/info and display rich breakdown.
-///
-/// Produces Effect::ShowContextInfo which spawns an async ACP ext request.
-/// On completion, TaskResult::ContextInfoComplete shows the formatted info.
+/// `/context` and the context-bar click — open the usage modal on its
+/// "Context usage" tab, or fetch-and-show in scrollback in minimal mode.
 pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
+    if !app.screen_mode.is_minimal() {
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::ContextUsage);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -245,488 +293,16 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     vec![Effect::ShowContextInfo {
         agent_id: id,
         session_id,
+        nonce: 0,
     }]
 }
 
-/// `/limits` — SuperGrok included / dollar extras / console path detail.
-///
-/// Opens a **dismissible popup modal** (not a scrollback dump) from the last
-/// good snapshot, then force-busts Management prepaid+postpaid+usage-series
-/// process caches (when a management key is present) and silent-`FetchBilling`
-/// so live meters match CLI `grok limits`. Background turn-end polls still
-/// honor ≤60s TTL (including usage series). While open, the modal ticks a
-/// d/h/m/s countdown and re-samples billing when the countdown hits zero
-/// (HonorProcessTtl, not another force-bust).
-///
-/// When two SuperGrok principals exist in `auth.json`, stacks dual rows
-/// (active principal gets the polled billing cache; siblings honest absence
-/// unless process-local included billing was remembered for them).
-/// Console team prepaid cents come from agent/app cache or Management process
-/// cache; missing → honest not-configured / loading / unavailable (never a soft
-/// "no $ meter yet" placeholder). Empty SuperGrok cache → "no data yet".
-/// Warm usage series (OAuth / Grok Build class window) attaches from process
-/// cache when FetchBilling or CLI collect has filled it.
-pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    if !app.agents.contains_key(&id) {
-        return vec![];
-    }
-    let (balance, autotopup, live, console_prepaid) = {
-        let agent = app.agents.get(&id).expect("checked contains_key");
-        let balance = agent
-            .credit_balance
-            .clone()
-            .or_else(|| app.credit_balance.clone());
-        let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
-        let console_prepaid = agent
-            .console_team_prepaid_cents
-            .or(app.console_team_prepaid_cents)
-            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
-        (balance, autotopup, agent.sampling_identity, console_prepaid)
-    };
-    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
-    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
-    let console_key_available =
-        xai_grok_shell::auth::console_inference_key_present_default() || live.is_console();
-    // Distinct missing key vs loading vs post-fetch gaps (ignored when cents known).
-    let prepaid_gap = if console_prepaid.is_some() {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
-    } else {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::from_management_config(
-            has_mgmt_key,
-            has_mgmt_team,
-        )
-    };
-    let snap = build_limits_snapshot(
-        balance.as_ref(),
-        autotopup.as_ref(),
-        live,
-        console_prepaid,
-        prepaid_gap,
-        console_key_available,
-    );
-    // Dual SuperGrok: any principal still missing included meters → silent
-    // refresh (sibling poll fills process cache). Unified fill may already
-    // paint the shared pool on cold siblings; only fetch when a row is still empty.
-    let needs_sibling_billing = !snap.extra_principals.is_empty()
-        && (snap.primary.included.is_none()
-            || snap.extra_principals.iter().any(|p| p.included.is_none()));
-
-    if let Some(agent) = app.agents.get_mut(&id) {
-        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
-            state: Box::new(crate::views::limits_modal::LimitsModalState::new(snap)),
-        });
-    }
-    // Explicit `/limits` open: same force class as CLI `grok limits` collect.
-    // Bust Management prepaid+postpaid+usage-series process caches when key
-    // present, then always silent-FetchBilling so live prepaid (+ postpaid
-    // and usage series into process cache) follows. Background turn-end
-    // FetchBilling still honors TTL.
-    let policy = crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open();
-    if crate::limits_cmd::should_clear_management_meter_caches(policy, has_mgmt_key) {
-        xai_grok_shell::auth::clear_console_team_billing_meter_caches();
-    }
-    let mut effects = Vec::new();
-    if crate::limits_cmd::should_queue_silent_billing_on_explicit_limits(
-        has_mgmt_key,
-        needs_sibling_billing,
-    ) {
-        effects.push(Effect::FetchBilling {
-            agent_id: id,
-            silent: true,
-        });
-    }
-    effects
-}
-
-/// `/spend` — double-entry local vs Management spend books into scrollback.
-pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    if !app.agents.contains_key(&id) {
-        return vec![];
-    }
-
-    let (balance, live) = {
-        let agent = app.agents.get(&id).expect("checked contains_key");
-        let balance = agent
-            .credit_balance
-            .clone()
-            .or_else(|| app.credit_balance.clone());
-        (balance, agent.sampling_identity)
-    };
-
-    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
-    let mut remote = xai_grok_shell::token_economy::RemoteBookSummary::default();
-    let has_mgmt = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
-    if !has_mgmt || !cfg.reconcile_management_usage {
-        remote.remote_unavailable = true;
-        if !has_mgmt {
-            remote.remote_setup_note = Some(
-                "No management key on file. Local book and free SuperGrok period context still work."
-                    .into(),
-            );
-        }
-    } else if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
-        if let Ok(Some(sample)) =
-            xai_grok_shell::token_economy::latest_remote_sample(&store, "management_usage_series")
-        {
-            remote.api_class_usd = sample.payload.get("api_class_usd").and_then(|v| v.as_f64());
-            remote.oauth_class_usd = sample
-                .payload
-                .get("oauth_class_usd")
-                .and_then(|v| v.as_f64());
-            if let (Some(s), Some(e)) = (sample.window_start, sample.window_end) {
-                remote.window_label = Some(format!("{s} → {e}"));
-            }
-        }
-        if let Some(cents) = xai_grok_shell::auth::cached_console_team_prepaid_cents_default() {
-            remote.prepaid_remaining_cents = Some(cents);
-            let payload = serde_json::json!({ "prepaid_remaining_cents": cents });
-            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
-                &store,
-                "management_prepaid",
-                None,
-                None,
-                &payload,
-            );
-        }
-        if let Some(pp) = xai_grok_shell::auth::cached_console_team_postpaid_default() {
-            remote.postpaid_api_class_cents = Some(pp.api_class_cents);
-            remote.postpaid_oauth_class_cents = Some(pp.oauth_class_cents);
-            let payload = serde_json::json!({
-                "api_class_cents": pp.api_class_cents,
-                "oauth_class_cents": pp.oauth_class_cents,
-            });
-            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
-                &store,
-                "management_postpaid",
-                None,
-                None,
-                &payload,
-            );
-        }
-    }
-
-    let mut supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
-    if let Some(bal) = &balance {
-        supergrok.usage_pct = Some(bal.usage_pct);
-        supergrok.period_label = Some(bal.usage_label().to_lowercase());
-        supergrok.pacing_sentence = bal.pacing_sentence(live, chrono::Utc::now());
-    }
-
-    // /spend: refresh local book from session usage.jsonl, then summarize.
-    let report = xai_grok_shell::token_economy::build_double_entry_report_with_options(
-        &cfg, remote, supergrok, true,
-    );
-    // Persist a reconciliation_run row when DB is available (fail-open).
-    if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
-        let notes = xai_grok_shell::token_economy::gap_honesty_line(&report.local, &report.remote);
-        let _ = xai_grok_shell::token_economy::insert_reconciliation_run(
-            &store,
-            "local_window",
-            "local_window",
-            &report.local,
-            report
-                .remote
-                .api_class_usd
-                .map(|u| (u * 100.0).round() as i64),
-            report
-                .remote
-                .oauth_class_usd
-                .map(|u| (u * 100.0).round() as i64),
-            &notes,
-        );
-    }
-
-    let body = xai_grok_shell::token_economy::format_double_entry_report(&report);
-    if let Some(agent) = app.agents.get_mut(&id) {
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(body));
-    }
-    vec![]
-}
-
-/// `/limits --json` — same cache snapshot as the modal, as pretty JSON in
-/// conversation scrollback (schema matches `grok limits --json`). No modal.
-///
-/// When `CreditBalance.grok_build_usage_pct` was set by FetchBilling (wire
-/// `productUsage`), the JSON includes `grokBuildUsagePct` on that principal —
-/// same field as live `grok limits --json` collect. Sibling process-cache rows
-/// stay without Build % until a full credits poll observes it.
-pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    if !app.agents.contains_key(&id) {
-        return vec![];
-    }
-    let Some(snap) = rebuild_limits_snapshot_for_agent(app, id) else {
-        return vec![];
-    };
-    let report = crate::limits_cmd::report_from_snapshot(&snap, Vec::new());
-    let json = match crate::limits_cmd::format_limits_json_pretty(&report) {
-        Ok(s) => s,
-        Err(e) => {
-            if let Some(agent) = app.agents.get_mut(&id) {
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Failed to format limits JSON: {e}"
-                )));
-            }
-            return vec![];
-        }
-    };
-    // Fenced so chat is readable; body is the same JSON as CLI --json.
-    let text = format!("```json\n{}\n```", json.trim_end());
-    if let Some(agent) = app.agents.get_mut(&id) {
-        // Bypass modal; commit into transcript both human and agent can see.
-        agent.active_modal = None;
-        agent.scrollback.push_block(RenderBlock::system(text));
-    }
-    // Same force-refresh + silent FetchBilling policy as modal open.
-    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
-    let needs_sibling_billing = !snap.extra_principals.is_empty()
-        && (snap.primary.included.is_none()
-            || snap.extra_principals.iter().any(|p| p.included.is_none()));
-    let policy = crate::limits_cmd::management_meter_cache_policy_for_explicit_limits_open();
-    if crate::limits_cmd::should_clear_management_meter_caches(policy, has_mgmt_key) {
-        xai_grok_shell::auth::clear_console_team_billing_meter_caches();
-    }
-    let mut effects = Vec::new();
-    if crate::limits_cmd::should_queue_silent_billing_on_explicit_limits(
-        has_mgmt_key,
-        needs_sibling_billing,
-    ) {
-        effects.push(Effect::FetchBilling {
-            agent_id: id,
-            silent: true,
-        });
-    }
-    effects
-}
-
-/// Rebuild limits snapshot from current caches (for open modal refresh).
-pub(super) fn rebuild_limits_snapshot_for_agent(
-    app: &AppView,
-    agent_id: crate::app::agent::AgentId,
-) -> Option<crate::views::limits_snapshot::LimitsSnapshot> {
-    let agent = app.agents.get(&agent_id)?;
-    let balance = agent
-        .credit_balance
-        .as_ref()
-        .or(app.credit_balance.as_ref());
-    let autotopup = agent.auto_topup.as_ref().or(app.auto_topup.as_ref());
-    let console_prepaid = agent
-        .console_team_prepaid_cents
-        .or(app.console_team_prepaid_cents)
-        .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
-    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
-    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
-    let console_key_available = xai_grok_shell::auth::console_inference_key_present_default()
-        || agent.sampling_identity.is_console();
-    let prepaid_gap = if console_prepaid.is_some() {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::Loading
-    } else {
-        crate::views::credit_bar::ConsoleTeamPrepaidGap::from_management_config(
-            has_mgmt_key,
-            has_mgmt_team,
-        )
-    };
-    Some(build_limits_snapshot(
-        balance,
-        autotopup,
-        agent.sampling_identity,
-        console_prepaid,
-        prepaid_gap,
-        console_key_available,
-    ))
-}
-
-/// Attach Management postpaid preview and usage series from process cache when
-/// warm (CLI `limits`, explicit `/limits` FetchBilling live-fill, or prior
-/// background poll). Distinct from prepaid remaining and from free SuperGrok
-/// period %. Does not invent $.
-fn attach_console_postpaid_from_cache(
-    snap: crate::views::limits_snapshot::LimitsSnapshot,
-) -> crate::views::limits_snapshot::LimitsSnapshot {
-    use crate::views::limits_snapshot::{
-        ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter, ConsoleTeamUsageSeriesSummary,
-    };
-
-    let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
-    let has_mgmt_team = xai_grok_shell::auth::resolve_management_team_id_default().is_some();
-    let postpaid = xai_grok_shell::auth::cached_console_team_postpaid_default()
-        .map(|m| ConsoleTeamPostpaidMeter::from_preview(&m));
-    let gap = if postpaid.is_some() {
-        ConsoleTeamPostpaidGap::Unavailable // unused when meter present
-    } else {
-        ConsoleTeamPostpaidGap::after_billing_fetch(has_mgmt_key, has_mgmt_team)
-    };
-    let usage_series = xai_grok_shell::auth::cached_console_team_usage_series_default(
-        xai_grok_shell::auth::USAGE_SERIES_DEFAULT_DAY_WINDOW,
-    )
-    .map(|s| ConsoleTeamUsageSeriesSummary::from_series(&s));
-    snap.with_console_postpaid(postpaid)
-        .with_console_postpaid_gap(gap)
-        .with_console_usage_series(usage_series)
-}
-
-/// Build `/limits` view-model: dual SuperGrok rows when multi-principal store.
-fn build_limits_snapshot(
-    balance: Option<&crate::views::credit_bar::CreditBalance>,
-    autotopup: Option<&crate::views::credit_bar::AutoTopupInfo>,
-    live: crate::views::credit_bar::SamplingIdentityKind,
-    console_team_prepaid_cents: Option<i64>,
-    console_team_prepaid_gap: crate::views::credit_bar::ConsoleTeamPrepaidGap,
-    console_key_available: bool,
-) -> crate::views::limits_snapshot::LimitsSnapshot {
-    use crate::views::limits_snapshot::{LimitsSnapshot, PrincipalLimitsInput};
-    use xai_grok_shell::auth::{
-        SupergrokAccountRole, active_supergrok_identity_id, included_billing_fields_snapshot,
-        list_supergrok_principal_listings, principal_limits_label, read_auth_json,
-    };
-
-    let home = xai_grok_shell::util::grok_home::grok_home();
-    let listings = read_auth_json(&home.join("auth.json"))
-        .map(|map| list_supergrok_principal_listings(&map))
-        .unwrap_or_default();
-
-    if listings.len() < 2 {
-        // Single principal (or none): keep classic single SuperGrok section.
-        let mut snap = LimitsSnapshot::from_billing(balance, autotopup, live)
-            .with_console_balance_cents(console_team_prepaid_cents)
-            .with_console_prepaid_gap(console_team_prepaid_gap)
-            .with_console_key_available(console_key_available);
-        if listings.len() == 1 && !live.is_console() {
-            snap.live_principal_label = Some(listings[0].role_label.to_string());
-        }
-        return crate::limits_cmd::attach_flat_poll_from_history(
-            attach_console_postpaid_from_cache(snap),
-        );
-    }
-
-    let active_id = active_supergrok_identity_id(&home);
-    let billing_by_id = included_billing_fields_snapshot();
-
-    // Order: active identity first (gets the live billing cache), then others.
-    let mut ordered = listings;
-    if let Some(ref aid) = active_id {
-        ordered.sort_by_key(|p| if &p.identity_id == aid { 0u8 } else { 1u8 });
-    }
-
-    let inputs: Vec<PrincipalLimitsInput> = ordered
-        .iter()
-        .map(|p| {
-            let role = if p.role_label == "business" {
-                SupergrokAccountRole::Business
-            } else {
-                SupergrokAccountRole::Personal
-            };
-            let is_active = active_id.as_deref() == Some(p.identity_id.as_str());
-            // Active principal: use pager credit cache (full meters).
-            // Others: process billing memory for this identity only (included %
-            // + prepaidBalance when the sibling credits poll observed it).
-            // Never copy active CreditBalance onto a sibling identity.
-            let (bal, topup, included_billing_only) = if is_active {
-                (balance.cloned(), autotopup.cloned(), false)
-            } else if let Some(fields) = billing_by_id.get(&p.identity_id) {
-                // Per-slot process cache only — never reuse active CreditBalance.
-                // Date format matches credit_balance_from_config (`%B`, full month)
-                // so dual rows do not look like two different clocks (Aug vs August).
-                // prepaid_balance_cents from sibling poll = Extra Usage Credits
-                // for that principal (or shared pool under unified billing).
-                let bal = fields.usage_pct.map(|pct| {
-                    crate::views::credit_bar::CreditBalance {
-                        usage_pct: pct,
-                        effective_usage_pct: pct,
-                        period_end_display: fields.reset_at.map(|dt| {
-                            dt.with_timezone(&chrono::Local)
-                                .format("%B %-d, %H:%M")
-                                .to_string()
-                        }),
-                        period_end_at: fields.reset_at,
-                        pay_as_you_go: false,
-                        on_demand_cap_cents: None,
-                        on_demand_used_cents: None,
-                        // Sibling credits poll prepaidBalance → Extra Usage Credits.
-                        prepaid_balance_cents: fields.prepaid_balance_cents,
-                        // Plumb period_type so copy says "weekly"/"monthly"
-                        // instead of bare "Included allowance".
-                        period_type: fields.period_type.clone(),
-                        is_unified_billing_user: None,
-                        // Sibling process cache Build productUsage when
-                        // remember_supergrok_build_usage ran on sibling poll.
-                        grok_build_usage_pct: fields.grok_build_usage_pct,
-                        included_usage_known: true,
-                    }
-                });
-                // included_billing_only when we never saw prepaid on this slot
-                // (honest "no data yet" unless unified fill shares the pool).
-                let included_only = fields.prepaid_balance_cents.is_none();
-                (bal, None, included_only)
-            } else {
-                // Never-polled sibling: included-only absence (not "none on file"
-                // for dollar extras). Unified fill + silent FetchBilling fill later.
-                (None, None, true)
-            };
-            let outcome = xai_grok_shell::auth::supergrok_billing_poll_outcome(&p.identity_id);
-            let (poll_succeeded, poll_error_class) = match outcome.kind {
-                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Ok => (Some(true), None),
-                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::AuthFailed => {
-                    (Some(false), Some("auth"))
-                }
-                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::OtherFailed => {
-                    (Some(false), outcome.error_class)
-                }
-                xai_grok_shell::auth::SupergrokBillingPollOutcomeKind::Never => {
-                    if bal.is_some() && !included_billing_only {
-                        (Some(true), None)
-                    } else if bal.is_some() {
-                        // Process-cache sibling reading.
-                        (Some(true), None)
-                    } else {
-                        (Some(false), None)
-                    }
-                }
-            };
-            PrincipalLimitsInput {
-                label: principal_limits_label(role),
-                role_label: Some(p.role_label.to_string()),
-                balance: bal,
-                autotopup: topup,
-                included_billing_only,
-                poll_succeeded,
-                poll_error_class,
-            }
-        })
-        .collect();
-
-    let live_role = if live.is_console() {
-        None
-    } else {
-        active_id.as_ref().and_then(|aid| {
-            ordered
-                .iter()
-                .find(|p| &p.identity_id == aid)
-                .map(|p| p.role_label)
-        })
-    };
-
-    crate::limits_cmd::attach_flat_poll_from_history(attach_console_postpaid_from_cache(
-        LimitsSnapshot::from_principals(&inputs, live, live_role)
-            .with_console_balance_cents(console_team_prepaid_cents)
-            .with_console_prepaid_gap(console_team_prepaid_gap)
-            .with_console_key_available(console_key_available),
-    ))
-}
-
-/// `/usage` — session token/cost, then consumer credits when visible.
-/// Credits are chained after the session block so layout stays ordered.
+/// `/usage` — open the usage modal on its "Usage limit" tab. Minimal mode
+/// keeps the scrollback flow: session token/cost, then consumer credits.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
+    if !app.screen_mode.is_minimal() {
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -740,16 +316,45 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         Some(session_id) => vec![Effect::FetchSessionUsage {
             agent_id: id,
             session_id,
+            nonce: 0,
         }],
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
-                agent.scrollback.push_block(RenderBlock::system(
-                    "Session usage is unavailable until the session starts.".to_string(),
-                ));
+                push_and_page_flip(
+                    &mut agent.scrollback,
+                    RenderBlock::system(
+                        "Session usage is unavailable until the session starts.".to_string(),
+                    ),
+                );
             }
             append_consumer_billing_surface(app, id)
         }
     }
+}
+
+/// Route a session-usage result (success or failure text) into the open
+/// usage modal, or into scrollback in minimal mode. Stale results are dropped.
+pub(super) fn handle_session_usage_result(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    text: String,
+    nonce: u64,
+) -> Vec<Effect> {
+    if !app.screen_mode.is_minimal() {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            if agent.session.session_id.as_ref() != Some(session_id) {
+                return vec![];
+            }
+            if let Some(state) = usage_modal_state_mut(agent)
+                && state.fetch_nonce == nonce
+            {
+                state.session_usage_text = Some(text);
+            }
+        }
+        return vec![];
+    }
+    commit_session_usage_block(app, agent_id, session_id, text)
 }
 
 /// Commit a session-usage block if still on `session_id`, then consumer credits.
@@ -765,7 +370,7 @@ pub(super) fn commit_session_usage_block(
     if agent.session.session_id.as_ref() != Some(session_id) {
         return vec![];
     }
-    agent.scrollback.push_block(RenderBlock::system(text));
+    push_and_page_flip(&mut agent.scrollback, RenderBlock::system(text));
     append_consumer_billing_surface(app, agent_id)
 }
 
@@ -794,6 +399,8 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
     vec![Effect::FetchBilling {
         agent_id,
         silent: false,
+        nonce: 0,
+        force_refresh: false,
     }]
 }
 
@@ -851,9 +458,193 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Clear completed/cancelled todos from the live board (shell archives + Plan).
-///
-/// No-op toast when the board has nothing finished. Does not use merge:false.
+/// `/limits` — open the limits modal from cached billing.
+pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+    let (balance, autotopup, live) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, autotopup, live)
+    };
+    let snap = crate::views::limits_snapshot::LimitsSnapshot::from_billing(
+        balance.as_ref(),
+        autotopup.as_ref(),
+        live,
+    );
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(crate::views::limits_modal::LimitsModalState::new(snap)),
+        });
+    }
+    vec![Effect::FetchBilling {
+        agent_id: id,
+        silent: true,
+        nonce: 0,
+        force_refresh: true,
+    }]
+}
+
+/// `/spend` — double-entry local vs Management spend books into scrollback.
+pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+
+    let (balance, live) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, live)
+    };
+
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    let mut remote = xai_grok_shell::token_economy::RemoteBookSummary::default();
+    let has_mgmt = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
+    if !has_mgmt || !cfg.reconcile_management_usage {
+        remote.remote_unavailable = true;
+        if !has_mgmt {
+            remote.remote_setup_note = Some(
+                "No management key on file. Local book and included SuperGrok period context still work."
+                    .into(),
+            );
+        }
+    } else if let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) {
+        if let Ok(Some(sample)) =
+            xai_grok_shell::token_economy::latest_remote_sample(&store, "management_usage_series")
+        {
+            remote.api_class_usd = sample.payload.get("api_class_usd").and_then(|v| v.as_f64());
+            remote.oauth_class_usd = sample
+                .payload
+                .get("oauth_class_usd")
+                .and_then(|v| v.as_f64());
+            if let (Some(s), Some(e)) = (sample.window_start, sample.window_end) {
+                remote.window_label = Some(format!("{s} → {e}"));
+            }
+        }
+        if let Some(cents) = xai_grok_shell::auth::cached_console_team_prepaid_cents_default() {
+            remote.prepaid_remaining_cents = Some(cents);
+            let payload = serde_json::json!({ "prepaid_remaining_cents": cents });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_prepaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+        if let Some(pp) = xai_grok_shell::auth::cached_console_team_postpaid_default() {
+            remote.postpaid_api_class_cents = Some(pp.api_class_cents);
+            remote.postpaid_oauth_class_cents = Some(pp.oauth_class_cents);
+            let payload = serde_json::json!({
+                "api_class_cents": pp.api_class_cents,
+                "oauth_class_cents": pp.oauth_class_cents,
+            });
+            let _ = xai_grok_shell::token_economy::try_insert_remote_meter_sample(
+                &store,
+                "management_postpaid",
+                None,
+                None,
+                &payload,
+            );
+        }
+    }
+
+    let mut supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
+    if let Some(bal) = &balance {
+        supergrok.usage_pct = Some(bal.usage_pct);
+        supergrok.period_label = Some(bal.usage_label().to_lowercase());
+        supergrok.pacing_sentence = bal.pacing_sentence(live, chrono::Utc::now());
+    }
+
+    // /spend: refresh local book from session usage.jsonl, then persist reconcile.
+    let report = xai_grok_shell::token_economy::run_spend_double_entry(
+        &cfg,
+        remote,
+        supergrok,
+        &xai_grok_config::grok_home(),
+    );
+
+    let body = xai_grok_shell::token_economy::format_double_entry_report(&report);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(RenderBlock::system(body));
+    }
+    vec![]
+}
+
+/// `/limits --json` — pretty JSON of the same snapshot in scrollback.
+pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    if !app.agents.contains_key(&id) {
+        return vec![];
+    }
+    let (balance, autotopup, live) = {
+        let agent = app.agents.get(&id).expect("checked contains_key");
+        let balance = agent
+            .credit_balance
+            .clone()
+            .or_else(|| app.credit_balance.clone());
+        let autotopup = agent.auto_topup.clone().or_else(|| app.auto_topup.clone());
+        let live = crate::views::credit_bar::compact_meter_identity(
+            agent.sampling_identity,
+            balance.as_ref(),
+        );
+        (balance, autotopup, live)
+    };
+    let snap = crate::views::limits_snapshot::LimitsSnapshot::from_billing(
+        balance.as_ref(),
+        autotopup.as_ref(),
+        live,
+    );
+    let report = crate::limits_cmd::report_from_snapshot(&snap, Vec::new());
+    let json = match crate::limits_cmd::format_limits_json_pretty(&report) {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Failed to format limits JSON: {e}"
+                )));
+            }
+            return vec![];
+        }
+    };
+    let text = format!("```json\n{}\n```", json.trim_end());
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.active_modal = None;
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    vec![Effect::FetchBilling {
+        agent_id: id,
+        silent: true,
+        nonce: 0,
+        force_refresh: true,
+    }]
+}
+
+/// Clear completed/cancelled todos from the live board.
 pub(super) fn dispatch_clear_completed_todos(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -928,16 +719,16 @@ pub(super) fn handle_coding_data_sharing_updated(
     app: &mut AppView,
     agent_id: AgentId,
     opted_in: bool,
+    seq: u64,
 ) -> Vec<Effect> {
+    if !is_current_coding_data_write(app, seq, agent_id) {
+        return vec![];
+    }
     // Re-anchor mirror to server-confirmed value (defense-in-depth against
     // server reshaping the boolean). `agent_id` discarded — privacy is
     // app-level, not per-agent.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    // Re-toast on confirmation. Without this, a slow ACP round-trip would
-    // leave the user with only the optimistic toast (already faded) and no
-    // server-confirmed feedback.
-    app.show_toast(&coding_data_sharing_toast(opted_in));
     tracing::info!(
         target: "settings",
         key = "coding_data_sharing",
@@ -946,9 +737,9 @@ pub(super) fn handle_coding_data_sharing_updated(
         "ACP update confirmed; mirror re-anchored",
     );
     let mut effects = vec![];
-    // Ack only after successful opt-in from the privacy banner Accept path.
-    if app.privacy_banner_accept_inflight {
-        app.privacy_banner_accept_inflight = false;
+    // Defer opt-in ack until this write lands; a failed write must not dismiss.
+    if app.privacy_banner_opt_in_inflight {
+        app.privacy_banner_opt_in_inflight = false;
         if opted_in {
             effects.extend(ack_privacy_banner(app));
         }
@@ -961,7 +752,15 @@ pub(super) fn handle_coding_data_sharing_failed(
     agent_id: AgentId,
     error: String,
     rollback_to_opted_in: bool,
+    seq: u64,
 ) -> Vec<Effect> {
+    // A superseded failure must not revert: `rollback_to_opted_in` predates
+    // the newer write, so applying it would undo a change the user made
+    // after this one was sent. It must not toast either — nothing the user
+    // is looking at failed.
+    if !is_current_coding_data_write(app, seq, agent_id) {
+        return vec![];
+    }
     // Revert optimistic mutation: inner → refresh → toast. `agent_id`
     // discarded — privacy is global.
     set_coding_data_sharing_inner(app, rollback_to_opted_in);
@@ -979,66 +778,83 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed; reverted optimistic mutation",
     );
-    // Accept failure: no ack; clear inflight so the banner stays.
-    app.privacy_banner_accept_inflight = false;
+    // Opt-in failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_opt_in_inflight = false;
     vec![]
 }
 
 /// Stamp `[privacy].privacy_banner_acked` (in-memory + disk).
+/// No-op when the notice is not rolled out: a Settings pick must not
+/// hide a notice the user has not been shown.
 pub(in crate::app::dispatch) fn ack_privacy_banner(app: &mut AppView) -> Vec<Effect> {
+    if !app.privacy_notice_rollout {
+        return vec![];
+    }
     let acked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     app.privacy_banner_acked = Some(acked_at.clone());
     vec![Effect::PersistPrivacyBannerAcked { acked_at }]
 }
 
-/// Accept: opt-in via settings path; ack only after ACP success.
-pub(in crate::app::dispatch) fn dispatch_privacy_banner_accept(app: &mut AppView) -> Vec<Effect> {
-    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+/// `[Opt in]`: opt in via the settings path; ack only after ACP success, so
+/// a failed round trip leaves the banner up instead of recording a change
+/// that did not happen.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_opt_in(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_opt_in_inflight || !app.privacy_banner_should_show() {
         return vec![];
     }
-    let effects = set_coding_data_sharing(app, true);
-    // should_show guarantees opted-out + unguarded, so effects is only empty
-    // if a guard regresses; leaving inflight false keeps Accept clickable.
-    app.privacy_banner_accept_inflight = !effects.is_empty();
-    effects
+    set_coding_data_sharing(
+        app,
+        true,
+        xai_grok_telemetry::events::CodingDataConsentSource::PrivacyBanner,
+    )
 }
 
-/// Customize: ack, then open settings on coding_data_sharing
-/// (creates/switches agent when opened from welcome).
-pub(in crate::app::dispatch) fn dispatch_privacy_banner_customize(
-    app: &mut AppView,
-) -> Vec<Effect> {
-    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+/// `[Opt out]`: ack now — waiting on ACP would re-ask a decline.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_opt_out(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_opt_in_inflight || !app.privacy_banner_should_show() {
         return vec![];
     }
-    let mut effects = ack_privacy_banner(app);
-    effects.extend(super::settings::ui::dispatch_open_settings(
+    set_coding_data_sharing(
         app,
-        Some("coding_data_sharing"),
-    ));
-    effects
+        false,
+        xai_grok_telemetry::events::CodingDataConsentSource::PrivacyBanner,
+    )
 }
 
 pub(super) fn handle_context_info_complete(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: &acp::SessionId,
     info: Box<xai_grok_shell::session::SessionInfoResponse>,
+    nonce: u64,
 ) -> Vec<Effect> {
+    let minimal = app.screen_mode.is_minimal();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        if agent.session.session_id.as_ref() != Some(session_id) {
+            return vec![];
+        }
+        // A reply from a previous modal open must not touch anything — not
+        // even the agent's context mirrors, which a fresher reply already set.
+        if let Some(state) = usage_modal_state_mut(agent)
+            && state.fetch_nonce != nonce
+        {
+            return vec![];
+        }
         let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
-        // Take ownership of the snapshot once, hand a clone to the
-        // agent's running counters, then move the original into the
-        // scrollback block (which keeps it for theme-reactive
-        // re-rendering). This still costs one clone but reads as
-        // "the agent needs a copy" rather than "the block needs a
-        // copy", which matches the lifetime story.
         let snapshot = info.data.context;
         agent.apply_full_context_info(snapshot.clone());
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::context_info(
+        if let Some(state) = usage_modal_state_mut(agent) {
+            state.context = Some(crate::scrollback::blocks::ContextInfoBlock::new(
                 snapshot, model,
             ));
+            state.context_error = None;
+        } else if minimal {
+            push_and_page_flip(
+                &mut agent.scrollback,
+                crate::scrollback::block::RenderBlock::context_info(snapshot, model),
+            );
+        }
+        // Full mode with the modal closed: result arrived after dismissal — drop.
     }
     vec![]
 }

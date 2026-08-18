@@ -6,7 +6,7 @@ Skills are reusable prompt packages that extend Grok with task-specific instruct
 
 ## What Are Skills?
 
-A skill is a directory that contains a `SKILL.md` file. Its markdown text tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
+A skill is a directory that contains a `SKILL.md` file. Its markdown body tells Grok how to handle a specific type of task: step-by-step instructions, conventions, and tool-usage patterns.
 
 Use a skill for a repeatable procedure that's too specific for AGENTS.md but too long to retype. Grok activates a skill only when it applies to your current task.
 
@@ -14,40 +14,19 @@ Use a skill for a repeatable procedure that's too specific for AGENTS.md but too
 
 ## Skill Locations
 
-Skills are **multi-source**. Grok owns discovery and load order in the product;
-skill packs may live in the project, your home directory, a network-synced
-bundle cache, config paths, server inject, or plugins. Same-named skills shadow
-by **scope** first (Local beats Repo beats User beats Server beats Bundled;
-native bare names beat plugins), then by **first-seen** within a scope.
-
-### Bare-name load order (code)
-
-Higher priority first. At every project or home tier, config dir **names** are
-scanned in this order: **`.agents` → `.grok` → `.claude` (if compat) →
-`.cursor` (if compat)**. First-seen wins for the same bare name at the same
-scope, so a maintained `~/.agents/skills/<name>` pack overrides a same-named
-`~/.grok/skills/<name>` copy (important when host skill packs pin process rules
-such as agent depth L1 / L2 / L3).
+Grok discovers skills from these directories, in priority order:
 
 | Location | Scope | Priority | Notes |
 |----------|-------|----------|-------|
-| `./.agents/skills/`, `./.agents/commands/` | Local (CWD) | Highest | Maintained agent skill tree at cwd |
-| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Grok-owned cwd skills / legacy command markdown |
-| `./.claude/skills/`, `./.claude/commands/` | Local (CWD) | Highest | Project Claude skills and legacy custom slash commands (compat) |
-| `./.cursor/skills/` | Local (CWD) | Highest | Project Cursor skills when cursor compat skills are on |
-| Intermediate dirs between cwd and repo root (same name order) | Repo | High | Walk every directory up to the git root |
-| `<repo_root>/.agents/…`, `<repo_root>/.grok/…` (+ vendor if on) | Repo | High | Shared across the repo |
-| `~/.agents/skills/`, `~/.agents/commands/` | User | Medium | Host operator skill packs (all projects) |
-| `~/.grok/skills/`, `~/.grok/commands/` | User | Medium | Personal Grok skills for all projects |
-| `~/.claude/skills/`, `~/.claude/commands/` | User | Medium | Claude Code compatibility (configurable) |
-| `~/.cursor/skills/` | User | Medium | Cursor compatibility (configurable) |
-| `[skills].paths` entries | Repo if under git root, else User | Medium | Extra dirs or direct `SKILL.md` files; stamp as config |
-| Server-injected skill dirs | Server | Lower | Managed workspace / launcher inject |
-| `~/.grok/bundled/skills/` (+ injected bundled dirs) | Bundled | Lower | Platform pack cache (network sync) |
-| Plugin skills | Plugin | Lowest bare name | Bare name loses to native; qualified `plugin:name` kept |
+| `./.grok/skills/`, `./.grok/commands/` | Local (CWD) | Highest | Current directory skills / legacy command markdown |
+| `<repo_root>/.grok/skills/`, `…/commands/` | Repo | Medium | Shared across the repo |
+| `~/.grok/skills/`, `~/.grok/commands/` | User | Lowest | Personal skills for all projects |
+| `~/.claude/skills/`, `~/.claude/commands/` | User | Lowest | Claude Code compatibility (configurable) |
+| `./.claude/skills/`, `./.claude/commands/` | Local / Repo | High | Project Claude skills and legacy custom slash commands |
+| `~/.cursor/skills/` | User | Lowest | Cursor compatibility (configurable) |
+| `./.cursor/skills/` | Local / Repo | High | Project Cursor skills (when cursor compat skills are enabled) |
 
-Grok also walks every directory between your working directory and the repo
-root, applying the same `.agents` → `.grok` → vendor name order at each level.
+Grok deduplicates skills by name -- a higher-priority location overrides a lower one. Grok also scans `.agents/skills/` (and `commands/`) at each tier (alongside `.grok/`) and walks every directory between your working directory and the repo root.
 
 Flat `*.md` files under a `commands/` directory become user-invocable slash commands (filename stem = command name), matching Claude Code's legacy custom-command layout.
 
@@ -113,7 +92,7 @@ Review staged changes and create a commit with a clear, conventional message.
 | Field | Description |
 |-------|-------------|
 | `name` | Skill identifier. Use lowercase letters, digits, and hyphens, up to 64 characters. Grok normalizes spaces and underscores to hyphens. If you omit `name`, Grok uses the skill's directory name. |
-| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the skill text. |
+| `description` | What the skill does and when to use it. Grok reads this to decide whether to invoke the skill. If you omit it, Grok uses the first paragraph of the body. |
 
 Write a specific `description`. It determines when Grok invokes the skill automatically. Name the trigger phrases and use cases.
 
@@ -148,9 +127,9 @@ When you run `/create-skill`, Grok:
 
 2. **Drafts the description.** Grok writes a `description` that states what the skill does, the phrases that trigger it, and the slash command name. You approve or edit the draft before continuing.
 
-3. **Creates the skill directory.** Grok creates the `<scope>/.grok/skills/<name>/` directory, plus `scripts/` or `references/` subdirectories when the skill needs them.
+3. **Creates the skill directory.** Grok creates the `<scope>/.grok/skills/<name>/` directory, plus `references/` (or, rarely, `scripts/`) when the skill needs supporting files. Do not add Python helpers. Product skills are not a Python runtime.
 
-4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and markdown instructions, along with any supporting files.
+4. **Writes SKILL.md.** Grok writes the frontmatter (`name` and `description`) and a markdown body of instructions, along with any supporting files.
 
 5. **Verifies and confirms.** Grok reads the file back, confirms it wrote correctly, and tells you how to run the skill.
 
@@ -184,16 +163,21 @@ Running a skill loads its instructions into the conversation and directs the mod
 /commit fix the build
 ```
 
-To browse your skills, type `/` to open the slash-command menu. Grok lists every built-in command and skill and filters them as you type. To list skills from the command line instead, run `grok inspect` (see [Viewing Skill Details](#viewing-skill-details)).
+To browse your skills, type `/` to open the slash-command menu. Grok lists every built-in command and skill and filters them as you type. To list skills from the command line instead, run `grok-oss inspect` (see [Viewing Skill Details](#viewing-skill-details)).
 
 ### Qualified Names
 
-When a skill's name collides with another skill or a built-in command, Grok advertises a qualified name prefixed by the skill's scope -- `local:`, `repo:`, `user:`, or the plugin name. Use the qualified form to choose a specific skill:
+When a skill's name collides with another skill or a built-in command, Grok keeps **both** invocable. The built-in keeps the bare name (`/login`, `/compact`, …). The skill is advertised under a qualified name prefixed by its scope -- `local:`, `repo:`, `user:`, or the plugin name:
 
 ```
 /local:commit        # The "commit" skill from ./.grok/skills/
 /user:commit         # The "commit" skill from ~/.grok/skills/
+/acme:login          # A plugin skill named "login" (built-in /login is unchanged)
 ```
+
+Typing `/login` in the slash menu shows both rows, with a right-aligned **built-in** or **skill · plugin-name** badge so you can tell them apart. Rename the skill (or its directory) if you want the bare `/name` for the skill instead.
+
+`grok-oss inspect` tags colliding skills with `[collides with /login → /acme:login]`.
 
 ### Automatic Invocation
 
@@ -205,28 +189,48 @@ For example, if a skill's description says "Use when the user wants to commit ch
 
 ## Viewing Skill Details
 
-Run `grok inspect` to see every skill Grok discovers, along with the rest of your configuration:
+Run `grok-oss inspect` to see every skill Grok discovers, along with the rest of your configuration:
 
 ```bash
-grok inspect          # Human-readable summary
-grok inspect --json   # Machine-readable report
+grok-oss inspect          # Human-readable summary
+grok-oss inspect --json   # Machine-readable report
 ```
 
 In the human-readable output, the Skills section lists each skill's name and its source -- `project`, `user`, `bundled`, `config` (a `[skills].paths` entry), `server` (skills synced from the skill store in managed workspaces), or `plugin: <name>`. Grok tags any skill disabled via `[skills].disabled` or from a disabled vendor surface with `[disabled]`.
 
 The report honors your `[skills]` config the same way a live session does: skills from `paths` are listed, skills under an `ignore` prefix are hidden, and skills named in `disabled` stay listed but tagged `[disabled]`.
 
-The `--json` report includes the full detail for each skill: its `name`, `description`, `source` (with the path to the SKILL.md file), and `userInvocable` flag.
+The `--json` report includes the full detail for each skill: its `name`, `description`, `source` (with the path to the SKILL.md file), and `userInvocable` flag. Skills whose bare slash name is contested — by a built-in command or by another skill — also include `collidesWith` (the contested name) and `invocableAs` (the qualified command to type).
 
 ---
 
 ## Bundled and Plugin Skills
 
-Grok distributes platform skills separately from your personal skills. Bundled skills are cached under `~/.grok/bundled/skills/`; Grok never writes them into `~/.grok/skills/`. A same-named local, repo, or user skill overrides the bundled copy. `grok inspect` labels each definition by its actual source. (A plugin skill of the same name does not override a native skill; it stays available under its qualified `plugin:name` form.)
+Grok distributes platform skills separately from your personal skills. Bundled skills are cached under `~/.grok/bundled/skills/`; Grok never writes them into `~/.grok/skills/`. A same-named local, repo, or user skill overrides the bundled copy. `grok-oss inspect` labels each definition by its actual source. (A plugin skill of the same name does not override a native skill; it stays available under its qualified `plugin:name` form.)
 
-Skills can also come from plugins. When you install a plugin that includes skills, they appear alongside your user and project skills. `grok inspect` labels each plugin-provided skill with its source as `plugin: <name>`.
+Skills can also come from plugins. When you install a plugin that includes skills, they appear alongside your user and project skills. `grok-oss inspect` labels each plugin-provided skill with its source as `plugin: <name>`.
 
 See the [Plugins guide](09-plugins.md) for more on installing plugins that provide skills.
+
+---
+
+## Skills are not a Python runtime
+
+Product skills are markdown procedures plus native Grok tools. They are not a Python runtime. Agents must not add `.py` helpers to a skill, and they must not invent ad-hoc Python to do skill work.
+
+A restack that installs non-excepted Python into product skills, or that drops the Rust intercept for the allowlisted CLI forms, is a failed land.
+
+**Allowlisted intercept CLI forms.** Keep these exact command shapes so the bash tool can run embedded Rust and never spawn Python:
+
+- `python3 .../implement/scripts/memory.py ...`
+- `python3 .../execute-plan/scripts/validate-plan.py ...`
+- `python3 .../resume-session/session_reader.py ...`
+
+Do not invent a second helper or read those files by hand.
+
+**Office and PDF exception.** Pre-reviewed scripts under the `docx`, `pptx`, `xlsx`, and `pdf` skills may stay. That exception is not a license to add new Python.
+
+**User projects.** If the user's own product is Python, work in their tree as usual. That is their codebase, not a Grok skill helper.
 
 ---
 
@@ -240,6 +244,6 @@ See the [Plugins guide](09-plugins.md) for more on installing plugins that provi
 
 4. **Keep skills focused.** Write one skill per workflow. A "deploy" skill and a "rollback" skill work better than a single "deploy-and-rollback" skill.
 
-5. **Version-control project skills.** Commit `.grok/skills/` to your repository so the whole team benefits. User skills in `~/.grok/skills/` stay personal and unshared.
+5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared.
 
 6. **Test by running it.** Invoke `/name` and confirm the skill works before you rely on automatic invocation.

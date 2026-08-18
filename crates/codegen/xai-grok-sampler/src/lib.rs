@@ -38,7 +38,8 @@ pub mod types;
 // Public re-exports — the API surface consumers see.
 pub use actor::SamplerActor;
 pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
+    Auth401AttributionCallback, BEARER_SUFFIX_LEN, SENT_BEARER_PREFIX_LEN, SamplingConsumer,
+    SharedAttributionCallback,
 };
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
 pub use config::{
@@ -46,7 +47,9 @@ pub use config::{
     SharedBearerResolver, SharedHeaderInjector,
 };
 pub use doom_loop::DoomLoopSignalCollector;
-pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+pub use events::{
+    SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,
+};
 pub use exhausted_identity::{
     AllowanceExhaustAction, CredentialLabel, HopCause, INCLUDED_ALLOWANCE_EXHAUST_PCT, clear_all,
     clear_all_including_durable, clear_exhausted, format_credential_hop_reason, format_hop_reason,

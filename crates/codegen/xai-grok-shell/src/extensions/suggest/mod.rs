@@ -320,11 +320,14 @@ fn find_session(
     agent: &MvpAgent,
     session_id: Option<&str>,
 ) -> Option<crate::session::handle::SessionHandle> {
-    let sessions = agent.sessions.borrow();
     if let Some(id) = session_id {
-        sessions.get(&acp::SessionId::new(id)).cloned()
+        agent.resident_handle(&acp::SessionId::new(id))
     } else {
-        sessions.values().next().cloned()
+        agent
+            .resident_ids()
+            .into_iter()
+            .next()
+            .and_then(|id| agent.resident_handle(&id))
     }
 }
 
@@ -347,7 +350,7 @@ fn aggregate(
     // tier/score/dirs-first order — see its `FILE_CMD_BOOST` doc), relying
     // on equal-priority order surviving to the wire. Do not "optimize"
     // into `sort_unstable_by`.
-    all.sort_by(|a, b| b.priority.cmp(&a.priority));
+    all.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
     let ghost = all.iter().find(|s| s.is_ghost_candidate).map(|s| {
         let suffix = s.insert_text.strip_prefix(prefix).unwrap_or(&s.insert_text);

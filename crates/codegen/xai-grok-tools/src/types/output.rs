@@ -224,11 +224,9 @@ pub struct FileContent {
     /// offset-past-end vs genuinely-empty files.
     #[serde(default)]
     pub total_lines: usize,
-    /// Base64 images captured before per-line truncation. The session
-    /// layer turns these into multimodal `ContentPart::Image` follow-ups
-    /// (same pipeline as MCP image extraction); pre-truncation capture
-    /// prevents `truncate_line` from cutting a long single-line URI
-    /// mid-payload. Hidden from the model's JSON schema.
+    /// Pre-truncation image captures for session harvest. Must survive
+    /// ToolDyn hub `to_value`/`from_value`; session drains before PostToolUse
+    /// and ACP wire serialize.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(skip)]
     pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
@@ -698,10 +696,31 @@ impl ToolOutput {
             _ => false,
         }
     }
+    fn format_task_duration_secs(duration_secs: f64) -> String {
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+            duration_secs.max(0.0),
+        ))
+    }
     /// Render tool output for inclusion in the model prompt with specified format.
     pub fn to_prompt_format(&self) -> String {
         match self {
             ToolOutput::ReadFile(read_file_output) => match read_file_output {
+                ReadFileOutput::FileContent(file_content) if file_content.content.is_empty() => {
+                    if file_content.total_lines == 0 {
+                        "File is empty.".to_string()
+                    } else if file_content
+                        .offset
+                        .is_some_and(|offset| offset > file_content.total_lines)
+                    {
+                        format!(
+                            "(no lines returned: the requested window is past the end of the \
+                             file; the file has {} lines)",
+                            file_content.total_lines
+                        )
+                    } else {
+                        "(no lines returned)".to_string()
+                    }
+                }
                 ReadFileOutput::FileContent(file_content) => file_content.content.clone(),
                 ReadFileOutput::ImageContent(image_content) => {
                     format!(
@@ -780,7 +799,7 @@ impl ToolOutput {
             ToolOutput::WebFetch(o) => o.to_prompt_format(),
             ToolOutput::MCP(mcp_output) => match &mcp_output.output {
                 MCPOutputDetails::Error(error) => {
-                    format!("Failed to call {}: {}", &mcp_output.tool_name, error)
+                    format!("Failed to call {}: {}", mcp_output.tool_name, error)
                 }
                 MCPOutputDetails::OkayOutput(output) => output.to_owned(),
             },
@@ -810,20 +829,25 @@ impl ToolOutput {
                         format!("=== Task {} ===", r.task_id),
                         format!("Command: {}", r.command),
                         format!("Status: {}", r.status),
-                        format!("Started: {}", r.started),
+                        format!(
+                            "Duration: {}",
+                            Self::format_task_duration_secs(r.duration_secs)
+                        ),
                     ];
-                    if let Some(ref ended) = r.ended {
-                        lines.push(format!("Ended: {}", ended));
-                    }
-                    lines.push(format!("Duration: {:.2}s", r.duration_secs));
                     if let Some(code) = r.exit_code {
                         lines.push(format!("Exit Code: {}", code));
                     }
-                    lines.push(format!("Output File: {}", r.output_file));
+                    if !r.output_file.is_empty() {
+                        lines.push(format!("Output File: {}", r.output_file));
+                    }
                     lines.push(String::new());
                     lines.push("=== Output ===".to_string());
                     if r.output.is_empty() {
-                        lines.push("(no output yet)".to_string());
+                        if r.status == "running" {
+                            lines.push("(no output yet)".to_string());
+                        } else {
+                            lines.push("(no output)".to_string());
+                        }
                     } else {
                         // T5: densify structured JSON handoff bodies only.
                         lines.push(crate::util::toon::densify_structured_text(&r.output));
@@ -838,8 +862,11 @@ impl ToolOutput {
                     let mut lines = vec![format!("=== Multi-wait ({}) ===", mr.mode)];
                     for r in &mr.results {
                         lines.push(format!(
-                            "--- Task {} [{}] ---\nCommand: {}\nDuration: {:.2}s",
-                            r.task_id, r.status, r.command, r.duration_secs,
+                            "--- Task {} [{}] ---\nCommand: {}\nDuration: {}",
+                            r.task_id,
+                            r.status,
+                            r.command,
+                            Self::format_task_duration_secs(r.duration_secs),
                         ));
                         if let Some(code) = r.exit_code {
                             lines.push(format!("Exit Code: {code}"));
@@ -885,7 +912,20 @@ impl ToolOutput {
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
-                text
+                if text.len() > crate::DEFAULT_TOOL_OUTPUT_BYTES {
+                    let (capped, _) = crate::util::truncate::truncate_with_preview(
+                        crate::util::truncate::PartialOutput::whole(&text),
+                        crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                        crate::util::truncate::PREVIEW_SIZE,
+                        Some(
+                            "Full last answer is not stored on the parent ToolResult. \
+                             Use read_file on the on-disk report if one exists.",
+                        ),
+                    );
+                    capped
+                } else {
+                    text
+                }
             }
             ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
                 message,
@@ -1212,6 +1252,11 @@ pub struct MCPOutput {
     pub is_timeout: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// Pre-truncation image captures for session harvest (same contract as
+    /// [`FileContent::extracted_images`]). Must survive ToolDyn hub
+    /// `to_value`/`from_value`; session drains before PostToolUse and ACP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
 }
 impl MCPOutput {
     pub fn okay_output(tool_name: String, server_name: String, output: String) -> Self {
@@ -1223,6 +1268,7 @@ impl MCPOutput {
             auth_retry_attempted: false,
             is_timeout: false,
             is_error: false,
+            extracted_images: Vec::new(),
         }
     }
     pub fn errored(tool_name: String, server_name: String, error: String) -> Self {
@@ -1234,6 +1280,7 @@ impl MCPOutput {
             auth_retry_attempted: false,
             is_timeout: false,
             is_error: true,
+            extracted_images: Vec::new(),
         }
     }
     pub fn output(&self) -> &MCPOutputDetails {
@@ -1256,8 +1303,8 @@ impl xai_tool_runtime::ToolOutput for BashOutput {
         let mut stdout = String::from_utf8_lossy(&self.output).into_owned();
         let mut extra = serde_json::Map::new();
         if self.truncated {
-            let shown = crate::util::truncate::format_bytes(self.output.len());
-            let total = crate::util::truncate::format_bytes(self.total_bytes);
+            let shown = crate::util::truncate::format_bytes(self.output.len() as u64);
+            let total = crate::util::truncate::format_bytes(self.total_bytes as u64);
             stdout.push_str(&format!(
                 "\n[truncated: showing first/last {shown} of {total} - full output at: {}]",
                 self.output_file
@@ -1316,6 +1363,162 @@ mod tests {
     /// Serialize a ToolOutput to JSON value
     fn to_json(output: ToolOutput) -> serde_json::Value {
         serde_json::to_value(&output).unwrap()
+    }
+    #[test]
+    fn mcp_extracted_images_survive_hub_json_roundtrip() {
+        let mut mcp = MCPOutput::okay_output(
+            "browser_screenshot".into(),
+            "browser-use".into(),
+            crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+        );
+        let payload = "A".repeat(50_000);
+        mcp.extracted_images = vec![crate::util::base64_images::ExtractedImage {
+            data: payload.clone(),
+            mime_type: "image/png".into(),
+        }];
+        let v = serde_json::to_value(&mcp).unwrap();
+        assert!(
+            v.get("extracted_images").is_some(),
+            "hub ToolDyn to_value must keep non-empty extracted_images"
+        );
+        let back: MCPOutput = serde_json::from_value(v).unwrap();
+        assert_eq!(back.extracted_images.len(), 1);
+        assert_eq!(back.extracted_images[0].data, payload);
+        assert_eq!(back.extracted_images[0].mime_type, "image/png");
+    }
+    #[test]
+    fn tool_output_mcp_extracted_images_survive_hub_roundtrip() {
+        let mut mcp = MCPOutput::okay_output(
+            "t".into(),
+            "s".into(),
+            crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+        );
+        let payload = "C".repeat(12_000);
+        mcp.extracted_images = vec![crate::util::base64_images::ExtractedImage {
+            data: payload.clone(),
+            mime_type: "image/webp".into(),
+        }];
+        let output = ToolOutput::MCP(mcp);
+        let v = serde_json::to_value(&output).unwrap();
+        let back: ToolOutput = serde_json::from_value(v).unwrap();
+        let ToolOutput::MCP(mcp) = back else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].data, payload);
+    }
+    #[test]
+    fn file_content_extracted_images_survive_hub_json_roundtrip() {
+        let payload = "B".repeat(40_000);
+        let fc = FileContent {
+            content: crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/x.png"),
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 1,
+            extracted_images: vec![crate::util::base64_images::ExtractedImage {
+                data: payload.clone(),
+                mime_type: "image/jpeg".into(),
+            }],
+        };
+        let v = serde_json::to_value(&fc).unwrap();
+        assert!(v.get("extracted_images").is_some());
+        let back: FileContent = serde_json::from_value(v).unwrap();
+        assert_eq!(back.extracted_images.len(), 1);
+        assert_eq!(back.extracted_images[0].data, payload);
+    }
+    #[test]
+    fn empty_extracted_images_omitted_from_json() {
+        let mcp = MCPOutput::okay_output("t".into(), "s".into(), "plain".into());
+        let v = serde_json::to_value(&mcp).unwrap();
+        assert!(v.get("extracted_images").is_none());
+    }
+    #[test]
+    fn tool_output_read_file_extracted_images_survive_hub_roundtrip() {
+        let payload = "D".repeat(18_000);
+        let fc = FileContent {
+            content: crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER.into(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/y.png"),
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 1,
+            extracted_images: vec![crate::util::base64_images::ExtractedImage {
+                data: payload.clone(),
+                mime_type: "image/png".into(),
+            }],
+        };
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(fc));
+        let v = serde_json::to_value(&output).unwrap();
+        let back: ToolOutput = serde_json::from_value(v).unwrap();
+        let ToolOutput::ReadFile(ReadFileOutput::FileContent(fc)) = back else {
+            panic!("expected FileContent");
+        };
+        assert_eq!(fc.extracted_images.len(), 1);
+        assert_eq!(fc.extracted_images[0].data, payload);
+        assert_eq!(fc.extracted_images[0].mime_type, "image/png");
+    }
+    fn empty_file_content(offset: Option<usize>, total_lines: usize) -> FileContent {
+        FileContent {
+            content: String::new(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/f.txt"),
+            offset,
+            limit: None,
+            raw_output: String::new(),
+            total_lines,
+            extracted_images: vec![],
+        }
+    }
+    /// An empty file must render an explicit notice, not a blank result.
+    #[test]
+    fn read_empty_file_prompt_says_file_is_empty() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(None, 0)));
+        assert_eq!(output.to_prompt_format(), "File is empty.");
+    }
+    /// An offset beyond the last line must say past-EOF and report the real
+    /// line count.
+    #[test]
+    fn read_past_eof_prompt_reports_line_count() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(
+            Some(101),
+            100,
+        )));
+        let prompt = output.to_prompt_format();
+        assert!(
+            prompt.contains("past the end of the file"),
+            "expected past-EOF notice, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("100 lines"),
+            "expected real line count, got: {prompt}"
+        );
+    }
+    /// An empty window with an in-range offset (e.g. `limit: 0`) must render
+    /// the generic notice, not a bogus past-EOF claim.
+    #[test]
+    fn read_empty_window_in_range_offset_is_not_past_eof() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(
+            Some(5),
+            100,
+        )));
+        let prompt = output.to_prompt_format();
+        assert_eq!(prompt, "(no lines returned)");
+        assert!(
+            !prompt.contains("past the end of the file"),
+            "in-range empty window must not claim past-EOF: {prompt}"
+        );
+    }
+    /// Non-empty content renders unchanged.
+    #[test]
+    fn read_non_empty_content_renders_verbatim() {
+        let mut fc = empty_file_content(None, 3);
+        fc.content = "1→a\nb\nc".to_string();
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(fc));
+        assert_eq!(output.to_prompt_format(), "1→a\nb\nc");
     }
     #[test]
     fn text_output_to_prompt_format_omits_consumed_completion_task_id() {
@@ -1610,6 +1813,58 @@ mod tests {
         );
     }
     #[test]
+    fn apply_patch_parse_error_json() {
+        let json = to_json(ApplyPatchOutput::ParseError("Invalid patch: boom".into()).into());
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "ParseError": "Invalid patch: boom"})
+        );
+    }
+    #[test]
+    fn apply_patch_application_error_json() {
+        let json = to_json(
+            ApplyPatchOutput::ApplicationError("File /tmp/x.rs does not exist".into()).into(),
+        );
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "ApplicationError": "File /tmp/x.rs does not exist"})
+        );
+    }
+    #[test]
+    fn apply_patch_empty_patch_json() {
+        let json = to_json(ApplyPatchOutput::EmptyPatch("No files were modified.".into()).into());
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "EmptyPatch": "No files were modified."})
+        );
+    }
+    /// `Success` must not serialize under any of the keys Python treats as a
+    /// failure, otherwise a successful patch would be taxed as a tool error.
+    #[test]
+    fn apply_patch_success_json_is_not_an_error_shape() {
+        let json = to_json(
+            ApplyPatchOutput::Success {
+                files: vec![ApplyPatchFileResult {
+                    path: PathBuf::from("/repo/src/main.rs"),
+                    action: "modified".into(),
+                    old_text: Some("old".into()),
+                    new_text: "new".into(),
+                    move_to: None,
+                }],
+                tool_output_for_prompt: "Updated /repo/src/main.rs".into(),
+            }
+            .into(),
+        );
+        assert_eq!(json["type"], "ApplyPatch");
+        assert!(json.get("Success").is_some(), "missing Success key: {json}");
+        for key in ["ParseError", "ApplicationError", "EmptyPatch"] {
+            assert!(
+                json.get(key).is_none(),
+                "success must not serialize under the error key {key}: {json}"
+            );
+        }
+    }
+    #[test]
     fn kill_task_result_json() {
         let json = to_json(
             KillTaskOutput::Result(KillTaskResult {
@@ -1672,6 +1927,118 @@ mod tests {
         assert!(json.get("Result").is_some(), "missing Result key: {json}");
         assert_eq!(json["Result"]["task_id"], "task-1");
         assert_eq!(json["Result"]["status"], "running");
+    }
+    /// The single-task detail view is duration-only: absolute `started` /
+    /// `ended` instants stay on the wire struct but must not reach the prompt.
+    #[test]
+    fn task_output_prompt_is_duration_only() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-1".into(),
+            command: "sleep 10".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: "2026-03-09T00:00:00Z".into(),
+            ended: Some("2026-03-09T00:00:05Z".into()),
+            duration_secs: 5.0,
+            output: "hello".into(),
+            output_file: "/tmp/task-1.log".into(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 5,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(prompt.contains("Duration: 5.0s"), "{prompt}");
+        assert!(prompt.contains("Output File: /tmp/task-1.log"), "{prompt}");
+        assert!(
+            !prompt.contains("Started") && !prompt.contains("Ended"),
+            "absolute instants must not be model-visible: {prompt}"
+        );
+        assert!(
+            !prompt.contains("2026-03-09"),
+            "no wall-clock date may survive into the prompt: {prompt}"
+        );
+    }
+    /// Model-visible TaskOutput wrapper must use compact minutes at 60s+,
+    /// not `Duration: 943.00s`. The inner Elapsed body is already compact;
+    /// this is the header `to_prompt_format` always sends as prompt_text.
+    #[test]
+    fn task_output_prompt_long_wait_uses_minutes_not_raw_seconds() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-wait".into(),
+            command: "wait".into(),
+            status: "running".into(),
+            exit_code: None,
+            started: "2026-03-09T00:00:00Z".into(),
+            ended: None,
+            duration_secs: 943.0,
+            output: String::new(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 0,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(
+            prompt.contains("Duration: 15m43s"),
+            "wrapper must use compact minutes: {prompt}"
+        );
+        for leak in ["943.00s", "943.0s", "943s", "943 seconds"] {
+            assert!(
+                !prompt.contains(leak),
+                "raw second leak {leak:?} in: {prompt}"
+            );
+        }
+
+        let multi = ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(
+            xai_tool_types::MultiTaskOutputResult {
+                mode: "wait_all".into(),
+                results: vec![TaskOutputResult {
+                    task_id: "task-wait".into(),
+                    command: "wait".into(),
+                    status: "running".into(),
+                    exit_code: None,
+                    started: String::new(),
+                    ended: None,
+                    duration_secs: 943.0,
+                    output: String::new(),
+                    output_file: String::new(),
+                    truncated: false,
+                    truncation_hint: String::new(),
+                    raw_output_bytes: 0,
+                }],
+                summary: "1/1 still running".into(),
+            },
+        ));
+        let multi_prompt = multi.to_prompt_format();
+        assert!(
+            multi_prompt.contains("Duration: 15m43s"),
+            "multi-wait wrapper must use compact minutes: {multi_prompt}"
+        );
+        for leak in ["943.00s", "943.0s", "943s", "943 seconds"] {
+            assert!(
+                !multi_prompt.contains(leak),
+                "raw second leak {leak:?} in: {multi_prompt}"
+            );
+        }
+    }
+    #[test]
+    fn task_output_prompt_omits_empty_output_file() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-2".into(),
+            command: "true".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: String::new(),
+            ended: None,
+            duration_secs: 0.1,
+            output: "done".into(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 4,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(!prompt.contains("Output File"), "{prompt}");
     }
     fn make_result(status: &str, raw_output_bytes: usize) -> TaskOutputResult {
         TaskOutputResult {

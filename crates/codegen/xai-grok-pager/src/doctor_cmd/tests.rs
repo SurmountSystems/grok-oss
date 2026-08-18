@@ -76,6 +76,7 @@ fn tmux_facts(
         allow_passthrough_support: TmuxProbeResult::Available(()),
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -87,6 +88,7 @@ fn unavailable_tmux_facts() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Unavailable,
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
+        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -103,6 +105,7 @@ fn healthy_report() -> DiagnosticReport {
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
                 allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
+                color_passthrough: crate::diagnostics::TmuxColorPassthrough::Unknown,
             },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
@@ -240,35 +243,15 @@ fn fake_standalone_facts_compose_through_shared_view() {
     );
     let report = collect_report_with(snapshot);
 
-    // Shared-view issues only. `collect_report_with` also runs the live voice
-    // input-device probe after the view, which appends `voice.no-input-device`
-    // when no system recorder is on PATH (typical headless CI). That host fact
-    // is outside the fake snapshot under test.
-    let view_issues: Vec<_> = report
-        .findings
-        .iter()
-        .filter(|finding| {
-            finding.disposition == FindingDisposition::Issue
-                && finding.id != crate::diagnostics::VOICE_NO_INPUT_DEVICE_ID
-        })
-        .collect();
-    assert_eq!(
-        view_issues.len(),
-        1,
-        "unexpected view issues: {:?}",
-        view_issues
-            .iter()
-            .map(|finding| finding.id)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(report.issue_count(), 1);
     assert!(
         report
             .findings
             .iter()
-            .all(|finding| finding.id != DiagnosticId::new("terminal", "control-mode"))
+            .all(|finding| { finding.id != DiagnosticId::new("terminal", "control-mode") })
     );
     assert_eq!(
-        view_issues[0].id,
+        report.findings[0].id,
         DiagnosticId::new("terminal", "tmux-clipboard")
     );
 }
@@ -431,6 +414,7 @@ fn standalone_runtime_and_tmux_are_unavailable_without_false_wezterm_finding() {
             "tmux.set-clipboard",
             "tmux.allow-passthrough-support",
             "tmux.control-mode",
+            "tmux.client-features",
         ]
     );
     let runtime_notes = report
@@ -884,10 +868,11 @@ fn stable_mapping_tables_are_complete() {
             MultiplexerKind::Screen,
             MultiplexerKind::Zellij,
             MultiplexerKind::Cmux,
+            MultiplexerKind::Herdr,
             MultiplexerKind::Undetected,
         ]
         .map(multiplexer),
-        ["tmux", "screen", "zellij", "cmux", "undetected"]
+        ["tmux", "screen", "zellij", "cmux", "herdr", "undetected"]
     );
     assert_eq!(
         [

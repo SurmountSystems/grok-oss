@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::auth::error::RefreshTokenError;
+use crate::auth::upsert_supergrok_session;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
@@ -476,8 +477,8 @@ async fn team_login_then_personal_keeps_both_principals() {
     );
 }
 
-/// Dual SuperGrok sticky Team base (last business login) for free SuperGrok
-/// period rank tests. Personal user_id lex-wins on equal headroom.
+/// Dual SuperGrok sticky Team base (last business login) for included SuperGrok
+/// period rank tests. Rank now prefers Business included while both have remaining.
 fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, AuthStore) {
     let personal = GrokAuth {
         key: "tok-personal-free-period".into(),
@@ -503,9 +504,9 @@ fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, Au
     (personal, team, map)
 }
 
-/// Named contract: sticky Team base must align to free SuperGrok period ranked
-/// primary (personal wins on equal headroom + lex identity_id) so SessionToken
-/// sampling does not burn team OAuth while free SuperGrok period sits idle.
+/// Named contract: sticky personal base must align to Business included SuperGrok
+/// period limits when both stored logins still have remaining. Operator 2026-08-14:
+/// Team/Business class wins while it still has included remaining (not lex personal).
 #[test]
 fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let dir = tempfile::tempdir().unwrap();
@@ -513,73 +514,140 @@ fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let mut cfg = GrokComConfig::default();
     cfg.auto_use_included_limits = false;
     let base_scope = cfg.auth_scope();
-    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
     write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-business-team-base".into()),
-        "precondition: sticky base is Team when auto_use_included_limits is false"
+        Some("tok-personal-free-period".into()),
+        "precondition: sticky base is personal when auto_use_included_limits is false"
     );
 
     let switched = mgr.align_to_ranked_free_period_primary();
     assert!(
         switched,
-        "equal free SuperGrok period headroom must realign sticky Team base"
+        "both logins with included remaining must realign sticky personal to Business"
     );
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-personal-free-period".into()),
-        "SessionToken bearer must be free SuperGrok period ranked personal primary"
+        Some("tok-business-team-base".into()),
+        "SessionToken bearer must be ranked Business included SuperGrok period primary"
     );
     let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
     assert_eq!(
         store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-personal-free-period"),
-        "disk base scope must match ranked free SuperGrok period primary"
+        Some("tok-business-team-base"),
+        "disk base scope must match ranked Business included SuperGrok period primary"
     );
     // No-op when already aligned.
     assert!(!mgr.align_to_ranked_free_period_primary());
     let trace = mgr
         .session_wire_bearer_trace()
         .expect("wire bearer after align");
-    assert_eq!(trace["principal_type"], "User");
-    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+    assert_eq!(trace["principal_type"], "Team");
+    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
 }
 
 /// Named contract: with `[auth] auto_use_included_limits = true` (default),
-/// AuthManager::new must load free SuperGrok period ranked primary, not leave
-/// sticky Team base wire-active until the first SessionToken reconstruct.
+/// AuthManager::new must load ranked included SuperGrok period primary (Business
+/// when both stored logins still have remaining), not leave sticky personal.
 #[test]
 fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_primary() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     assert!(
         cfg.auto_use_included_limits,
-        "default must prefer free SuperGrok period limits"
+        "default must prefer included SuperGrok period limits"
     );
     let base_scope = cfg.auth_scope();
-    let (_personal, _team, map) = dual_supergrok_sticky_team_store(&base_scope);
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
+    write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-business-team-base".into()),
+        "AuthManager::new with auto_use must wire ranked Business included SuperGrok period primary, not sticky personal"
+    );
+    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    assert_eq!(
+        store.get(&base_scope).map(|a| a.key.as_str()),
+        Some("tok-business-team-base"),
+        "disk base after new must match ranked Business included SuperGrok period primary"
+    );
+    let trace = mgr
+        .session_wire_bearer_trace()
+        .expect("wire bearer after new");
+    assert_eq!(trace["principal_type"], "Team");
+    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
+}
+
+/// Named contract: after a billing refresh that shows personal included
+/// SuperGrok period limits full (with SuperGrok dollar credits) and Business
+/// included remaining, align the sticky personal SessionToken bearer to the
+/// Business JWT. Hermetic: no network. Align is what handle_get_billing must
+/// call after remember.
+#[test]
+fn align_after_billing_switches_sticky_personal_full_to_business_included() {
+    use crate::auth::{
+        clear_included_billing_cache, remember_supergrok_dollar_extras,
+        remember_supergrok_included_billing,
+    };
+
+    clear_included_billing_cache();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = GrokComConfig::default();
+    cfg.auto_use_included_limits = false;
+    let base_scope = cfg.auth_scope();
+    // dual_supergrok_sticky_team_store upserts personal then Team (sticky Team).
+    // Re-order so personal is the sticky base (last upsert).
+    let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
+    let mut map = AuthStore::default();
+    upsert_supergrok_session(&mut map, &base_scope, team);
+    upsert_supergrok_session(&mut map, &base_scope, personal);
     write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
         Some("tok-personal-free-period".into()),
-        "AuthManager::new with auto_use must wire free SuperGrok period ranked personal primary, not sticky Team"
+        "precondition: sticky base is personal"
     );
-    let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
+
+    // Personal included SuperGrok period limits full + SuperGrok dollar credits.
+    // Business sibling still has included remaining.
+    remember_supergrok_included_billing(
+        "58c5f686-4270-4d6d-9c3b-df44559f8457",
+        100.0,
+        Some("2026-08-20T00:00:00Z"),
+        Some("USAGE_PERIOD_TYPE_WEEKLY"),
+    );
+    remember_supergrok_dollar_extras("58c5f686-4270-4d6d-9c3b-df44559f8457", 10_029);
+    remember_supergrok_included_billing(
+        "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
+        40.0,
+        Some("2026-08-21T00:00:00Z"),
+        Some("USAGE_PERIOD_TYPE_WEEKLY"),
+    );
+
+    let switched = mgr.align_to_ranked_free_period_primary();
+    assert!(
+        switched,
+        "billing that fills personal included and leaves Business included must realign"
+    );
     assert_eq!(
-        store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-personal-free-period"),
-        "disk base after new must match ranked free SuperGrok period primary"
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-business-team-base".into()),
+        "SessionToken bearer must hop to the Business sibling that still has included SuperGrok period limits"
     );
-    let trace = mgr
-        .session_wire_bearer_trace()
-        .expect("wire bearer after new");
-    assert_eq!(trace["principal_type"], "User");
-    assert_eq!(trace["team_id"], "58c5f686-4270-4d6d-9c3b-df44559f8457");
+    clear_included_billing_cache();
 }
 
 /// Regression test: clear() must only remove the current scope, not the
@@ -704,7 +772,7 @@ fn manager_collection_predicates_fail_directions() {
     );
 }
 
-// -- token_suffix ----------------------------------------------------------------
+// -- bearer_suffix ----------------------------------------------------------------
 
 #[test]
 fn token_suffix_matrix() {
@@ -715,7 +783,7 @@ fn token_suffix_matrix() {
         ("123456789012", "123456789012"),     // exact 12
     ];
     for (input, expected) in cases {
-        assert_eq!(token_suffix(input), *expected, "input={input:?}");
+        assert_eq!(bearer_suffix(input), *expected, "input={input:?}");
     }
 }
 
@@ -942,7 +1010,11 @@ async fn storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token() {
 
     for _ in 0..5 {
         let _ = mgr
-            .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+            .refresh_chain(
+                TokenType::OidcSession,
+                RefreshReason::ServerRejected,
+                RefreshUrgency::UserFacing,
+            )
             .await;
     }
     assert_eq!(
@@ -1010,7 +1082,11 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
     }));
 
     let _ = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1033,7 +1109,11 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
     });
 
     let _ = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1046,9 +1126,9 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
 /// but cannot write it to disk must surface `Transient` AND still swap the
 /// in-memory bearer to the fresh token (the "always update in-memory even if the
 /// disk write failed" invariant — without it a disk hiccup strands the session).
-/// The write is failed deterministically (root-safe) by planting a *directory*
-/// at the atomic-write temp path so `open_secure_file` hits `EISDIR`; the
-/// auth.json read (file absent) and the file lock still succeed.
+/// The write is failed deterministically (root-safe) via the path-scoped
+/// `WRITE_FAULT_PATH` injection in `storage.rs`; the auth.json read (file
+/// absent) and the file lock still succeed.
 #[tokio::test]
 async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -1063,14 +1143,20 @@ async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
         ..GrokAuth::test_default()
     });
 
-    // `write_auth_json_atomic` writes `auth.json.<pid>.tmp` then renames; a
-    // directory there makes the temp-file open fail with EISDIR (enforced even
-    // for root), so the persist fails while the read/lock paths are unaffected.
-    std::fs::create_dir(
-        dir.path()
-            .join(format!("auth.json.{}.tmp", std::process::id())),
-    )
-    .unwrap();
+    // Fail every atomic write to THIS tempdir's auth.json (path-scoped, so
+    // parallel tests are unaffected). Cleared on drop.
+    struct FaultGuard;
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            *crate::auth::storage::WRITE_FAULT_PATH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+    let _fault = FaultGuard;
+    *crate::auth::storage::WRITE_FAULT_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(dir.path().join("auth.json"));
 
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: Arc::new(AtomicU32::new(0)),
@@ -1078,7 +1164,11 @@ async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
     }));
 
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect_err("persist failure must surface an error");
     assert!(
@@ -1237,9 +1327,7 @@ async fn refresh_chain_surfaces_transient_failure() {
     #[async_trait::async_trait]
     impl TokenRefresher for TransientRefresher {
         async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
-            crate::auth::refresh::RefreshOutcome::TransientFailure {
-                message: "idp timeout".into(),
-            }
+            crate::auth::refresh::RefreshOutcome::transient("idp timeout")
         }
     }
     mgr.set_refresher(Arc::new(TransientRefresher));
@@ -1351,13 +1439,10 @@ async fn proactive_refresh_backs_off_on_permanent_failure() {
     let cancel = CancellationToken::new();
     mgr.start_proactive_refresh(cancel.clone());
 
-    // Give the loop ample time to observe the failure and back off.
-    // The 300ms window is two orders of magnitude shorter than the
-    // 5-minute BACKOFF_INTERVAL, so a backed-off loop completes at
-    // most a couple of iterations: the initial pass that records the
-    // permanent failure, optionally a few re-check passes if the
-    // executor races, then sleeps for `BACKOFF_INTERVAL`.
-    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    // Window: past the PROACTIVE_MIN_SLEEP-delayed first pass, yet two
+    // orders of magnitude under BACKOFF_INTERVAL — a backed-off loop
+    // completes at most a couple of iterations in it.
+    tokio::time::sleep(PROACTIVE_MIN_SLEEP + StdDuration::from_millis(500)).await;
 
     let iterations = mgr.proactive_iteration_count();
     let after_failure = call_count.load(Ordering::SeqCst);
@@ -1464,7 +1549,9 @@ async fn proactive_refresh_and_consumer_see_fresh_token_end_to_end() {
 
     let cancel = CancellationToken::new();
     mgr.start_proactive_refresh(cancel.clone());
-    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    // The loop's first pass runs after PROACTIVE_MIN_SLEEP (1 s), so the
+    // observation window must comfortably exceed the floor.
+    tokio::time::sleep(PROACTIVE_MIN_SLEEP + StdDuration::from_millis(1000)).await;
 
     assert!(call_count.load(Ordering::SeqCst) >= 1);
     assert_eq!(mgr.get_valid_token().await.unwrap(), "fresh-token");
@@ -1571,6 +1658,153 @@ async fn refresh_chain_demotes_when_disk_rt_differs_even_if_at_expired() {
     );
 }
 
+/// Regression test for the multi-process logout incident.
+///
+/// This is the shape `OidcRefresher` actually emits in production: the tried
+/// credential is **fully attributed** (`tried_key` *and* `tried_refresh_token`
+/// are `Some`). The pre-existing demotion tests all built the outcome with
+/// `tried_key = None` — the external-binary shape — so they passed while the
+/// OIDC path was gated behind `tried_key.is_none()` and could never demote.
+///
+/// Scenario: a sibling rotated the RT while our token exchange was in flight,
+/// so the IdP rejected the RT we spent. That is a lost race, not a revoked
+/// session: it must demote to transient and leave the sibling's credential on
+/// disk untouched.
+#[tokio::test]
+async fn refresh_chain_demotes_when_attributed_tried_rt_differs_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    // We hold, and spend, the predecessor RT.
+    let tried = GrokAuth {
+        key: "tried-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-spent".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    mgr.hot_swap(tried.clone());
+
+    // A sibling already rotated: disk carries the successor RT. Its AT is
+    // expired too, so disk adoption cannot short-circuit the failure path —
+    // the demotion is the only thing standing between us and a wipe.
+    let sibling = GrokAuth {
+        key: "sibling-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-successor".into()),
+        expires_at: Some(Utc::now() - Duration::minutes(30)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    let mut store = AuthStore::new();
+    store.insert(scope, sibling);
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    struct AttributedRejection(GrokAuth);
+    #[async_trait::async_trait]
+    impl TokenRefresher for AttributedRejection {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            // Exactly what OidcRefresher builds on a 400 invalid_grant.
+            crate::auth::refresh::RefreshOutcome::permanent_for(
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+                &self.0,
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(AttributedRejection(tried)));
+
+    let err = mgr
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "a rejected RT that disk has already rotated past is a lost race, \
+         not a revoked session; must demote to transient, got: {err:?}",
+    );
+    assert_eq!(
+        mgr.read_disk_auth().and_then(|a| a.refresh_token),
+        Some("rt-successor".into()),
+        "the sibling's successor RT must survive our rejection",
+    );
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "demotion must not record a sticky verdict that locks out every \
+         sibling process until the user re-runs `grok login`",
+    );
+}
+
+/// The demotion must *not* fire when disk still holds the very RT that was
+/// just rejected: nobody rotated, the session really is dead, and holding on
+/// to a known-revoked credential would loop forever.
+#[tokio::test]
+async fn refresh_chain_still_discards_when_attributed_tried_rt_matches_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    let tried = GrokAuth {
+        key: "only-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-revoked".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    mgr.hot_swap(tried.clone());
+    let mut store = AuthStore::new();
+    store.insert(scope, tried.clone());
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    struct AttributedRejection(GrokAuth);
+    #[async_trait::async_trait]
+    impl TokenRefresher for AttributedRejection {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            crate::auth::refresh::RefreshOutcome::permanent_for(
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+                &self.0,
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(AttributedRejection(tried)));
+
+    let err = mgr
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Permanent(_))),
+        "an un-rotated rejected RT is a genuinely dead session, got: {err:?}",
+    );
+    assert!(
+        mgr.permanent_failure().is_some(),
+        "a genuine revocation must still record a verdict",
+    );
+}
+
 /// Disk-first invalid_grant must not wipe an untried in-memory successor RT
 /// (mem-ahead-of-disk after a failed persist of a successful rotation).
 #[tokio::test]
@@ -1622,7 +1856,11 @@ async fn permanent_rtr_clears_only_the_tried_side_when_rts_diverge() {
     mgr.set_refresher(Arc::new(TriedDiskRtr(calls.clone())));
 
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2104,8 +2342,8 @@ fn compute_proactive_sleep_sleep_gated_returns_backoff() {
     });
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "precondition: ungated expired refreshable token yields a 0 sleep"
+        PROACTIVE_MIN_SLEEP,
+        "precondition: ungated expired refreshable token yields the floor sleep"
     );
 
     mgr.set_system_sleep_imminent(true);
@@ -2116,10 +2354,14 @@ fn compute_proactive_sleep_sleep_gated_returns_backoff() {
     );
 }
 
-/// Dark wake -> BACKOFF_INTERVAL even for a refreshable token past its expiry.
-/// `refresh_chain` defers every attempt during a dark wake (to avoid an IdP
-/// refresh straddling an unsignaled re-sleep), so the proactive loop must back
-/// off rather than spin at `sleep_dur=0`.
+/// Dark wake -> BACKOFF_INTERVAL regardless of token state: the proactive
+/// loop is a background consumer, so `refresh_chain` defers its every attempt
+/// in dark wake and the loop must back off rather than spin at `sleep_dur=0`
+/// against the deferral. Pre-straddle-hardening the dead-token case fell
+/// through to the floor sleep and attempted a refresh — that forced exchange
+/// inside a seconds-long dark-wake window is exactly what manufactured the
+/// overnight straddles (the wake nudge, not this schedule, handles recovery
+/// at the next full wake; a user-facing request still refreshes immediately).
 #[test]
 fn compute_proactive_sleep_dark_wake_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2128,19 +2370,20 @@ fn compute_proactive_sleep_dark_wake_returns_backoff() {
         call_count: Arc::new(AtomicU32::new(0)),
         delay: StdDuration::from_millis(0),
     }));
-    // Refreshable OidcSession past the early-invalidation boundary: without
-    // the dark-wake gate this returns 0 (would busy-loop).
+    // Wire-valid but past the early-invalidation boundary: renewal is due, and
+    // `refresh_chain` will defer it in dark wake — so the loop must back off
+    // rather than busy-loop against that deferral.
     mgr.hot_swap(GrokAuth {
         key: "oidc".into(),
         auth_mode: AuthMode::Oidc,
         refresh_token: Some("rt".into()),
-        expires_at: Some(Utc::now() - Duration::hours(1)),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
         ..GrokAuth::test_default()
     });
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "precondition: non-dark-wake expired refreshable token yields a 0 sleep"
+        PROACTIVE_MIN_SLEEP,
+        "precondition: renewal due outside dark wake yields the floor sleep"
     );
 
     mgr.set_dark_wake_for_test(true);
@@ -2150,12 +2393,30 @@ fn compute_proactive_sleep_dark_wake_returns_backoff() {
         "dark wake must back the proactive loop off instead of busy-looping"
     );
 
-    // Returning to a full wake re-enables immediate refresh.
+    // Hard-expired: the loop is a background consumer, so `refresh_chain`
+    // still defers in dark wake — the floor sleep would only spin against
+    // that deferral and grow the failure ladder.
+    mgr.hot_swap(GrokAuth {
+        key: "oidc".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    assert_eq!(
+        compute_proactive_sleep(&mgr),
+        BACKOFF_INTERVAL,
+        "a hard-expired token in dark wake must back off, not schedule a \
+         refresh the deferral will bounce"
+    );
+
+    // Full wake ends the backoff immediately (the wake nudge re-arms the
+    // loop out of any in-progress interval).
     mgr.set_dark_wake_for_test(false);
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "full wake must allow the refresh to proceed again"
+        PROACTIVE_MIN_SLEEP,
+        "recovery resumes on the floor schedule at full wake"
     );
 }
 
@@ -2197,10 +2458,11 @@ fn compute_proactive_sleep_refreshable_no_expiry_returns_backoff() {
     assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
 }
 
-/// Refreshable type + `Some(past)` and gates pass -> sleep_dur = 0
-/// (refresh now). This is the "happy path" the gates don't block.
+/// Refreshable type + `Some(past)` and gates pass -> the floor sleep
+/// (refresh on the next pass; floored so the adopt/skip fast paths can't
+/// spin). This is the "happy path" the gates don't block.
 #[test]
-fn compute_proactive_sleep_refreshable_past_expiry_returns_zero() {
+fn compute_proactive_sleep_refreshable_past_expiry_returns_floor() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     mgr.set_refresher(Arc::new(CountingRefresher {
@@ -2215,7 +2477,7 @@ fn compute_proactive_sleep_refreshable_past_expiry_returns_zero() {
         ..GrokAuth::test_default()
     });
     assert_eq!(mgr.token_type(), TokenType::OidcSession);
-    assert_eq!(compute_proactive_sleep(&mgr), StdDuration::from_secs(0));
+    assert_eq!(compute_proactive_sleep(&mgr), PROACTIVE_MIN_SLEEP);
 }
 
 /// Refreshable type + `Some(future)` and gates pass -> sleep_dur ~=
@@ -3040,6 +3302,28 @@ async fn update_recovers_from_whitespace_only_auth_json() {
     assert!(on_disk.contains("ws-token"), "credential must be persisted");
 }
 
+// -- sibling-rotation comparison ------------------------------------------
+
+/// The demotion — and therefore whether a dozen processes keep their
+/// credentials — rests entirely on this comparison, so pin its three cases
+/// directly rather than only through the refresh chain.
+#[test]
+fn refresh_token_superseded_needs_a_successor_on_disk() {
+    assert!(
+        AuthManager::refresh_token_superseded(Some("rt-successor"), "rt-spent"),
+        "a different RT on disk is a sibling's successor: demote"
+    );
+    assert!(
+        !AuthManager::refresh_token_superseded(Some("rt-spent"), "rt-spent"),
+        "disk still holding the RT the IdP just rejected is a real revocation"
+    );
+    assert!(
+        !AuthManager::refresh_token_superseded(None, "rt-spent"),
+        "no RT on disk means there is no successor to fall back to, so the \
+         rejection must be honored rather than demoted into a retry loop"
+    );
+}
+
 // -- sibling_has_different_refresh_token ----------------------------------
 
 /// Expired disk AT with different RT is still treated as a sibling RT
@@ -3072,8 +3356,9 @@ async fn sibling_different_rt_with_expired_at_is_still_sibling() {
     store.insert(cfg.auth_scope(), successor);
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
+    let disk_rt = mgr.read_disk_auth().and_then(|a| a.refresh_token);
     assert!(
-        mgr.sibling_has_different_refresh_token(),
+        mgr.sibling_has_different_refresh_token(disk_rt.as_deref()),
         "different disk RT must demote even when the sibling AT is expired"
     );
 }
@@ -3106,8 +3391,9 @@ async fn sibling_different_rt_with_valid_at_is_treated_as_live() {
     store.insert(cfg.auth_scope(), sibling);
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
+    let disk_rt = mgr.read_disk_auth().and_then(|a| a.refresh_token);
     assert!(
-        mgr.sibling_has_different_refresh_token(),
+        mgr.sibling_has_different_refresh_token(disk_rt.as_deref()),
         "valid disk token with different RT must be treated as live sibling"
     );
 }
@@ -3146,6 +3432,7 @@ async fn refresh_chain_server_rejected_bypasses_valid_token_double_check() {
         .refresh_chain(
             crate::auth::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         )
         .await;
 
@@ -3203,10 +3490,12 @@ async fn refresh_chain_server_rejected_concurrent_skips_redundant_refresh() {
         mgr1.refresh_chain(
             crate::auth::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         ),
         mgr2.refresh_chain(
             crate::auth::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         ),
     );
 
@@ -3249,6 +3538,7 @@ async fn refresh_chain_pre_request_short_circuits_on_valid_token() {
         .refresh_chain(
             crate::auth::token_type::TokenType::OidcSession,
             RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
         )
         .await;
 
@@ -4231,20 +4521,36 @@ async fn sleep_deferred_refresh_is_transient_no_kpi_no_verdict() {
     );
 }
 
+/// Dark wake defers a refresh only while a *wire-valid* token can still be
+/// served — then the deferral costs nothing but latency.
 #[tokio::test]
-async fn dark_wake_defers_refresh_without_calling_idp() {
+async fn dark_wake_defers_refresh_while_a_live_token_can_be_served() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    mgr.hot_swap(expired_oidc());
+    // Inside the early-invalidation buffer: due for renewal (`current()` is
+    // None, so `refresh_chain` proceeds) but still accepted on the wire.
+    mgr.hot_swap(GrokAuth {
+        key: "live-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
     let call_count = Arc::new(AtomicU32::new(0));
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: call_count.clone(),
         delay: StdDuration::from_millis(0),
     }));
-
     mgr.set_dark_wake_for_test(true);
 
-    let err = mgr.auth().await.unwrap_err();
+    let err = mgr
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             err,
@@ -4255,18 +4561,69 @@ async fn dark_wake_defers_refresh_without_calling_idp() {
     assert_eq!(
         call_count.load(Ordering::SeqCst),
         0,
-        "the IdP refresher must NOT be called during a dark wake (the refresh \
-         token must not be sent into a possible re-sleep)"
+        "with a live token to serve, the refresh token must not be sent into a \
+         possible re-sleep"
     );
+}
 
-    // Returning to a full wake lets the refresh proceed and reach the IdP.
-    mgr.set_dark_wake_for_test(false);
-    assert_eq!(mgr.auth().await.unwrap().key, "fresh-token");
+/// The inverse, and the one field logs caught: with **no** usable token, a
+/// dark-wake deferral guarantees the caller 401s instead of merely delaying it.
+/// A machine doing background work with the lid shut (leader mode + subagents)
+/// accumulated hundreds of 401s across hours of continuous dark wake while
+/// every recovery refresh was deferred. Refresh must proceed in that state.
+#[tokio::test]
+async fn dark_wake_does_not_defer_when_no_usable_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(expired_oidc());
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
     assert_eq!(
-        call_count.load(Ordering::SeqCst),
-        1,
-        "after a full wake the refresher must be invoked"
+        mgr.auth().await.unwrap().key,
+        "fresh-token",
+        "an expired credential in dark wake must still be refreshed"
     );
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+/// A 401 recovery is never deferred for dark wake: the server already rejected
+/// what we hold, so deferring can only prolong the failure.
+#[tokio::test]
+async fn dark_wake_does_not_defer_server_rejected_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "rejected-but-unexpired".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
+    assert_eq!(
+        mgr.refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
+        .await
+        .unwrap()
+        .key,
+        "fresh-token",
+        "ServerRejected recovery must reach the IdP even in dark wake"
+    );
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 
 /// A machine stuck reporting a *continuous* dark wake (e.g. an interactive Mac
@@ -4278,7 +4635,15 @@ async fn dark_wake_defers_refresh_without_calling_idp() {
 async fn dark_wake_defer_forces_refresh_after_max() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    mgr.hot_swap(expired_oidc());
+    // Wire-valid but due for renewal, so the deferral path (and its budget) is
+    // the thing under test — a hard-expired token is never deferred at all.
+    mgr.hot_swap(GrokAuth {
+        key: "live-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
     let call_count = Arc::new(AtomicU32::new(0));
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: call_count.clone(),
@@ -4296,7 +4661,7 @@ async fn dark_wake_defer_forces_refresh_after_max() {
     ) else {
         return; // machine/clock can't represent the backdate — skip
     };
-    *mgr.dark_wake_defer_since.write() = Some(super::sleep_gate::GateRaise { mono, wall });
+    *mgr.dark_wake_defer_since.write() = Some(crate::util::dual_clock::DualClock { mono, wall });
 
     assert_eq!(
         mgr.auth().await.unwrap().key,
@@ -4350,17 +4715,51 @@ fn dark_wake_defer_budget_survives_powered_on_during_dark_wake() {
 }
 
 /// The `power_listener_started` guard in `is_dark_wake` must short-circuit to
-/// `false` when no OS power listener was started (headless / datacenter), so
+/// `false` when no OS power listener was started (headless / server), so
 /// those processes never treat the OS power state as a dark wake. Exercises the
 /// guard directly (no dark-wake override installed).
 #[test]
+#[serial_test::serial(force_dark_wake_env)] // reads GROK_AUTH_FORCE_DARK_WAKE
 fn is_dark_wake_false_when_power_listener_not_started() {
+    let _unset = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_FORCE_DARK_WAKE");
     let dir = tempfile::tempdir().unwrap();
     let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
     assert!(
         !mgr.is_dark_wake(),
         "is_dark_wake must be false when the power listener was never started"
     );
+}
+
+/// `GROK_AUTH_FORCE_DARK_WAKE` forces the dark-wake answer for manual and
+/// integration testing — read BEFORE the `power_listener_started` check,
+/// because a headless run never starts the listener and the override
+/// exists precisely so such a run can drive the dark-wake paths against a
+/// real binary.
+#[test]
+#[serial_test::serial(force_dark_wake_env)]
+fn is_dark_wake_env_override_forces_both_states() {
+    use xai_grok_test_support::EnvGuard;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+    // Precondition: no power listener, so without the override this is
+    // unconditionally false.
+    {
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "1");
+        assert!(
+            mgr.is_dark_wake(),
+            "=1 must force dark wake even without a power listener"
+        );
+    }
+    {
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "0");
+        assert!(!mgr.is_dark_wake(), "=0 must force full wake");
+    }
+    {
+        // Unrecognized values fall through to the OS query (listener not
+        // started here, so false) rather than picking a state.
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "yes");
+        assert!(!mgr.is_dark_wake(), "non-1/0 values must not force a state");
+    }
 }
 
 #[tokio::test]
@@ -4399,7 +4798,7 @@ async fn sleep_gate_auto_expires_after_max() {
     ) else {
         return; // machine/clock can't represent the backdate — not reproducible; skip
     };
-    *mgr.sleep_gate.raised_at.write() = Some(super::sleep_gate::GateRaise { mono, wall });
+    *mgr.sleep_gate.raised_at.write() = Some(crate::util::dual_clock::DualClock { mono, wall });
 
     assert!(
         !mgr.is_sleep_gated(),
@@ -4431,7 +4830,7 @@ async fn sleep_gate_auto_expires_when_wall_clock_passes_during_sleep() {
     let Some(wall) = std::time::SystemTime::now().checked_sub(back) else {
         return; // clock can't represent the backdate — not reproducible; skip
     };
-    *mgr.sleep_gate.raised_at.write() = Some(super::sleep_gate::GateRaise {
+    *mgr.sleep_gate.raised_at.write() = Some(crate::util::dual_clock::DualClock {
         mono: Instant::now(),
         wall,
     });
@@ -4615,6 +5014,12 @@ fn manual_auth_reason_maps_terminal_and_skips_non_forcing() {
         }),
         Some(R::WrongTeam)
     );
+    // Before this reason existed these lockouts hid under the self-healing
+    // `Other` bucket and never surfaced in the KPI at all.
+    assert_eq!(
+        permanent(Reason::ProviderInteractiveRequired),
+        Some(R::ProviderInteractiveRequired)
+    );
     // Self-healing (TTL) reasons, transient / no-credential, and API-key
     // lockouts (out of scope for this KPI) don't count.
     assert_eq!(permanent(Reason::ClientRejected), None);
@@ -4648,6 +5053,10 @@ fn relay_should_cancel_gives_up_only_on_terminal_failures() {
     // Cancelled even though it never emits the KPI (a kill-switched API key
     // means rotate the key, not `/login`).
     assert!(relay_should_cancel(&AuthError::ApiKeyAuthDisabled));
+    // Reconnecting would replay the same 401 until the user signs in.
+    assert!(relay_should_cancel(&AuthError::permanent(
+        Reason::ProviderInteractiveRequired
+    )));
 
     // Recoverable: fall through and reconnect.
     assert!(!relay_should_cancel(&AuthError::transient("network blip")));
@@ -4781,4 +5190,1460 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .next()
         .await;
     assert!(api.manual_auth_last_token().is_none());
+}
+
+// ── requires_manual_reauth: transient-vs-terminal authority ─────────
+
+/// A refreshable credential with no sticky verdict must NOT demand a manual
+/// `/login` — this is the authority the sampler consults before painting the
+/// pager's re-auth banner, and the post-wake network gap must classify as
+/// self-healing.
+#[tokio::test]
+async fn requires_manual_reauth_false_for_refreshable_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-at".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-live".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "expired AT with a live RT and no verdict must be self-healing"
+    );
+
+    // A recoverable verdict (escalated `Other` — e.g. post-wake blips) still
+    // self-heals after its TTL, so it must not demand manual re-auth either.
+    record_permanent_failure(&mgr, crate::auth::error::RefreshTokenFailedReason::Other);
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "a recoverable Other verdict must not demand /login"
+    );
+}
+
+/// A sticky `RefreshTokenRejected` verdict (IdP revoked the RT) is fixable
+/// only by `/login`; likewise a manager with no refresh authority at all.
+#[tokio::test]
+async fn requires_manual_reauth_true_for_sticky_verdict_and_no_refresher() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-at".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-dead".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+
+    // No refresher configured: nothing can silently heal the session.
+    assert!(
+        mgr.requires_manual_reauth(),
+        "no refresh authority must demand /login"
+    );
+
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+    record_permanent_failure(
+        &mgr,
+        crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+    );
+    assert!(
+        mgr.requires_manual_reauth(),
+        "a sticky RefreshTokenRejected verdict must demand /login"
+    );
+}
+
+/// Treating a failed provider run as self-healing is what let an expired
+/// credential in and then 401'd every turn. The verdict still ages out, so a
+/// later launch gets to retry the provider.
+#[tokio::test]
+async fn requires_manual_reauth_true_after_external_provider_refresh_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), external_provider_config()));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-external".into(),
+        auth_mode: AuthMode::External,
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "before any attempt the provider may still mint silently"
+    );
+
+    record_permanent_failure(
+        &mgr,
+        crate::auth::error::RefreshTokenFailedReason::ProviderInteractiveRequired,
+    );
+    assert!(
+        mgr.requires_manual_reauth(),
+        "a failed headless provider run leaves only the interactive flow"
+    );
+
+    mgr.force_permanent_failure_aged_out();
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "the verdict is non-sticky: past its TTL the provider gets another chance"
+    );
+}
+
+/// Config for a deployment that mints sessions with an external binary.
+fn external_provider_config() -> GrokComConfig {
+    GrokComConfig {
+        auth_provider_command: Some("acme-auth".to_owned()),
+        ..GrokComConfig::default()
+    }
+}
+
+// ── proactive_failure_backoff ────────────────────────────────────────
+
+/// The proactive loop's failure backoff: zero before any failure (schedule is
+/// purely expiry-driven), grows with consecutive failures, and is capped so a
+/// long outage still retries at the regular cadence. Guards against the
+/// zero-delay spin that burned the OIDC escalation budget while post-wake
+/// Wi-Fi was still associating.
+#[test]
+fn proactive_failure_backoff_shape() {
+    assert_eq!(
+        crate::auth::manager::proactive_failure_backoff(0),
+        std::time::Duration::ZERO,
+        "no failures → no extra delay"
+    );
+    let b1 = crate::auth::manager::proactive_failure_backoff(1);
+    assert!(
+        b1 >= std::time::Duration::from_secs(5) && b1 < std::time::Duration::from_secs(9),
+        "first failure backs off ~5s (plus jitter), got {b1:?}"
+    );
+    let b3 = crate::auth::manager::proactive_failure_backoff(3);
+    assert!(
+        b3 >= std::time::Duration::from_secs(20) && b3 < std::time::Duration::from_secs(24),
+        "third failure backs off ~20s (plus jitter), got {b3:?}"
+    );
+    let huge = crate::auth::manager::proactive_failure_backoff(u32::MAX);
+    assert!(
+        huge <= BACKOFF_INTERVAL + std::time::Duration::from_secs(3),
+        "backoff must cap at BACKOFF_INTERVAL (+jitter), got {huge:?}"
+    );
+}
+
+// ── try_devbox_recovery: the wait-on-the-lock double-check ───────────
+
+/// Seed a credential that is locally valid but that the caller has been told
+/// the server rejects — the shape that made the double-check lie.
+fn devbox_manager(dir: &std::path::Path, key: &str) -> Arc<AuthManager> {
+    let mgr = Arc::new(AuthManager::new(dir, GrokComConfig::default()));
+    mgr.set_devbox_env_for_test(true);
+    mgr.hot_swap(GrokAuth {
+        key: key.into(),
+        auth_mode: AuthMode::External,
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr
+}
+
+/// The credential the caller already knows is dead can never be the answer.
+///
+/// `try_devbox_recovery` short-circuits on whatever `current()` holds, to
+/// catch a sibling task that refreshed while we waited on `refresh_lock`.
+/// Told nothing about the rejected bearer it used to return that bearer, so
+/// on a devbox every 401 against a still-locally-valid token reported
+/// "recovered" and the turn resubmitted it until its retry budget ran out.
+#[tokio::test]
+async fn devbox_recovery_never_re_serves_the_credential_it_was_given_up_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = devbox_manager(dir.path(), "rejected-but-locally-valid");
+    assert!(
+        mgr.current().is_some(),
+        "precondition: the rejected bearer is still locally valid"
+    );
+
+    // Asserted as "not this credential" rather than as an error: on a real
+    // devbox the mint can genuinely succeed, and a *different* credential is
+    // exactly the outcome we want. Everywhere else there is no mint endpoint
+    // and this is an error.
+    let outcome = mgr
+        .try_devbox_recovery(Some("rejected-but-locally-valid"))
+        .await;
+    assert!(
+        !matches!(&outcome, Ok(auth) if auth.key == "rejected-but-locally-valid"),
+        "recovery must not report success with the rejected bearer, got {outcome:?}"
+    );
+}
+
+/// The double-check still does its job: a credential that is *not* the one
+/// the caller gave up on means a sibling task refreshed, so take it and skip
+/// the mint.
+#[tokio::test]
+async fn devbox_recovery_short_circuits_on_a_credential_someone_else_landed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = devbox_manager(dir.path(), "landed-by-a-sibling-task");
+
+    let auth = mgr
+        .try_devbox_recovery(Some("the-bearer-the-server-rejected"))
+        .await
+        .expect("a different live credential is a recovery");
+    assert_eq!(auth.key, "landed-by-a-sibling-task");
+}
+
+// The consumed-RT sentinel suite; failure mode and lifecycle in
+// `manager::consumed_sentinel`'s module doc.
+
+/// Fails transiently while reporting the RT it had on the wire — what
+/// `OidcRefresher` surfaces for a straddled exchange.
+struct StraddledRefresher {
+    call_count: Arc<AtomicU32>,
+    suspect_rt: String,
+}
+
+#[async_trait::async_trait]
+impl TokenRefresher for StraddledRefresher {
+    async fn refresh(&self, _reason: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        crate::auth::refresh::RefreshOutcome::transient_suspect_consumed(
+            "OIDC token refresh failed",
+            crate::auth::refresh::SuspectConsumedRt::new(self.suspect_rt.clone(), 3_180_000),
+        )
+    }
+}
+
+/// Counts calls and always fails with a plain (non-straddled) transient.
+struct CountingTransientRefresher {
+    call_count: Arc<AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl TokenRefresher for CountingTransientRefresher {
+    async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        crate::auth::refresh::RefreshOutcome::transient("network gap")
+    }
+}
+
+/// The straddled credential these tests share: expired AT, the suspect RT,
+/// persisted to disk so a second manager (a sibling process) sees it too.
+fn seed_straddled_credential(mgr: &AuthManager) {
+    mgr.persist_and_swap(GrokAuth {
+        key: "expired-straddled-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-straddled".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+}
+
+#[tokio::test]
+async fn straddled_failure_sets_sentinel_and_records_no_permanent_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(StraddledRefresher {
+        call_count: call_count.clone(),
+        suspect_rt: "rt-straddled".into(),
+    }));
+
+    let err = mgr.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "a straddled failure must stay transient, got {err:?}"
+    );
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::StraddleSuspectRecorded)
+    );
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "a straddled failure must not charge the permanent-failure verdict"
+    );
+    let sentinel = mgr
+        .read_consumed_sentinel()
+        .expect("straddled failure must persist the sentinel");
+    assert!(
+        sentinel.matches_for_test("rt-straddled"),
+        "the sentinel must fingerprint the RT that was on the wire"
+    );
+    assert!(
+        mgr.current_or_expired().is_some(),
+        "credentials must be retained — the RT may never have reached the IdP"
+    );
+}
+
+/// A second manager on the same auth.json (a sibling process) is gated by
+/// the sentinel — even for a user-facing refresh with a hard-expired token.
+#[tokio::test]
+async fn sentinel_blocks_second_manager_until_full_wake_then_clears_on_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr1 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr1);
+    mgr1.set_refresher(Arc::new(StraddledRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+        suspect_rt: "rt-straddled".into(),
+    }));
+    let _ = mgr1.auth().await; // persists the sentinel
+
+    // A second manager on the same auth.json — a separate process in
+    // production — must observe the sentinel from disk.
+    let mgr2 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr2.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+
+    // Dark wake: the disk RT matches the sentinel, so it is not presented —
+    // even though a hard-expired token would normally force through.
+    mgr2.set_dark_wake_for_test(true);
+    let err = mgr2.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "sentinel deferral must be transient, got {err:?}"
+    );
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::SentinelAwaitingWake)
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        0,
+        "the possibly-consumed RT must not reach the IdP during a dark wake"
+    );
+
+    // Full wake: the elected retry runs, succeeds, and clears the sentinel.
+    mgr2.set_dark_wake_for_test(false);
+    let auth = mgr2.auth().await.expect("post-wake retry must succeed");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert!(
+        mgr2.read_consumed_sentinel().is_none(),
+        "a successful refresh must clear the sentinel"
+    );
+    assert!(
+        mgr1.read_consumed_sentinel().is_none(),
+        "the clear must be visible to the manager that recorded it"
+    );
+}
+
+#[tokio::test]
+async fn exactly_one_sentinel_retrier_elected_across_two_managers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr1 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr1);
+    let mgr2 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+
+    mgr1.write_consumed_sentinel_for_test(&mgr1.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    // One shared counter across both managers' refreshers: the assertion is
+    // about total IdP presentations on the machine, not per process.
+    let call_count = Arc::new(AtomicU32::new(0));
+    let slow = StdDuration::from_millis(100);
+    mgr1.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: slow,
+    }));
+    mgr2.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: slow,
+    }));
+
+    let (r1, r2) = tokio::join!(mgr1.auth(), mgr2.auth());
+    assert_eq!(
+        r1.expect("winner or adopter must succeed").key,
+        "fresh-token"
+    );
+    assert_eq!(
+        r2.expect("winner or adopter must succeed").key,
+        "fresh-token"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "exactly one coordinated retry may present the suspect RT"
+    );
+    assert!(
+        mgr1.read_consumed_sentinel().is_none(),
+        "the successful retry must clear the sentinel"
+    );
+}
+
+#[tokio::test]
+async fn sentinel_retry_failure_backs_off_followers_until_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr1 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr1);
+    let mgr2 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+
+    mgr1.write_consumed_sentinel_for_test(&mgr1.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    // Elected retry fails transiently (plain network failure, no straddle).
+    let calls1 = Arc::new(AtomicU32::new(0));
+    mgr1.set_refresher(Arc::new(CountingTransientRefresher {
+        call_count: calls1.clone(),
+    }));
+    let _ = mgr1.auth().await.unwrap_err();
+    assert_eq!(
+        calls1.load(Ordering::SeqCst),
+        1,
+        "mgr1 is the elected retrier"
+    );
+    let stamped = mgr1
+        .read_consumed_sentinel()
+        .expect("a failed retry must leave the sentinel in place");
+    assert_eq!(stamped.retry_count_for_test(), 1);
+
+    // The follower finds a retry stamped moments ago and must not present.
+    let calls2 = Arc::new(AtomicU32::new(0));
+    mgr2.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls2.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    let err = mgr2.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "follower backoff must be transient, got {err:?}"
+    );
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::SentinelCooldown)
+    );
+    assert_eq!(
+        calls2.load(Ordering::SeqCst),
+        0,
+        "a follower inside the cooldown must not present the suspect RT"
+    );
+
+    // Past the cooldown a new retrier is elected and can heal the state.
+    let mut aged = stamped;
+    aged.backdate_last_retry_for_test(
+        super::consumed_sentinel::SENTINEL_RETRY_COOLDOWN + StdDuration::from_secs(1),
+    );
+    mgr2.write_consumed_sentinel_for_test(&aged);
+    let auth = mgr2.auth().await.expect("post-cooldown retry must succeed");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    assert!(mgr2.read_consumed_sentinel().is_none());
+}
+
+/// The `DARK_WAKE_DEFER_MAX` force-through rescue exists for a user who is
+/// waiting; it must never force a background exchange through.
+#[tokio::test]
+async fn background_refresh_defers_in_dark_wake_past_budget_user_facing_forces_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(expired_oidc());
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
+    // Exhaust the user-facing deferral budget, as a machine hours into a
+    // continuous dark wake would have.
+    let back = super::sleep_gate::DARK_WAKE_DEFER_MAX + StdDuration::from_secs(5);
+    let (Some(mono), Some(wall)) = (
+        Instant::now().checked_sub(back),
+        std::time::SystemTime::now().checked_sub(back),
+    ) else {
+        return; // machine/clock can't represent the backdate — skip
+    };
+    *mgr.dark_wake_defer_since.write() = Some(crate::util::dual_clock::DualClock { mono, wall });
+
+    let err = mgr.auth_background().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "background dark-wake deferral must be transient, got {err:?}"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        0,
+        "a background refresh must never start an exchange in dark wake, \
+         even past DARK_WAKE_DEFER_MAX"
+    );
+    assert!(
+        mgr.dark_wake_defer_since.read().is_some(),
+        "a background deferral must not consume or reset the user-facing budget"
+    );
+
+    // User-facing work may still take the straddle risk.
+    let auth = mgr.auth().await.expect("user-facing refresh must proceed");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+/// `ServerRejected` gets no special pass: a background 401 recovery defers
+/// in dark wake, end-to-end through `try_recover_unauthorized`.
+#[tokio::test]
+async fn background_server_rejected_recovery_defers_in_dark_wake() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(expired_oidc());
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
+    let err = mgr
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::Background,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "background ServerRejected must defer in dark wake, got {err:?}"
+    );
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::DarkWakeDeferred)
+    );
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+    // The end-to-end background recovery entry point defers the same way.
+    assert!(
+        !mgr.try_recover_unauthorized(crate::auth::recovery::RecoverySource::Background)
+            .await,
+        "background 401 recovery must fail soft during dark wake"
+    );
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        0,
+        "no recovery attempt may reach the IdP during dark wake"
+    );
+
+    // A user-facing (turn) recovery still forces through.
+    assert!(
+        mgr.try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
+            .await,
+        "turn-sourced recovery must still refresh in dark wake"
+    );
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sentinel_cleared_on_relogin_and_on_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+
+    let sentinel = mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    );
+
+    // Re-login (any fresh credential persisted through update()).
+    mgr.write_consumed_sentinel_for_test(&sentinel);
+    mgr.update(GrokAuth {
+        key: "relogin-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-relogin".into()),
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..GrokAuth::test_default()
+    })
+    .await
+    .expect("login persist must succeed");
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "a persisted fresh credential must clear the sentinel"
+    );
+
+    // Logout.
+    mgr.write_consumed_sentinel_for_test(&sentinel);
+    mgr.clear().expect("logout must succeed");
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "logout must clear the sentinel"
+    );
+}
+
+#[tokio::test]
+async fn sentinel_for_rotated_past_rt_is_cleared_and_does_not_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    // Disk holds a successor RT, not the suspect one.
+    mgr.persist_and_swap(GrokAuth {
+        key: "expired-successor-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-successor".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+
+    let auth = mgr
+        .auth()
+        .await
+        .expect("successor RT must refresh normally");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "an obsolete sentinel must be cleared, not left to block future failures"
+    );
+}
+
+#[tokio::test]
+async fn straddled_failure_adopts_sibling_rotation_instead_of_setting_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let auth_path = dir.path().join("auth.json");
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+    seed_straddled_credential(&mgr);
+
+    /// Simulates the sibling's write landing while our exchange straddled:
+    /// writes a fresh credential to disk, then fails with the suspect RT.
+    struct SiblingRotatesDuringStraddle {
+        auth_path: std::path::PathBuf,
+        scope: String,
+    }
+    #[async_trait::async_trait]
+    impl TokenRefresher for SiblingRotatesDuringStraddle {
+        async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+            let mut map = read_auth_json_or_empty(&self.auth_path).unwrap_or_default();
+            map.insert(
+                self.scope.clone(),
+                GrokAuth {
+                    key: "sibling-rotated-key".into(),
+                    auth_mode: AuthMode::Oidc,
+                    refresh_token: Some("rt-sibling".into()),
+                    expires_at: Some(Utc::now() + Duration::hours(1)),
+                    ..GrokAuth::test_default()
+                },
+            );
+            write_auth_json(&self.auth_path, &map).unwrap();
+            crate::auth::refresh::RefreshOutcome::transient_suspect_consumed(
+                "OIDC token refresh failed",
+                crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(SiblingRotatesDuringStraddle { auth_path, scope }));
+
+    let auth = mgr
+        .auth()
+        .await
+        .expect("the sibling's rotated token must be adopted");
+    assert_eq!(auth.key, "sibling-rotated-key");
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "a superseded suspect RT needs no sentinel — nobody will present it"
+    );
+}
+
+/// Past the exhausted budget exactly one elected retry is forced through
+/// (still under the cooldown election); a sibling inside the cooldown still
+/// defers. Rationale: `should_defer_sentinel_for_dark_wake`.
+#[tokio::test]
+async fn sentinel_dark_wake_deferral_is_bounded_and_elects_one_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr1 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr1);
+    mgr1.write_consumed_sentinel_for_test(&mgr1.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    // The forced retry fails transiently (network still down), so the
+    // sentinel — and its stamped retry — survive for the sibling check.
+    let calls1 = Arc::new(AtomicU32::new(0));
+    mgr1.set_refresher(Arc::new(CountingTransientRefresher {
+        call_count: calls1.clone(),
+    }));
+    mgr1.set_dark_wake_for_test(true);
+
+    // Fresh budget: the gate defers and starts the run.
+    let _ = mgr1.auth().await.unwrap_err();
+    assert_eq!(
+        calls1.load(Ordering::SeqCst),
+        0,
+        "within the budget the suspect RT must not be presented in dark wake"
+    );
+    assert!(
+        mgr1.sentinel_dark_wake_defer_since.read().is_some(),
+        "the first dark-wake deferral must start the budget run"
+    );
+
+    // Exhaust the budget on both clocks, as hours of continuous dark wake
+    // would have.
+    let back = super::sleep_gate::DARK_WAKE_DEFER_MAX + StdDuration::from_secs(5);
+    let (Some(mono), Some(wall)) = (
+        Instant::now().checked_sub(back),
+        std::time::SystemTime::now().checked_sub(back),
+    ) else {
+        return; // machine/clock can't represent the backdate — skip
+    };
+    let backdated = crate::util::dual_clock::DualClock { mono, wall };
+    *mgr1.sentinel_dark_wake_defer_since.write() = Some(backdated);
+
+    // Budget exhausted: exactly one elected retry is forced through despite
+    // the (still-reported) dark wake.
+    let _ = mgr1.auth().await.unwrap_err();
+    assert_eq!(
+        calls1.load(Ordering::SeqCst),
+        1,
+        "an exhausted sentinel dark-wake budget must force one elected retry"
+    );
+    let stamped = mgr1
+        .read_consumed_sentinel()
+        .expect("the failed forced retry must leave the sentinel in place");
+    assert_eq!(stamped.retry_count_for_test(), 1);
+
+    // A sibling in the same continuous dark wake with its own exhausted
+    // budget is still inside the retry cooldown → defers, no presentation.
+    let mgr2 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let calls2 = Arc::new(AtomicU32::new(0));
+    mgr2.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls2.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr2.set_dark_wake_for_test(true);
+    *mgr2.sentinel_dark_wake_defer_since.write() = Some(backdated);
+    let err = mgr2.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "cooldown deferral must be transient, got {err:?}"
+    );
+    assert_eq!(
+        calls2.load(Ordering::SeqCst),
+        0,
+        "a sibling within the cooldown must not present, budget exhaustion \
+         notwithstanding"
+    );
+
+    // Past the cooldown, the next forced retry (budget exhausted afresh —
+    // exhaustion resets the run, so it must be re-backdated) heals the state.
+    let mut aged = stamped;
+    aged.backdate_last_retry_for_test(
+        super::consumed_sentinel::SENTINEL_RETRY_COOLDOWN + StdDuration::from_secs(1),
+    );
+    mgr2.write_consumed_sentinel_for_test(&aged);
+    *mgr2.sentinel_dark_wake_defer_since.write() = Some(backdated);
+    let auth = mgr2
+        .auth()
+        .await
+        .expect("post-cooldown forced retry must succeed");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    assert!(
+        mgr2.read_consumed_sentinel().is_none(),
+        "the successful forced retry must clear the sentinel"
+    );
+}
+
+/// Scope isolation (rationale: `ConsumedRtSentinel`'s scope-tag doc), plus
+/// the scope-less legacy-file fallback.
+#[tokio::test]
+async fn sentinel_is_scoped_other_scope_neither_gated_nor_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    // Scope A: the default config. Scope B: a custom OIDC issuer/client
+    // (what `GROK_OAUTH2_ISSUER` or a team principal produces) on the SAME
+    // auth.json.
+    let mgr_a = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let cfg_b = GrokComConfig {
+        oidc: Some(crate::auth::config::OidcAuthConfig {
+            issuer: "https://idp-b.example.com".into(),
+            client_id: "client-b".into(),
+            scopes: vec![],
+            audience: None,
+        }),
+        ..GrokComConfig::default()
+    };
+    let mgr_b = Arc::new(AuthManager::new(dir.path(), cfg_b));
+    assert_ne!(
+        mgr_a.grok_com_config().auth_scope(),
+        mgr_b.grok_com_config().auth_scope(),
+        "precondition: the two managers must be on different scopes"
+    );
+
+    // Scope A records a sentinel for its straddled RT (persisted to disk).
+    seed_straddled_credential(&mgr_a);
+    mgr_a.write_consumed_sentinel_for_test(&mgr_a.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    // Scope B refreshes and persists its own fresh credential: neither the
+    // gate's rotated-past lazy clear (B's RT never matches A's sentinel) nor
+    // update()'s credential-persisted clear may drop A's sentinel.
+    mgr_b.hot_swap(GrokAuth {
+        key: "scope-b-expired".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-scope-b".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    let calls_b = Arc::new(AtomicU32::new(0));
+    mgr_b.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls_b.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    let auth_b = mgr_b
+        .auth()
+        .await
+        .expect("scope B must refresh unimpeded by scope A's sentinel");
+    assert_eq!(auth_b.key, "fresh-token");
+    assert_eq!(
+        calls_b.load(Ordering::SeqCst),
+        1,
+        "another scope's sentinel must not gate this scope's refresh"
+    );
+    let surviving = mgr_a
+        .read_consumed_sentinel()
+        .expect("scope B's refresh/persist must not clear scope A's sentinel");
+    assert!(surviving.matches_for_test("rt-straddled"));
+
+    // Scope B's logout must not clear it either.
+    mgr_b.clear().expect("scope B logout");
+    assert!(
+        mgr_a.read_consumed_sentinel().is_some(),
+        "scope B's logout must not clear scope A's sentinel"
+    );
+
+    // Scope A itself is still gated by it (dark wake ⇒ deferral, no
+    // presentation) and still heals it at full wake.
+    let calls_a = Arc::new(AtomicU32::new(0));
+    mgr_a.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls_a.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr_a.set_dark_wake_for_test(true);
+    let _ = mgr_a.auth().await.unwrap_err();
+    assert_eq!(
+        calls_a.load(Ordering::SeqCst),
+        0,
+        "scope A must still be gated by its own sentinel"
+    );
+    mgr_a.set_dark_wake_for_test(false);
+    let auth_a = mgr_a.auth().await.expect("scope A post-wake retry");
+    assert_eq!(auth_a.key, "fresh-token");
+    assert!(
+        mgr_a.read_consumed_sentinel().is_none(),
+        "scope A's own success clears its sentinel"
+    );
+
+    // A scope-less sentinel (written by a pre-scope build of this change)
+    // matches any scope — the safe legacy fallback is the old behavior.
+    let scopeless = serde_json::json!({
+        "rt_sha256": super::consumed_sentinel::rt_fingerprint("rt-legacy"),
+        "rt_suffix": "legacy",
+        "recorded_at": Utc::now().timestamp(),
+        "reason": "test",
+        "suspended_ms": 100_000,
+        "pid": 1,
+    });
+    std::fs::write(
+        dir.path().join("auth.json.rt-sentinel"),
+        serde_json::to_vec_pretty(&scopeless).unwrap(),
+    )
+    .unwrap();
+    let legacy = mgr_a
+        .read_consumed_sentinel()
+        .expect("scope-less sentinel must parse");
+    assert!(
+        legacy.matches_for_test("rt-legacy"),
+        "legacy sentinel must fingerprint-match"
+    );
+    // Any scope may clear a scope-less sentinel (worst case is the old,
+    // scope-blind behavior).
+    let lock = mgr_b
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("test must hold the auth.json lock");
+    mgr_b.clear_consumed_sentinel("test_legacy", &lock);
+    assert!(mgr_a.read_consumed_sentinel().is_none());
+}
+
+/// End-to-end narrative of the 2026-08-07 field log: overnight dark wakes,
+/// a deferred background recovery, a straddling user-facing exchange,
+/// sentinel-gated dark wakes, one healing retry at the morning wake.
+#[tokio::test]
+async fn field_trace_narrative_dark_wake_straddle_sentinel_then_morning_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+
+    /// First call straddles (fails with the suspect RT); later calls succeed
+    /// — the exchange never actually reached the IdP, so the RT is intact.
+    struct StraddleOnceThenSucceed {
+        calls: Arc<AtomicU32>,
+    }
+    #[async_trait::async_trait]
+    impl TokenRefresher for StraddleOnceThenSucceed {
+        async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return crate::auth::refresh::RefreshOutcome::transient_suspect_consumed(
+                    "OIDC token refresh failed",
+                    crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+                );
+            }
+            crate::auth::refresh::RefreshOutcome::success(GrokAuth {
+                key: "fresh-token".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("rt-new".into()),
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+                ..GrokAuth::test_default()
+            })
+        }
+    }
+    let calls = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(StraddleOnceThenSucceed {
+        calls: calls.clone(),
+    }));
+
+    // 01:00, dark wake: the signals-sync 401 recovery defers — with this
+    // fix, no exchange even starts in the overnight window.
+    mgr.set_dark_wake_for_test(true);
+    assert!(
+        !mgr.try_recover_unauthorized(crate::auth::recovery::RecoverySource::Background)
+            .await
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // A user-facing refresh forces through (dead token) and straddles the
+    // re-suspend: transient failure + sentinel, no permanent verdict.
+    let _ = mgr.auth().await.unwrap_err();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(mgr.read_consumed_sentinel().is_some());
+    assert!(mgr.permanent_failure().is_none());
+
+    // 01:16–07:30, later dark wakes: the sentinel blocks every further
+    // presentation — pre-fix this is where sibling processes re-presented
+    // the spent RT and revoked the family.
+    let _ = mgr.auth().await.unwrap_err();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no re-presentation of the suspect RT during dark wake"
+    );
+
+    // 08:30, the human opens the lid: full wake, one coordinated retry, the
+    // never-presented RT refreshes cleanly, sentinel cleared, no login.
+    mgr.set_dark_wake_for_test(false);
+    let auth = mgr
+        .auth()
+        .await
+        .expect("morning retry must heal the session");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(mgr.read_consumed_sentinel().is_none());
+    assert!(!mgr.requires_manual_reauth(), "no `grok login` required");
+}
+
+/// An election dropped unstamped (the deterministic-abort path) leaves the
+/// sentinel untouched so a sibling elects immediately; only the stamp
+/// consumes the cooldown. Invariants: `SentinelRetryElection`.
+#[tokio::test]
+async fn sentinel_election_dropped_unstamped_does_not_consume_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    let lock = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("test must hold the auth.json lock");
+
+    // Win the election, then drop it unstamped — what refresh_chain does when
+    // a final pre-IdP re-check aborts after the gate elected this caller.
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("full wake, no prior retry: this caller must be elected")
+        .expect("a matching sentinel must produce an election");
+    let on_disk = mgr.read_consumed_sentinel().unwrap();
+    assert!(
+        !on_disk.has_stamped_retry_for_test(),
+        "winning the election must not stamp the sentinel"
+    );
+    assert_eq!(on_disk.retry_count_for_test(), 0);
+    drop(election);
+
+    // The abort consumed nothing: the very next participant is elected
+    // immediately (no cooldown to wait out).
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("an unstamped drop must leave the gate open")
+        .expect("the next participant must be elected immediately");
+
+    // Only the stamp — refresh_chain runs it strictly before the IdP call —
+    // consumes the cooldown; followers now back off.
+    let live = lock.live(mgr.auth_json_path()).expect("test lock is live");
+    mgr.stamp_sentinel_election(election, RefreshReason::PreRequest, &live)
+        .expect("stamp write must succeed");
+    let stamped = mgr.read_consumed_sentinel().unwrap();
+    assert!(stamped.has_stamped_retry_for_test());
+    assert_eq!(stamped.retry_count_for_test(), 1);
+    let err = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect_err("a stamped retry within the cooldown must defer followers");
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "follower backoff must be transient, got {err:?}"
+    );
+}
+
+/// A refresh deferred by the sleep gate must not consume the retry
+/// cooldown: once the gate clears, a sibling heals with one presentation.
+#[tokio::test]
+async fn sleep_gate_abort_leaves_sentinel_electable_by_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr1 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr1);
+    mgr1.write_consumed_sentinel_for_test(&mgr1.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    let calls1 = Arc::new(AtomicU32::new(0));
+    mgr1.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls1.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+
+    // Sleep imminent: the refresh aborts pre-IdP without presenting the RT.
+    mgr1.set_system_sleep_imminent(true);
+    let err = mgr1.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "sleep-gated deferral must be transient, got {err:?}"
+    );
+    assert_eq!(calls1.load(Ordering::SeqCst), 0, "no IdP presentation");
+    assert!(
+        !mgr1
+            .read_consumed_sentinel()
+            .expect("the sentinel must survive the abort")
+            .has_stamped_retry_for_test(),
+        "a pre-IdP abort must not consume the machine-wide retry cooldown"
+    );
+
+    // Gate cleared: a sibling process elects immediately — no 60 s penalty
+    // left behind by the aborted attempt.
+    mgr1.set_system_sleep_imminent(false);
+    let mgr2 = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    let calls2 = Arc::new(AtomicU32::new(0));
+    mgr2.set_refresher(Arc::new(CountingRefresher {
+        call_count: calls2.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    let auth = mgr2
+        .auth()
+        .await
+        .expect("the sibling must be elected the moment conditions clear");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(calls2.load(Ordering::SeqCst), 1);
+    assert!(mgr2.read_consumed_sentinel().is_none());
+}
+
+/// Crash-safety direction of the election split: the stamp is on disk
+/// before the RT is presented, so a crash mid-exchange still counts.
+#[tokio::test]
+async fn sentinel_stamp_happens_before_idp_presentation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    /// Observes the on-disk sentinel at the moment the exchange starts —
+    /// the IdP-presentation point.
+    struct StampObservingRefresher {
+        sentinel_path: std::path::PathBuf,
+        stamped_at_presentation: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl TokenRefresher for StampObservingRefresher {
+        async fn refresh(&self, _: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+            let stamped = std::fs::read(&self.sentinel_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|v| v.get("last_retry_at").cloned())
+                .is_some_and(|v| !v.is_null());
+            self.stamped_at_presentation
+                .store(stamped, std::sync::atomic::Ordering::SeqCst);
+            crate::auth::refresh::RefreshOutcome::success(GrokAuth {
+                key: "fresh-token".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("rt-new".into()),
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+                ..GrokAuth::test_default()
+            })
+        }
+    }
+    let stamped_at_presentation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    mgr.set_refresher(Arc::new(StampObservingRefresher {
+        sentinel_path: dir.path().join("auth.json.rt-sentinel"),
+        stamped_at_presentation: stamped_at_presentation.clone(),
+    }));
+
+    let auth = mgr.auth().await.expect("elected retry must proceed");
+    assert_eq!(auth.key, "fresh-token");
+    assert!(
+        stamped_at_presentation.load(std::sync::atomic::Ordering::SeqCst),
+        "the retry stamp must be on disk before the RT reaches the IdP"
+    );
+}
+
+/// Stamps and re-records rewrite an existing sentinel file; on Windows that
+/// needs `write_sentinel_file`'s pre-remove. The `cfg(windows)` branch can't
+/// run on POSIX CI, so this pins the observable rewrite-over-existing
+/// contract every platform must satisfy.
+#[tokio::test]
+async fn sentinel_rewrite_over_existing_file_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+
+    // First write creates the file.
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "first",
+    ));
+    assert!(mgr.read_consumed_sentinel().is_some());
+
+    // Stamp over the existing file (the election write path).
+    let lock = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("test must hold the auth.json lock");
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("gate must pass at full wake")
+        .expect("matching sentinel must elect");
+    let live = lock.live(mgr.auth_json_path()).expect("test lock is live");
+    mgr.stamp_sentinel_election(election, RefreshReason::PreRequest, &live)
+        .expect("the stamp must rewrite the existing sentinel, not fail silently");
+    let stamped = mgr
+        .read_consumed_sentinel()
+        .expect("the stamp must rewrite the existing sentinel, not fail silently");
+    assert!(stamped.has_stamped_retry_for_test());
+    assert_eq!(stamped.retry_count_for_test(), 1);
+    drop(lock);
+
+    // Re-record over the existing file (a repeat straddle, different RT).
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled-2".into(), 60_001),
+        "second",
+    ));
+    let replaced = mgr
+        .read_consumed_sentinel()
+        .expect("re-record must replace the existing sentinel");
+    assert!(replaced.matches_for_test("rt-straddled-2"));
+    assert!(
+        !replaced.has_stamped_retry_for_test(),
+        "a different-RT record must not inherit the old stamp"
+    );
+}
+
+/// A logout whose disk write was skipped (sibling holds the lock) leaves
+/// the suspect RT on disk — the sentinel must stay to gate it; a persisted
+/// logout still clears both.
+#[tokio::test]
+async fn logout_with_skipped_disk_write_keeps_sentinel_for_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    // A sibling holds the auth.json lock: remove_scope skips the disk write.
+    let sibling_lock = lock::try_lock_auth_file_nonblocking(&dir.path().join("auth.json"))
+        .expect("test sibling must acquire the free lock");
+    mgr.clear().expect("logout itself must not error");
+    assert!(
+        mgr.read_disk_auth().is_some(),
+        "precondition: the skipped write left the suspect RT on disk"
+    );
+    assert!(
+        mgr.read_consumed_sentinel().is_some(),
+        "a skipped scope removal must keep the sentinel gating the disk RT"
+    );
+
+    // Sibling releases the lock; a logout that persists clears both.
+    drop(sibling_lock);
+    mgr.clear().expect("logout must succeed");
+    assert!(
+        mgr.read_disk_auth().is_none(),
+        "the persisted removal must drop the scope entry"
+    );
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "a persisted logout must clear the sentinel"
+    );
+}
+
+/// A retry stamp in the future (a wall-clock step-back after stamping) must
+/// read as an expired cooldown: honoring it would defer machine-wide until
+/// the clock catches up, unbounded where the cooldown promises ≤ 60 s.
+#[tokio::test]
+async fn future_retry_stamp_does_not_wedge_the_cooldown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    let mut sentinel = mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    );
+    sentinel.stamp_future_retry_for_test(StdDuration::from_secs(3600));
+    mgr.write_consumed_sentinel_for_test(&sentinel);
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+
+    let auth = mgr
+        .auth()
+        .await
+        .expect("a future stamp must elect immediately, not defer for an hour");
+    assert_eq!(auth.key, "fresh-token");
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert!(mgr.read_consumed_sentinel().is_none());
+}
+
+/// The credential-persisted clear compares fingerprints: re-saving the same
+/// credential (the privacy-flag toggle shape, `extensions/privacy.rs`) must
+/// keep the machine-wide gate; a rotated credential clears it.
+#[tokio::test]
+async fn same_credential_resave_keeps_sentinel_rotated_save_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+
+    // Same credential, one flag flipped — what the privacy toggle persists.
+    let mut resave = mgr.current_or_expired().expect("seeded credential");
+    resave.coding_data_retention_opt_out = true;
+    mgr.save_without_enrichment(resave)
+        .await
+        .expect("re-save must persist");
+    assert!(
+        mgr.read_consumed_sentinel().is_some(),
+        "re-saving the same suspect RT must not delete the gate"
+    );
+
+    // A rotated credential supersedes the suspect.
+    mgr.save_without_enrichment(GrokAuth {
+        key: "rotated-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-rotated".into()),
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..GrokAuth::test_default()
+    })
+    .await
+    .expect("rotated save must persist");
+    assert!(
+        mgr.read_consumed_sentinel().is_none(),
+        "a superseding RT must clear the sentinel"
+    );
+}
+
+/// A flock that dies in the election-to-stamp window must abort the
+/// presentation — a sibling can have broken it, elected, and presented the
+/// same RT. Unix-gated: non-Unix has no flock-break protocol (`still_live`
+/// is unconditionally true).
+#[cfg(unix)]
+#[tokio::test]
+async fn dead_lock_after_election_aborts_instead_of_presenting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    let lock = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("test must hold the auth.json lock");
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("full wake must pass the gate")
+        .expect("matching sentinel must elect");
+
+    // Kill the flock the way a sibling's stale-lock break does: this guard's
+    // inode is no longer the live lock file.
+    std::fs::remove_file(dir.path().join("auth.json.lock")).unwrap();
+    let err = mgr
+        .stamp_sentinel_election_or_abort(election, RefreshReason::PreRequest, &lock)
+        .expect_err("a dead lock must abort the presentation");
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::SentinelLockLost)
+    );
+    assert!(
+        !mgr.read_consumed_sentinel()
+            .expect("the sentinel must survive the abort")
+            .has_stamped_retry_for_test(),
+        "an aborted presentation must not consume the cooldown"
+    );
+
+    // A sibling elects immediately under a fresh lock.
+    drop(lock);
+    let fresh = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("fresh lock must be acquirable");
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &fresh)
+        .expect("the gate must stay open")
+        .expect("a sibling must be elected immediately");
+    drop(election);
+}
+
+/// Election exclusivity depends on the durable stamp: a failed sidecar
+/// write aborts the presentation (can't-write ⇒ shouldn't-present — the
+/// exchange outcome shares the same write path).
+#[tokio::test]
+async fn stamp_write_failure_aborts_instead_of_presenting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "test",
+    ));
+    let lock = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .await
+        .expect("test must hold the auth.json lock");
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("full wake must pass the gate")
+        .expect("matching sentinel must elect");
+
+    let sentinel_path = dir.path().join("auth.json.rt-sentinel");
+    *super::consumed_sentinel::SENTINEL_WRITE_FAULT_PATH
+        .lock()
+        .unwrap() = Some(sentinel_path.clone());
+    let err = mgr
+        .stamp_sentinel_election_or_abort(election, RefreshReason::PreRequest, &lock)
+        .expect_err("a failed stamp write must abort the presentation");
+    *super::consumed_sentinel::SENTINEL_WRITE_FAULT_PATH
+        .lock()
+        .unwrap() = None;
+
+    assert_eq!(
+        err.transient_reason_kind(),
+        Some(crate::auth::error::TransientReason::SentinelStampFailed)
+    );
+    assert!(
+        !mgr.read_consumed_sentinel()
+            .expect("the sentinel must survive the abort")
+            .has_stamped_retry_for_test(),
+        "an aborted presentation must not consume the cooldown"
+    );
+
+    // A sibling elects immediately once the disk recovers.
+    let election = mgr
+        .check_consumed_sentinel_gate(TokenType::OidcSession, RefreshReason::PreRequest, &lock)
+        .expect("the gate must stay open")
+        .expect("a sibling must be elected immediately");
+    drop(election);
+}
+
+/// The Windows-shaped replace must leave the previous sentinel readable
+/// when the final rename fails — a bare pre-remove would wipe the gate and
+/// let the next pass present the suspect RT ungated. Pinned through the
+/// platform-independent `replace_via_backup`; the `cfg(windows)` selection
+/// itself cannot run on POSIX CI.
+#[tokio::test]
+async fn failed_replace_keeps_previous_sentinel_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    seed_straddled_credential(&mgr);
+    mgr.write_consumed_sentinel_for_test(&mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-straddled".into(), 3_180_000),
+        "previous",
+    ));
+    let sentinel_path = dir.path().join("auth.json.rt-sentinel");
+    let replacement = mgr.make_sentinel_for_test(
+        &crate::auth::refresh::SuspectConsumedRt::new("rt-replacement".into(), 60_001),
+        "replacement",
+    );
+    let json = serde_json::to_string_pretty(&replacement).unwrap();
+    let tmp = dir.path().join("auth.json.tmp.test");
+    std::fs::write(&tmp, &json).unwrap();
+
+    // Final rename fails: the parked previous content must be restored.
+    *super::consumed_sentinel::SENTINEL_RENAME_FAULT_PATH
+        .lock()
+        .unwrap() = Some(sentinel_path.clone());
+    *super::consumed_sentinel::SENTINEL_RENAME_FAULT_SAW_BAK
+        .lock()
+        .unwrap() = None;
+    super::consumed_sentinel::replace_via_backup(&tmp, &sentinel_path, &json)
+        .expect_err("the injected rename fault must surface");
+    *super::consumed_sentinel::SENTINEL_RENAME_FAULT_PATH
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        *super::consumed_sentinel::SENTINEL_RENAME_FAULT_SAW_BAK
+            .lock()
+            .unwrap(),
+        Some(true),
+        "the previous sentinel must be parked at the bak path before the rename"
+    );
+    assert!(
+        mgr.read_consumed_sentinel()
+            .expect("a failed replace must leave the previous sentinel readable")
+            .matches_for_test("rt-straddled"),
+        "the previous content must be restored, not the replacement"
+    );
+    let bak_orphans: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".bak."))
+        .collect();
+    assert!(
+        bak_orphans.is_empty(),
+        "the restore must not leave bak orphans, found {bak_orphans:?}"
+    );
+
+    // Fault cleared: the same replace succeeds and publishes the new content.
+    std::fs::write(&tmp, &json).unwrap();
+    super::consumed_sentinel::replace_via_backup(&tmp, &sentinel_path, &json)
+        .expect("replace must succeed without the fault");
+    assert!(
+        mgr.read_consumed_sentinel()
+            .expect("replaced sentinel must be readable")
+            .matches_for_test("rt-replacement")
+    );
 }

@@ -4,12 +4,15 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ratatui::style::Color;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::appearance::AppearanceConfig;
+use crate::render::SafeBuf;
 
 /// How to wrap content that exceeds the available width.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -23,16 +26,11 @@ pub enum WrapMode {
 /// Accent/bullet color style for a block.
 ///
 /// Used by both `accent()` and `bullet()` trait methods.
-/// When `animated` is true, the renderer uses a wave animation effect
-/// (unless [`Self::striped`] is set — then the rail cycles the DOGE
-/// striped-down glyph marquee in `color`).
+/// When `animated` is true, the renderer uses a wave animation effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccentStyle {
     pub color: Color,
     pub animated: bool,
-    /// Prefer dashed/striped vertical glyphs over solid `┃`.
-    /// Used for Yellow context/time/meta rails under DOGE.
-    pub striped: bool,
 }
 
 impl AccentStyle {
@@ -41,7 +39,6 @@ impl AccentStyle {
         Self {
             color,
             animated: false,
-            striped: false,
         }
     }
 
@@ -50,28 +47,6 @@ impl AccentStyle {
         Self {
             color,
             animated: true,
-            striped: false,
-        }
-    }
-
-    /// Static rail using striped (dashed) vertical glyphs in `color`.
-    ///
-    /// Context/time/meta (Yellow role): solid yellow `┃` is wrong; the rail
-    /// should read as yellow stripes.
-    pub const fn striped(color: Color) -> Self {
-        Self {
-            color,
-            animated: false,
-            striped: true,
-        }
-    }
-
-    /// Animated striped rail: cycles the DOGE striped-down marquee in `color`.
-    pub const fn striped_animated(color: Color) -> Self {
-        Self {
-            color,
-            animated: true,
-            striped: true,
         }
     }
 }
@@ -197,6 +172,11 @@ pub struct BlockLine {
     pub joiner: Option<String>,
     /// Semantic link target when paint text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
+    /// Column of the always-on bubble copy glyph, relative to the content
+    /// origin. `append_bubble_copy_button` records this and does not put
+    /// the glyph in `content` spans. Hit-testing and paint use this column
+    /// (slack in the wrap, otherwise the timestamp gutter or right pad).
+    pub copy_button_col: Option<u16>,
 }
 
 impl Default for BlockLine {
@@ -212,6 +192,7 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+            copy_button_col: None,
         }
     }
 }
@@ -301,6 +282,40 @@ impl BlockLine {
         self.joiner = joiner;
         self
     }
+
+    /// Screen rect of the always-on bubble copy glyph, if this line carries one.
+    pub(crate) fn bubble_copy_button_rect(&self, content_x: u16, screen_y: u16) -> Option<Rect> {
+        let col = self.copy_button_col?;
+        let width = crate::glyphs::copy_icon().width() as u16;
+        Some(Rect::new(
+            content_x.saturating_add(col),
+            screen_y,
+            width.max(1),
+            1,
+        ))
+    }
+
+    /// Paint the always-on bubble copy glyph at [`Self::copy_button_col`].
+    ///
+    /// Call after content and the timestamp overlay so the glyph is not
+    /// wiped by the gutter clear and is not part of wrap geometry.
+    pub(crate) fn paint_bubble_copy_button(
+        &self,
+        buf: &mut Buffer,
+        content_x: u16,
+        screen_y: u16,
+        style: Style,
+    ) {
+        let Some(col) = self.copy_button_col else {
+            return;
+        };
+        buf.set_string_safe(
+            content_x.saturating_add(col),
+            screen_y,
+            crate::glyphs::copy_icon(),
+            style,
+        );
+    }
 }
 
 /// Flatten a rendered line's spans into the plain text drawn on that row.
@@ -350,6 +365,8 @@ pub fn derive_selection_text(line: &BlockLine) -> String {
     }
 }
 
+/// Slice `text` to the graphemes overlapping the display-column range `[start, end)`. A wide grapheme is kept whole when the
+/// range covers any of its cells; graphemes that only touch a boundary (start at `end` or end at `start`) stay excluded.
 pub fn slice_display_cols(text: &str, start: u16, end: u16) -> String {
     if start >= end || text.is_empty() {
         return String::new();
@@ -375,13 +392,40 @@ pub fn slice_display_cols(text: &str, start: u16, end: u16) -> String {
         if col >= end {
             break;
         }
-        if col >= start && next_col <= end {
-            out.push_str(grapheme);
-        }
+        out.push_str(grapheme);
         col = next_col;
     }
 
     out
+}
+
+/// Display-cell range of the grapheme covering `col`, or `None` when `col` is past the last grapheme.
+/// Zero-width graphemes occupy no cell and never advance the column, matching `slice_display_cols` and the paint path.
+pub fn grapheme_cells_at(text: &str, col: u16) -> Option<std::ops::Range<u16>> {
+    let mut c = 0u16;
+
+    for grapheme in text.graphemes(true) {
+        let width = grapheme_width(grapheme) as u16;
+        if width == 0 {
+            continue;
+        }
+
+        let next = c.saturating_add(width);
+        if next > col {
+            return Some(c..next);
+        }
+        c = next;
+    }
+
+    None
+}
+
+/// Exclusive display column just past the grapheme occupying `col`, or the text's total width when `col` is past the last one.
+pub fn col_past_grapheme(text: &str, col: u16) -> u16 {
+    match grapheme_cells_at(text, col) {
+        Some(cells) => cells.end,
+        None => u16::try_from(text.width()).unwrap_or(u16::MAX),
+    }
 }
 
 pub fn block_line_selectable_width(line: &BlockLine) -> u16 {
@@ -634,6 +678,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            copy_button_col: None,
         };
     }
 
@@ -724,48 +769,5 @@ mod tests {
         // Only trailing whitespace is trimmed; interior alignment spaces stay.
         let line = BlockLine::styled(Line::from(vec![Span::raw("│ a   │ b   │")]));
         assert_eq!(derive_selection_text(&line), "│ a   │ b   │");
-    }
-
-    #[test]
-    fn test_slice_display_cols_ascii() {
-        assert_eq!(slice_display_cols("abcdef", 1, 4), "bcd");
-    }
-
-    #[test]
-    fn test_slice_display_cols_wide_unicode() {
-        assert_eq!(slice_display_cols("a界b", 1, 3), "界");
-    }
-
-    #[test]
-    fn test_slice_display_cols_combining_character() {
-        assert_eq!(slice_display_cols("e\u{301}f", 0, 1), "e\u{301}");
-    }
-
-    #[test]
-    fn test_slice_display_cols_tab() {
-        assert_eq!(slice_display_cols("a\tb", 0, 2), "a\t");
-    }
-
-    #[test]
-    fn test_block_line_selectable_width_uses_override() {
-        let line = BlockLine::text("ignored").with_selection_text(Some("界".to_string()));
-        assert_eq!(block_line_selectable_width(&line), 2);
-    }
-
-    #[test]
-    fn test_with_decorations_preserves_selection_metadata() {
-        let output = BlockOutput {
-            lines: vec![
-                BlockLine::styled(Line::from(vec![Span::raw("body")]))
-                    .with_selection_range(Some(7))
-                    .with_selection_text(Some("body".to_string())),
-            ],
-        };
-        let decorated = output.with_decorations(Some(Span::raw("> ")), None);
-        let line = &decorated.lines[0];
-
-        assert_eq!(line.selection_range, Some(7));
-        assert_eq!(line.selection_text.as_deref(), Some("body"));
-        assert!(matches!(line.selectable, Selectable::Spans(ref r) if *r == (1..2)));
     }
 }

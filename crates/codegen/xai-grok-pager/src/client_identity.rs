@@ -8,8 +8,30 @@ pub const PAGER_CLIENT_VERSION: &str = xai_grok_version::VERSION;
 /// Shown in terminal/tab titles, resume hints, and CLI branding. Upstream xAI
 /// uses bare `grok`; this fork's install artifact is `grok-oss`. Config keys
 /// that refer to the brand slot (e.g. title item `"grok"`) may keep the short
-/// name for compatibility — the **display** string is always this constant.
+/// name for compatibility. The display string is always this constant.
 pub const PRODUCT_CLI_NAME: &str = "grok-oss";
+
+/// Operator-facing `--version` line. First token is always [`PRODUCT_CLI_NAME`].
+///
+/// Example: `grok-oss 1.0.3 (f1abb5fd33b6)`. Never print bare `grok` as the
+/// product token. `version_with_commit` is the compiled version + git SHA
+/// (`VERSION_WITH_COMMIT`); `channel_label` is the optional suffix from
+/// `xai_grok_update::channel_label()`.
+pub fn product_version_line(version_with_commit: &str, channel_label: &str) -> String {
+    format!(
+        "{PRODUCT_CLI_NAME} {}",
+        xai_grok_version::display_version_with_commit(version_with_commit, channel_label)
+    )
+}
+
+/// Pasteable `Resume this session with:` command for this product.
+pub fn resume_session_command(session_id: &str, minimal: bool) -> String {
+    if minimal {
+        format!("{PRODUCT_CLI_NAME} --minimal --resume {session_id}")
+    } else {
+        format!("{PRODUCT_CLI_NAME} --resume {session_id}")
+    }
+}
 
 /// `User-Agent` for pager-owned direct-to-`api.x.ai` clients (voice STT).
 ///
@@ -50,5 +72,23 @@ mod tests {
         assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
         // Must not regress to bare upstream brand in product-facing surfaces.
         assert_ne!(PRODUCT_CLI_NAME, "grok");
+    }
+
+    #[test]
+    fn product_version_line_uses_grok_oss_not_bare_grok() {
+        // Operator report: `grok 1.0.3 (f1abb5fd33b6)` is the wrong product token.
+        let line = product_version_line("1.0.3 (f1abb5fd33b6)", "");
+        assert_eq!(line, "grok-oss 1.0.3 (f1abb5fd33b6)");
+        assert_eq!(line.split_whitespace().next(), Some("grok-oss"));
+        assert_ne!(line.split_whitespace().next(), Some("grok"));
+    }
+
+    #[test]
+    fn resume_session_command_uses_grok_oss() {
+        assert_eq!(resume_session_command("01", false), "grok-oss --resume 01");
+        assert_eq!(
+            resume_session_command("01", true),
+            "grok-oss --minimal --resume 01"
+        );
     }
 }

@@ -336,10 +336,13 @@ fn parse_http_blocking_result(
     }
 
     match serde_json::from_str::<super::GateHookJson>(response_text) {
-        Ok(output) => match super::gate_json_to_decision(output, hook_name) {
-            Ok(decision) => HookRunnerResult::Decision(decision),
-            Err(err) => HookRunnerResult::Failed(err),
-        },
+        // HTTP hooks have no stderr channel, so there is no fallback reason.
+        Ok(output) => {
+            match super::gate_json_to_decision(output, hook_name, /* fallback_reason */ None) {
+                Ok(decision) => HookRunnerResult::Decision(decision),
+                Err(err) => HookRunnerResult::Failed(err),
+            }
+        }
         Err(e) => {
             if status.is_success() {
                 tracing::warn!(
@@ -649,6 +652,7 @@ mod tests {
             timeout_ms: 1000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = HookEventEnvelope {
@@ -672,6 +676,7 @@ mod tests {
         let ctx = crate::runner::RunContext {
             session_id: "test",
             workspace_root: "/tmp",
+            process_scope: None,
         };
         let (result, _, info) = run_http_hook(&spec, &envelope, &ctx, GateKind::Tool).await;
 
@@ -727,6 +732,7 @@ mod tests {
             timeout_ms: 500,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
         let envelope = HookEventEnvelope {
             hook_event_name: HookEventName::PreToolUse,
@@ -749,6 +755,7 @@ mod tests {
         let ctx = crate::runner::RunContext {
             session_id: "test",
             workspace_root: "/tmp",
+            process_scope: None,
         };
 
         let (result, _, info) = run_http_hook(&spec, &envelope, &ctx, GateKind::Tool).await;

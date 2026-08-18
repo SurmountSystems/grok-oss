@@ -662,19 +662,16 @@ pub(crate) fn extract_repo_identity(cwd: &Path) -> Option<String> {
 /// - `https://github.com/acme/widgets.git`   → `"acme/widgets"`
 /// - `ssh://git@github.com/acme/widgets`     → `"acme/widgets"`
 fn normalize_remote_url(url: &str) -> Option<String> {
-    let path = if let Some(colon_pos) = url.find(':') {
-        // SSH format: git@github.com:org/repo.git
-        if url[..colon_pos].contains('@') && !url[..colon_pos].contains('/') {
-            &url[colon_pos + 1..]
-        } else {
-            // HTTPS/SSH-with-scheme: https://github.com/org/repo.git
-            url.split("//")
-                .nth(1)
-                .and_then(|after_scheme| after_scheme.split_once('/'))
-                .map(|(_, path)| path)?
-        }
+    let colon_pos = url.find(':')?;
+    // SSH format: git@github.com:org/repo.git
+    let path = if url[..colon_pos].contains('@') && !url[..colon_pos].contains('/') {
+        &url[colon_pos + 1..]
     } else {
-        return None;
+        // HTTPS/SSH-with-scheme: https://github.com/org/repo.git
+        url.split("//")
+            .nth(1)
+            .and_then(|after_scheme| after_scheme.split_once('/'))
+            .map(|(_, path)| path)?
     };
 
     let cleaned = path

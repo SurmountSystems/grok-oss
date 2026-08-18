@@ -7,12 +7,36 @@ use tokio::sync::oneshot;
 use super::super::coordinator_state::{
     BlockingWaiter, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER, ProgressFuture,
     ProgressTarget, RunningSeed, completed_inspection, completed_snapshot, pending_inspection,
-    pending_snapshot, running_inspection, running_seed,
+    pending_snapshot, queued_inspection, queued_snapshot, running_inspection, running_seed,
 };
-use super::super::types::{SubagentInspection, SubagentSnapshot};
-use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
+use super::super::types::{SubagentInspection, SubagentRequest, SubagentSnapshot};
+use super::{
+    ChildControl, ChildRunner, QueryWaitingForSpawn, SubagentCoordinator, SubagentProgress,
+    belongs_to_session,
+};
+
+const DEFAULT_QUERY_BLOCK_TIMEOUT_MS: u64 = 30_000;
+/// How long a blocking wait may sit on an id the coordinator has not
+/// seen a Spawn for. After this, the wait is not_found. Kept under the
+/// unknown-id "returns immediately" budget (2s).
+const UNSEEN_SPAWN_ID_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl<R: ChildRunner> SubagentCoordinator<R> {
+    fn push_blocking_waiter(
+        &mut self,
+        id: String,
+        timeout_ms: Option<u64>,
+        respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+    ) {
+        self.waiters.entry(id).or_default().push(BlockingWaiter {
+            deadline: tokio::time::Instant::now()
+                + std::time::Duration::from_millis(
+                    timeout_ms.unwrap_or(DEFAULT_QUERY_BLOCK_TIMEOUT_MS),
+                ),
+            respond_to,
+        });
+    }
+
     pub(super) fn handle_query(
         &mut self,
         id: String,
@@ -21,57 +45,193 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         timeout_ms: Option<u64>,
         respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
     ) {
-        if let Some(child) = self
-            .completed
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.completed.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             let snapshot = (!child.request.owner.is_workflow())
                 .then(|| self.completed_snapshot_for_query(child));
             let _ = respond_to.send(snapshot);
             return;
         }
-        if let Some(child) = self
-            .active
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.active.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
             }
             if block {
-                self.waiters.entry(id).or_default().push(BlockingWaiter {
-                    deadline: tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                    respond_to,
-                });
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
             } else {
                 self.queue_active_progress(&id, ProgressTarget::Query(respond_to));
             }
             return;
         }
-        if let Some(child) = self
-            .pending
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.pending.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
             }
             if block {
-                self.waiters.entry(id).or_default().push(BlockingWaiter {
-                    deadline: tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                    respond_to,
-                });
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
             } else {
                 let _ = respond_to.send(Some(pending_snapshot(child)));
             }
             return;
         }
-        let _ = respond_to.send(None);
+        if let Some(queued) = self.queued.iter().find(|queued| {
+            queued.request.id == id
+                && belongs_to_session(
+                    &queued.request,
+                    parent_session_id.as_deref(),
+                    self.spawned_by_session
+                        .get(&queued.request.id)
+                        .map(String::as_str),
+                )
+        }) {
+            if block {
+                self.push_blocking_waiter(id, timeout_ms, respond_to);
+            } else {
+                let _ = respond_to.send(Some(queued_snapshot(
+                    &queued.request,
+                    queued.queued_at.into_std(),
+                )));
+            }
+            return;
+        }
+        if block {
+            // Grace is only for a truly unseen id. A live/completed child
+            // this session must not see is not_found immediately, so a
+            // later duplicate Spawn cannot attach the waiter.
+            if self.child_exists_any_session(&id) {
+                let _ = respond_to.send(None);
+            } else {
+                self.park_query_waiting_for_spawn(id, parent_session_id, timeout_ms, respond_to);
+            }
+        } else {
+            let _ = respond_to.send(None);
+        }
+    }
+
+    fn child_exists_any_session(&self, id: &str) -> bool {
+        self.pending.contains_key(id)
+            || self.active.contains_key(id)
+            || self.completed.contains_key(id)
+            || self.queued.contains_id(id)
+    }
+
+    fn park_query_waiting_for_spawn(
+        &mut self,
+        id: String,
+        parent_session_id: Option<String>,
+        timeout_ms: Option<u64>,
+        respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+    ) {
+        let now = tokio::time::Instant::now();
+        self.queries_waiting_for_spawn
+            .entry(id)
+            .or_default()
+            .push(QueryWaitingForSpawn {
+                grace_deadline: now + UNSEEN_SPAWN_ID_GRACE,
+                block_until: now
+                    + std::time::Duration::from_millis(
+                        timeout_ms.unwrap_or(DEFAULT_QUERY_BLOCK_TIMEOUT_MS),
+                    ),
+                parent_session_id,
+                respond_to,
+            });
+    }
+
+    /// Move parked waits onto the live child, keeping the caller's full
+    /// block budget. Visibility uses the live child's session when the
+    /// id already exists, so a later duplicate Spawn cannot attach a
+    /// foreign waiter. A session that would not see the child still gets
+    /// not_found.
+    pub(super) fn attach_queries_waiting_for_spawn(&mut self, id: &str, request: &SubagentRequest) {
+        let Some(waiting) = self.queries_waiting_for_spawn.remove(id) else {
+            return;
+        };
+        let live_request = self
+            .pending
+            .get(id)
+            .map(|child| child.request.clone())
+            .or_else(|| self.active.get(id).map(|child| child.request.clone()))
+            .or_else(|| self.completed.get(id).map(|child| child.request.clone()))
+            .or_else(|| {
+                self.queued
+                    .iter()
+                    .find(|queued| queued.request.id == id)
+                    .map(|queued| (*queued.request).clone())
+            });
+        let visibility = live_request.as_ref().unwrap_or(request);
+        let spawned_by = self.spawned_by_session.get(id).cloned();
+        for query in waiting {
+            if !belongs_to_session(
+                visibility,
+                query.parent_session_id.as_deref(),
+                spawned_by.as_deref(),
+            ) {
+                let _ = query.respond_to.send(None);
+                continue;
+            }
+            self.waiters
+                .entry(id.to_owned())
+                .or_default()
+                .push(BlockingWaiter {
+                    deadline: query.block_until,
+                    respond_to: query.respond_to,
+                });
+        }
+    }
+
+    pub(super) fn reject_queries_waiting_for_spawn(&mut self, id: &str) {
+        for query in self
+            .queries_waiting_for_spawn
+            .remove(id)
+            .unwrap_or_default()
+        {
+            let _ = query.respond_to.send(None);
+        }
+    }
+
+    pub(super) fn reap_queries_waiting_for_spawn(&mut self) {
+        let now = tokio::time::Instant::now();
+        let ids: Vec<_> = self.queries_waiting_for_spawn.keys().cloned().collect();
+        for id in ids {
+            let waiting = self
+                .queries_waiting_for_spawn
+                .remove(&id)
+                .unwrap_or_default();
+            let (due, live): (Vec<_>, Vec<_>) = waiting
+                .into_iter()
+                .partition(|query| query.grace_deadline <= now);
+            if !live.is_empty() {
+                self.queries_waiting_for_spawn.insert(id, live);
+            }
+            for query in due {
+                let _ = query.respond_to.send(None);
+            }
+        }
     }
 
     pub(super) fn handle_inspect(
@@ -80,24 +240,50 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         parent_session_id: Option<String>,
         respond_to: oneshot::Sender<Option<SubagentInspection>>,
     ) {
-        if let Some(child) = self
-            .completed
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        if let Some(child) = self.completed.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             let _ = respond_to.send(Some(self.completed_inspection_for_query(child)));
-        } else if let Some(child) = self
-            .pending
-            .get(&id)
-            .filter(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        } else if let Some(child) = self.pending.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             let _ = respond_to.send(Some(pending_inspection(child)));
-        } else if self
-            .active
-            .get(&id)
-            .is_some_and(|child| belongs_to_session(&child.request, parent_session_id.as_deref()))
-        {
+        } else if self.active.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                parent_session_id.as_deref(),
+                self.spawned_by_session
+                    .get(&child.request.id)
+                    .map(String::as_str),
+            )
+        }) {
             self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
+        } else if let Some(queued) = self.queued.iter().find(|queued| {
+            queued.request.id == id
+                && belongs_to_session(
+                    &queued.request,
+                    parent_session_id.as_deref(),
+                    self.spawned_by_session
+                        .get(&queued.request.id)
+                        .map(String::as_str),
+                )
+        }) {
+            let _ = respond_to.send(Some(queued_inspection(
+                &queued.request,
+                queued.queued_at.into_std(),
+            )));
         } else {
             let _ = respond_to.send(None);
         }
@@ -131,6 +317,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .get(id)
                     .filter(|child| !child.request.owner.is_workflow())
                     .map(pending_snapshot)
+            })
+            .or_else(|| {
+                self.queued
+                    .iter()
+                    // Workflow spawns never queue; the filter matches the
+                    // completed/pending arms above should that ever bend.
+                    .find(|queued| queued.request.id == id && !queued.request.owner.is_workflow())
+                    .map(|queued| queued_snapshot(&queued.request, queued.queued_at.into_std()))
             })
     }
 

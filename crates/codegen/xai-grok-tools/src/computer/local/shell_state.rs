@@ -74,6 +74,19 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
+  # Capture the user's option set (including allexport) *before* isolating
+  # this dump. `set -euo pipefail` is this function's own (set is
+  # shell-global in bash) and must not be replayed. Allexport *must* be
+  # replayed, but we turn it off for the rest of the dump so temps —
+  # especially `_emit_encoded`'s `content` holding the full `export -p`
+  # payload — are not exported into helper `exec` environments. On large
+  # CI/Nix envs that exec has been seen to fail with status 126, which
+  # then replaced the user command's exit code.
+  local posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
+  builtin set +o allexport 2>/dev/null || true
+  builtin declare +x posix_opts 2>/dev/null || true
+
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -101,13 +114,9 @@ dump_bash_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
+  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY|__grok_user_cmd' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  # errexit/pipefail here are this function's own `set -euo pipefail` (set is
-  # shell-global in bash); replaying them would abort later user commands.
-  local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
   local bash_opts
@@ -327,6 +336,7 @@ impl ShellState {
         }
         crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
         cmd.envs(crate::util::pager_env());
+        #[allow(clippy::disallowed_methods)] // one-shot init run, waited on here
         let mut child = cmd.spawn().map_err(|e| {
             crate::computer::types::ComputerError::io(format!(
                 "failed to spawn {shell:?} for shell state init: {e}"
@@ -437,6 +447,25 @@ impl ShellState {
                 // Re-export GROK_AGENT=1 after snapshot eval so agent-definition
                 // selectors (or other values) from prior shells cannot clear the
                 // agent sentinel (process env alone is insufficient).
+                //
+                // Copy $1/$2 into plain variables and clear the positional
+                // parameters (`builtin set --`) BEFORE eval'ing the user
+                // command: `source <script>` with no arguments makes the
+                // sourced script inherit the caller's positional parameters,
+                // so e.g. conda's `bin/activate` (which forwards "$@" to
+                // `conda activate`) would receive the entire wrapped command
+                // string as an environment name. Clearing them matches the
+                // plain `bash -c "<command>"` execution path, where $# is 0.
+                //
+                // The snapshot can restore `allexport` (set -a), which would
+                // auto-export the temp variable — so briefly clear allexport
+                // around the assignment (`declare +x` after `var=value` is
+                // the backstop; inline `declare +x var=value` does NOT beat
+                // allexport), restore allexport if the user had it, and unset
+                // the temp after eval so it never reaches child processes or
+                // the state dump (`export -p`). Dump is `|| true` so a dump
+                // helper exec failure cannot replace the user exit code
+                // (`set -e` inside dump_bash_state is shell-global).
                 "{dump_script} \
                  snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && \
                  {{ builtin set +u 2>/dev/null || true; \
@@ -444,10 +473,18 @@ impl ShellState {
                  builtin export PWD=\"$(builtin pwd)\"; \
                  builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
                  builtin printf '%s' \"${{2:-}}\"; \
-                 builtin eval \"$1\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 __grok_had_allexport=0; \
+                 if builtin shopt -qo allexport 2>/dev/null; then __grok_had_allexport=1; builtin set +o allexport; fi; \
+                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null; \
+                 if [ \"$__grok_had_allexport\" -eq 1 ]; then builtin set -o allexport; fi; \
+                 builtin unset __grok_had_allexport; builtin set --; \
+                 builtin eval \"$__grok_user_cmd\" 2>&1; }}; \
+                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4 || true; builtin exit $COMMAND_EXIT_CODE"
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for model globs.
+            // See the bash wrapper comment for why positional parameters are
+            // cleared before the user-command eval (zsh's `source`/`.` inherits
+            // them identically).
             ShellKind::Zsh => format!(
                 "{dump_script} \
                  snap=$(command cat <&3); \
@@ -460,8 +497,9 @@ impl ShellState {
                  builtin export PWD=\"$(builtin pwd)\"; \
                  builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
                  builtin printf '%s' \"${{2:-}}\"; \
-                 builtin eval \"$1\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 __grok_user_cmd=\"$1\"; builtin typeset +x __grok_user_cmd 2>/dev/null; builtin set --; \
+                 builtin eval \"$__grok_user_cmd\" 2>&1; }}; \
+                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4 || true; builtin exit $COMMAND_EXIT_CODE"
             ),
         };
 
@@ -943,6 +981,7 @@ mod tests {
 
         cmd.fd_mappings(prep.fd_mappings).unwrap();
 
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().unwrap();
         // Drop cmd to release the FdMapping OwnedFds held in its pre_exec closure.
         // Without this, the parent keeps the write-end of the state-out pipe open,
@@ -1000,6 +1039,7 @@ mod tests {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         cmd.fd_mappings(prep.fd_mappings).unwrap();
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().unwrap();
         drop(cmd);
 
@@ -1164,6 +1204,97 @@ mod tests {
         let (code, stdout) = run_command(&mut state, "greet world").await;
         assert_eq!(code, 0);
         assert_eq!(stdout.trim(), "hello world");
+    }
+
+    /// Regression test: a script sourced WITHOUT arguments by the user command
+    /// must not see the wrapper's positional parameters ($1 = the whole
+    /// command string, $2 = the spawn notice). Conda's `bin/activate` forwards
+    /// "$@" to `conda activate`, so a leak makes every `activate_conda`-
+    /// prefixed command fail with `EnvironmentLocationNotFound: Not a conda
+    /// environment: <cwd>/<the entire command string>`.
+    #[tokio::test]
+    async fn test_sourced_script_does_not_inherit_wrapper_positional_args_bash() {
+        if !bash_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("activate_probe.sh");
+        std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+
+        let (code, stdout) = run_command(
+            &mut state,
+            &format!("source {} && echo AFTER_SOURCE_OK", probe.display()),
+        )
+        .await;
+        assert_eq!(code, 0, "command failed, stdout={stdout:?}");
+        assert!(
+            stdout.contains("SOURCED_ARGC=0"),
+            "sourced script must see zero positional args, got: {stdout:?}"
+        );
+        assert!(stdout.contains("AFTER_SOURCE_OK"), "got: {stdout:?}");
+    }
+
+    /// Regression test: with `allexport` active (restored from the snapshot
+    /// after the model runs `set -a`), the wrapper's `__grok_user_cmd` temp
+    /// variable must not leak into child-process environments or persist into
+    /// subsequent commands via the state dump.
+    #[tokio::test]
+    async fn test_user_cmd_var_not_exported_under_allexport_bash() {
+        if !bash_available() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+
+        // Turn on allexport; the option is captured by the dump and replayed
+        // into every subsequent command's shell.
+        let (code, _) = run_command(&mut state, "set -a").await;
+        assert_eq!(code, 0);
+
+        // This command's wrapper assigns __grok_user_cmd under allexport.
+        // printenv only sees exported vars — it must not see the temp var
+        // (neither from this command's own assignment nor re-exported from a
+        // previous command's state dump).
+        let (code, stdout) = run_command(
+            &mut state,
+            "printenv __grok_user_cmd >/dev/null 2>&1 && echo LEAKED_TO_ENV || echo ENV_CLEAN",
+        )
+        .await;
+        assert_eq!(code, 0);
+        assert!(
+            stdout.contains("ENV_CLEAN") && !stdout.contains("LEAKED_TO_ENV"),
+            "temp var must not be exported to child processes under allexport, got: {stdout:?}"
+        );
+    }
+
+    /// Same as the bash variant: zsh's `source`/`.` also inherits the caller's
+    /// positional parameters when invoked without arguments.
+    #[tokio::test]
+    async fn test_sourced_script_does_not_inherit_wrapper_positional_args_zsh() {
+        if !zsh_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("activate_probe.sh");
+        std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
+
+        let (code, stdout) = run_command(
+            &mut state,
+            &format!("source {} && echo AFTER_SOURCE_OK", probe.display()),
+        )
+        .await;
+        assert_eq!(code, 0, "command failed, stdout={stdout:?}");
+        assert!(
+            stdout.contains("SOURCED_ARGC=0"),
+            "sourced script must see zero positional args, got: {stdout:?}"
+        );
+        assert!(stdout.contains("AFTER_SOURCE_OK"), "got: {stdout:?}");
     }
 
     #[tokio::test]

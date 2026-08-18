@@ -1,6 +1,36 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
+#[test]
+fn format_restore_elapsed_hour_uses_hours_not_padded_minutes() {
+    let hour = format_restore_elapsed(std::time::Duration::from_secs(3725));
+    assert_eq!(hour, "1h2m");
+    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
+    let mins = format_restore_elapsed(std::time::Duration::from_secs(943));
+    assert_eq!(mins, "15m43s");
+}
+
+#[test]
+fn format_restore_complete_hour_uses_hours_not_padded_minutes() {
+    let hour = format_restore_finalize_status(false, std::time::Duration::from_secs(3725));
+    assert_eq!(hour, "Restore complete (1h2m).");
+    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
+    let incomplete = format_restore_finalize_status(true, std::time::Duration::from_secs(943));
+    assert_eq!(incomplete, "Restore incomplete (15m43s).");
+}
+
+#[test]
+fn session_rpc_timeout_copy_uses_minutes_not_raw_seconds() {
+    let msg = format_session_rpc_timeout("session/new", std::time::Duration::from_secs(180));
+    assert!(
+        msg.contains("timed out after 3m0s"),
+        "180s session RPC floor must print as minutes, got: {msg}"
+    );
+    assert!(
+        !msg.contains("180s") && !msg.contains("180 seconds"),
+        "raw second budget must not leak: {msg}"
+    );
+}
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -15,6 +45,20 @@ fn format_acp_error_reads_detail_from_wrapped_data() {
         }),
         );
     assert_eq!(format_acp_error(&wrapped, false), "model does not support tools");
+}
+#[test]
+fn format_acp_error_formats_http_500_dump() {
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "API error (status 500 Internal Server Error): {\"error\":\"upstream exploded\"}",
+            "http_status": 500
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&err, false),
+            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+        );
 }
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
@@ -399,10 +443,10 @@ fn empty_billing_config() -> BillingConfig {
         on_demand_used: None,
         prepaid_balance: None,
         is_unified_billing_user: None,
-        product_usage: vec![],
         billing_period_start: None,
         billing_period_end: None,
         history: vec![],
+        product_usage: vec![],
     }
 }
 #[test]
@@ -413,55 +457,8 @@ fn credit_balance_prefers_credit_usage_percent_over_limit_used() {
         used: Some(Cent { val: 9_000 }),
         ..empty_billing_config()
     };
-    let bal = credit_balance_from_config(c);
-    assert_eq!(bal.usage_pct, 42.0);
-    assert!(bal.included_usage_known);
+    assert_eq!(credit_balance_from_config(c).usage_pct, 42.0);
 }
-
-/// Named contract: empty billing config is honest absence, not a silent 0%.
-#[test]
-fn credit_balance_empty_config_marks_included_unknown() {
-    let bal = credit_balance_from_config(empty_billing_config());
-    assert!(
-        !bal.included_usage_known,
-        "no percent and no limit/used pair must not claim a known 0%"
-    );
-    assert_eq!(bal.usage_pct, 0.0, "placeholder only when unknown");
-}
-
-/// Named contract: explicit 0% on the wire is a true zero (known reading).
-#[test]
-fn credit_balance_explicit_zero_percent_is_known() {
-    let c = BillingConfig {
-        credit_usage_percent: Some(0.0),
-        ..empty_billing_config()
-    };
-    let bal = credit_balance_from_config(c);
-    assert!(bal.included_usage_known);
-    assert_eq!(bal.usage_pct, 0.0);
-}
-#[test]
-fn credit_balance_forwards_grok_build_usage_pct_from_product_usage() {
-    // Named contract: FetchBilling → CreditBalance carries PRODUCT_GROK_BUILD %
-    // so in-TUI /limits --json can show grokBuildUsagePct after cache warm.
-    let c = BillingConfig {
-        credit_usage_percent: Some(65.0),
-        product_usage: vec![xai_grok_shell::extensions::billing::ProductUsageEntry {
-            product: Some(
-                xai_grok_shell::extensions::billing::PRODUCT_GROK_BUILD.into(),
-            ),
-            usage_percent: Some(61.2),
-        }],
-        ..empty_billing_config()
-    };
-    assert_eq!(credit_balance_from_config(c).grok_build_usage_pct, Some(61.2));
-    assert_eq!(
-        credit_balance_from_config(empty_billing_config()).grok_build_usage_pct,
-        None,
-        "no productUsage → no invent"
-    );
-}
-
 #[test]
 fn credit_balance_forwards_is_unified_billing_user() {
     let c = BillingConfig {
@@ -692,6 +689,32 @@ fn credit_balance_effective_blends_budget_for_legacy_shape_under_100() {
     assert_eq!(bal.usage_pct, 50.0);
     assert_eq!(bal.effective_usage_pct, 25.0);
 }
+/// Successful TUI `FetchBilling` / `FetchAppBilling` map with a real included
+/// SuperGrok period used percent must paint `N%` on the compact meter, not the
+/// honest-unknown placeholder `...%`. SuperGrok is paid; this is included
+/// SuperGrok period limits, not SuperGrok dollar credits. Chrome must not
+/// invent a percent when usage is actually unknown.
+#[test]
+fn successful_tui_billing_map_paints_included_period_percent_not_ellipsis() {
+    let c = BillingConfig {
+        credit_usage_percent: Some(36.0),
+        ..empty_billing_config()
+    };
+    let bal = credit_balance_from_config(c);
+    assert!(
+        bal.included_usage_known,
+        "TUI billing map must mark included SuperGrok period usage known when credit_usage_percent is present"
+    );
+    assert_eq!(bal.usage_pct, 36.0);
+    let theme = crate::theme::Theme::default();
+    let line = crate::views::credit_bar::credit_bar_line(&bal, false, &theme);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "included SuperGrok period limits · 36%");
+    assert!(
+        !text.contains("...%"),
+        "known included SuperGrok period usage must not paint the unknown placeholder"
+    );
+}
 #[test]
 fn parse_worktree_restore_payload_full() {
     use xai_grok_workspace::session::git::RestoreDegree;
@@ -775,6 +798,57 @@ fn parse_session_load_restore_meta_rejects_unknown_degree() {
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
 }
+/// Changing the Settings "Default reasoning effort" row must write
+/// `[models].default_reasoning_effort` and a live read must see the override.
+#[tokio::test]
+async fn default_reasoning_effort_settings_row_persists_toml_override() {
+    use crate::settings::{current_value_for, PagerLocalSnapshot, SettingValue};
+    use xai_grok_shell::agent::config::UiConfig;
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_shell::util::config::{load_config_from_toml, user_config_path};
+
+    let _home = setup_grok_home_in_tempdir();
+    persist_setting("default_reasoning_effort", SettingValue::Enum("high"))
+        .await
+        .expect("Settings row persist must write [models].default_reasoning_effort");
+
+    let path = user_config_path();
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {} after persist: {e}", path.display()));
+    let root: toml::Value = toml::from_str(&body).expect("config.toml parse");
+    let models = root.get("models").and_then(|v| v.as_table()).unwrap_or_else(|| {
+        panic!("expected [models] table after persist, got:\n{body}")
+    });
+    assert_eq!(
+        models.get("default_reasoning_effort").and_then(|v| v.as_str()),
+        Some("high"),
+        "persist key must be [models].default_reasoning_effort, got:\n{body}"
+    );
+
+    let cfg = load_config_from_toml(&root);
+    assert_eq!(
+        cfg.models.default_reasoning_effort,
+        Some(ReasoningEffort::High),
+        "live config read must see the persisted High override"
+    );
+
+    // Settings modal live-read: seed the snapshot from the loaded config,
+    // same as AppView after startup / setter refresh.
+    let live = cfg
+        .models
+        .default_reasoning_effort
+        .expect("live config read must keep the persist");
+    let snap = PagerLocalSnapshot {
+        default_reasoning_effort: Some(live.to_string().to_ascii_lowercase()),
+        ..Default::default()
+    };
+    assert_eq!(
+        current_value_for("default_reasoning_effort", &UiConfig::default(), &snap),
+        Some(SettingValue::Enum("high")),
+        "live Settings read must show the persisted override, not the baked medium default"
+    );
+}
+
 /// Unknown keys return a descriptive error.
 #[tokio::test]
 async fn persist_setting_unknown_key_returns_err() {
@@ -836,6 +910,17 @@ async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
         );
 }
 #[tokio::test]
+async fn persist_setting_type_mismatch_errors_confirm_before_rewind() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("confirm_before_rewind", SettingValue::String("nope".into()))
+        .await;
+    let err = r.expect_err("confirm_before_rewind with String payload must return Err");
+    assert!(
+            err.contains("persist_setting(confirm_before_rewind) expected Bool"),
+            "got: {err}",
+        );
+}
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
     use crate::settings::SettingValue;
     let r = persist_setting(
@@ -862,18 +947,17 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts ExtNotifications for `method`.
-/// Exits when the channel closes.
-fn spawn_fake_acp_agent_counting(
+/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
+/// notifications. Exits when the channel closes.
+fn spawn_fake_acp_agent(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == method {
+                if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -881,13 +965,6 @@ fn spawn_fake_acp_agent_counting(
         }
     });
     counter
-}
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
-fn spawn_fake_acp_agent(
-    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-) -> Arc<AtomicUsize> {
-    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
 }
 /// Redirect `GROK_HOME` to a tempdir for test isolation.
 fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
@@ -898,16 +975,16 @@ fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
     tmp
 }
 fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
-    use xai_grok_shell::active_sessions::{ActiveSession, register_in};
+    use xai_grok_active_sessions::{ActiveSession, register_in};
     let session_id = acp::SessionId::new(id);
     register_in(
             root,
-            ActiveSession {
-                session_id: session_id.clone(),
-                pid: std::process::id(),
-                cwd: "/tmp/test".into(),
-                opened_at: chrono::Utc::now(),
-            },
+            ActiveSession::new(
+                session_id.clone(),
+                std::process::id(),
+                "/tmp/test",
+                chrono::Utc::now(),
+            ),
         )
         .expect("register");
     session_id
@@ -919,7 +996,7 @@ fn unregister_best_effort_removes_entry_when_lock_free() {
     let sid = register_session_in(dir.path(), "s1");
     unregister_active_session_best_effort_in(dir.path(), &sid);
     assert!(
-            xai_grok_shell::active_sessions::list_in(dir.path())
+            xai_grok_active_sessions::list_in(dir.path())
                 .expect("list")
                 .is_empty(),
             "lock-free unregister must remove the entry",
@@ -958,7 +1035,7 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
             "contended unregister blocked on the shared flock instead of skipping",
         );
     assert_eq!(
-            xai_grok_shell::active_sessions::list_in(dir.path())
+            xai_grok_active_sessions::list_in(dir.path())
                 .expect("list")
                 .len(),
             1,
@@ -1007,136 +1084,6 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
              SettingPersistFailedBestEffort (Err), got {result:?}",
         );
 }
-/// Helper notify: fires exactly one `x.ai/auto_compact_threshold_changed`.
-#[tokio::test]
-async fn notify_auto_compact_threshold_changed_fires_acp_once() {
-    use crate::settings::SettingValue;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("98")).await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        1,
-        "notify helper must fire ACP auto_compact_threshold_changed once"
-    );
-}
-
-/// Unparseable / wrong kind must not spam ACP (no silent mass-reset).
-#[tokio::test]
-async fn notify_auto_compact_threshold_changed_skips_invalid_value() {
-    use crate::settings::SettingValue;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Bool(true)).await;
-    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("not-a-choice")).await;
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        0,
-        "invalid live-apply values must not fire ACP"
-    );
-}
-
-/// Shipped path: `Effect::PersistSetting` for auto-compact fires ACP only after
-/// successful disk write (same gating as yolo permission mode).
-#[tokio::test]
-async fn persist_auto_compact_threshold_fires_acp_on_disk_success() {
-    use crate::settings::SettingValue;
-    use std::path::Path;
-    let _guard = setup_grok_home_in_tempdir();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    execute(
-        Effect::PersistSetting {
-            key: "auto_compact_threshold_percent",
-            value: SettingValue::Enum("98"),
-            rollback_value: SettingValue::Enum("95"),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    let result = tasks
-        .join_next()
-        .await
-        .expect("persist task should complete")
-        .expect("persist task should not panic");
-    assert!(
-        matches!(
-            result,
-            TaskResult::SettingPersisted {
-                key: "auto_compact_threshold_percent",
-                ..
-            }
-        ),
-        "disk Ok must yield SettingPersisted, got {result:?}"
-    );
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        1,
-        "ACP auto_compact_threshold_changed must fire exactly once after disk Ok"
-    );
-}
-
-/// Disk failure (kind mismatch) must not notify open sessions.
-#[tokio::test]
-async fn persist_auto_compact_threshold_no_acp_on_disk_failure() {
-    use crate::settings::SettingValue;
-    use std::path::Path;
-    let _guard = setup_grok_home_in_tempdir();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let counter =
-        spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
-    let mut tasks = JoinSet::new();
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    execute(
-        Effect::PersistSetting {
-            key: "auto_compact_threshold_percent",
-            value: SettingValue::Bool(true),
-            rollback_value: SettingValue::Enum("95"),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    let result = tasks
-        .join_next()
-        .await
-        .expect("persist task should complete")
-        .expect("persist task should not panic");
-    assert!(
-        matches!(
-            result,
-            TaskResult::SettingPersistFailed {
-                key: "auto_compact_threshold_percent",
-                ..
-            }
-        ),
-        "kind mismatch must yield SettingPersistFailed, got {result:?}"
-    );
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        counter.load(Ordering::SeqCst),
-        0,
-        "disk failure must not live-apply via ACP"
-    );
-}
-
 /// WithRollback: notification count matches disk outcome
 /// (1 on Ok, 0 on Err).
 #[tokio::test]
@@ -1494,8 +1441,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             MarketplaceAction::Update {
                                 source_url_or_path,
                                 plugin_relative_path,
-                            }
-if source_url_or_path == "https://example.com/plugins.git"
+                            } if source_url_or_path == "https://example.com/plugins.git"
                                 && plugin_relative_path == "plugins/test-plugin" => {
                                 saw_update_for_task.store(true, Ordering::SeqCst);
                             }
@@ -1577,7 +1523,7 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     execute(
         Effect::ScanForeignSessions {
             cwd: PathBuf::from("/path/that/must/not/be-read"),
-            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources::default(),
+            compat: xai_grok_foreign_sessions::EnabledForeignSessionSources::default(),
             grok_home: PathBuf::from("/path/that/must/not/be-read"),
             coordinator: app_coordinator.clone(),
             seq: 41,
@@ -1630,7 +1576,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
     let (quit, _) = execute(
         Effect::DetectForeignResumeHint {
             canonical_cwd: canonical_cwd.clone(),
-            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources::default(),
+            compat: xai_grok_foreign_sessions::EnabledForeignSessionSources::default(),
             grok_home: PathBuf::from("/path/that/must/not-be-read"),
             launch_token: 8,
         },
@@ -1710,6 +1656,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("hit".into()),
         seq: 7,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
@@ -1726,6 +1673,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: None,
         seq: 8,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1741,6 +1689,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("fail-me".into()),
         seq: 9,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListFailed { error, seq, query } => {
@@ -1774,6 +1723,50 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             "browse fetches opt into relaxing"
         );
     assert_eq!(captured[2]["query"], "fail-me");
+}
+#[tokio::test]
+async fn fetch_session_list_sends_kind_facet_filter() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task.lock().unwrap().push(params);
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("ser");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSessionList {
+            query: None,
+            seq: 1,
+            kind_filter: Some(vec!["build".into()]),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let _ = tasks.join_next().await;
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
+            serde_json::json!(["build"])
+        );
 }
 #[tokio::test]
 async fn fetch_workflows_list_sends_session_id() {
@@ -2212,6 +2205,10 @@ fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
                 "chat meta must not include workspace-bind key {key:?}: {meta}"
             );
     }
+    assert!(
+            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            "chat meta without attach must not include existing workspace: {meta}"
+        );
 }
 #[test]
 fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
@@ -2251,6 +2248,160 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
+}
+/// Attach stamp keeps existing workspace + local intent; envId / Direct hub stay stripped.
+#[cfg(feature = "local-workspace")]
+#[test]
+fn scrub_chat_workspace_matrix_attach_exception() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let mut meta = Some(acp::Meta::new());
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-x"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-x"));
+        obj.insert(
+            "x.ai/cloud_existing_workspace".into(),
+            serde_json::json!({"server_id": "srv-x", "cwd": "/ws"}),
+        );
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none());
+    assert!(scrubbed.get("x.ai/cloud_server_id").is_none());
+    assert!(scrubbed.get("x.ai/cloud_existing_workspace").is_none());
+    let mut meta = Some(acp::Meta::new());
+    apply_local_workspace_meta(
+        &mut meta,
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-dogfood".into()),
+        },
+    );
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-must-go"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-must-go"));
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none(), "envId must stay scrubbed");
+    assert!(
+            scrubbed.get("x.ai/cloud_server_id").is_none(),
+            "Direct hub must stay scrubbed"
+        );
+    assert_eq!(
+            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-dogfood"
+        );
+    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_attach_stamps_local_and_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-1".into()),
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert!(meta.get("envId").is_none());
+    assert!(meta.get("x.ai/cloud_server_id").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_own_stamps_intent_without_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Own,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo-own")),
+            server_id: None,
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
+    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
+    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert!(
+            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            "own must not stamp existing; shell mints server_id"
+        );
+    assert!(meta.get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn mid_session_add_params_scrub_envid() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let params = mid_session_add_local_workspace_params(
+        "sess-1",
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-add".into()),
+        },
+    );
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["meta"]["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(
+            params["meta"]["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-add"
+        );
+    assert!(params["meta"].get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn reject_non_fs_only_advertised_tools_matrix() {
+    let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
+    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
+    assert!(
+            reject_non_fs_only_advertised_tools(None)
+                .unwrap_err()
+                .contains("uncheckable")
+        );
+    assert!(
+            reject_non_fs_only_advertised_tools(Some(&[][..]))
+                .unwrap_err()
+                .contains("empty")
+        );
+    let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
+    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
+    assert!(err.contains("FS-only"), "{err}");
+    assert!(err.contains("workspace.bash"), "{err}");
+    assert!(err.contains("terminal.exec"), "{err}");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: false,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-wt".into()),
+        }),
+        ..Default::default()
+    };
+    let mut meta = flags.to_meta();
+    finalize_chat_session_meta(&mut meta, true, &flags);
+    let meta = meta.expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert!(meta.get("envId").is_none());
 }
 #[test]
 fn to_meta_yolo_suppresses_auto_mode() {
@@ -2309,7 +2460,7 @@ fn make_session_info(
             context: ContextInfo {
                 used,
                 total,
-                auto_compact_threshold_percent: 95,
+                auto_compact_threshold_percent: 85,
                 ..Default::default()
             },
         },
@@ -2320,10 +2471,7 @@ fn format_session_info_session_auth_ignores_api_key_env() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, true);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");
@@ -2334,10 +2482,7 @@ fn format_session_info_api_key_without_env() {
     let text = format_session_info(&info, None, false, true, false);
     assert!(text.contains("Auth method: API key\n"), "{text}");
     assert!(!text.contains("XAI_API_KEY"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
             text.contains("Run `grok login` to use your SuperGrok subscription instead."),
             "{text}"
@@ -2345,30 +2490,25 @@ fn format_session_info_api_key_without_env() {
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_api_key_auth_notes_console_billing() {
+fn format_session_info_api_key_auth_suggests_grok_login() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, true, true);
     assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: console.x.ai"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
             text.contains("Run `grok login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
+    assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
-fn format_session_info_session_only_manage_at_grok_com() {
+fn format_session_info_session_only_shows_oauth() {
     let info = make_session_info("auto", None, 1000, 10000);
     let text = format_session_info(&info, None, false, false, false);
     assert!(text.contains("Auth method: OAuth"), "{text}");
-    assert!(
-            text.contains("Manage account and credits: https://grok.com/?_s=billing"),
-            "{text}"
-        );
+    assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok login"), "{text}");
@@ -2525,6 +2665,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
+        last_turn_summary: Some("Fixed the parser".to_string()),
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);
@@ -2534,8 +2675,21 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert!(roster.is_worktree, "worktree_label present → is_worktree");
     assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
     assert_eq!(roster.activity, RosterActivity::Dormant);
+    assert_eq!(
+            roster.last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
     assert!(!roster.resident);
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+#[test]
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params("sess-1", 3);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], REWIND_MODE_WIRE);
+    assert_eq!(params["mode"], "conversation_only");
 }

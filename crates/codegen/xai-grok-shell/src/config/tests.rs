@@ -1002,6 +1002,24 @@ fn with_grok_subagents<T>(value: &str, f: impl FnOnce() -> T) -> T {
     with_env_var_opt("GROK_SUBAGENTS", Some(value), f)
 }
 #[test]
+fn resolve_max_depth_default_allows_l2_to_spawn_l3() {
+    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 2);
+    assert_eq!(SubagentsConfig::resolve_max_depth(None, None, None), 2);
+}
+
+#[test]
+fn resolve_max_depth_explicit_one_stays_one() {
+    assert_eq!(SubagentsConfig::clamp_max_depth(1, "config"), 1);
+    assert_eq!(SubagentsConfig::resolve_max_depth(None, Some(1), None), 1);
+}
+
+#[test]
+fn resolve_max_depth_zero_clamps_to_one_not_default() {
+    assert_eq!(SubagentsConfig::clamp_max_depth(0, "config"), 1);
+    assert_eq!(SubagentsConfig::resolve_max_depth(None, Some(0), None), 1);
+}
+
+#[test]
 fn subagents_config_default_enabled() {
     without_grok_subagents(|| {
         let config = toml::Value::Table(toml::map::Map::new());
@@ -1245,6 +1263,46 @@ fn subagents_config_allow_worktree_true_via_resolve() {
             "explicit allow_worktree = true opts into worktree isolation"
         );
     });
+}
+
+#[test]
+fn resolve_subagents_copies_allow_worktree() {
+    without_grok_subagents(|| {
+        let mut cfg = crate::agent::config::Config::default();
+        let raw: toml::Value =
+            toml::from_str("[subagents]\nenabled = true\nallow_worktree = true").unwrap();
+        cfg.resolve_subagents(false, &raw);
+        assert!(
+            cfg.subagent_allow_worktree,
+            "resolve_subagents must copy allow_worktree so spawn can honor it"
+        );
+        let mut off = crate::agent::config::Config::default();
+        let raw_off: toml::Value =
+            toml::from_str("[subagents]\nenabled = true\nallow_worktree = false").unwrap();
+        off.resolve_subagents(false, &raw_off);
+        assert!(
+            !off.subagent_allow_worktree,
+            "empty/false allow_worktree must stay off after resolve"
+        );
+    });
+}
+
+#[test]
+fn apply_allow_worktree_policy_false_forces_none() {
+    use xai_tool_types::SubagentIsolationMode;
+    assert_eq!(
+        crate::agent::subagent::apply_allow_worktree_policy(
+            SubagentIsolationMode::Worktree,
+            false
+        ),
+        SubagentIsolationMode::None,
+        "empty/false allow_worktree must force isolation none"
+    );
+    assert_eq!(
+        crate::agent::subagent::apply_allow_worktree_policy(SubagentIsolationMode::Worktree, true),
+        SubagentIsolationMode::Worktree,
+        "allow_worktree = true must keep resolved worktree isolation"
+    );
 }
 #[test]
 fn subagents_config_is_subagent_enabled_absent_defaults_true() {

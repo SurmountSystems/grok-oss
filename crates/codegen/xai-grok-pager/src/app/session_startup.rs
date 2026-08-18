@@ -18,7 +18,7 @@ pub enum DeferredSessionStartup {
         /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
         chat_kind: bool,
     },
-    /// Client-chosen id (`--session-id`); also stashes preferred for picker.
+    /// Client-chosen id (`--session-id`), also mirrored into `preferred_session_id`.
     NewWithId { session_id: String },
     /// Startup `--fork-session` after parent resolve.
     Fork {
@@ -28,7 +28,7 @@ pub enum DeferredSessionStartup {
     },
     /// Fresh plain Grok session whose first prompt resumes a foreign tool session.
     ForeignResume {
-        tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool,
+        tool: xai_grok_foreign_sessions::ForeignSessionTool,
         native_id: String,
     },
 }
@@ -44,6 +44,9 @@ pub struct DeferredStartupActions {
     pub prompt: Option<String>,
     pub open_dashboard: bool,
     pub pending_chat: bool,
+    /// Welcome history local-disk bypass persisted across the startup gate.
+    #[cfg(feature = "local-workspace")]
+    pub history_load_as_build: bool,
 }
 impl DeferredStartupActions {
     pub fn is_empty(&self) -> bool {
@@ -102,17 +105,25 @@ pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
         {
             return true;
         }
+        if v.get("worktree_label")
+            .and_then(|k| k.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            return true;
+        }
     }
-    let mut cur = Some(cwd);
-    while let Some(dir) = cur {
+    if let Some(info) = crate::git_info::compute_cwd_git_info(cwd) {
+        return info.is_worktree;
+    }
+    for dir in cwd.ancestors() {
         let git = dir.join(".git");
         if git.is_file() {
             return true;
         }
         if git.is_dir() {
-            return false;
+            return std::fs::read_to_string(git.join("grok-worktree-source"))
+                .is_ok_and(|s| !s.trim().is_empty());
         }
-        cur = dir.parent();
     }
     false
 }
@@ -300,6 +311,321 @@ pub fn chat_mode_flag_conflict(
     }
     None
 }
+/// Env: enable local workspace without CLI flags (`1`). Mode defaults to `own`
+/// unless `GROK_CHAT_LOCAL_WORKSPACE_MODE` / attach server id is set.
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_CWD";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_MODE";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME";
+/// Skip interactive first-run confirm (still prints the banner).
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ACK";
+/// Startup banner / first-run copy.
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_BANNER: &str =
+    "Local workspace runs tools on this machine (FS confined to <cwd>).";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID: &str = "local-workspace attach requires --local-workspace-attach=<server_id> \
+     (or GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_REQUIRES_CHAT: &str = "local-workspace flags/env require --chat";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_HOME_DENIED: &str =
+    "local-workspace cwd may not be / or $HOME unless GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME=1";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_HITL_HINT: &str = "Permission prompts for local workspace tools apply to your machine. \
+     Local workspace replaces the chat sandbox.";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_ACK_REQUIRED: &str =
+    "local-workspace requires interactive confirm, GROK_CHAT_LOCAL_WORKSPACE_ACK=1, or an ack file";
+/// Declared advertised tool ids for attach FS-only check (comma-separated).
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV: &str =
+    "GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS";
+#[cfg(feature = "local-workspace")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalWorkspaceMode {
+    Own,
+    Attach,
+}
+#[cfg(feature = "local-workspace")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalWorkspaceConfig {
+    pub mode: LocalWorkspaceMode,
+    pub cwd: Option<std::path::PathBuf>,
+    pub server_id: Option<String>,
+}
+#[cfg(feature = "local-workspace")]
+static ACTIVE_LOCAL_WORKSPACE: std::sync::Mutex<Option<LocalWorkspaceConfig>> =
+    std::sync::Mutex::new(None);
+#[cfg(feature = "local-workspace")]
+pub fn set_active_local_workspace(cfg: Option<LocalWorkspaceConfig>) -> anyhow::Result<()> {
+    let mut guard = ACTIVE_LOCAL_WORKSPACE.lock().map_err(|_| {
+        anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
+    })?;
+    tracing::info!(
+        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
+        event = if cfg.is_some() {
+            "process_stamp_set"
+        } else {
+            "process_stamp_cleared"
+        },
+        mode = cfg.as_ref().map(|c| format!("{:?}", c.mode)),
+        server_id = cfg.as_ref().and_then(|c| c.server_id.as_deref()),
+        cwd = cfg.as_ref().and_then(|c| c.cwd.as_ref().map(|p| p.display().to_string())),
+        "local-workspace process-wide intent stamp"
+    );
+    *guard = cfg;
+    Ok(())
+}
+#[cfg(feature = "local-workspace")]
+pub fn active_local_workspace() -> anyhow::Result<Option<LocalWorkspaceConfig>> {
+    ACTIVE_LOCAL_WORKSPACE
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|_| {
+            anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
+        })
+}
+#[cfg(not(feature = "local-workspace"))]
+pub fn active_local_workspace() -> anyhow::Result<Option<()>> {
+    Ok(None)
+}
+#[cfg(feature = "local-workspace")]
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+#[cfg(feature = "local-workspace")]
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+/// Resolve CLI > env local-workspace intent (own or attach).
+///
+/// Returns `Ok(None)` when local workspace is not requested.
+#[cfg(feature = "local-workspace")]
+pub fn resolve_local_workspace_config(
+    chat: bool,
+    cli_own: Option<Option<&std::path::Path>>,
+    cli_attach: Option<&str>,
+    cli_cwd: Option<&std::path::Path>,
+) -> anyhow::Result<Option<LocalWorkspaceConfig>> {
+    let env_enable = env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ENV);
+    let env_mode = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+    let env_server_id = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+    let env_cwd = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV).map(std::path::PathBuf::from);
+    let cli_attach = cli_attach.map(str::trim).filter(|s| !s.is_empty());
+    let cli_requested = cli_own.is_some() || cli_attach.is_some();
+    let env_requested = env_enable || env_mode.is_some() || env_server_id.is_some();
+    if !cli_requested && !env_requested {
+        return Ok(None);
+    }
+    if !chat {
+        anyhow::bail!("{LOCAL_WORKSPACE_REQUIRES_CHAT}");
+    }
+    let mode = if cli_attach.is_some() {
+        LocalWorkspaceMode::Attach
+    } else if cli_own.is_some() {
+        LocalWorkspaceMode::Own
+    } else if let Some(ref m) = env_mode {
+        match m.as_str() {
+            "attach" => LocalWorkspaceMode::Attach,
+            "own" => LocalWorkspaceMode::Own,
+            other => {
+                anyhow::bail!(
+                    "invalid {GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV}={other:?}; expected own|attach"
+                )
+            }
+        }
+    } else if env_server_id.is_some() {
+        LocalWorkspaceMode::Attach
+    } else {
+        LocalWorkspaceMode::Own
+    };
+    let cwd = cli_cwd
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| cli_own.and_then(|inner| inner.map(std::path::Path::to_path_buf)))
+        .or(env_cwd)
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+    let cwd = if cwd.is_absolute() {
+        cwd
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(cwd)
+    };
+    let cwd = validate_local_workspace_cwd(&cwd)?;
+    match mode {
+        LocalWorkspaceMode::Own => Ok(Some(LocalWorkspaceConfig {
+            mode,
+            cwd: Some(cwd),
+            server_id: None,
+        })),
+        LocalWorkspaceMode::Attach => {
+            let server_id = cli_attach
+                .map(str::to_owned)
+                .or(env_server_id)
+                .filter(|s| !s.is_empty());
+            let Some(server_id) = server_id else {
+                anyhow::bail!("{LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID}");
+            };
+            ensure_attach_fs_only_toolset(&server_id)?;
+            Ok(Some(LocalWorkspaceConfig {
+                mode,
+                cwd: Some(cwd),
+                server_id: Some(server_id),
+            }))
+        }
+    }
+}
+/// Canonicalize `path` and enforce the `/` + `$HOME` denylist.
+///
+/// Returns the canonical directory so callers stamp/persist what was actually
+/// checked (symlinks / `..` must not diverge from validation).
+#[cfg(feature = "local-workspace")]
+pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    };
+    let canon = abs.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "local workspace cwd must exist and be canonicalizable: {}: {e}",
+            abs.display()
+        )
+    })?;
+    if !canon.is_dir() {
+        anyhow::bail!(
+            "local workspace cwd must be an existing directory: {}",
+            canon.display()
+        );
+    }
+    if env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV) {
+        return Ok(canon);
+    }
+    if canon == std::path::Path::new("/") {
+        anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
+    }
+    if let Some(home_path) = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(Into::into)) {
+        let home_canon = home_path.canonicalize().unwrap_or(home_path);
+        if canon == home_canon {
+            anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
+        }
+    }
+    Ok(canon)
+}
+/// Banner + first-run confirm for local-workspace own/attach.
+///
+/// Skip confirm only with `GROK_CHAT_LOCAL_WORKSPACE_ACK=1` or a prior ack file.
+/// Non-TTY without ACK refuses (fail closed).
+#[cfg(feature = "local-workspace")]
+pub fn emit_local_workspace_startup_ux(cfg: &LocalWorkspaceConfig) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    emit_local_workspace_startup_ux_with(cfg, std::io::stdin().is_terminal())
+}
+/// Testable UX gate: `stdin_is_terminal` is injected.
+#[cfg(feature = "local-workspace")]
+pub fn emit_local_workspace_startup_ux_with(
+    cfg: &LocalWorkspaceConfig,
+    stdin_is_terminal: bool,
+) -> anyhow::Result<()> {
+    let cwd_display = cfg
+        .cwd
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<session cwd>".to_string());
+    let banner = LOCAL_WORKSPACE_BANNER.replace("<cwd>", &cwd_display);
+    eprintln!("{banner}");
+    eprintln!("{LOCAL_WORKSPACE_HITL_HINT}");
+    if local_workspace_ack_satisfied() {
+        return Ok(());
+    }
+    if !stdin_is_terminal {
+        anyhow::bail!("{LOCAL_WORKSPACE_ACK_REQUIRED}");
+    }
+    eprint!("Continue with local workspace on this machine? [y/N] ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let ok = matches!(line.trim(), "y" | "Y" | "yes" | "YES");
+    if !ok {
+        anyhow::bail!("local workspace cancelled");
+    }
+    write_local_workspace_ack();
+    Ok(())
+}
+/// True when ACK env or ack file already authorizes local workspace.
+#[cfg(feature = "local-workspace")]
+pub fn local_workspace_ack_satisfied() -> bool {
+    if env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV) {
+        return true;
+    }
+    local_workspace_ack_path().is_some_and(|p| p.is_file())
+}
+/// Persist the first-run local-workspace ACK file (best-effort).
+#[cfg(feature = "local-workspace")]
+pub fn write_local_workspace_ack() {
+    if let Some(path) = local_workspace_ack_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, "1\n");
+    }
+}
+/// Fail closed unless advertised tools are FS-only.
+///
+/// Until diag exposes a real tool catalog, attach trusts operator attestation
+/// via `GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
+/// Unset / empty → refuse.
+#[cfg(feature = "local-workspace")]
+pub fn ensure_attach_fs_only_toolset(_server_id: &str) -> anyhow::Result<()> {
+    let advertised = probe_advertised_tool_ids();
+    let refs: Option<Vec<&str>> = advertised
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    crate::app::effects::reject_non_fs_only_advertised_tools(refs.as_deref())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+/// Operator-attested advertised tool ids for attach (env only; no fake diag probe).
+#[cfg(feature = "local-workspace")]
+pub fn probe_advertised_tool_ids() -> Option<Vec<String>> {
+    let raw = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV)?;
+    let ids: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(ids)
+}
+#[cfg(feature = "local-workspace")]
+fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("GROK_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            dirs::home_dir()
+                .or_else(|| std::env::var_os("HOME").map(Into::into))
+                .map(|h| h.join(".grok"))
+        })?;
+    Some(home.join("local_workspace_ack"))
+}
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
 /// The id skips disk/GCS resolution and flows to the gateway, but it is also
@@ -352,10 +678,7 @@ pub fn chat_mode_refuses_local_build_load(
 #[derive(Debug, Clone)]
 pub enum MaterializedStartup {
     /// Create a new session with an agent-chosen ID (or defer to welcome).
-    NewAuto {
-        /// Soft yellow welcome notice: this workspace has no prior conversations.
-        new_folder_notice: bool,
-    },
+    NewAuto,
     /// Create a new session with this ID (`session/new` meta.sessionId).
     NewWithId { session_id: String },
     /// Strict load of an existing session.
@@ -367,9 +690,10 @@ pub enum MaterializedStartup {
         /// the worktree resume handler; worktree failure messages append the
         /// no-match hint only for this outcome (never inferred from shape).
         deferred_local_miss: bool,
-        /// When auto-opening the latest conversation and a next-oldest exists,
-        /// plain relative age for the toast (e.g. `"2 hours ago"`).
-        other_conversation_relative: Option<String>,
+        /// Pre-TUI conversation-only remote restore: follow-up `LoadSession`
+        /// must send `x.ai/restore_code: false` so agent `[cli] restore_code`
+        /// cannot checkout in-place on the new local child.
+        suppress_code_restore: bool,
     },
     /// Fork from a resolved parent, then load the child.
     Fork {
@@ -377,108 +701,10 @@ pub enum MaterializedStartup {
         parent_cwd: Option<PathBuf>,
         parent_title: Option<String>,
         new_session_id: Option<String>,
+        /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the
+        /// follow-up child `LoadSession` must not inherit agent restore-code.
+        suppress_code_restore: bool,
     },
-}
-
-/// Lightweight session row for default startup pick (newest first).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartupSessionRef {
-    pub id: String,
-    pub title: Option<String>,
-    pub last_active: chrono::DateTime<chrono::Utc>,
-}
-
-/// Pure result of picking the default conversation for a workspace open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefaultStartupPick {
-    /// No prior conversations for this workspace.
-    NewFolder,
-    /// Resume the most recent only (no sibling toast).
-    ResumeLatest { session: StartupSessionRef },
-    /// Resume most recent; toast mentions the next-oldest.
-    ResumeLatestWithOther {
-        session: StartupSessionRef,
-        other: StartupSessionRef,
-    },
-}
-
-/// Pick default startup session from chronological rows (newest first).
-///
-/// Empty → new folder. One row → resume only. Two or more → resume newest and
-/// surface the second-most-recent for the sibling toast.
-pub fn pick_default_startup_session(sessions: &[StartupSessionRef]) -> DefaultStartupPick {
-    match sessions {
-        [] => DefaultStartupPick::NewFolder,
-        [first] => DefaultStartupPick::ResumeLatest {
-            session: first.clone(),
-        },
-        [first, second, ..] => DefaultStartupPick::ResumeLatestWithOther {
-            session: first.clone(),
-            other: second.clone(),
-        },
-    }
-}
-
-/// Plain relative age for startup toasts (`"2 hours ago"`, not `"2h ago"`).
-pub fn format_plain_relative_ago(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        return "less than a minute ago".to_string();
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return if mins == 1 {
-            "1 minute ago".to_string()
-        } else {
-            format!("{mins} minutes ago")
-        };
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return if hours == 1 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{hours} hours ago")
-        };
-    }
-    let days = hours / 24;
-    if days == 1 {
-        "1 day ago".to_string()
-    } else {
-        format!("{days} days ago")
-    }
-}
-
-/// Toast when the default open resumes the latest conversation and others exist.
-pub fn format_other_conversations_toast(other_relative: &str) -> String {
-    format!("Other conversations exist in this folder. Next most recent was {other_relative}.")
-}
-
-/// Soft yellow welcome copy for a workspace with no prior conversations.
-pub fn new_folder_startup_message() -> &'static str {
-    "This is a new folder with no prior conversations yet."
-}
-
-/// Map sorted session summaries (newest first) into startup refs for pure pick.
-pub fn startup_session_refs_from_summaries(
-    summaries: &[xai_grok_shell::session::persistence::Summary],
-) -> Vec<StartupSessionRef> {
-    summaries
-        .iter()
-        .map(|s| StartupSessionRef {
-            id: s.info.id.to_string(),
-            title: s.display_title_opt(),
-            last_active: s.last_active_at.unwrap_or(s.updated_at),
-        })
-        .collect()
-}
-
-fn plain_relative_from_utc(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let elapsed = chrono::Utc::now()
-        .signed_duration_since(dt)
-        .to_std()
-        .unwrap_or_default();
-    format_plain_relative_ago(elapsed)
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,9 +733,16 @@ pub struct MaterializeCtx {
     pub chat_mode: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
-    /// Interactive TUI: bare `grok` / open folder loads the last conversation
-    /// for this workspace when one exists. Headless stays fresh (`false`).
-    pub auto_resume_last_for_cwd: bool,
+    /// CLI `--restore-code`. Remote codebase restore is never applied in-place;
+    /// this flag either defers to `--worktree` or refuses the in-place path.
+    pub restore_code: bool,
+    /// Pre-TUI restore progress on stdout (interactive tty). Headless keeps
+    /// stdout as JSON/NDJSON and uses stderr instead.
+    pub restore_progress_on_stdout: bool,
+    /// Interactive TUI: a bare `grok-oss` start opens the most recent local
+    /// session for this working directory. Missing session stays welcome.
+    /// Headless stays false (fresh session unless `-c` / `--resume`).
+    pub open_last_session_on_start: bool,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -526,8 +759,9 @@ impl MaterializeCtx {
             } else {
                 TitleResolution::Allowed
             },
-            // Worktree create is a fresh tree; do not auto-resume into it.
-            auto_resume_last_for_cwd: args.worktree.is_none() && !args.chat(),
+            restore_code: args.restore_code,
+            restore_progress_on_stdout: false,
+            open_last_session_on_start: true,
         }
     }
 }
@@ -543,13 +777,25 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
 /// Resolve most-recent session id for cwd, or error.
 async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
-    let first = summaries.first().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No session found for current directory. \
+    summaries
+        .first()
+        .map(|first| (first.info.id.to_string(), first.display_title_opt()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No session found for current directory. \
              Use 'grok' to start a new session."
-        )
-    })?;
-    Ok((first.info.id.to_string(), first.display_title_opt()))
+            )
+        })
+}
+/// Most recent local session for `cwd`, if any. Missing or unlistable is `None`
+/// so interactive start can stay on welcome.
+async fn try_most_recent_session_id(cwd: &str) -> Option<(String, Option<String>)> {
+    let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd))
+        .await
+        .ok()?;
+    summaries
+        .first()
+        .map(|first| (first.info.id.to_string(), first.display_title_opt()))
 }
 /// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP
 /// `--continue` conversation listing, the GCS restore effect). Wires the
@@ -568,6 +814,29 @@ pub(crate) fn pre_acp_auth_manager(
     );
     auth
 }
+/// Pre-TUI remote restore (session state + memory only). Codebase checkout is
+/// never applied on this path; `--restore-code` requires `--worktree`.
+const REMOTE_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn format_remote_restore_timeout_failed() -> String {
+    format!(
+        "Timed out restoring session from remote after {}. Conversation cannot be recovered.",
+        xai_tty_utils::format_human_duration(REMOTE_RESTORE_TIMEOUT)
+    )
+}
+
+fn format_remote_restore_timeout_recovered(local_session_id: &str) -> String {
+    format!(
+        "Remote restore timed out after {}; continuing with conversation {local_session_id}.",
+        xai_tty_utils::format_human_duration(REMOTE_RESTORE_TIMEOUT)
+    )
+}
+/// `--restore-code` without `--worktree` on a remote miss: refuse in-place checkout.
+const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session requires --worktree \
+     (refusing to check out snapshot code into the current directory)";
+/// `--worktree` resume without `--restore-code`: conversation only.
+pub(crate) const WORKTREE_NO_RESTORE_CODE_NOTICE: &str =
+    "Snapshot code will not be restored into the worktree; pass --restore-code to restore it.";
 /// Preflight: preferred id must be a UUID and not a persisted session under `cwd`.
 ///
 /// Agent `session/new` rejects non-UUID `_meta.sessionId`; fail fast here so
@@ -603,60 +872,22 @@ pub async fn materialize_startup_for_cwd(
     }
     match intent {
         SessionStartupIntent::NewAuto => {
-            if !ctx.auto_resume_last_for_cwd {
-                return Ok(MaterializedStartup::NewAuto {
-                    new_folder_notice: false,
-                });
-            }
-            let summaries = match xai_grok_shell::session::persistence::list_summaries(Some(cwd))
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "startup default: list sessions failed; welcome without new-folder notice"
+            if ctx.open_last_session_on_start && !ctx.has_worktree && !ctx.chat_mode {
+                if let Some((id, title)) = try_most_recent_session_id(cwd).await {
+                    tracing::info!(
+                        session_id = %id,
+                        "startup.open_last_session"
                     );
-                    return Ok(MaterializedStartup::NewAuto {
-                        new_folder_notice: false,
+                    return Ok(MaterializedStartup::Resume {
+                        session_id: id,
+                        original_cwd: None,
+                        title,
+                        deferred_local_miss: false,
+                        suppress_code_restore: false,
                     });
                 }
-            };
-            let refs = startup_session_refs_from_summaries(&summaries);
-            match pick_default_startup_session(&refs) {
-                DefaultStartupPick::NewFolder => Ok(MaterializedStartup::NewAuto {
-                    new_folder_notice: true,
-                }),
-                DefaultStartupPick::ResumeLatest { session } => {
-                    tracing::info!(
-                        session_id = %session.id,
-                        "startup.default.resume_latest"
-                    );
-                    Ok(MaterializedStartup::Resume {
-                        session_id: session.id,
-                        original_cwd: None,
-                        title: session.title,
-                        deferred_local_miss: false,
-                        other_conversation_relative: None,
-                    })
-                }
-                DefaultStartupPick::ResumeLatestWithOther { session, other } => {
-                    tracing::info!(
-                        session_id = %session.id,
-                        other_id = %other.id,
-                        "startup.default.resume_latest_with_other"
-                    );
-                    Ok(MaterializedStartup::Resume {
-                        session_id: session.id,
-                        original_cwd: None,
-                        title: session.title,
-                        deferred_local_miss: false,
-                        other_conversation_relative: Some(plain_relative_from_utc(
-                            other.last_active,
-                        )),
-                    })
-                }
             }
+            Ok(MaterializedStartup::NewAuto)
         }
         SessionStartupIntent::NewWithId { session_id } => {
             if !ctx.has_worktree {
@@ -685,7 +916,7 @@ pub async fn materialize_startup_for_cwd(
                 original_cwd: None,
                 title,
                 deferred_local_miss: false,
-                other_conversation_relative: None,
+                suppress_code_restore: false,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -702,6 +933,7 @@ pub async fn materialize_startup_for_cwd(
                 parent_cwd: None,
                 parent_title: title,
                 new_session_id,
+                suppress_code_restore: false,
             })
         }
         SessionStartupIntent::Resume {
@@ -717,7 +949,7 @@ pub async fn materialize_startup_for_cwd(
                     original_cwd: None,
                     title: None,
                     deferred_local_miss: false,
-                    other_conversation_relative: None,
+                    suppress_code_restore: false,
                 });
             }
             let r = resolve_existing_session(ctx, &session_id, cwd).await?;
@@ -726,7 +958,7 @@ pub async fn materialize_startup_for_cwd(
                 original_cwd: r.original_cwd,
                 title: r.title,
                 deferred_local_miss: r.deferred_local_miss,
-                other_conversation_relative: None,
+                suppress_code_restore: r.suppress_code_restore,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -744,6 +976,7 @@ pub async fn materialize_startup_for_cwd(
                 parent_cwd: r.original_cwd,
                 parent_title: r.title,
                 new_session_id,
+                suppress_code_restore: r.suppress_code_restore,
             })
         }
         SessionStartupIntent::Resume {
@@ -766,6 +999,7 @@ struct ResolvedExisting {
     /// True only for the worktree-defer arm: the target missed local
     /// id/title resolution.
     deferred_local_miss: bool,
+    suppress_code_restore: bool,
 }
 /// Resolve an existing session for strict resume (local / any-cwd / remote / worktree defer).
 async fn resolve_existing_session(
@@ -775,11 +1009,16 @@ async fn resolve_existing_session(
 ) -> anyhow::Result<ResolvedExisting> {
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
         tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");
+        if !in_place_restore_code_allowed(ctx.restore_code, ctx.has_worktree, session_id, &local_id)
+        {
+            anyhow::bail!("{REMOTE_RESTORE_NEEDS_WORKTREE}");
+        }
         return Ok(ResolvedExisting {
             id: local_id,
             original_cwd: None,
             title: None,
             deferred_local_miss: false,
+            suppress_code_restore: false,
         });
     }
     if let Some(original_cwd) = xai_grok_shell::session::resolve_local_session_any_cwd(session_id) {
@@ -797,6 +1036,7 @@ async fn resolve_existing_session(
             original_cwd: Some(PathBuf::from(original_cwd)),
             title: None,
             deferred_local_miss: false,
+            suppress_code_restore: false,
         });
     }
     let arg_is_uuid = super::session_title_resolve::is_uuid_shaped(session_id);
@@ -806,47 +1046,125 @@ async fn resolve_existing_session(
     {
         return Ok(resolved);
     }
+    match plan_remote_miss(ctx, arg_is_uuid) {
+        RemoteMissPlan::DeferToWorktree {
+            deferred_local_miss,
+        } => {
+            tracing::info!(
+                session_id = %session_id,
+                restore_code = ctx.restore_code,
+                "Session not found locally; deferring restore to worktree resume handler"
+            );
+            eprintln!(
+                "Session {:?} not found locally; it will be restored into the new worktree.",
+                session_id
+            );
+            if !ctx.restore_code {
+                eprintln!("{WORKTREE_NO_RESTORE_CODE_NOTICE}");
+            }
+            Ok(ResolvedExisting {
+                id: session_id.to_string(),
+                original_cwd: None,
+                title: None,
+                deferred_local_miss,
+                suppress_code_restore: !ctx.restore_code,
+            })
+        }
+        RemoteMissPlan::RejectInPlaceCodeRestore { title_miss_hint } => {
+            if title_miss_hint {
+                anyhow::bail!(
+                    "{REMOTE_RESTORE_NEEDS_WORKTREE}; {}",
+                    super::session_title_resolve::title_miss_hint(session_id)
+                );
+            }
+            anyhow::bail!("{REMOTE_RESTORE_NEEDS_WORKTREE}")
+        }
+        RemoteMissPlan::NotFound { title_miss_hint } => {
+            if title_miss_hint {
+                anyhow::bail!(
+                    "Session does not exist: {}",
+                    super::session_title_resolve::title_miss_hint(session_id)
+                );
+            }
+            anyhow::bail!("Session does not exist")
+        }
+        RemoteMissPlan::RestoreConversation => {
+            let restored =
+                restore_session_from_remote(session_id, cwd, ctx.restore_progress_on_stdout).await;
+            if arg_is_uuid {
+                return restored;
+            }
+            restored.map_err(|e| {
+                anyhow::anyhow!(
+                    "{e:#}; {}",
+                    super::session_title_resolve::title_miss_hint(session_id)
+                )
+            })
+        }
+    }
+}
+/// Policy after local id/title resolution misses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteMissPlan {
+    DeferToWorktree {
+        deferred_local_miss: bool,
+    },
+    RejectInPlaceCodeRestore {
+        title_miss_hint: bool,
+    },
+    /// Pre-TUI restore of session state + memory only (never codebase).
+    RestoreConversation,
+    NotFound {
+        title_miss_hint: bool,
+    },
+}
+/// Whether `--restore-code` may run in-place for this local hit.
+///
+/// `resolved_id != requested_id` means the CLI handle was a remote UUID that
+/// only exists as a previously restored child — still a remote session, so
+/// snapshot checkout requires `--worktree`.
+pub(crate) fn in_place_restore_code_allowed(
+    restore_code: bool,
+    has_worktree: bool,
+    requested_id: &str,
+    resolved_id: &str,
+) -> bool {
+    if !restore_code || has_worktree {
+        return true;
+    }
+    requested_id == resolved_id
+}
+pub(crate) fn plan_remote_miss(ctx: MaterializeCtx, arg_is_uuid: bool) -> RemoteMissPlan {
     if ctx.has_worktree {
-        tracing::info!(
-            session_id = %session_id,
-            "Session not found locally; deferring restore to worktree resume handler"
-        );
-        eprintln!(
-            "Session {:?} not found locally; it will be restored into the new worktree.",
-            session_id
-        );
-        return Ok(ResolvedExisting {
-            id: session_id.to_string(),
-            original_cwd: None,
-            title: None,
+        return RemoteMissPlan::DeferToWorktree {
             deferred_local_miss: !arg_is_uuid,
-        });
+        };
     }
     if !ctx.allow_remote_restore {
-        if !arg_is_uuid {
-            anyhow::bail!(
-                "Session does not exist: {}",
-                super::session_title_resolve::title_miss_hint(session_id)
-            );
-        }
-        anyhow::bail!("Session does not exist");
+        return RemoteMissPlan::NotFound {
+            title_miss_hint: !arg_is_uuid,
+        };
     }
-    let restored = restore_session_from_remote(session_id, cwd).await;
-    if arg_is_uuid {
-        return restored;
+    if ctx.restore_code {
+        return RemoteMissPlan::RejectInPlaceCodeRestore {
+            title_miss_hint: !arg_is_uuid,
+        };
     }
-    restored.map_err(|e| {
-        anyhow::anyhow!(
-            "{e:#}; {}",
-            super::session_title_resolve::title_miss_hint(session_id)
-        )
-    })
+    RemoteMissPlan::RestoreConversation
 }
 /// Remote-restore tail of [`resolve_existing_session`], split out so non-id
 /// targets can wrap every failure with the title-miss hint.
+///
+/// Always restores session state + memory only. Codebase checkout is refused
+/// in-place ([`RemoteMissPlan::RejectInPlaceCodeRestore`]) or deferred to the
+/// worktree handler.
+///
+/// On timeout the future is cancelled; partial JSONL may already be on disk
+/// and is recovered via a local-child scan of the remote id.
 async fn restore_session_from_remote(
     session_id: &str,
     cwd: &str,
+    progress_on_stdout: bool,
 ) -> anyhow::Result<ResolvedExisting> {
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
@@ -858,15 +1176,18 @@ async fn restore_session_from_remote(
             source.label()
         );
     }
-    eprintln!(
-        "Session {:?} not found locally, restoring from remote...",
-        session_id
+    emit_pre_tui_restore_line(
+        progress_on_stdout,
+        &format!(
+            "Session {:?} not found locally, restoring conversation from remote...",
+            session_id
+        ),
     );
     let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
     use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
     use xai_grok_shell::auth::{AuthManager, ensure_authenticated_or_noninteractive};
-    use xai_grok_shell::session::restore::restore_session_with_storage;
+    use xai_grok_shell::session::restore::{RestoreSessionOpts, restore_session_with_storage};
     use xai_grok_shell::util::grok_home::grok_home;
     let deployment_key = agent_config.endpoints.deployment_key.clone();
     ensure_authenticated_or_noninteractive(
@@ -894,30 +1215,120 @@ async fn restore_session_from_remote(
         None,
         "grok-pager",
     );
-    let progress: xai_grok_shell::session::restore::ProgressCallback =
-        Box::new(|event| eprintln!("  {}", event.display_line()));
-    let result = restore_session_with_storage(
-        &registry_client,
-        &storage_client,
-        session_id,
-        cwd,
-        None,
-        Some(progress),
+    let progress: xai_grok_shell::session::restore::ProgressCallback = Box::new(move |event| {
+        emit_pre_tui_restore_line(progress_on_stdout, &format!("  {}", event.display_line()));
+    });
+    let timed = tokio::time::timeout(
+        REMOTE_RESTORE_TIMEOUT,
+        restore_session_with_storage(
+            &registry_client,
+            &storage_client,
+            session_id,
+            cwd,
+            RestoreSessionOpts {
+                turn_override: None,
+                progress: Some(progress),
+                restore_code: false,
+            },
+        ),
     )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to restore session from remote: {:#}", e))?;
-    let effective_id = if result.local_session_id.is_empty() {
-        session_id.to_string()
-    } else {
-        result.local_session_id
+    .await;
+    let (timed_out, restore_result) = match timed {
+        Ok(inner) => (false, Some(inner)),
+        Err(_) => (true, None),
     };
-    eprintln!("  Restored as local session {}", effective_id);
-    Ok(ResolvedExisting {
-        id: effective_id,
-        original_cwd: None,
-        title: None,
-        deferred_local_miss: false,
-    })
+    let recovered_local_id = xai_grok_shell::session::find_local_child_for_remote(session_id, cwd);
+    match classify_remote_restore(
+        timed_out,
+        restore_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|r| r.local_session_id.as_str()),
+        restore_result
+            .as_ref()
+            .and_then(|r| r.as_ref().err())
+            .map(|e| format!("{e:#}"))
+            .as_deref(),
+        recovered_local_id.as_deref(),
+    ) {
+        RemoteRestoreOutcome::Restored { local_session_id } => {
+            emit_pre_tui_restore_line(
+                progress_on_stdout,
+                &format!("  Restored conversation as local session {local_session_id}"),
+            );
+            Ok(ResolvedExisting {
+                id: local_session_id,
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: true,
+            })
+        }
+        RemoteRestoreOutcome::RecoveredAfterFailure { local_session_id } => {
+            let msg = if timed_out {
+                format_remote_restore_timeout_recovered(&local_session_id)
+            } else if let Some(Err(e)) = restore_result {
+                format!(
+                    "Remote restore failed ({e:#}); continuing with conversation {local_session_id}."
+                )
+            } else {
+                format!(
+                    "Remote restore incomplete; continuing with conversation {local_session_id}."
+                )
+            };
+            emit_pre_tui_restore_line(progress_on_stdout, &msg);
+            Ok(ResolvedExisting {
+                id: local_session_id,
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: true,
+            })
+        }
+        RemoteRestoreOutcome::Failed(msg) => anyhow::bail!("{msg}"),
+    }
+}
+fn emit_pre_tui_restore_line(on_stdout: bool, line: &str) {
+    use std::io::Write;
+    if on_stdout {
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    } else {
+        eprintln!("{line}");
+        let _ = std::io::stderr().flush();
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteRestoreOutcome {
+    Restored { local_session_id: String },
+    RecoveredAfterFailure { local_session_id: String },
+    Failed(String),
+}
+pub(crate) fn classify_remote_restore(
+    timed_out: bool,
+    local_session_id: Option<&str>,
+    restore_err: Option<&str>,
+    recovered_local_id: Option<&str>,
+) -> RemoteRestoreOutcome {
+    if let Some(id) = local_session_id.filter(|s| !s.is_empty()) {
+        return RemoteRestoreOutcome::Restored {
+            local_session_id: id.to_string(),
+        };
+    }
+    if let Some(id) = recovered_local_id.filter(|s| !s.is_empty()) {
+        return RemoteRestoreOutcome::RecoveredAfterFailure {
+            local_session_id: id.to_string(),
+        };
+    }
+    if timed_out {
+        return RemoteRestoreOutcome::Failed(format_remote_restore_timeout_failed());
+    }
+    if let Some(e) = restore_err {
+        return RemoteRestoreOutcome::Failed(format!("Failed to restore session from remote: {e}"));
+    }
+    RemoteRestoreOutcome::Failed(
+        "Failed to restore session from remote: conversation history was unavailable.".to_string(),
+    )
 }
 /// Resolve a non-id resume arg as a session title among local sessions for `cwd`.
 ///
@@ -941,6 +1352,7 @@ async fn resolve_session_by_title(
         original_cwd: None,
         title: chosen.display_title_opt(),
         deferred_local_miss: false,
+        suppress_code_restore: false,
     }))
 }
 #[cfg(test)]
@@ -951,10 +1363,115 @@ mod tests {
         PagerArgs::try_parse_from(args).unwrap()
     }
     #[test]
+    fn parent_session_is_worktree_detects_standalone_marker() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let clone = main.standalone_clone("wt-branch");
+        assert!(clone.path.join(".git").is_dir());
+        assert!(parent_session_is_worktree("any-sid", &clone.path));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_detects_linked_git_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let wt = main.add_linked_worktree("wt", "wt-branch");
+        assert!(wt.join(".git").is_file());
+        assert!(parent_session_is_worktree("any-sid", &wt));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_relocated_gitdir_file_is_not_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("sub");
+        crate::test_util::init_git_repo_on_branch(&repo_path, "main");
+        let git_dir = tmp.path().join("modules").join("sub");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        std::fs::rename(repo_path.join(".git"), &git_dir).unwrap();
+        std::fs::write(
+            repo_path.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        assert!(repo_path.join(".git").is_file());
+        assert!(
+            git2::Repository::discover(&repo_path).is_ok(),
+            "relocated gitdir must still discover"
+        );
+        assert!(!parent_session_is_worktree("any-sid", &repo_path));
+    }
+    #[test]
+    fn parent_session_is_worktree_plain_clone_nested_in_linked_worktree() {
+        let main = crate::test_util::TempGitRepo::init("main-only");
+        let wt = main.add_linked_worktree("wt", "wt-branch");
+        let nested = wt.join("vendor").join("dep");
+        crate::test_util::init_git_repo_on_branch(&nested, "dep-branch");
+        assert!(!parent_session_is_worktree("any-sid", &nested));
+        assert!(!parent_session_is_worktree("any-sid", &main.path));
+    }
+    #[test]
+    fn parent_session_is_worktree_broken_gitdir_file_is_last_resort_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "not-a-gitdir\n").unwrap();
+        assert!(git2::Repository::discover(&dir).is_err());
+        assert!(parent_session_is_worktree("any-sid", &dir));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_session_kind() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-kind",
+            serde_json::json!({ "session_kind": "worktree" }),
+        );
+        assert!(parent_session_is_worktree("sid-kind", &repo.path));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_source_workspace_dir() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-src",
+            serde_json::json!({ "source_workspace_dir": "/src/main" }),
+        );
+        assert!(parent_session_is_worktree("sid-src", &repo.path));
+        fx.write_summary(
+            &cwd,
+            "sid-src-empty",
+            serde_json::json!({ "source_workspace_dir": "" }),
+        );
+        assert!(!parent_session_is_worktree("sid-src-empty", &repo.path));
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn parent_session_is_worktree_summary_worktree_label() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let repo = crate::test_util::TempGitRepo::init("main");
+        let cwd = repo.path.to_string_lossy().to_string();
+        fx.write_summary(
+            &cwd,
+            "sid-label",
+            serde_json::json!({ "worktree_label": "my-wt" }),
+        );
+        assert!(parent_session_is_worktree("sid-label", &repo.path));
+        fx.write_summary(
+            &cwd,
+            "sid-label-empty",
+            serde_json::json!({ "worktree_label": "" }),
+        );
+        assert!(!parent_session_is_worktree("sid-label-empty", &repo.path));
+    }
+    #[test]
     fn deferred_startup_owner_take_is_atomic() {
         let mut actions = DeferredStartupActions {
             session: Some(DeferredSessionStartup::ForeignResume {
-                tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool::Cursor,
+                tool: xai_grok_foreign_sessions::ForeignSessionTool::Cursor,
                 native_id: "cursor-id".into(),
             }),
             prompt: Some("prompt".into()),
@@ -981,105 +1498,6 @@ mod tests {
             parse(&["grok"]).session_startup_intent().unwrap(),
             SessionStartupIntent::NewAuto
         );
-    }
-
-    #[test]
-    fn pick_default_startup_empty_is_new_folder() {
-        assert_eq!(
-            pick_default_startup_session(&[]),
-            DefaultStartupPick::NewFolder
-        );
-    }
-
-    #[test]
-    fn pick_default_startup_one_is_resume_only() {
-        let a = StartupSessionRef {
-            id: "a".into(),
-            title: Some("First".into()),
-            last_active: chrono::Utc::now(),
-        };
-        match pick_default_startup_session(std::slice::from_ref(&a)) {
-            DefaultStartupPick::ResumeLatest { session } => {
-                assert_eq!(session.id, "a");
-                assert_eq!(session.title.as_deref(), Some("First"));
-            }
-            other => panic!("expected ResumeLatest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_default_startup_two_surfaces_second_most_recent() {
-        let now = chrono::Utc::now();
-        let newer = StartupSessionRef {
-            id: "new".into(),
-            title: Some("Latest".into()),
-            last_active: now,
-        };
-        let older = StartupSessionRef {
-            id: "old".into(),
-            title: Some("Previous".into()),
-            last_active: now - chrono::Duration::hours(3),
-        };
-        match pick_default_startup_session(&[newer, older]) {
-            DefaultStartupPick::ResumeLatestWithOther { session, other } => {
-                assert_eq!(session.id, "new");
-                assert_eq!(other.id, "old");
-            }
-            other => panic!("expected ResumeLatestWithOther, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn other_conversations_toast_names_relative_age() {
-        let msg = format_other_conversations_toast("3 hours ago");
-        assert!(msg.contains("Other conversations"));
-        assert!(msg.contains("3 hours ago"));
-        assert!(!msg.contains("error"));
-    }
-
-    #[test]
-    fn new_folder_message_is_informational_not_error() {
-        let msg = new_folder_startup_message();
-        assert!(msg.to_ascii_lowercase().contains("new folder"));
-        assert!(msg.to_ascii_lowercase().contains("no prior"));
-        assert!(!msg.to_ascii_lowercase().contains("error"));
-        assert!(!msg.to_ascii_lowercase().contains("failed"));
-    }
-
-    #[test]
-    fn plain_relative_ago_uses_full_words() {
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(30)),
-            "less than a minute ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(120)),
-            "2 minutes ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(3600)),
-            "1 hour ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(3 * 3600)),
-            "3 hours ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(2 * 86400)),
-            "2 days ago"
-        );
-    }
-
-    #[test]
-    fn pager_args_default_enables_auto_resume_last() {
-        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok"]));
-        assert!(ctx.auto_resume_last_for_cwd);
-    }
-
-    #[test]
-    fn pager_args_worktree_disables_auto_resume_last() {
-        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok", "--worktree"]));
-        assert!(!ctx.auto_resume_last_for_cwd);
     }
     #[test]
     fn intent_resume_id() {
@@ -1256,7 +1674,9 @@ mod tests {
             allow_remote_restore: true,
             chat_mode: true,
             title_resolution: TitleResolution::Allowed,
-            auto_resume_last_for_cwd: false,
+            restore_code: false,
+            restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         }
     }
     #[test]
@@ -1283,10 +1703,278 @@ mod tests {
     /// hardcoded `false` here once disabled it everywhere.
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
-        assert_eq!(
-            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
-            false
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
+    }
+    #[test]
+    fn from_pager_args_does_not_probe_tty_for_progress() {
+        assert!(
+            !MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_progress_on_stdout,
+            "stdout vs stderr is decided at the composition root, not from_pager_args"
         );
+    }
+    #[test]
+    fn from_pager_args_opens_last_session_on_start() {
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok"])).open_last_session_on_start,
+            "interactive grok-oss start must open the last session"
+        );
+    }
+    #[test]
+    fn materialize_ctx_restore_code_follows_cli_flag() {
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_code);
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc"])).restore_code);
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc", "--restore-code"]))
+                .restore_code
+        );
+        let wt = MaterializeCtx::from_pager_args(&parse(&[
+            "grok",
+            "-r",
+            "abc",
+            "--restore-code",
+            "--worktree",
+        ]));
+        assert!(wt.restore_code);
+        assert!(wt.has_worktree);
+    }
+    fn remote_miss_ctx(restore_code: bool, has_worktree: bool) -> MaterializeCtx {
+        MaterializeCtx {
+            has_worktree,
+            allow_remote_restore: true,
+            chat_mode: false,
+            title_resolution: TitleResolution::Allowed,
+            restore_code,
+            restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
+        }
+    }
+    #[test]
+    fn in_place_restore_code_allowed_blocks_restored_remote_child() {
+        assert!(in_place_restore_code_allowed(
+            true, false, "local-id", "local-id"
+        ));
+        assert!(!in_place_restore_code_allowed(
+            true,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            true,
+            true,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            false,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_false_restores_conversation_only() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, false), true),
+            RemoteMissPlan::RestoreConversation
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_without_worktree_is_rejected() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), true),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), false),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_worktree_defers_without_restore_code() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_with_worktree_defers() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_prefers_returned_local_id() {
+        assert_eq!(
+            classify_remote_restore(false, Some("child"), Some("boom"), Some("other")),
+            RemoteRestoreOutcome::Restored {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_recovers_disk_child_on_timeout_or_error() {
+        assert_eq!(
+            classify_remote_restore(true, None, None, Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+        assert_eq!(
+            classify_remote_restore(false, Some(""), Some("network"), Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_errors_when_conversation_missing() {
+        match classify_remote_restore(true, None, None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Timed out"), "{msg}");
+                assert!(msg.contains("cannot be recovered"), "{msg}");
+                assert!(
+                    msg.contains("1m30s"),
+                    "90s remote restore budget must print as minutes, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("90s") && !msg.contains("90 seconds"),
+                    "raw second budget must not leak: {msg}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, None, Some("registry 404"), None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Failed to restore"), "{msg}");
+                assert!(msg.contains("registry 404"), "{msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, Some(""), None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(
+                    msg.contains("conversation history was unavailable"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+    #[test]
+    fn worktree_no_restore_code_notice_mentions_flag() {
+        assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
+    }
+    /// `--restore-code` without `--worktree` must fail before any in-place checkout.
+    #[tokio::test]
+    async fn remote_miss_restore_code_without_worktree_errors() {
+        let err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("99999999-9999-4999-8999-999999999999".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("--worktree"),
+            "unexpected error: {err}"
+        );
+        let title_err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("no such title".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt-title",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(title_err.contains("--worktree"), "{title_err}");
+        assert!(
+            title_err.contains("no session id or title matched"),
+            "{title_err}"
+        );
+    }
+    /// `--restore-code --worktree` stays on the existing defer path.
+    #[tokio::test]
+    async fn remote_miss_restore_code_with_worktree_defers() {
+        let id = "no such remote target";
+        let out = materialize_startup_for_cwd(
+            remote_miss_ctx(true, true),
+            SessionStartupIntent::Resume {
+                session_id: Some(id.into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-wt",
+        )
+        .await
+        .unwrap();
+        match out {
+            MaterializedStartup::Resume {
+                session_id,
+                deferred_local_miss,
+                suppress_code_restore,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(deferred_local_miss, "non-uuid defer must flag a title miss");
+                assert!(
+                    !suppress_code_restore,
+                    "--restore-code --worktree must still restore snapshot code"
+                );
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn remote_miss_worktree_without_restore_code_suppresses_snapshot() {
+        let id = "no such remote target";
+        let out = materialize_startup_for_cwd(
+            remote_miss_ctx(false, true),
+            SessionStartupIntent::Resume {
+                session_id: Some(id.into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-wt-no-code",
+        )
+        .await
+        .unwrap();
+        match out {
+            MaterializedStartup::Resume {
+                session_id,
+                suppress_code_restore,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(suppress_code_restore);
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
     }
     /// Explicit-id resume under `--chat` passes the id through untouched:
     /// no disk resolution, no GCS restore (the cwd does not even exist).
@@ -1366,7 +2054,9 @@ mod tests {
             allow_remote_restore: false,
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
-            auto_resume_last_for_cwd: false,
+            restore_code: false,
+            restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -1448,6 +2138,102 @@ mod tests {
             other => panic!("expected Resume, got {other:?}"),
         }
     }
+    /// Cold start of grok-oss: open the last session for this directory.
+    /// Not continue-interrupted-turn. Not the /resume picker.
+    mod open_last_session_on_start {
+        use super::*;
+        use crate::test_util::GrokHomeFixture;
+        fn tui_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                has_worktree: false,
+                allow_remote_restore: false,
+                chat_mode: false,
+                title_resolution: TitleResolution::Allowed,
+                restore_code: false,
+                restore_progress_on_stdout: false,
+                open_last_session_on_start: true,
+            }
+        }
+        fn headless_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                open_last_session_on_start: false,
+                ..tui_ctx()
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_opens_last_session_when_one_exists() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            let older = "aaaaaaaa-1111-2222-3333-444444444444";
+            let last = "bbbbbbbb-1111-2222-3333-555555555555";
+            fx.write_summary(
+                &cwd_str,
+                older,
+                serde_json::json!({
+                    "generated_title": "Older",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                    "last_active_at": "2026-07-01T00:00:00Z",
+                }),
+            );
+            fx.write_summary(
+                &cwd_str,
+                last,
+                serde_json::json!({
+                    "generated_title": "Last session",
+                    "updated_at": "2026-08-13T12:00:00Z",
+                    "last_active_at": "2026-08-13T12:00:00Z",
+                }),
+            );
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::Resume {
+                    session_id, title, ..
+                } => {
+                    assert_eq!(session_id, last);
+                    assert_eq!(title.as_deref(), Some("Last session"));
+                }
+                other => panic!("expected last session to open, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_stays_welcome_when_no_last_session() {
+            let fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("first-ever use must stay welcome, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_does_not_open_last_when_headless() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(
+                &cwd_str,
+                "cccccccc-1111-2222-3333-666666666666",
+                serde_json::json!({ "generated_title": "Headless must not steal" }),
+            );
+            match materialize_startup_for_cwd(
+                headless_ctx(),
+                SessionStartupIntent::NewAuto,
+                &cwd_str,
+            )
+            .await
+            .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("headless -p stays a fresh session, got {other:?}"),
+            }
+        }
+    }
     mod resume_by_title {
         use super::*;
         use crate::test_util::GrokHomeFixture;
@@ -1457,7 +2243,9 @@ mod tests {
                 allow_remote_restore: false,
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
-                auto_resume_last_for_cwd: false,
+                restore_code: false,
+                restore_progress_on_stdout: false,
+                open_last_session_on_start: false,
             }
         }
         async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {
@@ -1601,5 +2389,201 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
+    }
+    #[cfg(feature = "local-workspace")]
+    fn advertised_tools_env() -> xai_grok_test_support::EnvGuard {
+        xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list,workspace.fs_read_file,workspace.fs_write_file,workspace.fs_exists,workspace.fs_delete_file,workspace.put_files,workspace.get_files",
+        )
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_attach_from_cli() {
+        let _env = advertised_tools_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, None, Some("srv-dogfood"), Some(tmp.path()))
+            .unwrap()
+            .expect("attach config");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
+        assert_eq!(cfg.server_id.as_deref(), Some("srv-dogfood"));
+        let canon = tmp.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
+    #[test]
+    fn resolve_local_workspace_empty_cli_attach_falls_back_to_env() {
+        let _env = advertised_tools_env();
+        let _sid = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV,
+            "srv-from-env",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, None, Some(""), Some(tmp.path()))
+            .unwrap()
+            .expect("empty CLI attach should fall back to env server id");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
+        assert_eq!(cfg.server_id.as_deref(), Some("srv-from-env"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_CWD)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_MODE)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
+    #[test]
+    fn resolve_local_workspace_cwd_only_is_not_a_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _cwd = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV,
+            tmp.path().to_str().unwrap(),
+        );
+        let _enable = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ENV);
+        let _mode = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+        let _sid = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+        let cfg = resolve_local_workspace_config(true, None, None, Some(tmp.path())).unwrap();
+        assert!(
+            cfg.is_none(),
+            "cwd-only CLI/env must not activate local workspace: {cfg:?}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_own_from_cli() {
+        let _env = advertised_tools_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, Some(Some(tmp.path())), None, None)
+            .unwrap()
+            .expect("own config");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
+        assert!(
+            cfg.server_id.is_none(),
+            "own leaves server_id to supervisor"
+        );
+        let canon = tmp.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_own_env_defaults() {
+        let _env = advertised_tools_env();
+        let _enable = xai_grok_test_support::EnvGuard::set(GROK_CHAT_LOCAL_WORKSPACE_ENV, "1");
+        let _mode = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+        let _sid = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+        let cwd = tempfile::tempdir().unwrap();
+        let _cwd = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV,
+            cwd.path().to_str().unwrap(),
+        );
+        let cfg = resolve_local_workspace_config(true, None, None, None)
+            .unwrap()
+            .expect("env own");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
+        assert!(cfg.server_id.is_none());
+        let canon = cwd.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_requires_chat() {
+        let _env = advertised_tools_env();
+        let err = resolve_local_workspace_config(false, None, Some("srv"), None).unwrap_err();
+        assert!(
+            err.to_string().contains("require --chat"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
+    #[serial_test::serial(HOME)]
+    #[serial_test::serial(USERPROFILE)]
+    #[test]
+    fn resolve_local_workspace_defaults_cwd_and_denies_home() {
+        let _tools = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list",
+        );
+        let _allow =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_str().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("HOME", home_str);
+        let _userprofile = xai_grok_test_support::EnvGuard::set("USERPROFILE", home_str);
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(home.path())).unwrap_err();
+        assert!(err.to_string().contains("ALLOW_HOME"), "unexpected: {err}");
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_refuses_uncheckable_toolset() {
+        let _tools =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("uncheckable") || err.to_string().contains("FS-only"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_refuses_non_fs_toolset() {
+        let _tools = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list,workspace.bash",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
+        assert!(err.to_string().contains("FS-only"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("workspace.bash"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn local_workspace_banner_mentions_local_machine() {
+        assert!(LOCAL_WORKSPACE_BANNER.contains("on this machine"));
+        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("your machine"));
+        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("replaces the chat sandbox"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn local_workspace_non_tty_requires_ack() {
+        let _ack = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV);
+        let home = tempfile::tempdir().unwrap();
+        let _home =
+            xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path().to_str().unwrap());
+        let cfg = LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv".into()),
+        };
+        let err = emit_local_workspace_startup_ux_with(&cfg, false).unwrap_err();
+        assert!(
+            err.to_string().contains("ACK") || err.to_string().contains("ack"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
+    #[test]
+    fn validate_local_workspace_cwd_denies_root() {
+        let _allow =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let err = validate_local_workspace_cwd(std::path::Path::new("/")).unwrap_err();
+        assert!(err.to_string().contains("ALLOW_HOME"), "{err}");
     }
 }

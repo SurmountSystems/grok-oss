@@ -1,17 +1,19 @@
 # Theming and Appearance Customization
 
-Grok Build draws all TUI colors from a central theme. You can switch themes while Grok is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
+Grok OSS (`grok-oss`) draws TUI colors from a central theme. You can switch themes while Grok OSS is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
+
+The product default theme is **DOGE**, not GrokNight.
 
 ---
 
 ## Available Themes
 
-Grok includes six built-in themes, plus an `auto` option that follows your system appearance:
+Grok OSS includes six built-in themes, plus an `auto` option that follows your system appearance:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
-| **DOGE** | `doge` | Pure black background (`#000000`), white text/lines (`#FFFFFF`), and only the eight classic pure ANSI primaries (channels `0` or `255` only). **Default theme.** Black is pixel-off on emissive displays (design intent only — no measured power claims). | No |
-| **GrokNight** | `groknight`, `grok-night`, `dark` | Neutral dark base with a magenta accent. Survives quantization cleanly on 256-color and 16-color terminals. | No |
+| **DOGE** | `doge` | Pure black canvas, white text, and the eight classic ANSI primaries. **Default theme** when `theme` is unset. | No |
+| **GrokNight** | `groknight`, `grok-night`, `dark` | Neutral dark base with a magenta accent. Previous default. Survives quantization cleanly on 256-color and 16-color terminals. | No |
 | **GrokDay** | `grokday`, `grok-day`, `light`, `day` | Light theme for bright terminal backgrounds. | No |
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
@@ -19,54 +21,29 @@ Grok includes six built-in themes, plus an `auto` option that follows your syste
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
 
-### DOGE (pure 3-bit)
+### DOGE (default)
 
-The **DOGE** theme uses exactly eight pure digital colours — Black, Red,
-Green, Yellow, Blue, Magenta, Cyan, White — with channels only `0` or `255`
-(no mid-gray or alpha as palette colours). Informal set mnemonic: **RGBCMYKW**
-(set membership; index order is classic ANSI SGR name order, not that string
-order).
+**DOGE** uses a pure-black background and only the eight classic ANSI primaries (channels `0` or `255`). Config name is `doge` only (case-insensitive).
 
-| Config name | Notes |
-|-------------|--------|
-| `doge` | Only accepted id (case-insensitive) |
+On DOGE, Grok OSS uses these roles:
 
-**Black (`#000000`)** is treated as true off for the canvas (OLED-friendly
-design). **Bright** SGR names use the same pure values as normal (already
-saturated). Muted UI is chromatic (yellow secondary chrome, cyan ambient meta),
-not mid-gray. Pure blue is not used for long body text or thin UI chrome.
+| Colour | Role |
+|--------|------|
+| **Green** | Human: composer caret, user rails, success |
+| **Magenta** | Agent: running activity, tool spinner, model accent |
+| **Yellow** | Dates, timers, secondary context |
+| **Cyan** | System tags, included SuperGrok period limits, credits, paths |
 
-#### Grok OSS semantic roles (application layer)
+Do not confuse the composer caret (human green) with the lower-left activity throbber (agent magenta). Mid-draft letters under the caret use ordinary text colour on the empty blink half, not neon green ink on the letter.
 
-Normative pure palette (hex + no gray/alpha as colours): Surmount specs
-[`0001_DOGE.md`](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md)
-(v1.0.0). That spec allows products to define semantic roles (Clause 8 MAY).
-Grok OSS maps roles as follows on DOGE:
+To switch back to the previous neutral dark default:
 
-| Colour | Role in Grok OSS |
-|--------|------------------|
-| **Green** | **Human** — user prompt pointer (`❯`), left accent rail (`┃`), **composer box caret**, session cursor (OSC 12), success marks, slash skills, links |
-| **Magenta** | **Agent** — running activity, **lower-left throbbers** (tool spinner + still-running cue), model label, assistant/thinking chrome |
-| **Yellow** | Dates, times, timers, other useful context / secondary chrome |
-| **Cyan** | System tags, limits, credits, path and ambient meta (not the activity throbber) |
-| **Red / Blue** | Avoid unless contextually useful (errors stay red) |
-| **Gray / alpha** | Forbidden as theme palette colours |
+```toml
+[ui]
+theme = "groknight"
+```
 
-**Human prompts** always show a one-column green left rail (`┃`), same geometry
-as the idle Recap white tool rail, via the shared accent column. Recap idle
-expanded still uses white (`accent_tool`); loading Recap uses animated yellow
-secondary chrome (`gray` token paints yellow on DOGE), not gray paint.
-
-**Do not confuse these three surfaces:**
-
-| Surface | DOGE colour | Notes |
-|---------|-------------|--------|
-| Composer box caret | Human **green** | Software caret on the prompt. Solid blink half reverse-plates the current cell (green plate, readable canvas ink). Empty half on mid-draft letters uses **`text_primary`** (normal text colour) — not neon `accent_user` letter ink. Solid `█` only at buffer end; mid-draft spaces never become solid `█`. |
-| Lower-left activity throbber | Agent **magenta** | Tool-running spinner and “subagents still running” cue |
-| Todo clear-finished icon (`[−]`, open board + finished) | Quiet secondary (hover stronger) | Not neon green always-on; never agent magenta; not painted when board hidden or nothing finished |
-
-Project internal palette + role annex:
-`doc/dev/specs/doge-pure-8-colour-2026-07-26.md`.
+Or pick **GrokNight** in `/theme` or under Appearance in `/settings`.
 
 ### Minimal Mode Has No Theming
 
@@ -99,15 +76,7 @@ Set the theme in `~/.grok/config.toml`:
 theme = "tokyonight"
 ```
 
-**Default theme is DOGE** when `theme` is unset (and when `theme = "auto"` maps to
-dark mode). To switch back to the previous neutral dark default:
-
-```toml
-[ui]
-theme = "groknight"
-```
-
-Or pick **GrokNight** in the `/theme` picker or under Appearance in `/settings`.
+**Default theme is DOGE** when `theme` is unset (and when `theme = "auto"` maps to dark mode).
 
 ---
 
@@ -138,9 +107,11 @@ auto_light_theme = "grokday"
 | **macOS** | Reads `AppleInterfaceStyle` system preference |
 | **Linux** | Queries XDG Desktop Portal (`org.freedesktop.appearance.color-scheme`) |
 | **Windows** | Reads the system personalization registry |
-| **SSH / headless** | Falls back to an OSC 11 terminal background query at startup |
+| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok-oss wrap ssh ...` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
 
-Once running, Grok polls for appearance changes every 5 seconds. Toggling your OS between light and dark mode takes effect within seconds without restarting.
+Once running, Grok polls desktop APIs and env hints every 5 seconds. Toggling your OS between light and dark mode on a local desktop takes effect within seconds without restarting. Over SSH the wrap-stamped env is fixed for that hop.
+
+You can also set `GROK_THEME` (or `LC_GROK_THEME`) to force a theme or `auto` without editing `config.toml`.
 
 ### Via the Settings Pane
 
@@ -170,7 +141,7 @@ Every theme is defined using full RGB values. At startup, Grok quantizes all col
 - On **256-color** terminals, each RGB value is mapped to the nearest indexed palette entry.
 - On **16-color** terminals, colors map to ANSI names.
 
-GrokNight and GrokDay use neutral grays that quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
+DOGE, GrokNight, and GrokDay quantize cleanly. TokyoNight, RosePineMoon, and OscuraMidnight use distinctive tinted backgrounds that lose their character when quantized, which is why the theme picker hides them on non-truecolor terminals.
 
 ### Runtime-Generated Colors
 
@@ -186,34 +157,6 @@ Grok sets your terminal cursor to the current theme's `accent_user` color using 
 - Reset to the terminal's default on exit via OSC 112.
 
 This works in terminals that support OSC 12 (most modern terminals).
-
-### Composer box caret (software)
-
-While the prompt is focused, Grok paints a **software box caret** (filled block
-↔ empty cell blink) in the theme's **Human** accent (`accent_user` = pure green
-on DOGE). That caret is the human input surface, not agent chrome: it must stay
-Human green (not agent magenta).
-
-- Typed letters under the caret keep their grapheme; the caret does not eat
-  characters. **Solid half:** reverse plate (Human green background, readable
-  canvas-coloured ink). **Empty half:** theme `text_primary` on canvas — not
-  neon `accent_user` on the letter (that would read as a second green prompt
-  glyph). Mid-draft spaces keep reverse-plate styling on solid half and never
-  become a solid `█` (solid block only at buffer end).
-- When you move the caret (arrows, Home, End), **previous cells repaint as
-  normal text**. There must be no leftover green plate or solid block glyph
-  stuck on letters behind the real caret.
-
-Hardware terminal cursor is hidden while the software box caret paints, so you
-do not see two cursors. OSC 12 still marks the session as Grok-owned for hosts
-that show it when focus leaves the software caret path.
-
-### Lower-left activity throbber
-
-The lower-left turn-status area uses **agent magenta** (`accent_running` on
-DOGE) for busy tool activity and for the idle “still running” concentric icon
-when background subagents (or other watchers) keep work alive. That is not
-system cyan and not Human green.
 
 ---
 
@@ -233,33 +176,22 @@ Use compact mode on small screens to maximize content area.
 
 ## Hide header
 
-Hide **in-app** chrome headers (status / welcome / dashboard) to reclaim vertical
-space. This is **not** the desktop or terminal **window title** (see
-[Window title](#window-title) below).
+Hide **in-app** chrome headers (status, welcome, dashboard) to reclaim vertical space. This is **not** the desktop or terminal **window title** (see [Window title](#window-title) below).
 
 ```toml
 [ui]
 hide_header = true
 ```
 
-Or toggle **Hide header** under Appearance in `/settings`. Default is off
-(headers visible).
+Or toggle **Hide header** under Appearance in `/settings`. Default is off (headers visible).
 
-When enabled, the same knob zeros:
-
-1. **Agent status bar** (cwd/git left; context %, queue badge, plan chip, todos right)
-2. **Welcome location top bar** (git branch / cwd line on the welcome screen)
-3. **Dashboard location header** (location + status chips + New Agent button row)
-
-Hiding is intentional opt-in: you lose those clicks and labels. Minimal mode has different chrome and ignores this setting.
+When enabled, the same knob zeros the agent status bar, the Welcome location top bar, and the dashboard location header. You lose those clicks and labels. Minimal mode has different chrome and ignores this setting.
 
 ---
 
 ## Window title
 
-Grok **always manages** the desktop or terminal tab/window title text (OSC
-SetTitle) when dynamic titles are enabled. This is **not** the in-app agent
-status bar and **not** the same as [Hide header](#hide-header).
+Window titles are **on by default**. Grok OSS manages the desktop or terminal tab title (OSC SetTitle) when `[ui.notifications.title] enabled` is true. This is **not** the in-app status bar and **not** the same as [Hide header](#hide-header).
 
 Examples:
 
@@ -268,27 +200,18 @@ Examples:
 | Idle single session | `my-session - grok-oss` |
 | Multi-agent busy | `Thinking - my-session - 2 agents - grok-oss` |
 
-`N agents` appears only when more than one top-level agent is busy. Startup
-always writes a product-managed title (session or `grok-oss`), never raw process
-argv like `grok-oss --resume …`, and never an empty title (empty OSC blanks DE
-switchers).
+Startup always writes a product-managed title (session or `grok-oss`). It never emits an empty title.
 
 ### Turn dynamic titles off
-
-Opt out with nested notification title config (not a separate hide flag):
 
 ```toml
 [ui.notifications.title]
 enabled = false
 ```
 
-That stops session/activity title updates. Product never blanks the window with
-an empty SetTitle.
+There is no `hide_title_bar` key. Stale config with that name is ignored.
 
 ### Customize title items
-
-When `title.enabled` is true (default), layout is controlled by `title.items`
-(defaults include `session-name` and `agents`):
 
 ```toml
 [ui.notifications.title]
@@ -296,76 +219,20 @@ enabled = true
 items = ["action-required", "spinner", "activity", "session-name", "agents", "grok"]
 ```
 
-The `grok` slot renders as **`grok-oss`**. Full options:
-[Configuration → Notifications](05-configuration.md#notifications).
-
----
-
-## Host window frame (edgeless)
-
-Grok OSS is a **TUI inside your terminal emulator**. It can set **title text**
-(OSC), but it **cannot** remove or restyle the OS / compositor window chrome
-(close buttons, client-side decorations, borders). There is **no product flag**
-that undresses arbitrary terminals, and Appearance settings do not own CSD.
-
-If you want a borderless or “edgeless” look, configure the **host terminal**
-(and sometimes the desktop). Copy-paste starters:
-
-### kitty
-
-In `kitty.conf`:
-
-```conf
-hide_window_decorations yes
-# or: hide_window_decorations titlebar-only
-```
-
-Reload kitty config or restart the terminal.
-
-### foot (Wayland)
-
-In `foot.ini`:
-
-```ini
-[csd]
-preferred=none
-```
-
-`server` keeps server-side decorations when the compositor provides them;
-`client` uses foot’s own CSD. Behavior depends on your compositor.
-
-### Ghostty
-
-In Ghostty config (GTK builds; check your version’s docs if a key differs):
-
-```conf
-window-decoration = false
-```
-
-Some builds also accept `true` / `auto`. Confirm with `ghostty +show-config` or
-upstream docs.
-
-### GNOME and other desktops
-
-Many GNOME apps draw client-side decorations. Hiding the frame is a **desktop +
-terminal** choice (tiling WM, extensions, terminal prefs), not something
-grok-oss can force. See [Terminal support](21-terminal-support.md) for which
-hosts Grok detects.
+The `grok` slot renders as **`grok-oss`**. Full options: [Configuration → Notifications](05-configuration.md#notifications).
 
 ---
 
 ## Syntax Highlighting
 
-Grok bundles four `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
+Grok OSS bundles four `.tmTheme` files for code-block syntax highlighting and selects one based on the active theme:
 
-- `grok-night.tmTheme` -- GrokNight, RosePineMoon, OscuraMidnight
-- `doge.tmTheme` -- DOGE — pure 8-colour primaries only (`#000000` / `#FFFFFF` + the eight primaries)
+- `doge.tmTheme` -- DOGE (pure primaries)
+- `grok-night.tmTheme` -- GrokNight, RosePineMoon, and OscuraMidnight
 - `grok-day.tmTheme` -- GrokDay
 - `tokyo-night.tmTheme` -- TokyoNight
 
 Grok selects the matching file automatically when you switch themes. The `.tmTheme` files are built into the binary, so you cannot replace them with your own.
-
-Under **DOGE**, the context usage bar also uses **solid DOGE colour steps** (no mid-gray gradient) so usage urgency stays on the pure 8-colour palette.
 
 ---
 
@@ -403,7 +270,7 @@ gap_right = 0           # Gap between scrollbar and screen edge (0 = at edge)
 [scrollback.scroll]
 margin = 0                  # Context lines above/below selected entry (0 = edge)
 min_page_fraction = 0       # Minimum scroll as % of viewport (0-100)
-follow_indicator = "center" # "center" = show down-arrow, "none" = hidden
+follow_indicator = "center" # "center" = show the ▼/▲ scroll arrows, "none" = hidden
 follow_auto_select = true   # Auto-select latest entry when following
 follow_by_overscroll = true # Scrolling past bottom engages follow mode
 anchor_on_fold = true       # Keep block header at same screen position when folding
@@ -420,8 +287,7 @@ expandable_indicator_char = "›"    # Character to use (default: "›")
 collapsed_accent_char = "❙"        # Accent for collapsed groupable blocks (falls back to "|" on the legacy Windows console)
 dim_accent = 0.5                   # Blend factor for dimmed accents (0.0-1.0)
 line_under_last_entry = false      # Horizontal line below last entry
-selection_buttons = true           # Show ⧉/↗ on selection box when a block is selected
-bubble_copy_buttons = true         # Always-on ⧉ on user/assistant bubbles (no select-first)
+selection_buttons = false          # Show copy/view buttons on selection box
 ```
 
 ### Animation
@@ -542,7 +408,7 @@ Each theme defines the following color slots that are used throughout the TUI:
 
 **Backgrounds:** `bg_base`, `bg_light`, `bg_dark`, `bg_highlight`, `bg_hover`, `bg_terminal`, `bg_visual`
 
-**Accents:** `accent_user`, `accent_assistant`, `accent_thinking`, `accent_tool`, `accent_system`, `accent_error`, `accent_success`, `accent_running`, `accent_skill`, `accent_plan`, `accent_verify`, `accent_feedback`, `accent_remember`, `accent_model`
+**Accents:** `accent_user`, `accent_assistant`, `accent_thinking`, `accent_tool`, `accent_system`, `accent_error`, `accent_success`, `accent_running`, `accent_skill`, `accent_plan`, `accent_verify`, `accent_remember`, `accent_model`
 
 **Text:** `text_primary`, `text_secondary`
 

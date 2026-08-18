@@ -167,6 +167,13 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         && stashed_pid.as_deref() != Some(pid.as_str())
                         && !raw_entries.iter().any(|(eid, _)| eid == *pid)
                         && !agent.optimistic_queue_ids.contains(*pid)
+                        // An active-goal Send Now painted block awaiting its
+                        // interjection claim: its row legitimately vanishes from
+                        // the broadcast the instant the shell converts the Send
+                        // Now into an interjection, so absence here is expected.
+                        // Keep it in place for `handle_interjection` to convert;
+                        // retiring it would drop and re-push it at the end.
+                        && !agent.is_send_now_awaiting_interjection_claim(pid)
                 })
                 .cloned()
                 .collect();
@@ -195,23 +202,20 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 agent.cancel_editing_queued_for_lost_row();
             }
         }
-        // Resolve a queue-row soft interject that was parked while its row was
+        // Resolve a queue-row send-now that was parked while its row was
         // still an optimistic echo: the broadcast just confirmed the row, so
         // fire the interject with the authoritative version (racing it
-        // earlier would have no-opped shell-side and dropped the intent).
+        // earlier would have no-opped shell-side and dropped the send-now).
         let fire = app.agents.get_mut(&aid).and_then(|agent| {
             agent.resolve_send_now_awaiting_confirm(&raw_entries, running_prompt_id.as_deref())
         });
         if let Some((id, expected_version)) = fire {
             if let Some(agent) = app.agents.get_mut(&aid) {
-                // Soft only — mirror `dispatch_queue_interject_shared`. Never
-                // arm send-now cancel or paint a cancel-and-send user block;
-                // multi-client paint is the shell interjection broadcast.
-                agent.suppress_parked_marker_on_interject();
-                agent.show_toast("Interjection sent");
+                // Same arming contract as `dispatch_queue_interject_shared`.
+                super::super::dispatch::arm_send_now_and_paint(agent, &id, None);
             }
             crate::unified_log::info(
-                "prompt.queue_interject_confirmed",
+                "prompt.queue_send_now_confirmed",
                 Some(&session_id),
                 Some(serde_json::json!({ "prompt_id": id, "version": expected_version })),
             );
@@ -223,10 +227,30 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                     new_text: None,
                 });
         }
-        // A queue change can empty the visible queue mid-wait — the marker
-        // may become eligible now (see `maybe_push_parked_marker`).
-        if let Some(agent) = app.agents.get_mut(&aid) {
-            agent.maybe_push_parked_marker();
+    }
+
+    // Wake-turn marker reconcile: `running_prompt_id` is authoritative. A
+    // broadcast naming a wake prompt offers the stop affordance even before
+    // its first delta; any other value retires a stale marker (recovery for
+    // a lost wake terminal).
+    if let Some(aid) = agent_id
+        && let Some(agent) = app.agents.get_mut(&aid)
+    {
+        let running = running_prompt_id.as_deref();
+        if agent
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| Some(wake.prompt_id.as_str()) != running)
+        {
+            agent.running_wake_turn = None;
+        }
+        if let Some(pid) = running
+            && is_wake_prompt(pid)
+        {
+            // The broadcast is authoritative: the shell says this wake is
+            // running, so an earlier terminal's record no longer applies.
+            agent.finished_wake_prompts.remove(pid);
+            agent.note_streaming_wake_turn(pid);
         }
     }
 

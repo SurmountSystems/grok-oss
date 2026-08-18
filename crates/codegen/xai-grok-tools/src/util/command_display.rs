@@ -156,13 +156,10 @@ fn peel_cd_prefix<'a>(command: &'a str, session_cwd: &Path) -> Option<&'a str> {
     }
 
     let after = after_path.trim_start();
-    let remainder = if let Some(stripped) = after.strip_prefix("&&") {
-        stripped.trim_start()
-    } else if let Some(stripped) = after.strip_prefix(';') {
-        stripped.trim_start()
-    } else {
-        return None;
-    };
+    let remainder = after
+        .strip_prefix("&&")
+        .or_else(|| after.strip_prefix(';'))?
+        .trim_start();
     if remainder.is_empty() {
         return None;
     }

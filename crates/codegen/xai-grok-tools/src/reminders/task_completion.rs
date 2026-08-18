@@ -20,7 +20,7 @@ use crate::types::TaskSnapshot;
 use crate::types::output::ToolOutput;
 use crate::types::resources::{SharedResources, State, Terminal};
 use crate::types::tool::{Reminder, ToolKind};
-use crate::util::truncate::{PREVIEW_SIZE, truncate_with_preview};
+use crate::util::truncate::{PREVIEW_SIZE, PartialOutput, truncate_with_preview};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xai_tool_types::KillTaskOutput;
@@ -28,6 +28,15 @@ use xai_tool_types::SubagentCompletedOutput;
 use xai_tool_types::TaskOutputOutput;
 /// Default tool name used in auto-wake completion messages.
 pub const DEFAULT_TASK_OUTPUT_TOOL: &str = "get_task_output";
+/// UI/Stop kill with no live waiter: tell the model not to relaunch the task.
+const USER_KILLED_NOTICE: &str = "This task was killed by the user — do not restart it.\n";
+fn user_killed_notice(task: &TaskSnapshot) -> &'static str {
+    if task.explicitly_killed && !task.kill_result_delivered {
+        USER_KILLED_NOTICE
+    } else {
+        ""
+    }
+}
 /// Inline preview cap applied ONLY to bash completion reminders that ship
 /// with a disk-pointer footer. Subagent completions (which have no
 /// disk-backed output file) are never truncated -- the inline branch is
@@ -127,10 +136,15 @@ pub fn format_bash_completion(
             format!("exit code: {exit_code_str}")
         }
     };
+    let notice = user_killed_notice(task);
+    let duration = xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+        duration_secs.max(0.0),
+    ));
     let mut msg = format!(
         "Background task \"{}\" completed ({}).\n\
-         Command: {} | Duration: {:.1}s\n",
-        task.task_id, status_str, command, duration_secs,
+         Command: {} | Duration: {duration}\n\
+         {notice}",
+        task.task_id, status_str, command,
     );
     if task.signal.is_some() && duration_secs < 1.0 {
         msg.push_str(
@@ -151,7 +165,7 @@ pub fn format_bash_completion(
     render_completion_output_delivery(
         &mut msg,
         &task.task_id,
-        &task.output,
+        task.output_view(),
         task_output_name,
         disk_pointer_footer.as_deref(),
     );
@@ -178,15 +192,19 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
         .and_then(|d| d.strip_prefix("[monitor] "))
         .unwrap_or("monitor");
     let tool = task_output_name.unwrap_or(DEFAULT_TASK_OUTPUT_TOOL);
+    let notice = user_killed_notice(task);
     format!(
         "Monitor \"{id}\" ended: [monitor ended: {reason}].\n\
          Description: {description}\n\
          Command: {cmd}\n\
-         Duration: {dur:.1}s\n\
-         Use {tool}(\"{id}\") for full output.",
+         Duration: {dur}\n\
+         Use {tool}(\"{id}\") for full output.\n\
+         {notice}",
         id = task.task_id,
         cmd = task.command,
-        dur = task.duration_secs(),
+        dur = xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+            task.duration_secs().max(0.0),
+        )),
     )
 }
 /// Warn the model about other background tasks that are still running.
@@ -199,9 +217,11 @@ fn format_running_tasks_warning(running: &[&TaskSnapshot], kill_task_name: Optio
         let cmd = task.display_command.as_deref().unwrap_or(&task.command);
         let _ = writeln!(
             buf,
-            "- \"{}\" (running for {:.0}s): {}",
+            "- \"{}\" (running for {}): {}",
             task.task_id,
-            task.duration_secs(),
+            xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+                task.duration_secs().max(0.0),
+            )),
             cmd,
         );
     }
@@ -255,11 +275,11 @@ fn split_wrapped_monitor_event(event_text: &str) -> Option<(&str, &str)> {
 /// Buffered `event_text` arrives pre-wrapped (`wrap_monitor_event`); it is
 /// unwrapped via [`split_wrapped_monitor_event`] with verbatim fallback.
 pub fn format_monitor_events(
-    events: &[crate::implementations::grok_build::task::types::MonitorEventNotification],
+    events: &[crate::implementations::grok_build::monitor::types::MonitorEventNotification],
     task_output_name: Option<&str>,
 ) -> Option<String> {
     use std::fmt::Write as _;
-    let tool_hint = task_output_name.unwrap_or("get_command_or_subagent_output");
+    let tool_hint = task_output_name.unwrap_or("get_task_output");
     match events {
         [] => None,
         [event] => {
@@ -278,7 +298,8 @@ pub fn format_monitor_events(
             ))
         }
         _ => {
-            type Event = crate::implementations::grok_build::task::types::MonitorEventNotification;
+            type Event =
+                crate::implementations::grok_build::monitor::types::MonitorEventNotification;
             let mut groups: Vec<(&str, Vec<&Event>)> = Vec::new();
             for event in events {
                 match groups.iter_mut().find(|(id, _)| *id == event.task_id) {
@@ -356,7 +377,7 @@ pub(crate) fn task_owned_by_session(task: &TaskSnapshot, my_owner: Option<&str>)
 pub fn render_completion_output_delivery(
     buf: &mut String,
     subagent_id: &str,
-    output: &str,
+    output: PartialOutput<'_>,
     task_output_name: Option<&str>,
     disk_pointer_footer: Option<&str>,
 ) {
@@ -367,10 +388,8 @@ pub fn render_completion_output_delivery(
         }
         None => match disk_pointer_footer {
             Some(footer) => {
-                // Densify structured JSON before truncate so TOON can avoid the cap.
-                let densified = crate::util::toon::densify_structured_text(output);
                 let (output, _) = truncate_with_preview(
-                    densified.as_str(),
+                    output,
                     MAX_INLINE_COMPLETION_BYTES,
                     PREVIEW_SIZE,
                     Some(footer),
@@ -378,9 +397,7 @@ pub fn render_completion_output_delivery(
                 let _ = write!(buf, "response:\n{output}");
             }
             None => {
-                // T5: inline subagent handoff — densify pure structured JSON only.
-                let densified = crate::util::toon::densify_structured_text(output);
-                let _ = write!(buf, "response:\n{densified}");
+                let _ = write!(buf, "response:\n{}", output.text());
             }
         },
     }
@@ -405,6 +422,10 @@ pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
 /// in the current agent's toolset. When `None`, the subagent's full
 /// `output` is inlined verbatim -- this notification is the only place
 /// the model will see it (no disk-backed output file exists for subagents).
+///
+/// KEEP IN SYNC: the exact wording of this message is a compatibility
+/// surface — downstream mirrors reproduce it verbatim (grep for
+/// `format_subagent_completion_reminder`). Update them when changing it.
 pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
@@ -416,12 +437,12 @@ pub fn format_subagent_completion(
     };
     let mut out = format!(
         "Background subagent \"{}\" ({}: \"{}\") completed {}.\n\
-         Duration: {:.1}s | Tool calls: {} | Turns: {}",
+         Duration: {} | Tool calls: {} | Turns: {}",
         c.subagent_id,
         c.subagent_type,
         c.description,
         status,
-        c.duration_ms as f64 / 1000.0,
+        xai_tty_utils::format_human_duration(std::time::Duration::from_millis(c.duration_ms)),
         c.tool_calls,
         c.turns,
     );
@@ -429,7 +450,13 @@ pub fn format_subagent_completion(
         Some(_) => "\n",
         None => "\n\n",
     });
-    render_completion_output_delivery(&mut out, &c.subagent_id, &c.output, task_output_name, None);
+    render_completion_output_delivery(
+        &mut out,
+        &c.subagent_id,
+        PartialOutput::whole(&c.output),
+        task_output_name,
+        None,
+    );
     out
 }
 /// Format buffered between-turn subagent completions into a system-reminder
@@ -462,7 +489,7 @@ pub fn format_between_turn_completions(
         render_completion_output_delivery(
             &mut buf,
             &c.subagent_id,
-            &c.output,
+            PartialOutput::whole(&c.output),
             task_output_name,
             None,
         );
@@ -804,14 +831,57 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("abc-123"));
         assert!(msg.contains("exit code: 0"));
         assert!(msg.contains("cargo test"));
         assert!(msg.contains("get_command_or_subagent_output(\"abc-123\")"));
+        assert!(
+            !msg.contains("killed by the user"),
+            "natural completion must not carry the UI-kill notice: {msg}"
+        );
+    }
+    #[test]
+    fn format_bash_completion_ui_kill_says_do_not_restart() {
+        let mut task = TaskSnapshot {
+            task_id: "ui-kill".into(),
+            command: "sleep 60".into(),
+            display_command: None,
+            cwd: String::new(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: std::path::PathBuf::new(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+            completed: true,
+            kind: Default::default(),
+            block_waited: false,
+            explicitly_killed: true,
+            kill_result_delivered: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            msg.contains("killed by the user — do not restart it"),
+            "UI-kill wake must include the do-not-restart line: {msg}"
+        );
+        task.kill_result_delivered = true;
+        let model_msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            !model_msg.contains("killed by the user"),
+            "model-tool kill must not tell the model the user killed it: {model_msg}"
+        );
     }
     #[test]
     fn format_monitor_completion_exit_zero() {
@@ -831,8 +901,11 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_monitor_completion(&task, Some("get_command_or_subagent_output"));
         assert!(
@@ -864,8 +937,11 @@ mod tests {
             kind: crate::computer::types::TaskKind::Monitor,
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_monitor_completion(&task, None);
         assert!(
@@ -873,6 +949,42 @@ mod tests {
             "expected signal wording: {msg}"
         );
         assert!(msg.contains("get_task_output(\"mon-sig\")"), "{msg}");
+    }
+    #[test]
+    fn format_monitor_completion_ui_kill_says_do_not_restart() {
+        let mut task = TaskSnapshot {
+            task_id: "mon-ui".into(),
+            command: "tail -f app.log".into(),
+            display_command: Some("[monitor] app".into()),
+            cwd: String::new(),
+            start_time: std::time::SystemTime::now(),
+            end_time: Some(std::time::SystemTime::now()),
+            output: String::new(),
+            output_file: std::path::PathBuf::new(),
+            truncated: false,
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+            completed: true,
+            kind: crate::computer::types::TaskKind::Monitor,
+            block_waited: false,
+            explicitly_killed: true,
+            kill_result_delivered: false,
+            owner_session_id: None,
+            description: None,
+            is_backgrounded: true,
+            output_total_bytes: 0,
+        };
+        let msg = format_monitor_completion(&task, None);
+        assert!(
+            msg.contains("\nThis task was killed by the user — do not restart it.\n"),
+            "UI-killed monitor notice must be on its own line: {msg}"
+        );
+        task.kill_result_delivered = true;
+        let model_msg = format_monitor_completion(&task, None);
+        assert!(
+            !model_msg.contains("killed by the user"),
+            "model-tool monitor kill must not carry the UI-kill notice: {model_msg}"
+        );
     }
     #[test]
     fn format_bash_completion_prefers_display_command() {
@@ -892,8 +1004,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("cargo test"));
@@ -917,8 +1032,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: unknown"));
@@ -945,8 +1063,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -984,8 +1105,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -1022,8 +1146,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: 0"));
@@ -1183,9 +1310,37 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         }
+    }
+    /// A log that cannot be read produces an empty snapshot with a
+    /// non-zero total. The completion must still say how big the output
+    /// is and where to read it.
+    #[test]
+    fn bash_completion_for_an_unreadable_log_still_points_at_the_file() {
+        let mut task = make_completed("bg-unreadable");
+        task.output = String::new();
+        task.truncated = true;
+        task.output_total_bytes = 123_456;
+        task.output_file = std::path::PathBuf::from("/tmp/bg-unreadable.log");
+        let msg = format_bash_completion(&task, None, Some("read_file"));
+        assert!(msg.contains("123456 bytes total"), "{msg}");
+        assert!(msg.contains("/tmp/bg-unreadable.log"), "{msg}");
+    }
+    /// The snapshot holds part of a large log. The footer the model reads must
+    /// state the task's real size, not the size of the part on hand.
+    #[test]
+    fn bash_completion_footer_states_the_real_log_size() {
+        let mut task = make_completed("bg-large");
+        task.output = "x".repeat(20_000);
+        task.output_total_bytes = 5_000_000;
+        task.output_file = std::path::PathBuf::from("/tmp/bg-large.log");
+        let msg = format_bash_completion(&task, None, Some("read_file"));
+        assert!(msg.contains("5000000 bytes total"), "{msg}");
     }
     fn make_running(id: &str) -> TaskSnapshot {
         TaskSnapshot {
@@ -1204,8 +1359,11 @@ mod tests {
             kind: Default::default(),
             block_waited: false,
             explicitly_killed: false,
+            kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
+            output_total_bytes: 0,
         }
     }
     fn make_bg_started(id: &str) -> crate::types::output::BackgroundTaskStarted {
@@ -1681,45 +1839,6 @@ mod tests {
             "must inline the subagent's output text: {msg}"
         );
     }
-
-    /// T5: inline handoff densifies pure structured JSON under auto policy.
-    #[test]
-    fn format_subagent_completion_densifies_structured_json_handoff() {
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
-
-        let mut c = make_subagent_completion("sub-json", true);
-        let body = serde_json::json!({
-            "hits": [
-                {"path": "a.rs", "line": 1, "text": "x"},
-                {"path": "b.rs", "line": 2, "text": "y"},
-                {"path": "c.rs", "line": 3, "text": "z"},
-            ]
-        });
-        let pretty = serde_json::to_string_pretty(&body).unwrap();
-        c.output = std::sync::Arc::from(pretty.as_str());
-        let msg = format_subagent_completion(&c, None);
-        assert!(
-            msg.contains("hits[") && msg.contains('{'),
-            "structured JSON handoff densified to TOON: {msg}"
-        );
-        assert!(
-            !msg.contains("\"path\": \"a.rs\""),
-            "pretty JSON should not remain: {msg}"
-        );
-        // Free-text still inline as-is.
-        let free = make_subagent_completion("sub-free", true);
-        let free_msg = format_subagent_completion(&free, None);
-        assert!(
-            free_msg.contains("response:\noutput for sub-free"),
-            "free text handoff unchanged: {free_msg}"
-        );
-    }
     #[test]
     fn task_completion_reservations_are_reference_counted() {
         let reservations = TaskCompletionReservations::default();
@@ -1854,7 +1973,7 @@ mod tests {
     /// reintroduced.
     #[tokio::test]
     async fn reminder_pipeline_ignores_monitor_event_buffer() {
-        use crate::implementations::grok_build::task::types::{
+        use crate::implementations::grok_build::monitor::types::{
             MonitorEventBuffer, MonitorEventNotification,
         };
         use crate::types::resources::Resources;
@@ -1888,7 +2007,7 @@ mod tests {
     /// own + owner-less legacy events; foreign events stay buffered.
     #[test]
     fn drain_owned_partitions_by_session_owner() {
-        use crate::implementations::grok_build::task::types::{
+        use crate::implementations::grok_build::monitor::types::{
             MonitorEventBuffer, MonitorEventNotification, drain_owned,
         };
         let shared_buffer = MonitorEventBuffer::default();
@@ -1925,7 +2044,7 @@ mod tests {
     /// empty => `None`.
     #[test]
     fn format_monitor_events_single_vs_batched() {
-        use crate::implementations::grok_build::task::types::MonitorEventNotification;
+        use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
         let event = |task: &str, desc: &str, text: &str| MonitorEventNotification {
             task_id: task.to_string(),
             event_text: format!(
@@ -1943,7 +2062,7 @@ mod tests {
             single, "<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>",
             "single event must use the lean monitor-event form"
         );
-        let bare = crate::implementations::grok_build::task::types::MonitorEventNotification {
+        let bare = crate::implementations::grok_build::monitor::types::MonitorEventNotification {
             task_id: "task-9".into(),
             event_text: "bare text, no wrapper".into(),
             owner_session_id: None,
@@ -1966,7 +2085,7 @@ mod tests {
         assert!(
             batched.starts_with(
                 "3 monitor events from 2 monitors \
-                 (use get_command_or_subagent_output to identify each monitor):"
+                 (use get_task_output to identify each monitor):"
             ),
             "batch must lead with event + monitor counts and default tool hint: {batched}"
         );
@@ -2031,7 +2150,7 @@ mod tests {
     /// End-to-end multibyte safety through the formatter (single + batch).
     #[test]
     fn format_monitor_events_handles_multibyte_content() {
-        use crate::implementations::grok_build::task::types::MonitorEventNotification;
+        use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
         let event = |task: &str, desc: &str, text: &str| MonitorEventNotification {
             task_id: task.to_string(),
             event_text: format!(

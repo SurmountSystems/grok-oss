@@ -346,69 +346,6 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
     );
     assert!(!app.agents[&id].session.model_switch_pending);
 }
-/// Resume-canceled-on-restart: default on, flip off emits PersistSetting
-/// with correct key/value/rollback, and live UiConfig updates immediately.
-#[test]
-fn set_resume_canceled_turn_on_restart_persists_and_updates_ui() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
-    assert!(
-        app.current_ui.resume_canceled_turn_on_restart_enabled(),
-        "default must be on"
-    );
-    let effects = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "resume_canceled_turn_on_restart");
-            assert_eq!(value, &SettingValue::Bool(false));
-            assert_eq!(rollback_value, &SettingValue::Bool(true));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-    assert!(!app.current_ui.resume_canceled_turn_on_restart_enabled());
-    // Idempotent when already off.
-    let again = dispatch(Action::SetResumeCanceledTurnOnRestart(false), &mut app);
-    assert!(again.is_empty());
-    // Restore on.
-    let on = dispatch(Action::SetResumeCanceledTurnOnRestart(true), &mut app);
-    assert_eq!(on.len(), 1);
-    assert!(app.current_ui.resume_canceled_turn_on_restart_enabled());
-}
-
-/// Token Economy bool from Settings emits PersistSetting under the dotted key.
-#[test]
-fn set_token_economy_bool_emits_persist_setting() {
-    use crate::settings::SettingValue;
-    xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
-    let mut app = test_app_with_agent();
-    let effects = dispatch(
-        Action::SetTokenEconomyBool {
-            field: "show_period_pacing",
-            value: false,
-        },
-        &mut app,
-    );
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "token_economy.show_period_pacing");
-            assert_eq!(value, &SettingValue::Bool(false));
-            // Rollback is the prior disk value (defaults true when unset).
-            assert_eq!(rollback_value, &SettingValue::Bool(true));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`
 /// matches `new`, `rollback_value` matches the prior cache value.
@@ -657,6 +594,27 @@ fn set_timeline_toggles_displayed_state_when_current_ui_diverges() {
     assert_eq!(app.current_ui.show_timeline, Some(false));
 }
 #[test]
+fn set_confirm_before_rewind_emits_persist_setting_with_correct_payload() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let default_on = app.current_ui.confirm_before_rewind_enabled();
+    let effects = dispatch(Action::SetConfirmBeforeRewind(!default_on), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "confirm_before_rewind");
+            assert_eq!(value, &SettingValue::Bool(!default_on));
+            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.current_ui.confirm_before_rewind, Some(!default_on));
+}
+#[test]
 fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
@@ -679,32 +637,6 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     assert_eq!(app.current_ui.page_flip_on_send, Some(!default_on));
     assert_eq!(
         crate::appearance::cache::load_page_flip_on_send(),
-        !default_on
-    );
-}
-#[test]
-fn set_scrub_ascii_punct_emits_persist_setting_with_correct_payload() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
-    let default_on = app.current_ui.scrub_ascii_punct_enabled();
-    crate::appearance::cache::set_scrub_ascii_punct(default_on);
-    let effects = dispatch(Action::SetScrubAsciiPunct(!default_on), &mut app);
-    assert_eq!(effects.len(), 1);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "scrub_ascii_punct");
-            assert_eq!(value, &SettingValue::Bool(!default_on));
-            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-    assert_eq!(app.current_ui.scrub_ascii_punct, Some(!default_on));
-    assert_eq!(
-        crate::appearance::cache::load_scrub_ascii_punct(),
         !default_on
     );
 }
@@ -749,12 +681,12 @@ fn dispatch_open_settings_opens_then_close_on_reentry() {
         );
     }
 }
-/// A focused open (privacy banner Customize) landing on an agent whose
-/// settings modal is already open must reopen focused on the requested
-/// row — not toggle the modal closed.
+/// A focused open on an agent whose settings modal is already open must
+/// reopen focused on the requested row — not toggle the modal closed.
 #[test]
 fn dispatch_open_settings_focus_reopens_when_already_open() {
     use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
     let mut app = test_app_with_agent();
     let _ = dispatch(Action::OpenSettings, &mut app);
     let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -777,6 +709,266 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
         Some("coding_data_sharing"),
         "focused re-entry must land on the requested row"
     );
+    assert!(
+        matches!(state.mode(), SettingsModalMode::PickingEnum { .. }),
+        "focused re-entry must open the chooser, got {:?}",
+        state.mode()
+    );
+    assert!(
+        state.close_on_picker_exit,
+        "focused re-entry must arm close_on_picker_exit"
+    );
+}
+/// Chooser when editable, browse row when locked. The team-admin arm is the
+/// one a `team_name.is_some()` shortcut would break.
+#[test]
+fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    let open_focused = |app: &mut AppView| -> SettingsModalMode {
+        let _ = dispatch(
+            Action::OpenSettingsFocus {
+                key: "coding_data_sharing",
+            },
+            app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert_eq!(
+            state.focused_setting().map(|(k, _)| k),
+            Some("coding_data_sharing"),
+            "every landing focuses the row"
+        );
+        state.mode()
+    };
+    let mut app = test_app_with_agent();
+    assert!(
+        matches!(
+            open_focused(&mut app),
+            SettingsModalMode::PickingEnum { .. }
+        ),
+        "an editable setting opens its chooser"
+    );
+    let mut app = test_app_with_agent();
+    app.is_zdr = true;
+    assert!(
+        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        "ZDR must stop at the row that says so"
+    );
+    let mut app = test_app_with_agent();
+    app.team_name = Some("acme".to_string());
+    app.team_role = Some("member".to_string());
+    assert!(
+        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        "a team-managed lock must stop at the row that says so"
+    );
+    let mut app = test_app_with_agent();
+    app.team_name = Some("acme".to_string());
+    app.team_role = Some("admin".to_string());
+    assert!(
+        matches!(
+            open_focused(&mut app),
+            SettingsModalMode::PickingEnum { .. }
+        ),
+        "a team admin is not locked"
+    );
+}
+/// Focused open that enters the chooser sets `close_on_picker_exit` so Esc
+/// dismisses the modal (GB-4470). Locked landings stay in Browse with the
+/// flag clear — chrome Esc already closes.
+#[test]
+fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::OpenSettingsFocus {
+            key: "coding_data_sharing",
+        },
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("settings modal must be open")
+    };
+    assert!(
+        matches!(state.mode(), SettingsModalMode::PickingEnum { .. }),
+        "editable focus must open the chooser"
+    );
+    assert!(
+        state.close_on_picker_exit,
+        "deep-link chooser open must set close_on_picker_exit"
+    );
+    let mut app = test_app_with_agent();
+    app.is_zdr = true;
+    let _ = dispatch(
+        Action::OpenSettingsFocus {
+            key: "coding_data_sharing",
+        },
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("settings modal must be open")
+    };
+    assert!(matches!(state.mode(), SettingsModalMode::Browse));
+    assert!(
+        !state.close_on_picker_exit,
+        "locked focus must not set close_on_picker_exit"
+    );
+}
+/// Plain OpenSettings does not arm close-on-picker-Esc.
+#[test]
+fn dispatch_open_settings_does_not_set_close_on_picker_exit() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::OpenSettings, &mut app);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("settings modal must be open")
+    };
+    assert!(!state.close_on_picker_exit);
+}
+/// Full path: `/privacy`-style focus open → Esc dismisses the settings modal.
+#[test]
+fn open_settings_focus_esc_closes_settings_modal() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(
+        Action::OpenSettingsFocus {
+            key: "coding_data_sharing",
+        },
+        &mut app,
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert!(matches!(
+            state.mode(),
+            SettingsModalMode::PickingEnum { .. }
+        ));
+        assert!(state.close_on_picker_exit);
+    }
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = app.handle_input(&esc);
+    assert!(
+        app.agents.get(&id).unwrap().active_modal.is_none(),
+        "deep-link Esc must dismiss the settings modal"
+    );
+}
+/// Full path: `/privacy`-style focus open → Enter commits and dismisses.
+#[test]
+fn open_settings_focus_enter_closes_settings_modal() {
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(
+        Action::OpenSettingsFocus {
+            key: "coding_data_sharing",
+        },
+        &mut app,
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert!(matches!(
+            state.mode(),
+            SettingsModalMode::PickingEnum { .. }
+        ));
+        assert!(state.close_on_picker_exit);
+    }
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let outcome = app.handle_input(&enter);
+    assert!(
+        app.agents.get(&id).unwrap().active_modal.is_none(),
+        "deep-link Enter must dismiss the settings modal"
+    );
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Action(Action::SetCodingDataSharing { .. })
+        ),
+        "deep-link Enter must commit SetCodingDataSharing, got {outcome:?}"
+    );
+}
+/// Browse path: OpenSettings → enter picker → Esc keeps modal open in Browse.
+#[test]
+fn open_settings_enter_picker_esc_stays_open_in_browse() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(Action::OpenSettings, &mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let Some(ActiveModal::Settings { state }) = &mut agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert!(state.focus_key("coding_data_sharing"));
+        assert!(state.try_enter_picking_enum());
+        assert!(!state.close_on_picker_exit);
+    }
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = app.handle_input(&esc);
+    let agent = app.agents.get(&id).unwrap();
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("browse-path Esc must keep the settings modal open")
+    };
+    assert!(
+        matches!(state.mode(), SettingsModalMode::Browse),
+        "browse-path Esc must return to Browse, got {:?}",
+        state.mode()
+    );
+}
+/// `ActionThenClose` closes the modal and forwards the preview-revert Action
+/// through `apply_settings_outcome` (handle_input path).
+#[test]
+fn deep_link_preview_esc_closes_modal_and_forwards_revert_action() {
+    use crate::app::app_view::InputOutcome;
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(Action::OpenSettings, &mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let Some(ActiveModal::Settings { state }) = &mut agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert!(state.focus_key("theme"));
+        assert!(state.try_enter_picking_enum());
+        state.close_on_picker_exit = true;
+        assert!(matches!(
+            state.mode(),
+            SettingsModalMode::PickingEnum { .. }
+        ));
+    }
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let outcome = app.handle_input(&esc);
+    assert!(
+        app.agents.get(&id).unwrap().active_modal.is_none(),
+        "ActionThenClose must clear active_modal"
+    );
+    match outcome {
+        InputOutcome::Action(Action::PreviewTheme(name)) => {
+            assert_eq!(name, "doge");
+        }
+        other => panic!("expected Action(PreviewTheme), got {other:?}"),
+    }
 }
 /// `dispatch_open_reset_confirm` moves the Settings modal state
 /// into the new `ResetSettingsConfirm` variant, preserving it
@@ -1008,10 +1200,6 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
     with_theme_test_env(|| {
-        // Pin Token Economy live cache to product defaults so a developer
-        // `$GROK_HOME` (e.g. min_implement_effort = 2) cannot poison the
-        // move-away → reset round-trip.
-        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
             if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {
@@ -1246,141 +1434,6 @@ fn pr13_set_show_tips_emits_persist_with_rollback() {
     }
     assert_eq!(app.show_tips, Some(true));
 }
-// ── auto_compact_threshold (percent or tokens) ─────────────────────
-
-#[test]
-fn set_auto_compact_threshold_first_commit_of_default_persists() {
-    use crate::settings::{AutoCompactThresholdChoice, SettingValue};
-    let mut app = test_app_with_agent();
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(95)),
-        &mut app,
-    );
-    assert_eq!(
-        effects.len(),
-        1,
-        "first commit of the default must persist (not silently no-op)"
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(95));
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    match &effects[0] {
-        Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        } => {
-            assert_eq!(*key, "auto_compact_threshold_percent");
-            assert_eq!(*value, SettingValue::Enum("95"));
-            // prev was None → effective default 95 is the rollback canonical.
-            assert_eq!(*rollback_value, SettingValue::Enum("95"));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
-/// Product contract: built-in default preference is 95% (not a token preset).
-#[test]
-fn auto_compact_threshold_default_is_95_percent() {
-    use crate::settings::{
-        AutoCompactThresholdChoice, SettingValue, canonical_auto_compact_threshold,
-    };
-    assert_eq!(
-        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-        95
-    );
-    assert_eq!(canonical_auto_compact_threshold(None, None), "95");
-    assert_eq!(
-        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
-        "95"
-    );
-    // Dispatching the default choice leaves percent mode active.
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(95)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(95));
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-    // Token preset is opt-in, not the default.
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Tokens(200_000)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_tokens, Some(200_000));
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    match &effects[0] {
-        Effect::PersistSetting { value, .. } => {
-            assert_eq!(*value, SettingValue::Enum("200k"));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-}
-
-#[test]
-fn set_auto_compact_threshold_idempotent_re_commit() {
-    use crate::settings::AutoCompactThresholdChoice;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    assert_eq!(app.auto_compact_threshold_percent, Some(98));
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    assert!(
-        effects.is_empty(),
-        "re-committing the same value must be idempotent, got {effects:?}"
-    );
-}
-
-#[test]
-fn set_auto_compact_threshold_toast_no_restart() {
-    use crate::settings::AutoCompactThresholdChoice;
-    let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("98%"),
-        "toast must include the value, got {toast:?}"
-    );
-    assert!(
-        !toast.contains("restart to apply"),
-        "live-applied setting must not toast restart, got {toast:?}"
-    );
-}
-
-#[test]
-fn auto_compact_rollback_from_none_state_restores_none() {
-    use crate::settings::{AutoCompactThresholdChoice, SettingValue};
-    let mut app = test_app_with_agent();
-    assert_eq!(app.auto_compact_threshold_percent, None);
-    let effects = dispatch(
-        Action::SetAutoCompactThreshold(AutoCompactThresholdChoice::Percent(98)),
-        &mut app,
-    );
-    let rollback_value = match &effects[0] {
-        Effect::PersistSetting { rollback_value, .. } => rollback_value.clone(),
-        _ => panic!("expected PersistSetting"),
-    };
-    // Effective default before first commit is 95.
-    assert_eq!(rollback_value, SettingValue::Enum("95"));
-    assert_eq!(app.auto_compact_threshold_percent, Some(98));
-    apply_setting_rollback(&mut app, "auto_compact_threshold_percent", &rollback_value);
-    assert_eq!(
-        app.auto_compact_threshold_percent, None,
-        "rollback from prev=None must restore None (not Some(95)) so AppView \
-         stays in sync with disk after a failed first-commit persist"
-    );
-    assert_eq!(app.auto_compact_threshold_tokens, None);
-}
-
 /// Idempotency — re-committing the same value is a no-op
 /// (no Effect). Mirror of `set_auto_compact_threshold_percent_idempotent_re_commit`.
 #[test]
@@ -1452,7 +1505,8 @@ fn pr13_show_tips_rollback_from_none_state_restores_none() {
 }
 /// Toast text includes the "(restart to apply)" cue —
 /// matches the modal pill so the user gets consistent restart
-/// feedback through both surfaces (startup-only settings like show_tips).
+/// feedback through both surfaces. Mirror of
+/// `set_auto_compact_threshold_percent_toast_includes_restart_marker`.
 #[test]
 fn pr13_set_show_tips_toast_includes_restart_marker() {
     let mut app = test_app_with_agent();
@@ -1482,9 +1536,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compact_mode" => {
             let _ = dispatch(Action::SetCompactMode(true), app);
         }
-        "hide_header" => {
-            let _ = dispatch(Action::SetHideHeader(true), app);
-        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
@@ -1496,9 +1547,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);
         }
-        "scrub_ascii_punct" => {
-            let away = !crate::appearance::cache::load_scrub_ascii_punct();
-            let _ = dispatch(Action::SetScrubAsciiPunct(away), app);
+        "confirm_before_rewind" => {
+            let away = !app.current_ui.confirm_before_rewind_enabled();
+            let _ = dispatch(Action::SetConfirmBeforeRewind(away), app);
         }
         "combine_queued_prompts" => {
             let away = !crate::appearance::cache::load_combine_queued_prompts();
@@ -1573,22 +1624,11 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
-        "plan_approval_park" => {
-            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_owned()), app);
-        }
         "show_tips" => {
             let _ = dispatch(Action::SetShowTips(false), app);
         }
         "auto_update" => {
             let _ = dispatch(Action::SetAutoUpdate(false), app);
-        }
-        "auto_compact_threshold_percent" => {
-            let _ = dispatch(
-                Action::SetAutoCompactThreshold(
-                    crate::settings::AutoCompactThresholdChoice::Percent(98),
-                ),
-                app,
-            );
         }
         "vim_mode" => {
             let _ = dispatch(Action::SetVimMode(true), app);
@@ -1626,8 +1666,23 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
         "always_expand_thinking" => {
             let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+        }
+        "scrub_ascii_punct" => {
+            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
+        }
+        "allow_worktree" => {
+            let _ = dispatch(Action::SetAllowWorktree(true), app);
+        }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(Action::SetBubbleCopyButtons(false), app);
+        }
+        "plan_approval_park" => {
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
         }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
@@ -1719,22 +1774,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
-        "respect_manual_folds" => {
-            let _ = dispatch(
-                Action::SetRespectManualFolds(
-                    !crate::appearance::ScrollConfig::default().respect_manual_folds,
-                ),
-                app,
-            );
-        }
-        "bubble_copy_buttons" => {
-            let _ = dispatch(
-                Action::SetBubbleCopyButtons(
-                    !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
-                ),
-                app,
-            );
-        }
         "cancel_subagents_on_turn_cancel" => {
             let _ = dispatch(
                 Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
@@ -1750,6 +1789,22 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "features.session_recap" => {
             let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
         }
+        "auto_compact_threshold_percent" => {
+            let _ = dispatch(
+                Action::SetAutoCompactThreshold(
+                    crate::settings::AutoCompactThresholdChoice::Percent(90),
+                ),
+                app,
+            );
+        }
+        "respect_manual_folds" => {
+            let _ = dispatch(
+                Action::SetRespectManualFolds(
+                    !crate::appearance::ScrollConfig::default().respect_manual_folds,
+                ),
+                app,
+            );
+        }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
         }
@@ -1764,6 +1819,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "voice_stt_language" => {
             let _ = dispatch(Action::SetVoiceSttLanguage("es".to_string()), app);
+        }
+        "default_reasoning_effort" => {
+            let _ = dispatch(Action::SetDefaultReasoningEffort("high".to_string()), app);
         }
         "fork_secondary_model" => {
             use agent_client_protocol as acp;
@@ -1882,7 +1940,6 @@ fn set_simple_mode_propagates_to_every_agent() {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2327,55 +2384,6 @@ fn set_show_thinking_blocks_applies_persists_and_rolls_back() {
         crate::appearance::cache::load_show_thinking_blocks(),
         "rollback must restore cache",
     );
-}
-#[test]
-fn set_always_expand_thinking_applies_persists_and_rolls_back() {
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::PersistSetting {
-                key: "always_expand_thinking",
-                value: crate::settings::SettingValue::Bool(true),
-                rollback_value: crate::settings::SettingValue::Bool(false),
-            }]
-        ),
-        "expected exactly one PersistSetting effect, got {effects:?}",
-    );
-    assert!(crate::appearance::cache::load_always_expand_thinking());
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(effects.is_empty(), "redundant set must be a no-op");
-    let _ = apply_setting_rollback(
-        &mut app,
-        "always_expand_thinking",
-        &crate::settings::SettingValue::Bool(false),
-    );
-    assert!(
-        !crate::appearance::cache::load_always_expand_thinking(),
-        "rollback must restore cache",
-    );
-}
-#[test]
-fn set_always_expand_thinking_expands_existing_thinking() {
-    use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::types::DisplayMode;
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    let id = agent
-        .scrollback
-        .push_block(RenderBlock::thinking("collapsed-until-setting"));
-    agent.scrollback.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
-    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    assert_eq!(
-        agent.scrollback.get_by_id(id).unwrap().display_mode,
-        DisplayMode::Expanded,
-        "turning always_expand_thinking on must expand existing thinking"
-    );
-    crate::appearance::cache::set_always_expand_thinking(false);
 }
 #[test]
 fn set_group_tool_verbs_applies_persists_and_rolls_back() {
@@ -3394,7 +3402,6 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
         assert!(crate::theme::cache::is_auto_mode());
-        // Product default auto-dark mapping is DOGE.
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::Doge,

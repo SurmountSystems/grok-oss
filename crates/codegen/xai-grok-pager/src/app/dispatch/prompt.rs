@@ -1,21 +1,22 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
-use super::auth::{scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt};
+use super::auth::{
+    scrollback_has_recent_context_too_large, scrollback_has_recent_disk_full,
+    scrollback_has_recent_reauth_prompt, scrollback_has_recent_request_failed,
+};
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
-    QueueDrain, apply_turn_start_shim, drain_prompt_state_to_last_queued,
-    immediate_server_send_eligible, maybe_drain_queue, note_peek_page_flip, push_server_queue_echo,
+    apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
+    maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
     retire_optimistic_echo,
 };
 use super::router::dispatch;
-use super::session::fork::open_project_question;
-use super::session::lifecycle::skip_picker_and_create_session;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, DoctorFixTarget, Effect};
-use crate::app::agent::{AgentId, AgentState};
+use crate::app::agent::{AgentCommand, AgentId, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
@@ -188,7 +189,6 @@ pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
         interject::record_interject_prompt_history(agent, &text);
         // Clears chips/images via PromptWidget::set_text empty path.
         agent.prompt.set_text("");
-        agent.clear_unsent_prompt_draft();
     });
     vec![]
 }
@@ -200,10 +200,15 @@ pub(super) fn dispatch_open_history_search(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
         let history = agent.combined_prompt_history();
         let current_text = agent.prompt.text().to_string();
-        agent
+        let opened = agent
             .prompt
             .history_search
             .activate(&history, &current_text);
+        if !opened {
+            // Matcher thread didn't start: the overlay stays closed on
+            // purpose (nothing could ever populate it).
+            tracing::debug!("history search unavailable: matcher spawn failed");
+        }
     });
     vec![]
 }
@@ -402,59 +407,6 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
-/// Immediate ACK when a follow-up is accepted into the queue while the session
-/// is busy (turn running or background-subagent hold). Composer is already
-/// clear; without this the send can feel swallowed when the ephemeral tip is
-/// seen-capped, config-off, or unrenderable.
-fn ack_followup_queued(app: &mut AppView) {
-    let ActiveView::Agent(id) = app.active_view else {
-        return;
-    };
-    if let Some(agent) = app.agents.get_mut(&id) {
-        // P2/Q1: during Revise/Clarify rewrite there is no live plan-feedback
-        // channel. Prefer an honest toast over bare "Queued" so notes do not
-        // feel silently lost into a revise that already unparked.
-        if agent.plan_feedback_in_flight.is_some() {
-            agent.show_toast(crate::views::plan_approval_view::PLAN_FEEDBACK_QUEUE_TOAST);
-        } else {
-            agent.show_toast("Queued");
-        }
-    }
-}
-
-/// Whether submitting `text` may open the project picker. Slash commands,
-/// `exit`/`quit` aliases, and empty input never send a prompt to the agent,
-/// so they must pass through untouched.
-pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
-    let t = text.trim();
-    !t.is_empty()
-        && !t.starts_with('/')
-        && !t.starts_with('!')
-        && !matches!(t, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!")
-}
-
-/// Token Economy: rewrite implement-loop effort on human submit paths.
-///
-/// Toasts once when effort is clamped or desired is injected. Non-implement
-/// text is unchanged. Shared with auto-run via
-/// [`crate::app::auto_implement::apply_implement_effort_for_product`].
-fn apply_implement_effort_on_submit(
-    agent: &mut crate::app::agent_view::AgentView,
-    text: String,
-) -> String {
-    if !crate::app::auto_implement::is_implement_command_sentence(&text)
-        && !xai_grok_shell::token_economy::is_implement_command(&text)
-    {
-        return text;
-    }
-    let economic = crate::appearance::cache::load_economic_mode();
-    let rewrite = crate::app::auto_implement::apply_implement_effort_for_product(&text, economic);
-    if let Some(toast) = rewrite.toast.as_deref() {
-        agent.show_toast(toast);
-    }
-    rewrite.command
-}
-
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -466,9 +418,7 @@ fn apply_implement_effort_on_submit(
 /// resolution and the downstream `Effect`s are identical in both cases.
 ///
 /// `literal = true` (follow-up chip click) submits `text` straight to the
-/// model: the slash-command, exit-alias, and project-picker branches are all
-/// skipped so server/model-controlled chip text can never execute a command
-/// nor be diverted into the project question.
+/// model: the slash-command and exit-alias branches are skipped so server/model-controlled chip text can never execute a command.
 pub(super) fn dispatch_send_prompt_inner(
     app: &mut AppView,
     text: String,
@@ -492,18 +442,15 @@ pub(super) fn dispatch_send_prompt_inner(
     } else {
         text
     };
+    let implement_rewrite = crate::app::auto_implement::apply_implement_effort_for_product(
+        &text,
+        crate::appearance::cache::load_economic_mode(),
+    );
+    let text = implement_rewrite.command;
 
     if app.reconnect_pending {
         app.show_toast("Reconnecting, please wait...");
         return vec![];
-    }
-
-    // The picker intercepts only real, user-authored prompts; slash commands,
-    // exit aliases, empty input, and literal chip submissions pass through so
-    // they never spawn it (a chip is a model suggestion for an already-running
-    // session, not the first-prompt project choice).
-    if !literal && input_can_trigger_project_picker(&text) && app.needs_project_picker() {
-        return open_project_question(app, text);
     }
 
     let ActiveView::Agent(id) = app.active_view else {
@@ -511,6 +458,7 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -519,14 +467,16 @@ pub(super) fn dispatch_send_prompt_inner(
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
-    // Local path while busy: toast "Queued" after drain if the row is still held
-    // (not when idle-clean drain starts a turn immediately — human rail is enough).
-    let mut ack_queued_after_local = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
+    let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    if let Some(toast) = implement_rewrite.toast {
+        agent.show_toast(&toast);
+    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is
     // still off-thread. Stash this send and re-issue it once the probe completes
@@ -596,6 +546,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
                 billing_surface_visible: app.usage_visible,
+                usage_command_visible: !app.has_external_auth_provider,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
@@ -610,25 +561,31 @@ pub(super) fn dispatch_send_prompt_inner(
                         .map(|(id, info)| (info.name.clone(), id.clone()))
                         .collect(),
                     coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+                    coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                     // Prefer optimistic pending over confirmed active.
                     plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
                     show_tips: show_tips_from_app,
                     auto_update: auto_update_from_app,
                     auto_compact_threshold_percent: app.auto_compact_threshold_percent,
                     auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
-                    vim_mode: crate::appearance::cache::load_vim_mode(),
-                    scroll_speed: crate::appearance::cache::load_scroll_speed(),
-                    respect_manual_folds: respect_manual_folds_from_app,
-                    auto_mode_gate: auto_mode_gate_from_app,
-                    ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
-                    voice_stt_language: voice_stt_language_from_app,
                     notifications_session_recap: app.notification_service.config().session_recap,
                     notifications_session_recap_threshold_secs: app
                         .notification_service
                         .config()
                         .session_recap_threshold_secs,
                     features_session_recap: app.features_session_recap,
-                    bubble_copy_buttons: app.appearance.scrollback.display.bubble_copy_buttons,
+                    vim_mode: crate::appearance::cache::load_vim_mode(),
+                    scroll_speed: crate::appearance::cache::load_scroll_speed(),
+                    respect_manual_folds: respect_manual_folds_from_app,
+                    auto_mode_gate: auto_mode_gate_from_app,
+                    ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
+                    voice_stt_language: voice_stt_language_from_app,
+                    // This session's own value (what its fires will actually
+                    // do), seed only until the session response lands.
+                    scheduler_background_loops: agent
+                        .scheduler_background_loops
+                        .unwrap_or(scheduler_background_loops_seed),
+                    default_reasoning_effort: app.default_reasoning_effort.clone(),
                 },
             };
 
@@ -655,15 +612,15 @@ pub(super) fn dispatch_send_prompt_inner(
                     });
                 }
                 if let Some(command) = command {
-                    if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
-                        // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /dashboard, …)
-                        // have nothing to act on in scrollback-native mode.
-                        // Surface a friendly system block instead of running them.
-                        CommandResult::Message(format!(
-                            "/{} is not available in minimal mode",
-                            invocation.token
-                        ))
+                    // Central screen-mode gate. Such a command is already
+                    // filtered out of every completion surface, but it stays
+                    // resolvable so a fully-typed invocation earns a hint that
+                    // names the way out instead of leaking to the model.
+                    if let Some(refusal) = command
+                        .mode_support()
+                        .refusal(invocation.token, ctx.screen_mode)
+                    {
+                        CommandResult::Message(refusal)
                     } else {
                         agent
                             .prompt
@@ -694,14 +651,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(msg));
                 return vec![];
             }
             CommandResult::Message(msg) => {
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(msg));
                 return vec![];
             }
             CommandResult::Doctor(request) => {
@@ -741,8 +698,6 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
-                // Token Economy: clamp implement-loop effort on display text.
-                let display_text = apply_implement_effort_on_submit(agent, display_text);
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
                 agent
@@ -780,8 +735,6 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
-                // Token Economy: clamp implement-loop effort on human /implement.
-                let pass_text = apply_implement_effort_on_submit(agent, pass_text);
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -796,15 +749,10 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
-            agent.clear_unsent_prompt_draft();
         }
-        // Every non-enqueue arm returned above. Queued slash work bypasses
-        // the picker, so create the deferred session or it never drains.
-        effects = skip_picker_and_create_session(app, id);
-    } else if !literal && matches!(trimmed, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!") {
+    } else if !literal && crate::slash::commands::exit::is_exit_alias(trimmed) {
         if consume_input {
             agent.prompt.set_text("");
-            agent.clear_unsent_prompt_draft();
         }
         return dispatch(Action::Quit, app);
     } else {
@@ -842,12 +790,10 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.clear_follow_ups();
         }
 
-        // Busy for Enter:queue = primary turn running only. Live background
-        // subagents do not force queue (operator 2026-08-09): primary idle
-        // sends a normal main turn. ACK immediately while primary is busy so
-        // Enter:queue never feels swallowed.
+        // If the user queues a follow-up while a turn is already running, surface
+        // a short tip advertising send-now — plain Enter queues; Enter again on
+        // the emptied composer sends the queued message now (cancel-and-send).
         let queued_while_running = agent.session.state.is_turn_running();
-        let queued_while_busy = queued_while_running;
 
         // Composer-recognized slash tokens at submit time: styles the
         // scrollback echo and rides the wire meta so replay restyles it.
@@ -857,7 +803,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .recognized_token_ranges(&text, &agent.session.models);
 
         let immediate_server_send =
-            immediate_server_send_eligible(agent) && agent.prompt.images.is_empty();
+            immediate_server_send_eligible(agent, leader_mode) && agent.prompt.images.is_empty();
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
@@ -873,13 +819,13 @@ pub(super) fn dispatch_send_prompt_inner(
             "plain prompt send routing decision",
         );
 
-        // Parked + held occupancy → append; empty held → cancel-and-send.
+        // Occupancy/park flags: only the image branch below immediately send-nows on an empty held wait.
         let parked_sendable_wait = agent.is_parked_on_sendable_wait();
         let hold_behind_existing_queue = parked_sendable_wait && agent.has_held_user_queue();
 
         // Images can't ride immediate server-send; empty-held park still send-nows.
         if !immediate_server_send
-            && immediate_server_send_eligible(agent)
+            && immediate_server_send_eligible(agent, leader_mode)
             && !agent.prompt.images.is_empty()
             && parked_sendable_wait
             && !hold_behind_existing_queue
@@ -887,7 +833,6 @@ pub(super) fn dispatch_send_prompt_inner(
             let images = agent.prompt.drain_images();
             if consume_input {
                 agent.prompt.set_text("");
-                agent.clear_unsent_prompt_draft();
             }
             // A new prompt is taking the wheel (same contract as the
             // immediate-send branch below).
@@ -907,20 +852,12 @@ pub(super) fn dispatch_send_prompt_inner(
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
-
-            // Empty-held park: cancel-and-send (not a hold). Occupied hold
-            // appends like a normal mid-turn queue.
-            let cancel_and_send = parked_sendable_wait && !hold_behind_existing_queue;
-            if cancel_and_send {
-                agent.arm_send_now_expectation(prompt_id.clone());
-                agent.suppress_parked_marker_on_interject();
-            }
+            // Plain image-free sends stay unarmed: shell queue state and cancelTrigger decide disposition.
 
             if consume_input {
                 // Plain prompt: no images to drain. Clear textarea + record
                 // up-arrow history (same as the local path's history insert).
                 agent.prompt.set_text("");
-                agent.clear_unsent_prompt_draft();
                 let trimmed_key = text.trim().to_string();
                 if !trimmed_key.is_empty() {
                     agent
@@ -951,12 +888,11 @@ pub(super) fn dispatch_send_prompt_inner(
                 Some(&sid_str),
                 Some(serde_json::json!({ "kind": "prompt", "len": text.len() })),
             );
-            // Queue path (not cancel-and-send): tip + always toast ACK.
-            if queued_while_busy && !cancel_and_send {
-                if queued_while_running && !parked_sendable_wait {
-                    maybe_show_send_now_tip(app);
-                }
-                ack_followup_queued(app);
+            if queued_while_running && !parked_sendable_wait {
+                maybe_show_send_now_tip(app);
+            }
+            if queued_while_running && let Some(agent) = app.agents.get_mut(&id) {
+                agent.maybe_toast_plan_feedback_queue();
             }
             return vec![Effect::SendPrompt {
                 agent_id,
@@ -974,15 +910,14 @@ pub(super) fn dispatch_send_prompt_inner(
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
             agent.prompt.set_text("");
-            agent.clear_unsent_prompt_draft();
         }
-        // Mid-turn tip (Enter to interject) only while a turn is running.
+        // Local queue while a turn is running (e.g. images attached): tip after
+        // this branch so the agent mut-borrow is released first.
         tip_send_now_after_queue = queued_while_running;
-        ack_queued_after_local = queued_while_busy;
     }
 
-    // Mid-turn local queue: advertise interject via the ephemeral tip when the
-    // status row is not already showing an "N queued" inline hint.
+    // Mid-turn local queue: advertise send-now via the ephemeral tip (skip during
+    // a sendable wait — the inline hint already says it).
     if tip_send_now_after_queue {
         let inline_hint_shown = app
             .agents
@@ -990,6 +925,9 @@ pub(super) fn dispatch_send_prompt_inner(
             .is_some_and(|agent| agent.held_queue_count() > 0);
         if !inline_hint_shown {
             maybe_show_send_now_tip(app);
+        }
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.maybe_toast_plan_feedback_queue();
         }
     }
 
@@ -1018,16 +956,6 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
-    // Busy local enqueue that remained held: toast so clear-composer is never silent.
-    if ack_queued_after_local {
-        let still_held = app
-            .agents
-            .get(&id)
-            .is_some_and(|agent| agent.held_queue_count() > 0 || agent.has_held_user_queue());
-        if still_held {
-            ack_followup_queued(app);
-        }
-    }
     effects
 }
 
@@ -1045,19 +973,12 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
     // Submitting a bash command retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
-    if agent.session.session_id.is_none() {
-        let effects = skip_picker_and_create_session(app, id);
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.session.enqueue_bash_command(command);
-            agent.prompt.set_text("");
-        }
-        return effects;
-    }
 
     // Store in prompt history with `! ` prefix for restore semantics.
     let history_key = format!("! {}", command.trim());
@@ -1076,7 +997,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     // into the shared queue with `kind="bash"`. On `running_prompt_id`
     // adoption the turn-start shim sets `bash_turn` (no user block). The IDLE
     // case is unchanged: enqueue locally + drain instantly.
-    let bash_immediate = immediate_server_send_eligible(agent);
+    let bash_immediate = immediate_server_send_eligible(agent, leader_mode);
     tracing::debug!(
         target: "qtrace",
         pid = std::process::id(),
@@ -1102,7 +1023,6 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         // deltas ours in the ACP gate once it becomes the running turn.
         agent.note_self_originated_prompt(&prompt_id);
         agent.prompt.set_text("");
-        agent.clear_unsent_prompt_draft();
 
         let sid_str = session_id.0.to_string();
         push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &command, "bash");
@@ -1121,7 +1041,6 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
 
     agent.session.enqueue_bash_command(command.clone());
     agent.prompt.set_text("");
-    agent.clear_unsent_prompt_draft();
 
     let drain = maybe_drain_queue(agent);
     note_peek_page_flip(app, id, drain.page_flip_entry);
@@ -1272,7 +1191,15 @@ pub(super) fn handle_prompt_response(
                 }
                 // Resolved-without-running never adopts; explicit for the
                 // session-less arm (no note_queue_echo_retired above).
-                agent.retire_send_now_painted_block(response_pid);
+                // Exception: an active-goal Send Now painted block still awaiting
+                // its interjection claim stays put — the `RemovedFromQueue`
+                // response is the expected outcome of routing the Send Now as an
+                // interjection, and `handle_interjection` converts the block in
+                // place. Retiring it here (before that claim wins the race) would
+                // drop and re-push the message at the scrollback end.
+                if !agent.is_send_now_awaiting_interjection_claim(response_pid) {
+                    agent.retire_send_now_painted_block(response_pid);
+                }
                 return vec![];
             }
         }
@@ -1312,25 +1239,50 @@ pub(super) fn handle_prompt_response(
         // block, so the generic TurnFailed + error toast are redundant. Derived
         // from the scrollback (mirrors reauth), not a session flag.
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
+        let disk_full_from_error = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| crate::app::effects::is_disk_full_error(e));
+        if disk_full_from_error && !scrollback_has_recent_disk_full(&agent.scrollback) {
+            agent
+                .scrollback
+                .push_block(RenderBlock::session_event(SessionEvent::DiskFull));
+        }
+        let disk_full = disk_full_from_error || scrollback_has_recent_disk_full(&agent.scrollback);
         // Fallback: if the retry notification didn't set the flag,
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
         // the retry notification arrives after the PromptResponse.
+        // The error text is already banner-formatted ("Request failed (402) —
+        // …"), so recover the status from it when the field is absent.
         let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| is_credit_limit_error(http_status, e));
+            || result.as_ref().err().is_some_and(|e| {
+                let status =
+                    http_status.or_else(|| crate::app::error_display::parse_http_status(e));
+                is_credit_limit_error(status, e)
+            });
         // A 401/auth failure already surfaced an actionable
         // `ReAuthRequired` prompt via the RetryState handler (which
         // runs before this PromptResponse). Suppress the redundant
         // "Turn failed" block + error toast so only the prompt shows.
+        // "(401)" matches both the raw "Unauthorized (401)" dump and the
+        // banner-formatted "Request failed (401) — …" text.
         let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
             || (http_status == Some(401)
-                && result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("Unauthorized (401)")));
+                && result.as_ref().err().is_some_and(|e| e.contains("(401)")));
+        let request_failed_shown = scrollback_has_recent_request_failed(&agent.scrollback);
+        // A dedicated prompt/modal/banner replaces the generic TurnFailed
+        // marker and error toast (rate limit, free-usage paywall, model
+        // incompatibility, credit 402/403, 401 re-auth, context overflow,
+        // disk-full, or a formatted RequestFailed banner from RetryState).
+        let dedicated_ux_shown = rate_limited
+            || free_usage_blocked
+            || model_incompatible
+            || credit_limit_blocked
+            || reauth_prompted
+            || context_overflow
+            || disk_full
+            || request_failed_shown;
         let elapsed = agent.turn_elapsed();
 
         {
@@ -1391,14 +1343,6 @@ pub(super) fn handle_prompt_response(
             .current_prompt_id
             .clone()
             .or_else(|| response_pid.clone());
-        // Killall mid-child: keep cancel-resume text across finish_turn so a
-        // successful parent exit with live background subagents can re-arm the
-        // parent implement prompt on disk.
-        let cancel_resume_keep_text = agent
-            .session
-            .prompt_text_for_cancel_resume()
-            .map(str::to_string);
-        let cancel_resume_keep_pid = agent.session.current_prompt_id.clone();
 
         agent.session.finish_turn(&mut agent.scrollback);
 
@@ -1416,20 +1360,9 @@ pub(super) fn handle_prompt_response(
                 // form here — only wake markers use the honest `None` form.
                 elapsed: Some(elapsed.unwrap_or_default()),
             }),
-            (Err(_), _)
-                if rate_limited
-                    || free_usage_blocked
-                    || model_incompatible
-                    || credit_limit_blocked
-                    || reauth_prompted
-                    || context_overflow =>
-            {
-                // Skip TurnFailed when a dedicated prompt/modal shows instead
-                // (rate limit, free-usage paywall, model incompatibility,
-                // credit 403, 401 re-auth, or a terminal context-window
-                // overflow).
-                None
-            }
+            (Err(_), _) if dedicated_ux_shown => None,
+            // `err` is already banner-formatted by `format_acp_error` at the
+            // producer — the single formatting owner. Don't re-format here.
             (Err(err), _) => Some(SessionEvent::TurnFailed {
                 error: err.clone(),
                 elapsed,
@@ -1451,14 +1384,7 @@ pub(super) fn handle_prompt_response(
                 };
                 Some((NotificationEventKind::TurnComplete, body))
             }
-            (Err(err), _)
-                if !rate_limited
-                    && !free_usage_blocked
-                    && !model_incompatible
-                    && !credit_limit_blocked
-                    && !reauth_prompted
-                    && !context_overflow =>
-            {
+            (Err(err), _) if !dedicated_ux_shown => {
                 Some((NotificationEventKind::AgentError, format!("Error: {err}")))
             }
             _ => None,
@@ -1472,13 +1398,9 @@ pub(super) fn handle_prompt_response(
         // so any pending permissions are stale. Send Cancelled to each.
         drain_permission_queue(agent);
 
-        // Soft-park may still be awaiting Approve/Notes/Clarify/Revise/Quit
-        // (live reverse-request). Do not wipe that chrome on turn-end — only
-        // drop leftovers with no open response channel. Explicit cancel-turn
-        // still hard-wipes (see turn.rs).
+        // Keep live soft-park. When plan mode is still on without a
+        // reverse-request, park the five-CTA panel.
         agent.dismiss_plan_approval_after_turn_if_stale();
-        // Plan mode still on, no reverse-request chrome: auto-open review
-        // panel + toast so freeform "waiting on plan panel" is not a dead end.
         agent.surface_idle_plan_review_if_needed();
 
         agent.cancel_turn_view = None;
@@ -1503,42 +1425,28 @@ pub(super) fn handle_prompt_response(
             // mirroring the local non-empty-queue behavior.
             let queue_empty =
                 agent.session.pending_prompts.is_empty() && pending_adoption.is_none();
-            let session_name = crate::notifications::title::resolve_session_title_name(
-                agent.display_name.as_deref(),
-                agent.generated_session_title.as_deref(),
-            )
-            .map(str::to_owned);
+            let session_name = agent
+                .display_name
+                .as_deref()
+                .or(agent.generated_session_title.as_deref());
 
             // Skip idle escapes when queue is non-empty — the next
             // turn starts immediately and would overwrite them (title flicker).
             if queue_empty {
                 let cwd_str = app.cwd.to_string_lossy();
                 let model = agent.session.models.current_model_name();
-                // Parent turn is idle, but L2 children may still be live.
-                // Forcing a fully idle DE title here races the next tick and
-                // can flush session-only OSC on draw (pending skips recompute).
-                let has_running_subagents =
-                    crate::app::app_view::agent_has_running_title_subagents(agent);
-                let subagent_wait =
-                    has_running_subagents.then_some(crate::acp::tracker::TurnActivity::Waiting(
-                        crate::acp::tracker::WaitingReason::Subagent,
-                    ));
-                // busy_agent_count under-counts other top-level agents (we only
-                // hold this AgentView). Next update_notifications tick fills.
-                let post_turn_title = crate::notifications::TitleState {
-                    session_name: session_name.as_deref(),
+                let idle_title = crate::notifications::TitleState {
+                    session_name,
                     model: model.as_deref(),
-                    activity: subagent_wait.as_ref(),
+                    activity: None,
                     has_pending_permissions: false,
                     cwd: Some(&cwd_str),
                     turn_elapsed: None,
-                    is_busy: has_running_subagents,
-                    busy_agent_count: usize::from(has_running_subagents),
+                    is_busy: false,
                     focused: true,
                 };
-                app.pending_notification_escapes = app
-                    .notification_service
-                    .build_idle_escapes(&post_turn_title);
+                app.pending_notification_escapes =
+                    app.notification_service.build_idle_escapes(&idle_title);
             }
 
             if kind != NotificationEventKind::TurnComplete || queue_empty {
@@ -1597,28 +1505,19 @@ pub(super) fn handle_prompt_response(
         // prompt is retried automatically; otherwise the upsell
         // is shown.
         if credit_limit_blocked {
-            // Strip stale "Retry failed" / "Turn failed" error blocks
-            // that were pushed before the credit-limit was detected.
-            // Walk backwards from the end and remove matching events.
-            let mut to_remove = Vec::new();
-            for idx in (0..agent.scrollback.len()).rev() {
-                match agent.scrollback.entry(idx).map(|e| &e.block) {
-                    Some(crate::scrollback::block::RenderBlock::SessionEvent(ev))
-                        if matches!(
-                            &ev.event,
-                            SessionEvent::RetryFailed { .. } | SessionEvent::TurnFailed { .. }
-                        ) =>
-                    {
-                        to_remove.push(idx);
-                    }
-                    // Stop at the first non-error block.
-                    Some(
-                        crate::scrollback::block::RenderBlock::SessionEvent(_)
-                        | crate::scrollback::block::RenderBlock::System(_),
-                    ) => continue,
-                    _ => break,
-                }
-            }
+            // Strip stale error blocks that were pushed before the
+            // credit-limit was detected.
+            let to_remove: Vec<usize> = super::auth::trailing_session_events(&agent.scrollback)
+                .filter(|(_, ev)| {
+                    matches!(
+                        ev,
+                        SessionEvent::RequestFailed { .. }
+                            | SessionEvent::RetryFailed { .. }
+                            | SessionEvent::TurnFailed { .. }
+                    )
+                })
+                .map(|(idx, _)| idx)
+                .collect();
             for idx in to_remove {
                 agent.scrollback.remove_from(idx);
             }
@@ -1667,79 +1566,7 @@ pub(super) fn handle_prompt_response(
             None
         };
 
-        // Auto-run a sentence-leading `/implement` follow-up from the prior
-        // user prompt (settings-gated, default on). Before drain so the
-        // enqueue is visible to `maybe_drain_queue`. Skip cancel/error/bash
-        // and when a server adoption already owns the running slot.
-        if result.is_ok()
-            && !was_cancelling
-            && !was_bash_turn
-            && agent.session.current_prompt_id.is_none()
-        {
-            crate::app::auto_implement::on_successful_turn_end(agent);
-            // Successful finish: clear marker unless live background subagents
-            // still own incomplete work (implement killall dogfood).
-            super::turn::finalize_cancel_resume_after_successful_turn(
-                agent,
-                cancel_resume_keep_text.as_deref(),
-                cancel_resume_keep_pid.as_deref(),
-            );
-        } else if result.is_err()
-            && !was_cancelling
-            && !rate_limited
-            && !credit_limit_blocked
-            && !free_usage_blocked
-            && agent.session.current_prompt_id.is_none()
-        {
-            // Failed PromptResponse (not rate-limit / credits): ensure a
-            // cancel-resume marker is on disk so reopen / `/rebuild` auto-
-            // resumes even when an older clear-on-error path wiped the eager
-            // turn-start file. History recovery also covers the no-marker
-            // case via `last_primary_user_turn_failed_in_replay` after load
-            // replay of durable `stop_reason: error`.
-            if let Some(text) = cancel_resume_keep_text
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-            {
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Some(marker) =
-                    xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
-                        text,
-                        cancel_resume_keep_pid.as_deref(),
-                        now,
-                    )
-                {
-                    let cwd = agent.session.cwd.to_string_lossy().into_owned();
-                    if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.as_ref()) {
-                        match xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
-                            &cwd, sid, &marker,
-                        ) {
-                            Ok(()) => tracing::info!(
-                                session = %sid,
-                                prompt_len = text.len(),
-                                "canceled_turn_resume: marker written (error terminal PromptResponse)"
-                            ),
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                session = %sid,
-                                "canceled_turn_resume: error-terminal write failed"
-                            ),
-                        }
-                    }
-                }
-            }
-        }
-
-        // Soft stop: take effect after this top-level turn finishes; hold drain.
-        // Collect toast before releasing the agent borrow.
-        let soft_stop_toast = app.soft_stop.on_top_level_turn_finished();
-        let block_drain = app.soft_stop.blocks_drain() || app.global_work_pause.is_active();
-        let drain = if block_drain {
-            QueueDrain::blocked()
-        } else {
-            maybe_drain_queue(agent)
-        };
+        let drain = maybe_drain_queue(agent);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
 
@@ -1773,10 +1600,9 @@ pub(super) fn handle_prompt_response(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
+            force_refresh: false,
         });
-        if let Some(toast) = soft_stop_toast {
-            agent.show_toast(&toast);
-        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }
@@ -1789,10 +1615,23 @@ pub(super) fn handle_compact_complete(
     result: Result<(), String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        // Defensive: only process if we're still in CommandRunning state.
-        // This guards against state machine bugs or future cancellation support.
-        if !matches!(agent.session.state, AgentState::CommandRunning { .. }) {
-            tracing::debug!("Ignoring CompactComplete (not in CommandRunning state)");
+        // Defensive: only process if we're still in a compact command state.
+        let was_cancelling = matches!(
+            agent.session.state,
+            AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        );
+        if !matches!(
+            agent.session.state,
+            AgentState::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            } | AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        ) {
+            tracing::debug!("Ignoring CompactComplete (not in compact command state)");
             return vec![];
         }
 
@@ -1805,6 +1644,11 @@ pub(super) fn handle_compact_complete(
                     SessionEvent::CompactCompleted {
                         elapsed: elapsed.unwrap_or_default(),
                     },
+                ));
+            }
+            Err(err) if was_cancelling || err.contains("compact cancelled") => {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::CompactionCancelled,
                 ));
             }
             Err(err) => {

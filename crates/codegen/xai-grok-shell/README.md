@@ -232,7 +232,9 @@ export GROK_AUTH_TOKEN_TTL=3600               # optional
 
 If your binary outputs a bare token string (not JSON with `expires_in`), set `auth_token_ttl` to the token's expected lifetime in seconds. Without it, Grok cannot detect expiry proactively and will only refresh after a 401.
 
-The command is run via `sh -c`, so it can be a binary path, a shell script, or a pipeline.
+The command runs through the platform shell — `sh -c` on macOS/Linux, `cmd /C` on Windows — so it can be a binary path, a script, or a pipeline.
+
+> **Windows:** write the path as a TOML *literal* string (single quotes) so backslashes survive: `auth_provider_command = 'C:\corp\grok-auth.exe'`. Inside a double-quoted TOML string `\t`, `\n`, `\r`, `\b` and `\f` are escape sequences, so `"C:\temp\auth.exe"` parses into a path containing a tab character and the provider fails to start — after which Grok falls back to browser login as if the setting were ignored.
 
 When `auth_provider_label` is set, the TUI welcome screen shows **"Login with Acme Corp"** instead of "Login with grok.com". In headless mode (`grok -p`), the label has no effect — stderr from your binary is printed directly to the terminal.
 
@@ -266,16 +268,25 @@ echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 
 #### Example: Auth Binary with Refresh Support
 
-When Grok needs to refresh an expired token, it re-runs your binary with `GROK_AUTH_EXPIRED=1` set in the environment. Your binary can use this to take a faster silent-refresh path:
+Grok runs your binary on two different contracts, and `GROK_AUTH_EXPIRED` is how it tells them apart:
+
+| | `GROK_AUTH_EXPIRED=1` | unset |
+|---|---|---|
+| **What it is** | A headless refresh over a credential Grok already holds — near-expiry rotation, or a token the server rejected | A sign-in: `grok login`, the sign-in screen, or the escalation after a headless run couldn't mint |
+| **Is anyone watching?** | No. stdin is closed and nothing renders your prompts | Yes. A user is waiting, and your stderr reaches them |
+| **Budget** | A few seconds (7s), then Grok kills the process | 300s — enough for a browser round trip or a device code |
+| **So your binary should** | Mint silently, or **exit non-zero**. Never block | Do the full SSO flow, and always mint fresh |
 
 ```bash
 #!/bin/sh
 if [ "$GROK_AUTH_EXPIRED" = "1" ]; then
-    # Token expired — attempt silent refresh (no user interaction)
+    # Headless: silent refresh only. If that can't work — the SSO session
+    # lapsed, say — exit non-zero rather than block. Grok then shows the
+    # sign-in screen, which re-runs this binary with the variable unset.
     echo "Refreshing token..." >&2
-    TOKEN=$(my-company-auth --refresh --silent)
+    TOKEN=$(my-company-auth --refresh --silent) || exit 1
 else
-    # First login — full interactive SSO flow
+    # A user is attached — full interactive SSO flow.
     echo "Authenticating via Acme Corp SSO..." >&2
     TOKEN=$(my-company-auth --login --interactive)
 fi
@@ -288,7 +299,11 @@ fi
 echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 ```
 
-`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh.
+Exiting promptly on `GROK_AUTH_EXPIRED=1` is what makes the handover to the sign-in screen fast: a binary that blocks instead pays the whole refresh timeout on every start with an expired token.
+
+One case stays ambiguous, and only in **leader mode** (`--leader`, or `[cli] use_leader = true`; off by default): with no credential at all, the leader makes one extra attempt in the background just after startup, and that run has the variable unset, like a sign-in. A binary that mints without help (service account, keytab, mounted token) succeeds there and the session heals itself. One that must prompt just sits, up to the 300s sign-in ceiling — nothing waits on it, the sign-in screen is already up, and its stderr goes to `~/.grok/leader.log` rather than to the user.
+
+`GROK_AUTH_EXPIRED` is optional — if your binary ignores it, Grok still works. It just runs the same flow for both login and refresh, and a flow that prompts will be killed on the headless run before it can finish.
 
 ### Automatic Credential Refresh
 
@@ -300,6 +315,7 @@ This is transparent — you don't need to do anything. Grok handles it in the ba
 
 - **Before expiry:** If your binary returned `expires_in` in its JSON output, or you set `auth_token_ttl` in config, Grok re-runs the binary ~5 minutes before the token expires, so you never see an auth error.
 - **On auth error:** If the server rejects a request with 401/403 (e.g. token was revoked or expired), Grok re-runs the binary and retries the request once.
+- **When the refresh run can't mint:** refreshes are headless (no stdin, short timeout), so a binary that needs you to complete an SSO flow cannot succeed there. Grok then stops treating the stored credential as usable and runs your binary in its interactive mode instead — at startup that is the same sign-in flow a machine with no credentials gets; mid-session the turn fails with a re-auth prompt and `/login` re-runs the binary.
 - **OIDC:** If you're using OIDC and have a `refresh_token`, Grok silently refreshes via your IdP without re-opening the browser.
 
 **Tuning the refresh buffer:**
@@ -328,10 +344,11 @@ Common log messages:
 
 | Log message | What it means |
 |-------------|---------------|
-| `auth: running external auth provider` | Your binary is being called (includes the command and whether it's a refresh) |
+| `auth: running external auth provider (headless refresh)` | Your binary is being called with `GROK_AUTH_EXPIRED=1` and a few seconds to work |
+| `auth: running external auth provider (interactive login)` | Your binary is being called on the sign-in contract: no `GROK_AUTH_EXPIRED`, stderr shown, 300s |
 | `auth: external auth provider returned fresh token` | Success — token was parsed and stored |
 | `auth: external auth provider failed` | Binary exited non-zero, or exited 0 but stdout was empty/unparseable (the `error` field has details) |
-| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the timeout (60s initial, 5s mid-session refresh) and was killed |
+| `auth: external auth provider timed out (likely needs interactive auth), killing` | Binary didn't exit before the 7s headless-refresh timeout and was killed. Exiting non-zero on `GROK_AUTH_EXPIRED=1` avoids this wait entirely |
 | `auth: failed to start external auth provider` | The command couldn't be spawned (e.g. binary not found) |
 
 ### Per-Model Auth Providers
@@ -1349,12 +1366,6 @@ output_byte_limit = 65536              # max output size (64KB)
 [toolset.web_fetch]
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL (all requests routed through it)
 allowed_domains = ["docs.rs", "x.ai"]           # override the built-in ~84-domain allowlist
-
-[shortcuts]
-send = ["Enter"]
-newline = ["Shift+Enter", "Alt+Enter"]
-quit = ["Ctrl+D", "Ctrl+Q"]
-confirm_quit = true
 ```
 
 ### Telemetry
@@ -1447,10 +1458,45 @@ If LSP tools are enabled but no usable server config is found, Grok emits a non-
 | `initializationOptions` | JSON passed during LSP initialize. |
 | `settings` | Configuration sent via workspace settings updates. |
 | `workspaceFolder` | Override workspace folder path sent to the server. |
+| `workspaceOpen` | Solution or projects to load, for servers that need to be told explicitly (see below). |
 | `startupTimeout` | Max startup wait in milliseconds before startup is considered failed. |
 | `shutdownTimeout` | Max graceful shutdown wait in milliseconds. |
 | `restartOnCrash` | Whether to restart the server after a crash. |
 | `maxRestarts` | Maximum restart attempts before giving up. |
+
+#### Telling a server which solution to load (`workspaceOpen`)
+
+Most servers work out what to analyze from the workspace folder. A few do not,
+and instead load their workspace through a protocol extension. The C# server
+(`Microsoft.CodeAnalysis.LanguageServer`, "Roslyn") is the notable one: on its
+own it treats every file as a loose "miscellaneous file" and reports no
+project-level diagnostics at all, until it is told to open a solution or a set
+of projects.
+
+```json
+{
+  "csharp": {
+    "command": "dotnet",
+    "args": [
+      "/path/to/Microsoft.CodeAnalysis.LanguageServer.dll",
+      "--stdio",
+      "--logLevel", "Warning",
+      "--extensionLogDirectory", "/tmp/roslyn-logs"
+    ],
+    "extensionToLanguage": { ".cs": "csharp" },
+    "workspaceOpen": { "solution": "MyApp.sln" },
+    "startupTimeout": 60000
+  }
+}
+```
+
+Use `"projects": ["src/App/App.csproj", "src/Lib/Lib.csproj"]` instead of
+`"solution"` when there is no solution file. Paths may be absolute or relative
+to the workspace root. Wrappers such as `roslyn-language-server` already send
+these notifications themselves, in which case `workspaceOpen` can be omitted.
+
+Note that `--logLevel` is required by that server, and that anything more
+verbose than `Warning` makes it stream every internal log line to the client.
 
 #### Installing language servers
 
@@ -1735,6 +1781,32 @@ Grok discovers hooks from `.grok/hooks/` in the project directory. Manage them w
 /hooks-trust             # trust this project for hook execution
 /hooks-add <path>        # add a custom hook file or directory
 ```
+
+### Hooks in config files
+
+Hooks can also be defined directly in the config layers, so they can be
+distributed with your other configuration instead of as separate JSON files. Add
+a `[[hooks.<Event>]]` table to `config.toml` (your own), `managed_config.toml`, or
+`requirements.toml`:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+  [[hooks.PreToolUse.hooks]]
+  type = "command"
+  command = "/opt/guard/pretooluse.sh"   # use an absolute path
+  timeout = 10
+```
+
+The schema matches the JSON `hooks` object used in hook files. Hooks are read from
+every layer and combined additively: a lower-priority layer can add hooks but
+never removes or replaces another layer's block. Each hook's `/hooks-list` name is
+prefixed with the layer it came from (for example `managed:` or
+`requirements/user:`).
+
+Config-layer hooks are convenience distribution, not an enforcement boundary: on
+an unmanaged device a user can still edit these files. Tamper-resistant,
+admin-enforced hooks are tracked separately.
 
 ---
 
@@ -2028,7 +2100,7 @@ args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
 
 If you also have a `linear` server in `~/.grok/config.toml`, the project version replaces it entirely.
 
-> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, shortcuts, etc.) are only read from `~/.grok/config.toml`.
+> **Note:** Only `[mcp_servers]` is supported in project-scoped `.grok/config.toml`. Other config sections (models, etc.) are only read from `~/.grok/config.toml`.
 
 ### Tool Naming
 
@@ -2257,7 +2329,8 @@ restrict_network = true
 # Paths the agent can read but NOT write/delete
 read_only = ["/data"]
 
-# Additional writable paths
+# Additional writable paths (literal directory grants — no globs;
+# trailing /** is treated as the parent directory)
 read_write = ["/tmp/scratch"]
 
 # Paths denied entirely

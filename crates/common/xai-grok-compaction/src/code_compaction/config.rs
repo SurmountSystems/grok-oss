@@ -76,13 +76,11 @@ impl AutoCompactThreshold {
     pub fn as_percent_of(self, context_window: u64) -> u8 {
         match self {
             Self::Percent(p) => p.min(100),
-            Self::Tokens(t) => {
-                if context_window == 0 {
-                    0
-                } else {
-                    ((t.saturating_mul(100)) / context_window).min(100) as u8
-                }
-            }
+            Self::Tokens(t) => t
+                .saturating_mul(100)
+                .checked_div(context_window)
+                .map(|p| p.min(100) as u8)
+                .unwrap_or(0),
         }
     }
 }

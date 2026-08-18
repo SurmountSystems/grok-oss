@@ -30,6 +30,52 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's per-session scratch staging on
 /// teardown. A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+/// SessionEnd hooks + stop dispatch. Shared so channel-closed and Shutdown
+/// cannot drift on hook ordering (memory save still runs after this).
+async fn fire_session_end_hooks(session: &SessionActor, reason: &str) {
+    let envelope = session.fire_hook(
+        xai_grok_hooks::event::HookEventName::SessionEnd,
+        None,
+        xai_grok_hooks::event::HookPayload::SessionEnd {
+            reason: reason.to_string(),
+            turn_count: None,
+            tool_call_count: None,
+        },
+    );
+    if let Some(registry) = session.hook_registry.borrow().clone() {
+        let ctx = session.hook_run_ctx();
+        let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
+            &registry,
+            xai_grok_hooks::event::HookEventName::SessionEnd,
+            &envelope,
+            &ctx,
+        )
+        .await;
+        session
+            .send_hook_execution("session_end", None, None, &results)
+            .await;
+    }
+    session.dispatch_session_end_stop(reason).await;
+}
+/// Cancel the feedback sync loop, drain/sync under exit budgets, persist
+/// background-task state, and drop scratch. Owns the single final signal sync
+/// via [`FeedbackManager::shutdown`] — the sync loop cancel arm does not sync.
+///
+/// `FeedbackManager::shutdown` short-circuits force_sync/drain when telemetry
+/// is off or the session is empty with nothing pending (empty open→exit).
+async fn finish_session_exit_feedback(session: &SessionActor) {
+    if let Some(cancel) = &session.sync_loop_cancel {
+        cancel.cancel();
+    }
+    session
+        .feedback_manager
+        .shutdown(session.upload_queue.get())
+        .await;
+    if !session.startup_hints.is_subagent {
+        session.persist_background_task_manifest().await;
+    }
+    cleanup_session_scratch(session);
+}
 impl SessionActor {
     /// Serialize terminal task-wake admission with interactive cancellation.
     pub(super) async fn admit_task_completion_wake(
@@ -110,7 +156,10 @@ async fn shutdown_workflows(session: &SessionActor) {
         return;
     }
     match tokio::time::timeout(std::time::Duration::from_secs(2), ack).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(%error, "workflow shutdown persistence flush failed")
+        }
         Ok(Err(_)) => {
             tracing::warn!("workflow shutdown persistence actor dropped flush ack")
         }
@@ -392,143 +441,16 @@ pub(super) async fn run_session(
                         }
                     }
                 }
-                maybe_completion = completion_rx.recv() => {
-                    let Some((prompt_id, result)) = maybe_completion else {
-                        // Channel closed - shutdown feedback sync loop
-                        shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
-                        cleanup_session_scratch(&session);
-                        return;
-                    };
-                    // Flush any buffered turn deltas before `handle_completion`
-                    // emits the durable `TurnCompleted`, so the terminal lands
-                    // in updates.jsonl strictly after the turn's last
-                    // `session/update` delta. Mirrors the Cancel / Shutdown /
-                    // FlushComplete arms.
-                    if let Some(notification) = replay_buffer.flush() {
-                        session.emit_buffered(notification).await;
-                    }
-                    let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
-                        SessionActor::post_turn_goal_degradation_plan(&result);
-                    session.handle_completion(prompt_id, result).await;
-                    // Drain any monitor events that were routed to the mid-turn buffer
-                    // but arrived after the turn ended (race between is_turn_active and buffer push).
-                    session.drain_monitor_buffer_to_pending().await;
-                    if let Some(message) = infra_pause_message {
-                        session.apply_infra_pause_after_turn_err(message).await;
-                    }
-                    // Goal continuation (success) or back-off (non-success).
-                    // Owns the streak-tracking and reminder-injection path.
-                    session
-                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
-                        .await;
-                    // Interjections that raced past the turn's final drain
-                    // (arrived during turn-end bookkeeping) have no turn left
-                    // to merge into — convert them to front-of-queue prompt
-                    // turns so the message runs instead of stranding.
-                    //
-                    // INVARIANT: this flush must only ever see interjections
-                    // aimed at the turn that just completed. That holds
-                    // because this arm runs in the same serialized actor loop
-                    // as `SessionCommand::Interject` (no live turn's buffer
-                    // can be stolen mid-stream), and the Cancel arm clears
-                    // the buffer before its completion arrives. If the
-                    // select arms are ever reordered or the Cancel clear
-                    // moves, re-audit this flush.
-                    if session.flush_stranded_interjections().await {
-                        tracing::info!("Flushed stranded interjection(s) into prompt turns");
-                    }
-                    SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
-                    // If no user prompt started, check for pending notifications
-                    SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
-                    session.emit_session_idle_if_idle().await;
-                    // Layer-3 LazinessDetector: spawn an idle-triggered
-                    // classifier dispatch. The method is a no-op when the
-                    // per-model `laziness_detector.enabled = false`
-                    // (the v1 default for every model), so no
-                    // classification cost is incurred without explicit
-                    // opt-in. Spawned via `spawn_local` so the actor
-                    // loop can continue accepting commands while the
-                    // classifier idle-waits.
-                    {
-                        let s = session.clone();
-                        tokio::task::spawn_local(async move {
-                            s.maybe_fire_laziness_check().await;
-                        });
-                    }
-                }
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else {
-                        // ── session_end hook (channel-closed path) ────
-                        // Fires BEFORE memory auto-save per plan contract.
-                        let envelope = session.fire_hook(
-                            xai_grok_hooks::event::HookEventName::SessionEnd,
-                            None,
-                            xai_grok_hooks::event::HookPayload::SessionEnd {
-                                reason: "channel_closed".to_string(),
-                                turn_count: None,
-                                tool_call_count: None,
-                            },
-                        );
-                        if let Some(registry) = session.hook_registry.borrow().clone() {
-                            let ctx = session.hook_run_ctx();
-                            let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                &registry,
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                &envelope,
-                                &ctx,
+                        // ── session_end (channel-closed path) ────────
+                        // Hooks fire BEFORE memory auto-save per plan contract.
+                        fire_session_end_hooks(&session, "channel_closed").await;
+                        session
+                            .run_session_end_memory_pipeline(
+                                "channel closed, session summary saved",
                             )
                             .await;
-                            session.send_hook_execution("session_end", None, None, &results).await;
-                        }
-                        session.dispatch_session_end_stop("channel_closed").await;
-                        // Channel closed -- run memory session-end hook.
-                        let mut session_end_result = "disabled";
-                        let mut total_chunks_at_end = 0usize;
-                        if !session.startup_hints.is_subagent {
-                            if let Some(storage) = session.memory.storage() {
-                                let conversation = session.chat_state_handle.get_conversation().await;
-                                let result = crate::session::memory::hooks::on_session_end(
-                                    &storage,
-                                    &conversation,
-                                    &session.session_info.id.0,
-                                    session.memory.save_on_end,
-                                );
-                                session_end_result = match &result {
-                                    crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
-                                    crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                    crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
-                                };
-                                total_chunks_at_end = storage.total_chunk_count();
-                                let telem = session.memory.telemetry_snapshot();
-                                tracing::info!(
-                                    target: xai_grok_telemetry::memory_log::TARGET,
-                                    result = ?result,
-                                    tool_searches = telem.tool_search_count,
-                                    injection_searches = telem.injection_count,
-                                    recovery_searches = telem.compaction_recovery_count,
-                                    "MEMORY_SESSION_END: channel closed, session summary saved"
-                                );
-                                if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
-                                    session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                    session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
-                                        path: path_str.clone(),
-                                    }).await;
-                                }
-                            }
-                        } else {
-                            tracing::debug!(
-                                target: xai_grok_telemetry::memory_log::TARGET,
-                                "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                            );
-                        }
-                        // Dream: attempt consolidation at session end
-                        session.maybe_run_dream().await;
-                        // Structured telemetry after dream so counters are populated
-                        let telem = session.memory.telemetry_snapshot();
-                        session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
                         if let Some(notification) = replay_buffer.flush() {
                             session.emit_buffered(notification).await;
                         }
@@ -547,18 +469,27 @@ pub(super) async fn run_session(
                             }
                         }
                         shutdown_workflows(&session).await;
-                        if let Some(cancel) = &session.sync_loop_cancel {
-                            cancel.cancel();
-                        }
-                        session.feedback_manager.shutdown(session.upload_queue.get()).await;
-                        if !session.startup_hints.is_subagent {
-                            session.persist_background_task_manifest().await;
-                        }
-                        cleanup_session_scratch(&session);
+                        finish_session_exit_feedback(&session).await;
                         return;
                     };
 
                     match cmd {
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::Initialize { system_prompt } => {
                             session.initialize(system_prompt).await;
                             let s = session.clone();
@@ -587,13 +518,6 @@ pub(super) async fn run_session(
                             tokio::task::spawn_local(async move {
                                 s.resume_plan_approval(completion_tx).await;
                             });
-                        }
-                        SessionCommand::RestoreTodoBoard { plan_state } => {
-                            session.restore_todo_board(plan_state).await;
-                        }
-                        SessionCommand::ClearCompletedTodos { respond_to } => {
-                            let n = session.clear_completed_todos().await;
-                            let _ = respond_to.send(n);
                         }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
@@ -673,7 +597,23 @@ pub(super) async fn run_session(
                                 None => (None, None),
                             };
                             let cancel_for_send_now = session
-                                .queue_input(prompt_blocks, prompt_id, prompt_mode, trace_gcs_config, artifact_tracker, client_identifier, screen_mode, verbatim, json_schema, send_now, task_wake_fallback, tool_overrides_update, respond_to, persist_ack, parsed_prompt_tx)
+                                .queue_input(QueueInputRequest {
+                                    prompt_blocks,
+                                    prompt_id,
+                                    prompt_mode,
+                                    trace_gcs_config,
+                                    artifact_tracker,
+                                    client_identifier,
+                                    screen_mode,
+                                    verbatim,
+                                    json_schema,
+                                    send_now,
+                                    task_wake_fallback,
+                                    tool_overrides_update,
+                                    respond_to,
+                                    persist_ack,
+                                    parsed_prompt_tx,
+                                })
                                 .await;
                             if cancel_for_send_now {
                                 session.cancel_turn_for_send_now(&mut replay_buffer).await;
@@ -687,15 +627,6 @@ pub(super) async fn run_session(
                         SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens, responds_to } => {
                             let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, auto_compact_threshold_tokens).await;
                             let _ = responds_to.send(updated_model_id);
-                        }
-                        SessionCommand::SetAutoCompactThreshold {
-                            auto_compact_threshold_percent,
-                            auto_compact_threshold_tokens,
-                        } => {
-                            session.apply_auto_compact_threshold(
-                                auto_compact_threshold_percent,
-                                auto_compact_threshold_tokens,
-                            );
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
@@ -724,13 +655,7 @@ pub(super) async fn run_session(
                                 if let Some(cw) = context_window
                                     && session.compaction.context_window_override.is_none()
                                 {
-                                    session.compaction.model_context_window.set(cw.get());
-                                    let effective = crate::util::config::apply_economic_context_cap(
-                                        cw.get(),
-                                        session.compaction.economic_mode.get(),
-                                    );
-                                    cfg.context_window =
-                                        std::num::NonZeroU64::new(effective).unwrap_or(cw);
+                                    cfg.context_window = cw;
                                 }
                                 session.chat_state_handle.update_sampling_config(cfg);
 
@@ -738,10 +663,10 @@ pub(super) async fn run_session(
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
                                     session.chat_state_handle.update_credentials(xai_chat_state::Credentials {
                                         api_key: r.api_key,
-                                        failover_api_keys: r.failover_api_keys,
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
+                                        failover_api_keys: r.failover_api_keys,
                                         failover_base_url: r.failover_base_url,
                                         session_base_url: r.session_base_url,
                                         session_identity_key: r.session_identity_key,
@@ -775,9 +700,9 @@ pub(super) async fn run_session(
                                 .await;
                             let _ = respond_to.send(result);
                         }
-                        SessionCommand::KillBackgroundTask { task_id, respond_to } => {
+                        SessionCommand::KillBackgroundTask { task_id, source, respond_to } => {
                             let result = session.agent.borrow().tool_bridge()
-                                .kill_background_task(&task_id)
+                                .kill_background_task(&task_id, source)
                                 .await
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
@@ -915,7 +840,7 @@ pub(super) async fn run_session(
                                     // Cap to prevent unbounded growth during long tool calls.
                                     const MAX_BUFFER_EVENTS: usize = 50;
                                     buffer.push_capped(
-                                        xai_grok_tools::implementations::grok_build::task::types::MonitorEventNotification {
+                                        xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventNotification {
                                             task_id: task_id.clone(),
                                             event_text,
                                             // Tag with this session's id so the
@@ -956,47 +881,45 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
                             session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;
+                            // Re-kick: delete-while-editing keeps the hold until remove clears it.
+                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::ReorderQueue { ordered_ids } => {
                             session.handle_reorder_queue(&ordered_ids).await;
+                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
                         SessionCommand::ClearQueue { owner } => {
                             session.handle_clear_queue(owner.as_deref()).await;
-                        }
-                        SessionCommand::EditQueuedPrompt { id, new_text, editor } => {
-                            session.handle_edit_queued_prompt(&id, new_text, editor.as_deref()).await;
-                        }
-                        SessionCommand::HoldCombineEdit { id } => {
-                            let mut state = session.state.lock().await;
-                            state.combine_edit_holds.insert(id);
-                        }
-                        SessionCommand::ReleaseCombineEdit { id } => {
-                            let mut state = session.state.lock().await;
-                            state.combine_edit_holds.remove(&id);
-                        }
-                        SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
-                            // Soft interject only: buffers into the running turn
-                            // (or no-ops). Never cancels — cancel is Esc/stop.
-                            let _never_cancels = session
-                                .handle_interject_queued_prompt(
-                                    &id,
-                                    expected_version,
-                                    owner.as_deref(),
-                                    new_text.as_deref(),
-                                )
-                                .await;
-                            debug_assert!(
-                                !_never_cancels,
-                                "queue soft-interject must never request cancel"
-                            );
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
-                        SessionCommand::Cancel {
-                            cancel_subagents,
-                            kill_background_tasks,
-                            rewind_if_pristine,
-                            trigger,
-                        } => {
+                        SessionCommand::EditQueuedPrompt { id, new_text, editor } => {
+                            // Edit clears the hold; re-kick so a previously held front can start.
+                            session.handle_edit_queued_prompt(&id, new_text, editor.as_deref()).await;
+                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                        }
+                        SessionCommand::HoldEdit { id } => {
+                            // insert (not entry/or_insert): re-entering edit after a
+                            // dropped release must refresh the TTL stamp.
+                            session.handle_hold_edit(id).await;
+                        }
+                        SessionCommand::ReleaseEdit { id } => {
+                            {
+                                let mut state = session.state.lock().await;
+                                state.edit_holds.remove(&id);
+                            }
+                            // Unblocks a front that was parked under edit hold.
+                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                        }
+                        SessionCommand::InterjectQueuedPrompt { id, expected_version, owner, new_text } => {
+                            // Soft interject: buffer into the running turn. Never
+                            // cancels. Send-now is `queue_input(send_now: true)`.
+                            let cancel_for_send_now = session.handle_interject_queued_prompt(&id, expected_version, owner.as_deref(), new_text.as_deref()).await;
+                            if cancel_for_send_now {
+                                session.cancel_turn_for_send_now(&mut replay_buffer).await;
+                            }
+                            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                        }
+                        SessionCommand::Cancel(options) => {
                             // Flush the actor-owned replay buffer before tearing
                             // down the running turn so any streamed chunks
                             // (notably AgentThoughtChunk reasoning text) still
@@ -1009,20 +932,17 @@ pub(super) async fn run_session(
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
-                            // Clear pending interjections — the turn is being
-                            // cancelled, so they have no active turn to inject into.
+                            // Clear, don't flush: converting interjections to
+                            // prompt turns would restart the model after a stop.
                             session.pending_interjections.clear();
-                            let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
-                            session
-                                .cancel_running_task(
-                                    cancel_subagents,
-                                    kill_background_tasks,
-                                    rewind_if_pristine,
-                                    trigger,
-                                )
-                                .await;
+                            // Do not abort turn summary here. Summaries spawn only
+                            // after a successful turn, so an in-flight call describes
+                            // that prior success. Cancel targets the current turn;
+                            // under show-until-replaced the prior line should still
+                            // finish. New real prompts and rewind abort separately.
+                            let barrier = session.cancel_running_task(options).await;
 
-                            // Auto-pause active goal on Ctrl+C so timers stop
+                            // Auto-pause the active goal on any cancel so timers stop
                             // and the pager shows "paused" instead of "active".
                             // Shared with the doom-loop and back-off paths via
                             // `auto_pause_goal_if_active`.
@@ -1036,9 +956,9 @@ pub(super) async fn run_session(
                             // waiting for a completion message that will never
                             // arrive (the aborted task can't send one).
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
-                            // Ctrl+C leaves pending notifications suppressed. Other
-                            // cancel triggers leave the actor eligible for its normal idle drain.
-                            if !suppress_task_wakes {
+                            // An armed barrier must outlive the cancel; only
+                            // a clear one lets queued notifications drain.
+                            if barrier == super::tasks_cancel::WakeBarrier::Clear {
                                 SessionActor::maybe_drain_notifications(
                                     session.clone(),
                                     completion_tx.clone(),
@@ -1309,6 +1229,9 @@ pub(super) async fn run_session(
                                 .notifications.persistence_tx
                                 .send(PersistenceMsg::FlushAndAck { respond_to });
                         }
+                        SessionCommand::UpdateAttachPolicy { startup_hints } => {
+                            session.apply_attach_policy(&startup_hints);
+                        }
                         SessionCommand::UpdateMcpServers { mcp_servers, respond_to } => {
                             if session.startup_hints.is_subagent {
                                 tracing::debug!(
@@ -1398,7 +1321,7 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::ToggleMcpServer { server_name, enabled, server_config, respond_to } => {
-                            session.events.emit(xai_file_utils::events::Event::McpServerToggled {
+                            session.events.emit(xai_grok_session_events::Event::McpServerToggled {
                                 server_name: server_name.clone(),
                                 enabled,
                             });
@@ -1481,11 +1404,16 @@ pub(super) async fn run_session(
 
                             let session_for_mcp = session.clone();
                             let sname = server_name.clone();
+                            let session_cwd = session.session_info.cwd.clone();
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
-                                if let Err(e) = crate::util::config::save_mcp_server_enabled(
-                                    &sname, enabled,
-                                ).await {
+                                if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
+                                    &sname,
+                                    enabled,
+                                    std::path::Path::new(&session_cwd),
+                                )
+                                .await
+                                {
                                     tracing::warn!(
                                         server = sname.as_str(),
                                         error = %e,
@@ -1813,8 +1741,7 @@ pub(super) async fn run_session(
                                 .send((availability.workflows, availability.workflow_management));
                         }
                         SessionCommand::ListAvailableCommands { respond_to } => {
-                            let bridge = session.agent.borrow().tool_bridge().clone();
-                            let skills = bridge.slash_skills().await;
+                            let skills = session.slash_skills_for_resolve().await;
                             let tool_names = session.registered_tool_names().await;
                             let has_runs = !session.workflow_tracker().await.lock().list().is_empty();
                             let availability =
@@ -1913,22 +1840,20 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion {
-                            question,
-                            btw_session_id,
-                            prior_turns,
-                            respond_to,
-                        } => {
+                        SessionCommand::SideQuestion { question, btw_session_id, prior_turns: _, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s
-                                    .handle_side_question(
-                                        &question,
-                                        btw_session_id,
-                                        prior_turns,
-                                    )
-                                    .await;
-                                let _ = respond_to.send(result);
+                                let result = s.handle_side_question(&question).await;
+                                let mapped = match result {
+                                    Ok(answer) => Ok(crate::session::helpers::side_question::SideQuestionResult {
+                                        answer,
+                                        btw_session_id: crate::session::helpers::side_question::resolve_btw_session_id(
+                                            btw_session_id.as_deref(),
+                                        ),
+                                    }),
+                                    Err(e) => Err(e.to_string()),
+                                };
+                                let _ = respond_to.send(mapped);
                             });
                         }
                         SessionCommand::Recap { auto } => {
@@ -2139,7 +2064,7 @@ pub(super) async fn run_session(
                                 PersistenceMsg::GitHead { commit, branch },
                             );
                         }
-                        SessionCommand::Shutdown => {
+                        SessionCommand::Shutdown(kind) => {
                             shutdown_workflows(&session).await;
                             // Flush the actor-owned replay buffer so any
                             // streamed chunks still pending at shutdown
@@ -2152,6 +2077,24 @@ pub(super) async fn run_session(
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
                             }
+                            // Session is ending: do not leave a side-call
+                            // holding an Arc into this actor.
+                            session.abort_turn_summary();
+                            // This arm returns; an unanswered turn would race
+                            // teardown and report `EndTurn` for unfinished work.
+                            if kind == crate::session::ShutdownKind::CancelRunningTurn {
+                                // Shutdown is not a stop gesture; the barrier
+                                // stays clear.
+                                let _ = session
+                                    .cancel_running_task(crate::session::CancelOptions {
+                                        cancel_subagents: true,
+                                        kill_background_tasks: true,
+                                        rewind_if_no_output: false,
+                                        trigger: Some(crate::session::CancelTrigger::Shutdown),
+                                        user_initiated: false,
+                                    })
+                                    .await;
+                            }
                             // Drop any queued synthetic auto-wake prompts and pending
                             // notifications before running hooks. Without this, a
                             // synthetic prompt that slipped through the per-tool-result
@@ -2162,90 +2105,104 @@ pub(super) async fn run_session(
                             // abort.
                             session.drop_pending_synthetic_items().await;
 
-                            // ── session_end hook (shutdown path) ────────
-                            // Fires BEFORE memory auto-save per plan contract.
-                            let envelope = session.fire_hook(
-                                xai_grok_hooks::event::HookEventName::SessionEnd,
-                                None,
-                                xai_grok_hooks::event::HookPayload::SessionEnd {
-                                    reason: "shutdown".to_string(),
-                                    turn_count: None,
-                                    tool_call_count: None,
-                                },
-                            );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
-                                let ctx = session.hook_run_ctx();
-                                let results = xai_grok_hooks::dispatcher::dispatch_non_blocking(
-                                    &registry,
-                                    xai_grok_hooks::event::HookEventName::SessionEnd,
-                                    &envelope,
-                                    &ctx,
-                                )
+                            // ── session_end (shutdown path) ────────────
+                            // Hooks fire BEFORE memory auto-save per plan contract.
+                            fire_session_end_hooks(&session, "shutdown").await;
+                            session
+                                .run_session_end_memory_pipeline("session summary saved")
                                 .await;
-                                session.send_hook_execution("session_end", None, None, &results).await;
-                            }
-                            session.dispatch_session_end_stop("shutdown").await;
-                            // Memory: save session summary before shutdown
-                            let mut session_end_result = "disabled";
-                            let mut total_chunks_at_end = 0usize;
-                            if !session.startup_hints.is_subagent {
-                                if let Some(storage) = session.memory.storage() {
-                                    let conversation = session.chat_state_handle.get_conversation().await;
-                                    let result = crate::session::memory::hooks::on_session_end(
-                                        &storage,
-                                        &conversation,
-                                        &session.session_info.id.0,
-                                        session.memory.save_on_end,
-                                    );
-                                    session_end_result = match &result {
-                                        crate::session::memory::hooks::SessionEndResult::Written(_) => "written",
-                                        crate::session::memory::hooks::SessionEndResult::Skipped => "skipped",
-                                        crate::session::memory::hooks::SessionEndResult::Failed(_) => "failed",
-                                    };
-                                    total_chunks_at_end = storage.total_chunk_count();
-                                    let telem = session.memory.telemetry_snapshot();
-                                    tracing::info!(
-                                        target: xai_grok_telemetry::memory_log::TARGET,
-                                        result = ?result,
-                                        tool_searches = telem.tool_search_count,
-                                        injection_searches = telem.injection_count,
-                                        recovery_searches = telem.compaction_recovery_count,
-                                        "MEMORY_SESSION_END: session summary saved"
-                                    );
-                                    // Reindex + embed the written file so it's searchable next session
-                                    if let crate::session::memory::hooks::SessionEndResult::Written(ref path_str) = result {
-                                        session.reindex_and_embed(std::path::Path::new(path_str), "session").await;
-                                        session.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
-                                            path: path_str.clone(),
-                                        }).await;
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    target: xai_grok_telemetry::memory_log::TARGET,
-                                    "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
-                                );
-                            }
-                            // Dream: attempt consolidation at session end
-                            session.maybe_run_dream().await;
-                            // Structured telemetry after dream so counters are populated
-                            let telem = session.memory.telemetry_snapshot();
-                            session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
-                            // Shutdown feedback sync loop and do final sync
-                            if let Some(cancel) = &session.sync_loop_cancel {
-                                cancel.cancel();
-                            }
-                            // Shutdown feedback manager (syncs signals, drains upload queue)
-                            session.feedback_manager.shutdown(session.upload_queue.get()).await;
-                            if !session.startup_hints.is_subagent {
-                                session.persist_background_task_manifest().await;
-                            }
-                            // Clean up scratch directory (pre-edit file copies).
-                            cleanup_session_scratch(&session);
+                            finish_session_exit_feedback(&session).await;
                             return;
                         }
                     }
             }
+                // Prefer cmd_rx when both are already waiting so a queued
+                // hold/edit can land before turn-end promote (biased select).
+                maybe_completion = completion_rx.recv() => {
+                    let Some((prompt_id, result)) = maybe_completion else {
+                        // Completion channel closed: full feedback teardown so
+                        // final signal sync + upload drain still run (cancel
+                        // alone no longer force-syncs — shutdown owns that).
+                        shutdown_workflows(&session).await;
+                        finish_session_exit_feedback(&session).await;
+                        return;
+                    };
+                    // Flush any buffered turn deltas before `handle_completion`
+                    // emits the durable `TurnCompleted`, so the terminal lands
+                    // in updates.jsonl strictly after the turn's last
+                    // `session/update` delta. Mirrors the Cancel / Shutdown /
+                    // FlushComplete arms.
+                    if let Some(notification) = replay_buffer.flush() {
+                        session.emit_buffered(notification).await;
+                    }
+                    let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
+                        SessionActor::post_turn_goal_degradation_plan(&result);
+                    // A `RemovedFromQueue` completion never started a turn, so
+                    // there is nothing to summarize below.
+                    let turn_ran = !matches!(
+                        &result,
+                        Ok(PromptTurnOk {
+                            completion_kind: PromptCompletionKind::RemovedFromQueue,
+                            ..
+                        })
+                    );
+                    let completed_prompt_id = prompt_id.clone();
+                    let owned_completion = session.handle_completion(prompt_id, result).await;
+                    // Drain any monitor events that were routed to the mid-turn buffer
+                    // but arrived after the turn ended (race between is_turn_active and buffer push).
+                    session.drain_monitor_buffer_to_pending().await;
+                    if let Some(message) = infra_pause_message {
+                        session.apply_infra_pause_after_turn_err(message).await;
+                    }
+                    // Goal continuation (success) or back-off (non-success).
+                    // Owns the streak-tracking and reminder-injection path.
+                    session
+                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .await;
+                    // Interjections that raced past the turn's final drain
+                    // (arrived during turn-end bookkeeping) have no turn left
+                    // to merge into — convert them to front-of-queue prompt
+                    // turns so the message runs instead of stranding.
+                    //
+                    // INVARIANT: this flush must only ever see interjections
+                    // aimed at the turn that just completed. That holds
+                    // because this arm runs in the same serialized actor loop
+                    // as `SessionCommand::Interject` (no live turn's buffer
+                    // can be stolen mid-stream), and both cancel paths drain
+                    // the buffer before their completion arrives.
+                    if session.flush_stranded_interjections().await > 0 {
+                        tracing::info!("Flushed stranded interjection(s) into prompt turns");
+                    }
+                    SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                    // If no user prompt started, check for pending notifications
+                    SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
+                    session.emit_session_idle_if_idle().await;
+                    // Layer-3 LazinessDetector: spawn an idle-triggered
+                    // classifier dispatch. The method is a no-op when the
+                    // per-model `laziness_detector.enabled = false`
+                    // (the v1 default for every model), so no
+                    // classification cost is incurred without explicit
+                    // opt-in. Spawned via `spawn_local` so the actor
+                    // loop can continue accepting commands while the
+                    // classifier idle-waits.
+                    {
+                        let s = session.clone();
+                        tokio::task::spawn_local(async move {
+                            s.maybe_fire_laziness_check().await;
+                        });
+                    }
+                    // Per-turn dashboard summary (display-only side-call);
+                    // spawned so the actor loop keeps accepting commands.
+                    // `turn_succeeded` keeps cancelled/errored/refused turns
+                    // from triggering a fresh model call (a user who hit
+                    // Ctrl+C wants model activity to stop), and
+                    // `owned_completion` keeps a stale completion — a turn
+                    // the Cancel path already finalized — from summarizing
+                    // work the user aborted.
+                    if turn_ran && turn_succeeded && owned_completion {
+                        session.restart_turn_summary(completed_prompt_id);
+                    }
+                }
         }
     }
 }

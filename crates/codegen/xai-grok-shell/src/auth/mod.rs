@@ -1,4 +1,5 @@
 pub mod allowance_exhaust_from_billing;
+pub(crate) mod api_key_probe;
 pub(crate) mod attribution;
 mod auth_provider;
 mod config;
@@ -6,7 +7,7 @@ pub mod credential_provider;
 pub mod credentials_store;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
-pub mod device_code;
+pub(crate) mod device_code;
 pub mod dual_auth_status;
 pub mod error;
 mod external_auth;
@@ -15,6 +16,7 @@ pub mod free_period_debit_unproven_guard;
 pub mod harness_secrets;
 pub mod included_poll_history;
 mod jwt;
+pub mod limits_snapshot_hub;
 pub(crate) mod manager;
 mod model;
 pub mod oidc;
@@ -28,6 +30,9 @@ mod storage;
 pub mod supergrok_identity_rank;
 mod token_output;
 pub(crate) mod token_type;
+pub(crate) use api_key_probe::{
+    DEFAULT_PROBE_TIMEOUT, first_party_env_key_allows_advertise, should_probe_first_party_env_key,
+};
 pub mod xai_console;
 pub mod xai_management;
 pub use auth_provider::{AuthProviderConfig, AuthProviderRef};
@@ -45,8 +50,8 @@ pub use config::{
 // free_period_debit_unproven_guard re-exports are below (after module decl).
 pub(crate) use external_auth::{parse_output, refresh_with_command};
 pub(crate) use flow::{
-    AuthChannels, run_auth_flow, run_auth_flow_with_stderr_bridge,
-    try_ensure_session_noninteractive,
+    AuthChannels, mint_session_noninteractive, run_auth_flow, run_auth_flow_with_stderr_bridge,
+    try_noninteractive_auth_no_mint,
 };
 pub use flow::{
     AuthUrlInfo, AuthUrlMode, LoginTransportOverride, LogoutResult, ensure_authenticated,
@@ -58,7 +63,8 @@ mod meta;
 pub use allowance_exhaust_from_billing::{
     SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD, SupergrokBillingPollOutcome,
     SupergrokBillingPollOutcomeKind, SupergrokBillingPollTarget, active_supergrok_identity_id,
-    afterburner_skips_allowance_mark, apply_billing_usage_to_session_exhaust,
+    afterburner_skips_allowance_mark, afterburner_skips_allowance_mark_with_sibling,
+    any_sibling_has_included_remaining, apply_billing_usage_to_session_exhaust,
     apply_billing_usage_to_session_exhaust_with_period, classify_supergrok_billing_poll_error,
     clear_included_billing_cache, consecutive_auth_fail_streak,
     demote_included_billing_on_auth_fail, ensure_fresh_access_token_for_supergrok_billing_poll,
@@ -75,7 +81,8 @@ pub use allowance_exhaust_from_billing::{
     supergrok_identity_last_poll_ok, supergrok_out_of_allowance_with_console_ready,
 };
 pub use dual_auth_status::{
-    DualAuthStatus, collect_dual_auth_status, collect_dual_auth_status_with,
+    DualAuthStatus, NOTE_SINGLE_SUPERGROK_SESSION_CANNOT_SEE_TEAM_PLAN, collect_dual_auth_status,
+    collect_dual_auth_status_with,
 };
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use free_period_debit_unproven_guard::{
@@ -98,16 +105,23 @@ pub use included_poll_history::{
     included_debit_unproven, included_poll_history_for, record_included_poll_now,
     record_included_poll_sample,
 };
+pub use limits_snapshot_hub::{
+    LimitsSnapshotDocument, LimitsSnapshotIdentity, LimitsSnapshotManagement, LimitsSnapshotMode,
+    LimitsSnapshotRole, POLL_OUTCOME_AUTH, POLL_OUTCOME_NETWORK, POLL_OUTCOME_NEVER,
+    POLL_OUTCOME_OK, POLL_OUTCOME_OTHER, SNAPSHOT_FILE_NAME, SNAPSHOT_LOCK_FILE_NAME, SNAPSHOT_TTL,
+    SNAPSHOT_TTL_SECS, apply_limits_snapshot, coordinate_limits_snapshot,
+    fetch_management_into_snapshot, read_limits_snapshot_file, shared_limits_snapshot_disabled,
+    snapshot_is_stale, snapshot_json_contains_secrets, write_limits_snapshot_file,
+};
 pub use manager::{AuthManager, shared_api_key_provider};
+pub(crate) use manager::{AuthRemedy, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{
     AuthMode, GrokAuth, SupergrokPrincipalListing, fingerprint_session_token,
     list_supergrok_principal_listings, lookup_auth, multi_slot_scope_for_auth,
     supergrok_identity_id_from_auth, upsert_supergrok_session,
 };
-pub(crate) use model::{
-    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
-};
+pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub use openrouter::{
     OPENROUTER_API_KEY_ENV, OPENROUTER_API_KEYS_ENV, OPENROUTER_API_URL,
     OPENROUTER_GROK_45_CATALOG_ID, OpenRouterAuthError, OpenRouterCreditsData,
@@ -122,17 +136,17 @@ pub use secret_entry::{
     API_KEY_STDIN_SENTINEL, CliApiKeyError, is_argv_api_key_secret, materialize_cli_api_key,
     materialize_cli_api_key_with, prompt_api_key_no_echo, read_api_key_from_stdin,
 };
-pub use storage::{
-    clear_api_key, read_api_key, read_auth_json, read_token_by_scope, store_api_key,
-};
+pub use storage::{clear_api_key, read_api_key, read_auth_json, store_api_key};
 pub use supergrok_identity_rank::{
-    AutoCredentialOrder, AutoSupergrokOrder, IncludedBillingFields, PickSupergrokForAuto,
-    SupergrokAccountRole, SupergrokIdentityHeadroom, SupergrokPrincipalSlot,
-    SupergrokPrincipalSlotInput, SupergrokSessionCandidate, apply_included_billing_to_headroom,
-    enrich_candidates_with_included_billing, has_positive_supergrok_dollar_extras,
-    included_remaining_from_usage_pct, list_supergrok_principal_slots,
-    order_after_supergrok_included_exhaust, order_credentials_for_preferred_auto,
-    order_live_supergrok_for_auto, pick_supergrok_identity_for_auto, preferred_is_console_primary,
+    AutoCredentialOrder, AutoSupergrokOrder, CombinedIncludedRemaining, IncludedBillingFields,
+    IncludedPoolReading, PickSupergrokForAuto, SupergrokAccountRole, SupergrokIdentityHeadroom,
+    SupergrokPrincipalSlot, SupergrokPrincipalSlotInput, SupergrokSessionCandidate,
+    apply_included_billing_to_headroom, chrome_included_usage_from_combined,
+    combined_included_remaining, enrich_candidates_with_included_billing,
+    has_positive_supergrok_dollar_extras, included_remaining_from_usage_pct,
+    list_supergrok_principal_slots, order_after_supergrok_included_exhaust,
+    order_credentials_for_preferred_auto, order_live_supergrok_for_auto,
+    pick_supergrok_identity_for_auto, preferred_is_console_primary,
     preferred_uses_supergrok_auto_rank, principal_limits_label, ranked_free_period_primary_token,
     reset_at_from_period_end, role_from_session_fields, role_label,
     session_bearer_should_align_to_ranked_free_period_primary,
@@ -178,7 +192,8 @@ pub use xai_management::{
     prepaid_balance_path, prepaid_remaining_cents_from_total_val, resolve_management_api_key,
     resolve_management_api_key_default, resolve_management_team_id,
     resolve_management_team_id_default, resolve_management_team_id_with_discovery,
-    run_management_key_login, store_management_api_key,
+    run_management_key_login, seed_console_team_postpaid_cache, seed_console_team_prepaid_cache,
+    seed_console_team_usage_series_cache, store_management_api_key,
     usage_analytics_day_sum_by_description_request, usage_analytics_path, validate_management_key,
     validate_management_key_at, validate_management_key_outcome,
     validate_management_key_outcome_at,

@@ -82,6 +82,12 @@ impl crate::types::tool_metadata::ToolMetadata for JsonToToonTool {
         ToolNamespace::GrokBuild
     }
 
+    /// Pure conversion: no workspace or external side-effects. Overrides the
+    /// `Other` kind default (mutating) so wire metadata matches `capabilities`.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description_template(&self) -> &str {
         r#"Convert JSON to TOON (Token-Oriented Object Notation) for denser model context.
 

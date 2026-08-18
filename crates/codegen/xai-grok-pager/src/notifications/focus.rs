@@ -61,7 +61,7 @@ impl FocusTracker {
         self.focused.get()
     }
 
-    /// Update the auto-recap unfocused debounce (Settings live-apply).
+    /// Live-update the auto recap debounce used by [`FocusTracker::recap_due`].
     pub fn set_recap_threshold_secs(&mut self, secs: u64) {
         self.recap_threshold = Duration::from_secs(secs);
     }

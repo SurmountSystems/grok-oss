@@ -60,7 +60,7 @@ fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
                 .collect(),
             Err(_) => continue,
         };
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by_key(|e| e.file_name().map(std::ffi::OsStr::to_os_string));
         results.extend(entries);
     }
     results

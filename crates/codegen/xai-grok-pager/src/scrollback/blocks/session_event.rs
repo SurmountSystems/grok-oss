@@ -11,6 +11,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use super::tool::HookRunEntry;
+use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{
@@ -55,14 +56,12 @@ pub enum SessionEvent {
     },
     /// Auto-compaction started (context window threshold reached).
     CompactionStarted {
-        /// Usage percentage of context window at fire time (e.g., 81).
-        /// This is **not** the configured threshold — see `threshold_percent`.
+        /// Percentage of the sampling window used (e.g., 85).
         percentage: u8,
-        /// Configured auto-compact threshold percent (live session).
-        /// `None` when the shell did not send it (older payloads).
-        threshold_percent: Option<u8>,
-        /// Configured absolute-token threshold when in tokens mode.
-        threshold_tokens: Option<u64>,
+        /// Sampling context window AUTO actually gates on.
+        sampling_window: Option<u64>,
+        /// Catalog / painted chip total when the pager knows it.
+        catalog_window: Option<u64>,
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
@@ -72,7 +71,11 @@ pub enum SessionEvent {
         tokens_after: u64,
         /// How long compaction took (milliseconds).
         elapsed_ms: Option<i64>,
+        /// Replacement kept, but AUTO will not run again this session.
+        saved_too_little: bool,
     },
+    /// AUTO did not start because the last full-replace saved too little.
+    CompactionSkippedTinySavings,
     /// Auto-compaction failed.
     CompactionFailed {
         /// Error description.
@@ -91,6 +94,17 @@ pub enum SessionEvent {
         /// Used to match known error patterns without fragile string matching.
         error_type: Option<String>,
     },
+    /// A non-success API / HTTP response (or similar terminal request error).
+    /// Rendered like [`SessionEvent::ReAuthRequired`]: warning color + accent,
+    /// no JSON dump.
+    RequestFailed {
+        /// HTTP status when known. `None` for transport / idle-timeout / etc.
+        status: Option<u16>,
+        /// Short headline, e.g. `"Server error (500)"`.
+        headline: String,
+        /// Sanitized one-line detail (server message or fallback guidance).
+        detail: String,
+    },
     /// The server rejected the credentials (401 / auth error) and automatic
     /// recovery was exhausted. Rendered as a prominent call-to-action that
     /// points the user at `/login` to re-authenticate, replacing the raw
@@ -101,6 +115,8 @@ pub enum SessionEvent {
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
     /// prompt, replacing the CompactionFailed + RetryFailed + TurnFailed stack.
     ContextTooLarge,
+    /// Session disk is full.
+    DiskFull,
     /// Manual `/compact` command completed.
     CompactCompleted {
         /// Wall-clock elapsed time for the command.
@@ -178,28 +194,22 @@ impl SessionEvent {
             }
             SessionEvent::CompactionStarted {
                 percentage,
-                threshold_percent,
-                threshold_tokens,
-            } => match (threshold_tokens, threshold_percent) {
-                (Some(t), _) => {
-                    let label = if *t >= 1000 {
-                        format!("{}k", t / 1000)
-                    } else {
-                        t.to_string()
-                    };
+                sampling_window,
+                catalog_window,
+            } => match (sampling_window, catalog_window) {
+                (Some(sampling), Some(catalog)) if sampling != catalog => {
                     format!(
-                        "Context {percentage}% full (auto-compact at {label} tokens). Compacting…"
+                        "The {}-token sampling window is {percentage}% full. Compacting...",
+                        format_tokens(*sampling)
                     )
                 }
-                (None, Some(threshold)) => format!(
-                    "Context {percentage}% full (auto-compact at {threshold}%). Compacting…"
-                ),
-                (None, None) => format!("Context {percentage}% full. Compacting…"),
+                _ => format!("Context {percentage}% full. Compacting…"),
             },
             SessionEvent::CompactionCompleted {
                 tokens_before,
                 tokens_after,
                 elapsed_ms,
+                saved_too_little,
             } => {
                 let after = format_tokens(*tokens_after);
                 // Older shells don't send tokens_before — keep the legacy format.
@@ -212,12 +222,21 @@ impl SessionEvent {
                     }
                     _ => format!("Context compacted → {after} tokens"),
                 };
-                if let Some(ms) = elapsed_ms {
-                    let secs = *ms as f64 / 1000.0;
-                    format!("{body} ({secs:.1}s)")
+                let mut msg = if let Some(ms) = elapsed_ms {
+                    format!(
+                        "{body} ({})",
+                        format_duration(Duration::from_millis(*ms as u64))
+                    )
                 } else {
                     body
+                };
+                if *saved_too_little {
+                    msg.push_str(". Auto-compact will not run again because it saved too little.");
                 }
+                msg
+            }
+            SessionEvent::CompactionSkippedTinySavings => {
+                "Auto-compact is skipped because the last compact saved too little.".to_string()
             }
             SessionEvent::CompactionFailed { error } => {
                 if error.trim().is_empty() {
@@ -228,7 +247,10 @@ impl SessionEvent {
             }
             SessionEvent::CompactionCancelled => "Compaction cancelled.".to_string(),
             SessionEvent::RetryFailed { error, error_type } => {
-                if error_type.as_deref() == Some("encrypted_content_mismatch") {
+                use crate::app::error_display::WireErrorType;
+                if WireErrorType::parse(error_type.as_deref())
+                    == WireErrorType::EncryptedContentMismatch
+                {
                     "This session's conversation history is incompatible with the \
                      current model. Please start a new session."
                         .to_string()
@@ -236,6 +258,9 @@ impl SessionEvent {
                     format!("Retry failed: {error}")
                 }
             }
+            SessionEvent::RequestFailed {
+                headline, detail, ..
+            } => crate::app::error_display::banner_message(headline, detail),
             SessionEvent::ReAuthRequired => {
                 "Authentication required \u{2014} your session has expired or your \
                  credentials were rejected. Run /login to re-authenticate, then resend \
@@ -246,6 +271,9 @@ impl SessionEvent {
                 "This conversation is too large for the model's context window. \
                  Use /new to start a new session."
                     .to_string()
+            }
+            SessionEvent::DiskFull => {
+                xai_grok_shell::extensions::notification::DISK_FULL_USER_MESSAGE.to_string()
             }
             SessionEvent::CompactCompleted { elapsed } => {
                 format!("Compaction completed in {}.", format_duration(*elapsed))
@@ -292,12 +320,29 @@ impl SessionEvent {
         }
     }
 
+    /// Failures and actionable prompts stand out (warning color + accent bar).
+    fn is_warning_banner(&self) -> bool {
+        matches!(
+            self,
+            SessionEvent::ReAuthRequired
+                | SessionEvent::ContextTooLarge
+                | SessionEvent::DiskFull
+                | SessionEvent::CompactionFailed { .. }
+                | SessionEvent::RequestFailed { .. }
+                | SessionEvent::RetryFailed { .. }
+                | SessionEvent::TurnFailed { .. }
+        )
+    }
+
     /// Whether this event marks the end of an agent turn (the "Turn
     /// completed/cancelled/failed" markers). These are the only events that
-    /// can carry the turn's stop/stop_failure hook runs inline — but a
-    /// parked marker renders mid-turn while the turn is still running
-    /// shell-side, before any Stop hook fires, so hook eligibility is the
-    /// block-level [`SessionEventBlock::accepts_stop_hooks`].
+    /// can carry the turn's stop/stop_failure hook runs inline.
+    ///
+    /// [`SessionEvent::RequestFailed`] is intentionally excluded — same as
+    /// [`SessionEvent::ReAuthRequired`]. RetryState may push it before
+    /// PromptResponse; treating it as terminal would change stop-hook
+    /// attribution. Dedicated banners skip the TurnFailed marker and flush
+    /// hooks standalone.
     pub fn is_turn_terminal(&self) -> bool {
         matches!(
             self,
@@ -335,12 +380,6 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
-    /// The marker was pushed at park time (user-interruptible blocking
-    /// wait): the turn is still running shell-side, so it must never accept
-    /// stop hooks. Rendering is unchanged — a parked wait reads as stopped.
-    /// Cleared when the completion folds into the uncommitted tail marker;
-    /// a committed tail (minimal print-once) gets a fresh row instead.
-    pub parked: bool,
 }
 
 impl SessionEventBlock {
@@ -350,7 +389,6 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
-            parked: false,
         }
     }
 
@@ -365,15 +403,7 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
-            parked: false,
         }
-    }
-
-    /// Whether this marker may carry/accept stop-hook runs: a turn-terminal
-    /// event that is not a parked line (which renders while the turn is
-    /// still running shell-side, before any Stop hook fires).
-    pub fn accepts_stop_hooks(&self) -> bool {
-        self.event.is_turn_terminal() && !self.parked
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the
@@ -559,12 +589,7 @@ impl BlockContent for SessionEventBlock {
         let theme = Theme::current();
         // Failures and re-auth / context-overflow prompts are actionable, not
         // informational — render them in the warning color, not muted noise.
-        let style = if matches!(
-            self.event,
-            SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
-                | SessionEvent::CompactionFailed { .. }
-        ) {
+        let style = if self.event.is_warning_banner() {
             ratatui::style::Style::default().fg(theme.warning)
         } else {
             theme.muted()
@@ -597,23 +622,18 @@ impl BlockContent for SessionEventBlock {
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         let theme = Theme::current();
         if self.event.recap_summary().is_some() {
-            // Loading: striped yellow context rail (theme.gray is yellow under
-            // DOGE) so the recap reads as context/time meta, not agent magenta.
+            // Loading: animated sidebar so there's feedback that the recap is
+            // being generated. Gray rather than the magenta `accent_running` —
+            // the recap is a passive marker, not an active tool turn.
             if ctx.is_running {
-                return Some(AccentStyle::striped_animated(theme.gray));
+                return Some(AccentStyle::animated(theme.gray));
             }
-            // Finished: white/info tool rail when expanded (not green, not magenta).
+            // Finished: neutral tool accent bar when expanded (no special color).
             return (ctx.mode != DisplayMode::Collapsed)
                 .then(|| AccentStyle::static_color(theme.accent_tool));
         }
-        if matches!(
-            self.event,
-            SessionEvent::ReAuthRequired
-                | SessionEvent::ContextTooLarge
-                | SessionEvent::CompactionFailed { .. }
-        ) {
-            // Yellow context/limits: striped rail, not solid.
-            Some(AccentStyle::striped(theme.warning))
+        if self.event.is_warning_banner() {
+            Some(AccentStyle::static_color(theme.warning))
         } else {
             None
         }
@@ -631,7 +651,7 @@ impl BlockContent for SessionEventBlock {
         self.accent(ctx)
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false // Compact like SystemMessageBlock
     }
 
@@ -686,46 +706,6 @@ impl BlockContent for SessionEventBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compaction_started_banner_includes_threshold() {
-        let with_threshold = SessionEvent::CompactionStarted {
-            percentage: 81,
-            threshold_percent: Some(80),
-            threshold_tokens: None,
-        };
-        assert_eq!(
-            with_threshold.message(),
-            "Context 81% full (auto-compact at 80%). Compacting…"
-        );
-
-        let at_product_default = SessionEvent::CompactionStarted {
-            percentage: 95,
-            threshold_percent: Some(95),
-            threshold_tokens: None,
-        };
-        assert_eq!(
-            at_product_default.message(),
-            "Context 95% full (auto-compact at 95%). Compacting…"
-        );
-
-        let tokens_mode = SessionEvent::CompactionStarted {
-            percentage: 80,
-            threshold_percent: None,
-            threshold_tokens: Some(200_000),
-        };
-        assert_eq!(
-            tokens_mode.message(),
-            "Context 80% full (auto-compact at 200k tokens). Compacting…"
-        );
-
-        let legacy = SessionEvent::CompactionStarted {
-            percentage: 81,
-            threshold_percent: None,
-            threshold_tokens: None,
-        };
-        assert_eq!(legacy.message(), "Context 81% full. Compacting…");
-    }
 
     #[test]
     fn turn_completed_message() {
@@ -853,14 +833,31 @@ mod tests {
     fn reauth_required_has_warning_accent() {
         let block = SessionEventBlock::new(SessionEvent::ReAuthRequired);
         let theme = Theme::current();
-        let accent = block.accent(&ctx()).expect("re-auth rail");
+        let accent = block.accent(&ctx());
         assert_eq!(
-            accent.color, theme.warning,
+            accent.map(|a| a.color),
+            Some(theme.warning),
             "re-auth prompt must stand out with a warning accent"
         );
-        assert!(
-            accent.striped,
-            "yellow context rail must be striped, not solid"
+    }
+
+    #[test]
+    fn request_failed_message_and_warning_accent() {
+        let event = SessionEvent::RequestFailed {
+            status: Some(500),
+            headline: "Server error (500)".into(),
+            detail: "upstream exploded".into(),
+        };
+        assert_eq!(
+            event.message(),
+            "Server error (500) \u{2014} upstream exploded"
+        );
+        let block = SessionEventBlock::new(event);
+        let theme = Theme::current();
+        assert_eq!(
+            block.accent(&ctx()).map(|a| a.color),
+            Some(theme.warning),
+            "request-failed banner must stand out like re-auth"
         );
     }
 
@@ -881,14 +878,11 @@ mod tests {
     fn context_too_large_has_warning_accent() {
         let block = SessionEventBlock::new(SessionEvent::ContextTooLarge);
         let theme = Theme::current();
-        let accent = block.accent(&ctx()).expect("context-too-large rail");
+        let accent = block.accent(&ctx());
         assert_eq!(
-            accent.color, theme.warning,
+            accent.map(|a| a.color),
+            Some(theme.warning),
             "context-too-large prompt must stand out with a warning accent"
-        );
-        assert!(
-            accent.striped,
-            "yellow context rail must be striped, not solid"
         );
     }
 
@@ -898,11 +892,105 @@ mod tests {
             tokens_before: Some(48_800),
             tokens_after: 27_100,
             elapsed_ms: Some(21_000),
+            saved_too_little: false,
         };
         assert_eq!(
             event.message(),
-            "Context compacted: 48.8k → 27.1k tokens (21.0s)"
+            "Context compacted: 48.8k → 27.1k tokens (21s)"
         );
+    }
+
+    #[test]
+    fn compaction_completed_long_wait_uses_minutes_not_raw_seconds() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(48_800),
+            tokens_after: 27_100,
+            elapsed_ms: Some(943_000),
+            saved_too_little: false,
+        };
+        assert_eq!(
+            event.message(),
+            "Context compacted: 48.8k → 27.1k tokens (15m43s)"
+        );
+    }
+
+    #[test]
+    fn compaction_completed_68300ms_uses_minutes_not_raw_seconds() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(198_300),
+            tokens_after: 12_000,
+            elapsed_ms: Some(68_300),
+            saved_too_little: false,
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("(1m8s)"),
+            "68_300ms must render as (1m8s), not raw seconds: {msg}"
+        );
+        assert!(
+            !msg.contains("(68.3s)"),
+            "must not print a raw-seconds compact wait: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_completed_tiny_savings_says_will_not_run_again() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(198_300),
+            tokens_after: 190_300,
+            elapsed_ms: Some(68_300),
+            saved_too_little: true,
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("198.3k") && msg.contains("190.3k") && msg.contains("(1m8s)"),
+            "tiny-savings line must keep before, after, and human duration: {msg}"
+        );
+        assert!(
+            msg.contains("will not run again") && msg.contains("saved too little"),
+            "must say auto-compact will not run again because it saved too little: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_started_names_sampling_window_when_catalog_differs() {
+        let event = SessionEvent::CompactionStarted {
+            percentage: 100,
+            sampling_window: Some(200_000),
+            catalog_window: Some(500_000),
+        };
+        let msg = event.message();
+        assert!(
+            msg.contains("sampling window"),
+            "when the painted catalog total differs from the sampling window, name the sampling window: {msg}"
+        );
+        assert!(
+            msg.contains("200") && msg.to_ascii_lowercase().contains("token"),
+            "must include the sampling window size in human tokens: {msg}"
+        );
+        assert!(
+            !msg.starts_with("Context 100% full."),
+            "must not say bare Context 100% full when the two windows differ: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_skipped_tiny_savings_is_honest() {
+        let event = SessionEvent::CompactionSkippedTinySavings;
+        assert_eq!(
+            event.message(),
+            "Auto-compact is skipped because the last compact saved too little."
+        );
+    }
+
+    #[test]
+    fn compaction_started_keeps_legacy_copy_when_windows_match() {
+        let event = SessionEvent::CompactionStarted {
+            percentage: 95,
+            sampling_window: Some(500_000),
+            catalog_window: Some(500_000),
+        };
+        assert_eq!(event.message(), "Context 95% full. Compacting…");
     }
 
     #[test]
@@ -911,6 +999,7 @@ mod tests {
             tokens_before: None,
             tokens_after: 27_100,
             elapsed_ms: None,
+            saved_too_little: false,
         };
         assert_eq!(event.message(), "Context compacted → 27.1k tokens");
     }
@@ -940,14 +1029,10 @@ mod tests {
             error: "out of credits or over your spending limit. Add credits and retry.".into(),
         });
         let theme = Theme::current();
-        let accent = block.accent(&ctx()).expect("compaction-failed rail");
         assert_eq!(
-            accent.color, theme.warning,
+            block.accent(&ctx()).map(|a| a.color),
+            Some(theme.warning),
             "an actionable compaction failure must use a warning accent, not muted"
-        );
-        assert!(
-            accent.striped,
-            "yellow context rail must be striped, not solid"
         );
     }
 
@@ -1092,15 +1177,11 @@ mod tests {
         assert_eq!(out.lines.len(), 1, "loading recap is just the header");
         assert_eq!(plain(&out.lines[0]), "Recap");
 
-        // The sidebar + bullet use yellow/gray striped marquee (context role) —
-        // not the magenta running color used for active tool turns.
+        // The sidebar + bullet animate in gray (the feedback) — not the magenta
+        // running color used for active tool turns.
         let accent = block.accent(&rc).expect("loading recap has an accent bar");
         assert_eq!(accent.color, theme.gray);
         assert!(accent.animated, "loading sidebar animates");
-        assert!(
-            accent.striped,
-            "loading recap rail must be yellow-striped context chrome"
-        );
         assert_eq!(
             block.bullet(&rc),
             Some(accent),
@@ -1421,44 +1502,16 @@ mod tests {
         );
     }
 
-    /// A parked marker block — the shape `maybe_push_parked_marker` pushes.
-    fn parked_marker() -> SessionEventBlock {
-        SessionEventBlock {
-            event: SessionEvent::TurnCompleted {
-                elapsed: Some(Duration::from_secs(24)),
-            },
-            stop_hooks: Vec::new(),
-            prompt_id: None,
-            parked: true,
-        }
-    }
-
     #[test]
-    fn parked_markers_never_accept_stop_hooks() {
-        // A parked marker renders mid-turn, before any Stop hook fires.
-        let block = parked_marker();
-        assert!(!block.accepts_stop_hooks(), "parked marker refuses hooks");
-
-        // The real terminal marker accepts.
+    fn only_turn_terminal_events_accept_stop_hooks() {
         let settled = SessionEventBlock::new(SessionEvent::TurnCompleted {
             elapsed: Some(Duration::from_secs(24)),
         });
-        assert!(settled.accepts_stop_hooks());
-        // Non-terminal events never accept, parked or not.
+        assert!(settled.event.is_turn_terminal());
         let recap = SessionEventBlock::new(SessionEvent::Recap {
             summary: "did stuff".into(),
             auto: false,
         });
-        assert!(!recap.accepts_stop_hooks());
-    }
-
-    #[test]
-    fn parked_marker_output_reads_as_plain_completed_marker() {
-        // The parked marker renders the plain event text — still-running
-        // background work is the status row's "… still running" cue, never a
-        // transcript suffix.
-        let block = parked_marker();
-        let out = block.output(&ctx());
-        assert_eq!(plain(&out.lines[0]), "Worked for 24s");
+        assert!(!recap.event.is_turn_terminal());
     }
 }

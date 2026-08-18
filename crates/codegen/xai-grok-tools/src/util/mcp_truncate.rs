@@ -26,6 +26,7 @@ use xai_tool_runtime::ToolCallContext;
 
 use crate::types::output::{MCPOutputDetails, ToolOutput};
 use crate::types::tool::ToolKind;
+use crate::util::base64_images::{ExtractionResult, extract_base64_images};
 use crate::util::query_tools::{QueryTools, examples_clause};
 use crate::util::truncate::format_bytes;
 
@@ -88,10 +89,6 @@ pub(crate) enum McpDumpKind {
     LongLineJson,
     Json,
     LongLineText,
-    /// Structured JSON densified to TOON (or other non-JSON model format).
-    /// Dump body is densified text; extension `.txt` with shell search steer
-    /// (not jq — body is no longer JSON).
-    DensifiedStructured,
     Other,
 }
 
@@ -109,23 +106,10 @@ impl McpDumpKind {
         }
     }
 
-    /// Dump kind after densify: keep JSON/long-line kinds when the densified
-    /// body still classifies that way; if densify turned JSON into TOON
-    /// (non-JSON), use [`Self::DensifiedStructured`] so the operator still
-    /// gets a non-empty “query the saved file” steer under default `auto`.
-    pub(crate) fn after_densify(pre_kind: Self, densified_text: &str) -> Self {
-        let densified_kind = Self::classify(densified_text);
-        match (pre_kind, densified_kind) {
-            (_, densified @ (Self::Json | Self::LongLineJson | Self::LongLineText)) => densified,
-            (Self::Json | Self::LongLineJson, Self::Other) => Self::DensifiedStructured,
-            (_, densified) => densified,
-        }
-    }
-
     pub(crate) fn extension(self) -> &'static str {
         match self {
             Self::LongLineJson | Self::Json => "json",
-            Self::LongLineText | Self::DensifiedStructured | Self::Other => "txt",
+            Self::LongLineText | Self::Other => "txt",
         }
     }
 
@@ -146,11 +130,6 @@ impl McpDumpKind {
                 " The full output has a very long line, so grep/read_file are \
                  ineffective on it — use `{shell}` to slice/search the saved \
                  file{eg}.",
-                eg = examples_clause(&tools.text_tools()),
-            ),
-            Self::DensifiedStructured => format!(
-                " The full output is densified structured text (model format from \
-                 JSON); use `{shell}` to search/slice the saved file{eg}.",
                 eg = examples_clause(&tools.text_tools()),
             ),
             Self::Other => String::new(),
@@ -226,8 +205,6 @@ fn sanitized_stem(call_id: &str) -> String {
 ///
 /// Delegates to [`crate::util::toon::densify_structured_text_in_place`] (single
 /// policy parser; no second independent densify path).
-///
-/// No-op without allocate when the body is not structured JSON.
 pub fn densify_mcp_result_text_in_place(text: &mut String) {
     crate::util::toon::densify_structured_text_in_place(text);
 }
@@ -239,14 +216,8 @@ pub fn densify_mcp_result_text(text: &str) -> String {
 
 /// Truncate `text` in place when over the limit, dumping the full payload to
 /// the session `mcp/` dir (when available) with a pointer appended.
-///
-/// Structured JSON is densified via [`densify_mcp_result_text_in_place`] first
-/// (T3 UDAX). Dump kind is chosen with [`McpDumpKind::after_densify`] so
-/// JSON→TOON over-cap dumps still get a shell steer under default `auto`.
 async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
-    // Classify before densify so JSON→TOON still gets structured dump steer.
-    let pre_kind = McpDumpKind::classify(text.as_str());
-    // Encode structured→text under TOON policy before the byte cap.
+    // Encode structured→text under TOON policy before the byte cap (UDAX densify).
     densify_mcp_result_text_in_place(text);
 
     if text.len() <= trunc_ctx.max_output_bytes {
@@ -254,7 +225,7 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     }
 
     let total_bytes = text.len();
-    let kind = McpDumpKind::after_densify(pre_kind, text.as_str());
+    let kind = McpDumpKind::classify(text.as_str());
 
     let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| {
         folder.join("mcp").join(format!(
@@ -293,25 +264,34 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     *text = format!(
         "{}\n\n[MCP output truncated: showing first {} of {}.{}{}]",
         truncated,
-        format_bytes(trunc_ctx.max_output_bytes),
-        format_bytes(total_bytes),
+        format_bytes(trunc_ctx.max_output_bytes as u64),
+        format_bytes(total_bytes as u64),
         file_hint,
         steer,
     );
 }
 
 /// Bound the `MCP`/`Text` variants to the inline size limit, keeping a preview
-/// and dumping the full payload to disk. Other variants are returned untouched.
+/// and dumping the text that remains after any MCP image extract. Other
+/// variants pass through. MCP data-URI images go into `extracted_images`
+/// before the bound.
 pub async fn truncate_tool_output(
     mut output: ToolOutput,
     trunc_ctx: &McpTruncateContext,
 ) -> ToolOutput {
     match &mut output {
         ToolOutput::MCP(mcp) => {
-            let text = match mcp.output_mut() {
-                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => t,
+            let raw = match mcp.output_mut() {
+                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => std::mem::take(t),
             };
-            truncate_mcp_text(text, trunc_ctx).await;
+            let ExtractionResult { mut text, images } = extract_base64_images(raw);
+            mcp.extracted_images = images;
+            truncate_mcp_text(&mut text, trunc_ctx).await;
+            match mcp.output_mut() {
+                MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => {
+                    *t = text;
+                }
+            }
         }
         ToolOutput::Text(text_out) => {
             truncate_mcp_text(&mut text_out.text, trunc_ctx).await;
@@ -324,6 +304,7 @@ pub async fn truncate_tool_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::base64_images::IMAGE_CONTENT_PLACEHOLDER;
 
     fn cfg_with_folder(folder: PathBuf, max: usize) -> McpTruncateContext {
         McpTruncateContext {
@@ -517,244 +498,26 @@ mod tests {
         assert_eq!(s.content, "anything", "passthrough leaves content intact");
     }
 
-    // ── T3: densify structured MCP JSON before byte cap ──
-
-    #[test]
-    fn densify_mcp_free_text_unchanged() {
-        let plain = "hello world\nnot json at all";
-        assert_eq!(densify_mcp_result_text(plain), plain);
-
-        let scalar = "12345";
-        assert_eq!(
-            densify_mcp_result_text(scalar),
-            scalar,
-            "bare scalar is not object/array"
-        );
-
-        // In-place free text: no rewrite, no re-allocation of a densified body.
-        let mut owned = plain.to_owned();
-        let ptr_before = owned.as_ptr();
-        densify_mcp_result_text_in_place(&mut owned);
-        assert_eq!(owned, plain);
-        assert_eq!(
-            owned.as_ptr(),
-            ptr_before,
-            "free text densify-in-place must not reallocate"
-        );
-    }
-
-    #[test]
-    fn after_densify_preserves_json_kinds_and_marks_toon() {
-        let json = r#"{"hits":[{"path":"a.rs","line":1,"text":"x"}]}"#;
-        assert_eq!(McpDumpKind::classify(json), McpDumpKind::Json);
-        // densified TOON is not JSON → DensifiedStructured (keeps shell steer).
-        let toon_like = "hits[1]{path,line,text}:\n  a.rs,1,x";
-        assert_eq!(
-            McpDumpKind::after_densify(McpDumpKind::Json, toon_like),
-            McpDumpKind::DensifiedStructured
-        );
-        assert_eq!(McpDumpKind::DensifiedStructured.extension(), "txt");
-        let steer = McpDumpKind::DensifiedStructured.steer(
-            "bash",
-            QueryTools {
-                jq: None,
-                sed: Some("sed"),
-                cut: Some("cut"),
-            },
-        );
-        assert!(
-            steer.contains("densified structured") && steer.contains("`bash`"),
-            "TOON dump must steer to shell, got: {steer}"
-        );
-        // Still-JSON densified body keeps .json path.
-        assert_eq!(
-            McpDumpKind::after_densify(McpDumpKind::Json, r#"{"a":1}"#),
-            McpDumpKind::Json
-        );
-    }
-
-    #[test]
-    fn densify_mcp_invalid_json_unchanged() {
-        let junk = "{not valid json";
-        assert_eq!(densify_mcp_result_text(junk), junk);
-    }
-
-    #[test]
-    fn densify_mcp_tabular_auto_emits_toon() {
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, None)]); // auto
-
-        let json = serde_json::json!({
-            "hits": [
-                {"path": "a.rs", "line": 1, "text": "fn main"},
-                {"path": "b.rs", "line": 2, "text": "fn other"},
-                {"path": "c.rs", "line": 3, "text": "fn third"},
-            ]
-        });
-        let pretty = serde_json::to_string_pretty(&json).unwrap();
-        let out = densify_mcp_result_text(&pretty);
-        assert!(
-            out.contains("hits[") && out.contains('{'),
-            "auto should emit tabular TOON for uniform array, got: {out}"
-        );
-        assert!(
-            !out.trim_start().starts_with('{'),
-            "must not remain JSON object: {out}"
-        );
-        assert!(out.contains("a.rs") && out.contains("b.rs"));
-    }
-
-    #[test]
-    fn densify_mcp_json_policy_is_compact_json() {
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("json"))]);
-
-        let value = serde_json::json!({
-            "users": [
-                {"id": 1, "name": "Alice"},
-                {"id": 2, "name": "Bob"}
-            ]
-        });
-        let pretty = serde_json::to_string_pretty(&value).unwrap();
-        let out = densify_mcp_result_text(&pretty);
-        assert_eq!(out, serde_json::to_string(&value).unwrap());
-        assert!(out.starts_with('{'));
-        assert!(!out.contains('\n'), "compact JSON is single-line: {out}");
-    }
-
     #[tokio::test]
-    async fn densify_before_truncate_can_avoid_byte_cap() {
-        use crate::types::output::MCPOutput;
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("toon"))]);
-
-        // Pretty JSON with a uniform array — large enough that pretty form
-        // exceeds a tight cap, but densified TOON fits under it.
-        let rows: Vec<_> = (0..30)
-            .map(|i| {
-                serde_json::json!({
-                    "path": format!("src/module_{i:03}.rs"),
-                    "line": i * 10,
-                    "text": "match found here"
-                })
-            })
-            .collect();
-        let value = serde_json::json!({"matches": rows});
-        let pretty = serde_json::to_string_pretty(&value).unwrap();
-        let densified = densify_mcp_result_text(&pretty);
-        assert!(
-            densified.len() < pretty.len(),
-            "TOON denser than pretty: densified={} pretty={}",
-            densified.len(),
-            pretty.len()
-        );
-        // Cap between densified and pretty so densify-first avoids truncation.
-        assert!(
-            densified.len() < pretty.len(),
-            "precondition: densified < pretty"
-        );
-        let max = densified.len() + (pretty.len() - densified.len()) / 2;
-        assert!(
-            densified.len() <= max && pretty.len() > max,
-            "cap {max} should sit between densified {} and pretty {}",
-            densified.len(),
-            pretty.len()
-        );
-
-        let cfg = McpTruncateContext {
-            max_output_bytes: max,
-            session_folder: None,
-            shell_tool: "bash".to_string(),
-            call_id: "call-densify".to_string(),
-        };
-        let out = truncate_tool_output(
-            ToolOutput::MCP(MCPOutput::okay_output(
-                "server__tool".into(),
-                "server".into(),
-                pretty,
-            )),
-            &cfg,
-        )
-        .await;
-
-        let ToolOutput::MCP(mcp) = out else {
-            panic!("expected MCP");
-        };
-        let text = match mcp.output() {
-            MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => t,
-        };
-        assert!(
-            !text.contains("[MCP output truncated:"),
-            "densify-before-cap should keep payload under limit: {}",
-            &text[text.len().saturating_sub(120)..]
-        );
-        assert!(
-            text.contains("matches[") || text.contains("module_"),
-            "should be densified TOON body, got: {text}"
-        );
-    }
-
-    /// Under default auto/toon, over-cap densified JSON dumps as .txt with
-    /// densified-structured steer (not empty Other).
-    #[tokio::test]
-    async fn densified_toon_over_cap_dumps_txt_with_structured_steer() {
-        use crate::types::output::MCPOutput;
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("toon"))]);
-
+    async fn mcp_data_uri_image_survives_truncate_intact() {
         let dir = tempfile::tempdir().unwrap();
-        // Build a large uniform array that densifies to multi-line TOON but
-        // still exceeds a small cap.
-        let rows: Vec<_> = (0..80)
-            .map(|i| {
-                serde_json::json!({
-                    "path": format!("src/file_{i:03}.rs"),
-                    "line": i,
-                    "text": "match found in source"
-                })
-            })
-            .collect();
-        let value = serde_json::json!({"matches": rows});
-        let pretty = serde_json::to_string_pretty(&value).unwrap();
-        let densified = densify_mcp_result_text(&pretty);
-        assert!(
-            !densified.trim_start().starts_with('{'),
-            "precondition: toon densify leaves non-JSON"
-        );
-        let max = densified.len() / 3;
-        assert!(max > 0 && densified.len() > max);
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
 
-        let cfg = McpTruncateContext {
-            max_output_bytes: max,
-            session_folder: Some(dir.path().to_path_buf()),
-            shell_tool: "bash".to_string(),
-            call_id: "call-toon-dump".to_string(),
-        };
+        let payload = "A".repeat(100_000);
+        let prose = "x".repeat(30_000);
+        let full = format!("before data:image/png;base64,{payload} after\n{prose}");
+        assert!(
+            full.len() > max,
+            "fixture must exceed inline cap (got {})",
+            full.len()
+        );
+
         let out = truncate_tool_output(
-            ToolOutput::MCP(MCPOutput::okay_output(
-                "server__tool".into(),
-                "server".into(),
-                pretty,
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "browser_screenshot".into(),
+                "browser-use".into(),
+                full,
             )),
             &cfg,
         )
@@ -763,56 +526,76 @@ mod tests {
         let ToolOutput::MCP(mcp) = out else {
             panic!("expected MCP");
         };
-        let text = match mcp.output() {
-            MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => t,
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+        assert_eq!(mcp.extracted_images[0].data.len(), 100_000);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
         };
-        assert!(text.contains("[MCP output truncated:"));
         assert!(
-            text.contains(".txt"),
-            "densified TOON dump must use .txt, got: {}",
-            &text[text.len().saturating_sub(200)..]
+            text.contains(IMAGE_CONTENT_PLACEHOLDER),
+            "data URI replaced with placeholder"
         );
         assert!(
-            text.contains("densified structured") || text.contains("to slice/search"),
-            "must keep a shell steer (not empty Other): {}",
-            &text[text.len().saturating_sub(300)..]
+            !text.contains("data:image"),
+            "no data URI left for session mid-chop extraction"
+        );
+        assert!(
+            !text.contains(&payload),
+            "full payload must not remain inline"
+        );
+        // Truncation footer is appended after the bound, so allow overhead.
+        let body_end = text
+            .find("\n\n[MCP output truncated:")
+            .unwrap_or(text.len());
+        assert!(
+            body_end <= max,
+            "inline body must stay within cap: body={body_end} max={max}"
+        );
+        assert!(
+            text.contains("[MCP output truncated:"),
+            "large leftover prose still triggers truncate"
         );
 
-        let files: Vec<_> = std::fs::read_dir(dir.path().join("mcp"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        assert_eq!(files.len(), 1);
-        assert_eq!(
-            files[0].extension().and_then(|e| e.to_str()),
-            Some("txt"),
-            "dump extension .txt for densified body"
+        // Dump is post-extraction (full leftover text), not the raw data URI.
+        let dump = dir.path().join("mcp").join("call-test.txt");
+        let dump_text = tokio::fs::read_to_string(&dump).await.unwrap();
+        assert!(
+            dump_text.contains(IMAGE_CONTENT_PLACEHOLDER),
+            "dump should keep the placeholder"
+        );
+        assert!(
+            !dump_text.contains("data:image"),
+            "dump must not re-embed the data URI"
+        );
+        assert!(
+            !dump_text.contains(&payload),
+            "dump must not contain the raw base64 payload"
+        );
+        assert!(
+            dump_text.contains(&prose),
+            "dump keeps full post-extraction prose (not the truncated preview)"
         );
     }
 
     #[tokio::test]
-    async fn free_text_mcp_not_rewritten_by_toon_policy() {
-        use crate::types::output::MCPOutput;
-        use crate::util::toon::ENV_TOOL_RESULT_FORMAT;
-        use crate::util::toon::test_env::{ENV_LOCK, EnvGuard};
-
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set(&[(ENV_TOOL_RESULT_FORMAT, Some("toon"))]);
-
-        let plain = "issue created successfully\nno json here";
+    async fn mcp_image_only_under_cap_still_extracts() {
         let cfg = McpTruncateContext {
             max_output_bytes: 20_000,
             session_folder: None,
             shell_tool: "bash".to_string(),
-            call_id: "call-plain".to_string(),
+            call_id: "call-img".to_string(),
         };
+        let payload = "B".repeat(50_000);
+        let full = format!("data:image/jpeg;base64,{payload}");
+
         let out = truncate_tool_output(
-            ToolOutput::MCP(MCPOutput::okay_output(
-                "server__tool".into(),
-                "server".into(),
-                plain.to_owned(),
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "shot".into(),
+                "srv".into(),
+                full,
             )),
             &cfg,
         )
@@ -821,9 +604,99 @@ mod tests {
         let ToolOutput::MCP(mcp) = out else {
             panic!("expected MCP");
         };
-        let text = match mcp.output() {
-            MCPOutputDetails::OkayOutput(t) | MCPOutputDetails::Error(t) => t,
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/jpeg");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
         };
-        assert_eq!(text, plain, "free text must not be rewritten");
+        assert_eq!(text, IMAGE_CONTENT_PLACEHOLDER);
+        assert!(!text.contains("[MCP output truncated:"));
+    }
+
+    #[tokio::test]
+    async fn mcp_multi_image_extract_then_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
+
+        let p1 = "A".repeat(40_000);
+        let p2 = "B".repeat(50_000);
+        let prose = "z".repeat(25_000);
+        let full =
+            format!("one data:image/png;base64,{p1} two data:image/jpeg;base64,{p2} end\n{prose}");
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::okay_output(
+                "multi".into(),
+                "srv".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert_eq!(mcp.extracted_images.len(), 2);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, p1);
+        assert_eq!(mcp.extracted_images[1].mime_type, "image/jpeg");
+        assert_eq!(mcp.extracted_images[1].data, p2);
+
+        let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
+            panic!("expected OkayOutput");
+        };
+        assert_eq!(text.matches(IMAGE_CONTENT_PLACEHOLDER).count(), 2);
+        assert!(!text.contains("data:image"));
+        assert!(!text.contains(&p1));
+        assert!(!text.contains(&p2));
+        assert!(text.contains("[MCP output truncated:"));
+
+        let dump = tokio::fs::read_to_string(dir.path().join("mcp").join("call-test.txt"))
+            .await
+            .unwrap();
+        assert_eq!(dump.matches(IMAGE_CONTENT_PLACEHOLDER).count(), 2);
+        assert!(!dump.contains("data:image"));
+    }
+
+    #[tokio::test]
+    async fn mcp_error_path_extracts_before_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = 20_000;
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), max);
+
+        let payload = "C".repeat(80_000);
+        let prose = "e".repeat(30_000);
+        // Space terminator so LF-wrapped prose is not absorbed into the payload.
+        let full = format!("err data:image/png;base64,{payload} done\n{prose}");
+
+        let out = truncate_tool_output(
+            ToolOutput::MCP(crate::types::output::MCPOutput::errored(
+                "failing_tool".into(),
+                "srv".into(),
+                full,
+            )),
+            &cfg,
+        )
+        .await;
+
+        let ToolOutput::MCP(mcp) = out else {
+            panic!("expected MCP");
+        };
+        assert!(mcp.is_error);
+        assert_eq!(mcp.extracted_images.len(), 1);
+        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
+        assert_eq!(mcp.extracted_images[0].data, payload);
+
+        let MCPOutputDetails::Error(text) = mcp.output() else {
+            panic!("expected Error");
+        };
+        assert!(text.contains(IMAGE_CONTENT_PLACEHOLDER));
+        assert!(!text.contains("data:image"));
+        assert!(!text.contains(&payload));
+        assert!(text.contains("[MCP output truncated:"));
     }
 }

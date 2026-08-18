@@ -7,7 +7,7 @@ multiplexers, containers, and SSH sessions can handle these features differently
 ## Diagnose and Fix Terminal Problems
 
 Run `/doctor` in Grok to check the current session and see available fixes. If
-Grok cannot start, run `grok doctor` in your shell. Use `grok doctor --json`
+Grok cannot start, run `grok-oss doctor` in your shell. Use `grok-oss doctor --json`
 for a machine-readable report.
 
 Doctor checks the terminal, multiplexer, color support, keyboard and newline
@@ -16,7 +16,7 @@ included. The in-app command can also check live session details such as
 notification focus tracking and sandbox profile conflicts.
 
 A report can contain issues or recommendations and still exit successfully.
-`grok doctor --json` reports the same color capability when piped. Microphone
+`grok-oss doctor --json` reports the same color capability when piped. Microphone
 checks do not start recording, so Doctor cannot detect macOS permission failures
 that appear only as silence during capture.
 
@@ -25,12 +25,13 @@ that appear only as silence during capture.
 
 When Doctor finds an explicit unhealthy tmux setting, `/doctor fix` lists the
 available automatic fixes. Apply one named fix at a time, for example
-`/doctor fix tmux-clipboard` or `grok doctor fix dcs-passthrough --yes`.
-Doctor can persist these three tmux options:
+`/doctor fix tmux-clipboard` or `grok-oss doctor fix dcs-passthrough --yes`.
+Doctor can persist these four tmux options:
 
 - `terminal.tmux-clipboard` — `set -g set-clipboard on`
 - `terminal.dcs-passthrough` — `set -wg allow-passthrough on`
 - `terminal.tmux-extended-keys` — `set -g extended-keys on`
+- `terminal.tmux-truecolor` — `set -as terminal-features ",*:RGB"`
 
 A tmux fix edits only the persistent config on the computer hosting the affected
 tmux server, including remote sessions. Plain tmux uses the real
@@ -81,6 +82,16 @@ Detection has these limitations:
 
 Run `/doctor`. A fully supported setup shows `color truecolor` and `themes all`.
 If it does not, Doctor shows the detected limitation and the relevant fix.
+
+Inside tmux there are two separate questions: what color Grok emits, and what
+color survives the multiplexer. The `color` line answers the first. For the
+second, when the attached client is not marked `RGB`, tmux rewrites every
+24-bit color to the nearest color the outer terminal's terminfo advertises,
+which can be as few as eight. Themes then look washed out even though `color`
+reads `truecolor`. Doctor reports this as `terminal.tmux-truecolor`. Reload
+your tmux config and then detach and reattach: the server reads the new option
+only on reload, and a client fixes its color depth only at attach, so neither
+step alone changes anything.
 
 ### Clipboard problems
 
@@ -136,23 +147,23 @@ is unverified or the clipboard is unreachable. You can also use `/copy <file>` o
 `/minimal`.
 
 For direct clipboard forwarding, run the SSH command from the local computer
-through `grok wrap`, for example `grok wrap ssh user@host`. The same command can
+through `grok-oss wrap`, for example `grok-oss wrap ssh user@host`. The same command can
 wrap container and pod shells. It also restores terminal modes after a dropped
 connection.
 
-When an SSH session is not using `grok wrap`, Grok shows the one-time tip
+When an SSH session is not using `grok-oss wrap`, Grok shows the one-time tip
 “Run `/doctor` for details and fixes.” The tip stops appearing after the session
 is launched through wrap. Turn it off with `/settings` → **Show contextual
 hints** → **SSH wrap**, or set `ssh_wrap = false` under
 `[ui.contextual_hints]` in `$GROK_HOME/config.toml`. This setting does not hide
 the Doctor recommendation.
 
-For repeated SSH use, Doctor offers `grok doctor fix ssh-wrap`. It also shows
+For repeated SSH use, Doctor offers `grok-oss doctor fix ssh-wrap`. It also shows
 the one-off command, the file that would change, and the cases where the alias
 should be bypassed. The ID `terminal.ssh-wrap` remains accepted and appears in
 JSON.
 
-> **Warning**: `grok wrap` is experimental and may not work in every setup.
+> **Warning**: `grok-oss wrap` is experimental and may not work in every setup.
 
 #### iTerm2
 
@@ -165,7 +176,7 @@ check.
 Zellij and tmux control mode can limit the alternate screen. Grok normally uses
 inline mode in those environments. Run `/doctor` to see the detected condition.
 You can configure `[terminal] alt_screen` in `~/.grok/pager.toml`, or run
-`grok --no-alt-screen` to confirm inline mode works.
+`grok-oss --no-alt-screen` to confirm inline mode works.
 
 ### Zellij keybindings interfere with Grok
 
@@ -217,7 +228,7 @@ Microphone**, enable the terminal, and restart it. If access is already on, chec
 the input device and level under **System Settings → Sound → Input** and try
 again.
 
-Run `grok doctor`, or run `/doctor` while voice mode is on. The **Voice** section
+Run `grok-oss doctor`, or run `/doctor` while voice mode is on. The **Voice** section
 shows the microphone Grok would use. If no input device is available, Doctor
 shows `voice.no-input-device` and the next steps. Doctor cannot detect denied
 macOS microphone access passively when macOS supplies silence.

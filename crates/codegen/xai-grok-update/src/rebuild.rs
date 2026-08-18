@@ -21,8 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::format_build_id;
-use xai_grok_shell::active_sessions::{self, ActiveSession};
+use xai_grok_active_sessions::{self as active_sessions, ActiveSession};
 use xai_grok_shell::leader::{self, LeaderRelaunchOutcome};
 
 /// Package that produces the `grok-oss` binary.
@@ -663,6 +662,10 @@ fn run_command_captured(
     engine: &mut RebuildProgressEngine,
     on_progress: &mut dyn FnMut(RebuildProgressEvent),
 ) -> Result<(std::process::ExitStatus, String)> {
+    use std::sync::Arc;
+
+    use xai_grok_tools::util::{ProcessGroup, detach_std_command, global_process_scope};
+
     debug_assert_eq!(
         install_stdio_policy(),
         InstallStdioPolicy::Capture,
@@ -672,8 +675,22 @@ fn run_command_captured(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group so session kill_all can reap the install tree.
+    detach_std_command(&mut cmd);
 
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
     let mut child = cmd.spawn().with_context(|| format!("spawn `{label}`"))?;
+    let group = ProcessGroup::new()
+        .and_then(|mut group| {
+            group.attach_std(&child)?;
+            Ok(Arc::new(group))
+        })
+        .with_context(|| format!("enroll process group for `{label}`"))?;
+    if !global_process_scope().register(&group) {
+        let _ = group.kill();
+        let _ = child.wait();
+        bail!("process scope closed; `{label}` aborted");
+    }
 
     let stdout = child
         .stdout
@@ -747,6 +764,7 @@ fn run_command_captured(
     let status = child
         .wait()
         .with_context(|| format!("wait for `{label}`"))?;
+    drop(group); // drop strong handle after reap so Weak cannot killpg a reused PID
     Ok((status, combined))
 }
 
@@ -921,17 +939,54 @@ pub fn parse_version_output(stdout: &str) -> Option<String> {
     None
 }
 
-/// Pure helper for tests: build-fail path must not signal leaders.
+/// Whether `/rebuild` may replace the live fleet after install/verify.
 ///
-/// Returns `Err` without calling `signal` when install fails.
+/// Failed `just install` / `--version` verify must not SIGUSR1 peers or
+/// soft-signal leaders. Process-wide replace is success-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebuildFleetPlan {
+    /// Soft-signal reachable leaders (`RelaunchForUpdate`).
+    pub signal_leaders: bool,
+    /// Write `rebuild_relaunch_request.json` and `SIGUSR1` other live TUIs.
+    pub write_request_and_signal_peers: bool,
+}
+
+impl RebuildFleetPlan {
+    /// Plan after the install recipe (and optional `--version` verify).
+    pub fn after_install(install_succeeded: bool) -> Self {
+        if install_succeeded {
+            Self {
+                signal_leaders: true,
+                write_request_and_signal_peers: true,
+            }
+        } else {
+            Self {
+                signal_leaders: false,
+                write_request_and_signal_peers: false,
+            }
+        }
+    }
+
+    /// True when leaders and peer TUIs should be asked to pick up the new binary.
+    pub fn should_replace_fleet(self) -> bool {
+        self.signal_leaders && self.write_request_and_signal_peers
+    }
+}
+
+/// Pure helper for tests: build-fail path must not signal leaders or peers.
+///
+/// Returns `Err` without marking signals when install fails.
 pub fn orchestrate_order_on_install_result(
     install_ok: bool,
-    signal_called: &mut bool,
+    leader_signal_called: &mut bool,
+    peer_signal_called: &mut bool,
 ) -> Result<()> {
-    if !install_ok {
-        bail!("install failed; not signaling leaders");
+    let plan = RebuildFleetPlan::after_install(install_ok);
+    if !plan.should_replace_fleet() {
+        bail!("install failed; not signaling leaders or peers");
     }
-    *signal_called = true;
+    *leader_signal_called = plan.signal_leaders;
+    *peer_signal_called = plan.write_request_and_signal_peers;
     Ok(())
 }
 
@@ -1034,22 +1089,45 @@ pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe
     cur != inst
 }
 
-/// Pure: which active-session PIDs should receive the cooperative relaunch
-/// signal. Excludes `except_pid` (the invoker, which re-execs itself), dead
-/// PIDs, and non-product processes (recycled PID safety).
-pub fn peer_pids_to_signal_for_relaunch(
+/// Pure: PID set rebuild should SIGUSR1 after the composite `(pid, session_id)`
+/// registry key.
+///
+/// Walks every row, then dedupes with a `BTreeSet` of PIDs. Two windows on the
+/// same `session_id` are two rows and both PIDs stay. Duplicate rows for one
+/// PID collapse to one. Skips the invoker, dead PIDs, and non-grok processes.
+/// Does not send a signal.
+pub fn collect_rebuild_signal_pids(
     sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
     except_pid: Option<u32>,
-) -> Vec<(u32, String)> {
-    let mut out = Vec::new();
-    for (pid, session_id, alive, is_grok) in sessions {
+) -> std::collections::BTreeSet<u32> {
+    let mut pids = std::collections::BTreeSet::new();
+    for (pid, _session_id, alive, is_grok) in sessions {
         if except_pid == Some(*pid) {
             continue;
         }
         if !*alive || !*is_grok {
             continue;
         }
-        out.push((*pid, session_id.clone()));
+        pids.insert(*pid);
+    }
+    pids
+}
+
+/// Pure: which active-session PIDs should receive the cooperative relaunch
+/// signal. Excludes `except_pid` (the invoker, which re-execs itself), dead
+/// PIDs, and non-product processes (recycled PID safety). Dedupes by PID
+/// after the composite key, in first-seen order.
+pub fn peer_pids_to_signal_for_relaunch(
+    sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
+    except_pid: Option<u32>,
+) -> Vec<(u32, String)> {
+    let targets = collect_rebuild_signal_pids(sessions, except_pid);
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (pid, session_id, _alive, _is_grok) in sessions {
+        if targets.contains(pid) && seen.insert(*pid) {
+            out.push((*pid, session_id.clone()));
+        }
     }
     out
 }
@@ -1106,12 +1184,35 @@ pub fn signal_active_sessions_to_relaunch(
     }
 
     let sessions = active_sessions::list().unwrap_or_default();
+    let classified: Vec<(u32, String, bool, bool)> = sessions
+        .iter()
+        .map(|s| {
+            let pid = s.pid;
+            (
+                pid,
+                s.session_id.0.to_string(),
+                active_sessions::is_pid_alive(pid),
+                xai_grok_shell::util::is_grok_process(pid),
+            )
+        })
+        .collect();
+    let targets = collect_rebuild_signal_pids(&classified, except_pid);
+
     let mut outcomes = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for s in sessions {
-        let pid = s.pid;
-        let session_id = s.session_id.0.to_string();
+    for (pid, session_id, alive, is_grok) in classified {
         if !seen.insert(pid) {
+            continue;
+        }
+        if targets.contains(&pid) {
+            match xai_grok_shell::util::signal_process_rebuild_relaunch(pid) {
+                Ok(()) => outcomes.push(PeerRelaunchOutcome::Signaled { pid, session_id }),
+                Err(e) => outcomes.push(PeerRelaunchOutcome::Skipped {
+                    pid,
+                    session_id,
+                    reason: format!("signal failed: {e}"),
+                }),
+            }
             continue;
         }
         if except_pid == Some(pid) {
@@ -1122,7 +1223,7 @@ pub fn signal_active_sessions_to_relaunch(
             });
             continue;
         }
-        if !active_sessions::is_pid_alive(pid) {
+        if !alive {
             outcomes.push(PeerRelaunchOutcome::Skipped {
                 pid,
                 session_id,
@@ -1130,21 +1231,12 @@ pub fn signal_active_sessions_to_relaunch(
             });
             continue;
         }
-        if !xai_grok_shell::util::is_grok_process(pid) {
+        if !is_grok {
             outcomes.push(PeerRelaunchOutcome::Skipped {
                 pid,
                 session_id,
                 reason: "not a grok product process".into(),
             });
-            continue;
-        }
-        match xai_grok_shell::util::signal_process_rebuild_relaunch(pid) {
-            Ok(()) => outcomes.push(PeerRelaunchOutcome::Signaled { pid, session_id }),
-            Err(e) => outcomes.push(PeerRelaunchOutcome::Skipped {
-                pid,
-                session_id,
-                reason: format!("signal failed: {e}"),
-            }),
         }
     }
     outcomes
@@ -1193,15 +1285,29 @@ where
         }
     };
     let (install_join, ()) = tokio::join!(install_task, drain_task);
-    let (backend, installed_path) = install_join.context("install task join")??;
+    let (backend, installed_path) = match install_join.context("install task join")? {
+        Ok(v) => v,
+        Err(e) => {
+            // Named contract: failed install must not replace the live fleet.
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(e);
+        }
+    };
 
-    let installed_identity = verify_installed_identity(&installed_path).unwrap_or_else(|_| {
-        // Fallback identity from this process when --version parse fails.
-        format_build_id(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("GROK_GIT_SHA").unwrap_or("unknown"),
-        )
-    });
+    // `--version` verify is a hard gate. Swallowing it used to SIGUSR1 peers
+    // onto a binary that cannot even print its identity (ENXIO / TUI start).
+    let installed_identity = match verify_installed_identity(&installed_path) {
+        Ok(id) => id,
+        Err(e) => {
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(e.context(
+                "installed binary failed `--version` verify; not signaling peers or leaders",
+            ));
+        }
+    };
+
+    let plan = RebuildFleetPlan::after_install(true);
+    debug_assert!(plan.should_replace_fleet());
 
     {
         let mut engine = RebuildProgressEngine::new();
@@ -1213,15 +1319,24 @@ where
     // Optional hygiene: drop dead PIDs from the registry before inventory.
     let _ = active_sessions::collect_crashed();
 
-    let leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
+    let leader_outcomes = if plan.signal_leaders {
+        leader::signal_leaders_to_relaunch(&installed_identity).await
+    } else {
+        Vec::new()
+    };
 
     // Cooperative peer TUI relaunch: every other live product window, not only
     // the invoker. Writes request + SIGUSR1; peers re-exec with the same session.
-    let peer_outcomes = signal_active_sessions_to_relaunch(
-        &installed_path,
-        &installed_identity,
-        Some(std::process::id()),
-    );
+    // Only after a successful install + verify.
+    let peer_outcomes = if plan.write_request_and_signal_peers {
+        signal_active_sessions_to_relaunch(
+            &installed_path,
+            &installed_identity,
+            Some(std::process::id()),
+        )
+    } else {
+        Vec::new()
+    };
 
     let live_sessions = active_sessions::list()
         .unwrap_or_default()
@@ -1409,11 +1524,33 @@ mod tests {
     #[test]
     fn build_fail_does_not_signal_leaders() {
         let mut signaled = false;
-        let err = orchestrate_order_on_install_result(false, &mut signaled).unwrap_err();
+        let mut peers = false;
+        let err =
+            orchestrate_order_on_install_result(false, &mut signaled, &mut peers).unwrap_err();
         assert!(!signaled);
+        assert!(!peers);
         assert!(err.to_string().contains("not signaling"));
-        orchestrate_order_on_install_result(true, &mut signaled).unwrap();
+        orchestrate_order_on_install_result(true, &mut signaled, &mut peers).unwrap();
         assert!(signaled);
+        assert!(peers);
+    }
+
+    /// Contract: a failed `just install` / verify must not write the
+    /// cooperative request or SIGUSR1 peers. Fleet replace is success-only.
+    #[test]
+    fn failed_install_must_not_replace_or_signal_peers() {
+        let plan = RebuildFleetPlan::after_install(false);
+        assert!(
+            !plan.should_replace_fleet(),
+            "failed install must not replace the live fleet"
+        );
+        assert!(!plan.signal_leaders);
+        assert!(!plan.write_request_and_signal_peers);
+
+        let ok = RebuildFleetPlan::after_install(true);
+        assert!(ok.should_replace_fleet());
+        assert!(ok.signal_leaders);
+        assert!(ok.write_request_and_signal_peers);
     }
 
     /// Contract: product install must capture child stdio (never inherit TTY).
@@ -1624,6 +1761,45 @@ mod tests {
         assert!(a > 0.0 && a < 1.0);
         assert!(b > a);
         assert!(b < 1.0);
+    }
+
+    /// Contract: after register identity is `(pid, session_id)`, two windows
+    /// on the same conversation are two rows. Rebuild must consider both
+    /// PIDs and dedupe by PID, not by session_id. Self, dead, and non-grok
+    /// rows are skipped. This helper never sends SIGUSR1.
+    #[test]
+    fn rebuild_signals_each_pid_after_composite_key() {
+        let session_id = "shared-conversation";
+        let self_pid = 111;
+        let peer_a = 222;
+        let peer_b = 333;
+        let dead_same_session = 444;
+        let non_grok = 555;
+        let sessions = vec![
+            (self_pid, session_id.into(), true, true),
+            (peer_a, session_id.into(), true, true),
+            (peer_b, session_id.into(), true, true),
+            (dead_same_session, session_id.into(), false, true),
+            (non_grok, session_id.into(), true, false),
+            (peer_a, session_id.into(), true, true),
+        ];
+        let targets = collect_rebuild_signal_pids(&sessions, Some(self_pid));
+        assert!(
+            targets.contains(&peer_a),
+            "first window on the shared session must be signaled"
+        );
+        assert!(
+            targets.contains(&peer_b),
+            "second window on the same session_id must also be signaled; dedupe is by PID"
+        );
+        assert_eq!(
+            targets.len(),
+            2,
+            "self, dead, non-grok, and a duplicate pid must not add extra targets: {targets:?}"
+        );
+        assert!(!targets.contains(&self_pid));
+        assert!(!targets.contains(&dead_same_session));
+        assert!(!targets.contains(&non_grok));
     }
 
     /// Contract: rebuild must schedule restart of **all** other live product

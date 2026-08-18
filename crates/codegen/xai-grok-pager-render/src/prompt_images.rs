@@ -68,10 +68,9 @@ impl ImageViewerState {
     pub fn open(image: &PastedImage) -> Option<Self> {
         let bytes = if let Some(ref b) = image.encoded_bytes {
             b.to_vec()
-        } else if let Some(ref path) = image.session_image_path {
-            std::fs::read(path).ok()?
         } else {
-            return None;
+            let path = image.session_image_path.as_ref()?;
+            std::fs::read(path).ok()?
         };
 
         let (w, h) = decode_image_dimensions(&bytes)?;

@@ -14,6 +14,7 @@
 pub mod cache;
 pub mod color_support;
 pub mod doge;
+pub mod env_appearance;
 mod grokday;
 mod groknight;
 pub mod md_style;
@@ -161,12 +162,11 @@ pub fn canonical_name(value: &str) -> Option<&'static str> {
 pub fn display_name_for_canonical(value: &str) -> &str {
     match value {
         "auto" => "Auto",
+        "doge" => "DOGE",
         "groknight" => "Grok Night",
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
-        "oscura-midnight" => "Oscura Midnight",
-        "doge" => "DOGE",
         other => other,
     }
 }
@@ -317,32 +317,24 @@ impl Theme {
         };
         let adapted = adapted.quantized(level);
         if is_doge {
-            // Re-pin every background slot to Rgb(0,0,0). Basic quantize
-            // maps pure black to named `Color::Black`, which many terminal
-            // profiles paint as charcoal (not emissive pure black). Keep
-            // truecolor pure black so DOGE never washes the canvas.
-            // Under NO_COLOR, quantized slots are already Reset — leave them.
-            if level.has_color() {
-                adapted.pin_doge_pure_black_backgrounds()
-            } else {
-                adapted
-            }
-        } else if level.has_color()
+            return adapted;
+        }
+        // ANSI16 chrome fallback — fires in two cases:
+        //   1. Any terminal that only advertises 16-color support
+        //      (e.g., `TERM=xterm`, `TERM=ansi`, or `GROK_FORCE_COLOR_LEVEL=basic`),
+        //      where naive quantization collapses every dark RGB onto `Color::Black`.
+        //   2. Legacy Windows ConHost below TrueColor, kept for parity with the
+        //      glyph fallback path also gated on `is_legacy_windows_console()`.
+        //
+        // Both arms require `has_color()` so that `NO_COLOR` (which produces
+        // `ColorLevel::None`) keeps suppressing all SGR output. Without the
+        // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
+        // would repaint `Color::Reset` slots with named ANSI colors and
+        // partially defeat the user's opt-out on ConHost.
+        if level.has_color()
             && (level == color_support::ColorLevel::Basic
                 || (crate::glyphs::is_legacy_windows_console() && !level.has_truecolor()))
         {
-            // ANSI16 chrome fallback — fires in two cases:
-            //   1. Any terminal that only advertises 16-color support
-            //      (e.g., `TERM=xterm`, `TERM=ansi`, or `GROK_FORCE_COLOR_LEVEL=basic`),
-            //      where naive quantization collapses every dark RGB onto `Color::Black`.
-            //   2. Legacy Windows ConHost below TrueColor, kept for parity with the
-            //      glyph fallback path also gated on `is_legacy_windows_console()`.
-            //
-            // Both arms require `has_color()` so that `NO_COLOR` (which produces
-            // `ColorLevel::None`) keeps suppressing all SGR output. Without the
-            // explicit gate on the legacy-Windows arm, `ansi16_chrome_overrides`
-            // would repaint `Color::Reset` slots with named ANSI colors and
-            // partially defeat the user's opt-out on ConHost.
             adapted.ansi16_chrome_overrides(dark)
         } else {
             adapted
@@ -402,9 +394,7 @@ impl Theme {
         use ratatui::style::Color;
 
         /// Move `color` `amount` levels per channel further from `base`.
-        /// Returns `color` unchanged when either side isn't RGB, or when
-        /// `color` already matches `base` (do not invent elevation — that
-        /// turns pure black into charcoal wash / light-bleed).
+        /// Returns `color` unchanged when either side isn't RGB.
         fn push_away(base: Color, color: Color, amount: i16) -> Color {
             let Color::Rgb(br, b_green, bb) = base else {
                 return color;
@@ -412,9 +402,6 @@ impl Theme {
             let Color::Rgb(cr, cg, cb) = color else {
                 return color;
             };
-            if cr == br && cg == b_green && cb == bb {
-                return color;
-            }
             let base_lum = br as i16 + b_green as i16 + bb as i16;
             let color_lum = cr as i16 + cg as i16 + cb as i16;
             let sign: i16 = if color_lum >= base_lum { 1 } else { -1 };
@@ -461,33 +448,6 @@ impl Theme {
         };
         crate::theme::osc11::classify_luminance(r, g, b)
             == crate::theme::system_appearance::SystemAppearance::Dark
-    }
-
-    /// Force every DOGE canvas / sunken background slot to pure
-    /// [`Color::Rgb(0, 0, 0)`].
-    ///
-    /// DOGE design is a flat emissive-black canvas with no elevated
-    /// surface, gray ramp, or semi-transparent panel wash. Call after
-    /// quantization so named `Color::Black` (ANSI palette — often
-    /// charcoal in host profiles) cannot reintroduce light-bleed.
-    fn pin_doge_pure_black_backgrounds(self) -> Self {
-        use ratatui::style::Color;
-        const BLACK: Color = Color::Rgb(0, 0, 0);
-        Self {
-            bg_base: BLACK,
-            bg_light: BLACK,
-            bg_dark: BLACK,
-            bg_highlight: BLACK,
-            bg_hover: BLACK,
-            bg_terminal: BLACK,
-            scrollbar_bg: BLACK,
-            diff_delete_bg: BLACK,
-            diff_insert_bg: BLACK,
-            bg_visual: BLACK,
-            paste_bg: BLACK,
-            md_code_bg: BLACK,
-            ..self
-        }
     }
 
     /// Pin chrome and semantic-accent colors to ANSI-named entries so
@@ -593,11 +553,13 @@ impl Theme {
             paste_bg: canvas_bg,
             scrollbar_bg: canvas_bg,
 
-            // ── Borders: dim (idle) → muted (selection) → high-contrast (active) ──
+            // ── Borders: muted (idle prompt) → muted (selection) → high-contrast (active) ──
             // The four-tier truecolor border hierarchy collapses onto
             // three ANSI16 slots:
-            //   - `prompt_border` (idle text-input frame) → `dim_fg`,
-            //     softest readable border on each canvas.
+            //   - `prompt_border` (idle text-input frame) → `muted_fg`,
+            //     not `dim_fg`. DarkGray (ANSI 8) is tuned near-bg on
+            //     many palettes, so a dim idle frame vanishes the same
+            //     way table chrome did (GB-3759).
             //   - `hover_border` (transient mouse-hover) → `DarkGray`,
             //     stable across both polarities so a hover band reads
             //     consistently.
@@ -606,7 +568,7 @@ impl Theme {
             //     screaming.
             //   - `prompt_border_active` (focused) → `high_contrast_fg`,
             //     maximum contrast so focus always pops.
-            prompt_border: dim_fg,
+            prompt_border: muted_fg,
             prompt_border_active: high_contrast_fg,
             selection_border: muted_fg,
             hover_border: Color::DarkGray,
@@ -615,6 +577,11 @@ impl Theme {
             scrollbar_fg: muted_fg,
 
             // ── Foreground / text hierarchy ─────────────────────────────
+            // Prompt textarea + chrome captions use these directly (and
+            // blend_color cannot mix named ANSI, so they must already
+            // be readable slots).
+            text_primary: high_contrast_fg,
+            text_secondary: muted_fg,
             md_text: high_contrast_fg,
             // Selected user-prompt `>` (drives the user selection accent
             // and the OSC 12 cursor color) takes max-contrast fg so the
@@ -662,13 +629,12 @@ impl Theme {
             accent_system: blue,
             accent_skill: blue,
             fuzzy_accent: blue,
-            // Cyan family — feedback mode, model name, and the legacy
-            // `running` indicator (distinct from the magenta
-            // `accent_running` used for subagents). ANSI16 has no
-            // separate teal slot, so the truecolor teal accents
-            // (feedback, model) fold onto cyan here.
-            accent_feedback: cyan,
+            // Cyan family: model name, feedback mode, and the legacy `running`
+            // indicator (distinct from the magenta `accent_running` used for
+            // subagents). ANSI16 has no separate teal slot, so the truecolor
+            // teal model accent folds onto cyan here.
             accent_model: cyan,
+            accent_feedback: cyan,
             running: cyan,
             // Yellow family — warning text, plan-mode gold, shell
             // commands, file paths. ANSI16 has no orange or gold slot,
@@ -677,6 +643,26 @@ impl Theme {
             warning: yellow,
             path: yellow,
             accent_plan: yellow,
+
+            // Markdown content: naive Basic quantize lands GrokNight
+            // md_code / md_muted / h4–h6 on DarkGray (ANSI 8). Many
+            // palettes tune that slot near the background, so inline
+            // code and table borders vanish over ssh+tmux (GB-3759).
+            // `md_muted` uses muted_fg, not dim_fg — format_table also
+            // stacks DIM on table borders.
+            md_heading_h1: cyan,
+            md_heading_h2: blue,
+            md_heading_h3: magenta,
+            md_heading_h4: high_contrast_fg,
+            md_heading_h5: muted_fg,
+            md_heading_h6: muted_fg,
+            md_code: cyan,
+            md_muted: muted_fg,
+            md_task_checked: green,
+            md_task_unchecked: muted_fg,
+            link_fg: blue,
+            diff_equal_fg: muted_fg,
+            diff_gutter_fg: muted_fg,
             ..self
         }
     }
@@ -719,44 +705,6 @@ pub fn reset_cursor_color() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn from_name_doge_only() {
-        for name in ["doge", "DOGE", "Doge"] {
-            assert_eq!(
-                ThemeKind::from_name(name),
-                Some(ThemeKind::Doge),
-                "name {name}"
-            );
-        }
-        // No compat or ECMA-branded aliases — those ids are rejected.
-        for dead in [
-            "ansi-8",
-            "ansi8",
-            "ansi",
-            "tty",
-            "oled",
-            "oled-ansi",
-            "ANSI-8",
-            "ecma-doge",
-            "ECMA-DOGE",
-            "rgbcmykw",
-            "Ecma-Doge",
-        ] {
-            assert_eq!(
-                ThemeKind::from_name(dead),
-                None,
-                "compat/ecma alias {dead} must not resolve"
-            );
-        }
-        assert_eq!(ThemeKind::Doge.display_name(), "doge");
-        assert_eq!(canonical_name("doge"), Some("doge"));
-        assert_eq!(canonical_name("ansi-8"), None);
-        assert_eq!(canonical_name("ecma-doge"), None);
-        assert!(!ThemeKind::Doge.requires_truecolor());
-        assert_eq!(display_name_for_canonical("doge"), "DOGE");
-        assert_eq!(display_name_for_canonical("ansi-8"), "ansi-8"); // passthrough unknown
-    }
 
     #[test]
     fn from_name_auto() {
@@ -820,11 +768,13 @@ mod tests {
         let t = Theme::groknight().ansi16_chrome_overrides(true);
         assert_eq!(t.bg_light, Color::DarkGray);
         assert_eq!(t.bg_highlight, Color::DarkGray);
-        // Idle prompt border sits at `dim_fg` (DarkGray on dark canvas);
+        // Idle prompt border sits at `muted_fg` (Gray on dark canvas);
         // focused border jumps to max-contrast White.
-        assert_eq!(t.prompt_border, Color::DarkGray);
+        assert_eq!(t.prompt_border, Color::Gray);
         assert_eq!(t.prompt_border_active, Color::White);
         assert_eq!(t.md_text, Color::White);
+        assert_eq!(t.text_primary, Color::White);
+        assert_eq!(t.text_secondary, Color::Gray);
         // Two-tier grey: secondary text (`gray`) reads at the muted
         // slot (silver), `gray_dim` reads at the dim slot (DarkGray) —
         // see `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
@@ -836,16 +786,17 @@ mod tests {
     fn ansi16_overrides_light_inverts_high_contrast_and_elevated_bg() {
         // Light canvas inverts polarity: elevated bg reads darker
         // (silver step from white), high-contrast fg is Black, muted
-        // fg is DarkGray, and the dim slot (`prompt_border`, `gray_dim`)
-        // flips to silver — see
-        // `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
+        // fg is DarkGray, and the dim slot (`gray_dim`) flips to silver
+        // — see `ansi16_overrides_gray_hierarchy_collapses_to_two_slots`.
         use ratatui::style::Color;
         let t = Theme::grokday().ansi16_chrome_overrides(false);
         assert_eq!(t.bg_light, Color::Gray);
         assert_eq!(t.bg_highlight, Color::Gray);
-        assert_eq!(t.prompt_border, Color::Gray);
+        assert_eq!(t.prompt_border, Color::DarkGray);
         assert_eq!(t.prompt_border_active, Color::Black);
         assert_eq!(t.md_text, Color::Black);
+        assert_eq!(t.text_primary, Color::Black);
+        assert_eq!(t.text_secondary, Color::DarkGray);
         assert_eq!(t.gray, Color::DarkGray);
         assert_eq!(t.gray_dim, Color::Gray);
     }
@@ -879,6 +830,64 @@ mod tests {
         assert_eq!(t_light.accent_error, Color::Red);
         assert_eq!(t_light.accent_success, Color::Green);
         assert_eq!(t_light.accent_running, Color::Magenta);
+    }
+
+    #[test]
+    fn ansi16_overrides_md_palette_never_lands_on_dark_gray() {
+        // GB-3759: on a dark canvas no md field may land on DarkGray,
+        // the slot palettes tune near their background.
+        use ratatui::style::Color;
+        let t = Theme::groknight().ansi16_chrome_overrides(true);
+        for (name, c) in [
+            ("md_heading_h1", t.md_heading_h1),
+            ("md_heading_h2", t.md_heading_h2),
+            ("md_heading_h3", t.md_heading_h3),
+            ("md_heading_h4", t.md_heading_h4),
+            ("md_heading_h5", t.md_heading_h5),
+            ("md_heading_h6", t.md_heading_h6),
+            ("md_code", t.md_code),
+            ("md_muted", t.md_muted),
+            ("md_task_checked", t.md_task_checked),
+            ("md_task_unchecked", t.md_task_unchecked),
+            ("link_fg", t.link_fg),
+            ("diff_equal_fg", t.diff_equal_fg),
+            ("diff_gutter_fg", t.diff_gutter_fg),
+        ] {
+            assert_ne!(
+                c,
+                Color::DarkGray,
+                "{name} must not land on DarkGray on a dark canvas \
+                 (invisible on palettes that tune ANSI 8 near-bg)"
+            );
+            assert!(
+                !matches!(c, Color::Rgb(..) | Color::Indexed(_)),
+                "{name} must be a named ANSI16 color, got {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ansi16_overrides_md_palette_polarity_aware_hues() {
+        use ratatui::style::Color;
+        let t_dark = Theme::groknight().ansi16_chrome_overrides(true);
+        assert_eq!(t_dark.md_code, Color::LightCyan);
+        assert_eq!(t_dark.md_muted, Color::Gray);
+        assert_eq!(t_dark.md_heading_h1, Color::LightCyan);
+        assert_eq!(t_dark.md_heading_h2, Color::LightBlue);
+        assert_eq!(t_dark.md_heading_h3, Color::LightMagenta);
+        assert_eq!(t_dark.md_heading_h4, Color::White);
+        assert_eq!(t_dark.link_fg, Color::LightBlue);
+        assert_eq!(t_dark.md_task_checked, Color::LightGreen);
+
+        let t_light = Theme::grokday().ansi16_chrome_overrides(false);
+        assert_eq!(t_light.md_code, Color::Cyan);
+        assert_eq!(t_light.md_muted, Color::DarkGray);
+        assert_eq!(t_light.md_heading_h1, Color::Cyan);
+        assert_eq!(t_light.md_heading_h2, Color::Blue);
+        assert_eq!(t_light.md_heading_h3, Color::Magenta);
+        assert_eq!(t_light.md_heading_h4, Color::Black);
+        assert_eq!(t_light.link_fg, Color::Blue);
+        assert_eq!(t_light.md_task_checked, Color::Green);
     }
 
     #[test]
@@ -927,13 +936,10 @@ mod tests {
 
     #[test]
     fn ansi16_overrides_cyan_family_absorbs_teal() {
-        // ANSI16 has no teal slot — feedback / model teal both fold
-        // onto cyan. The `running` indicator (legacy cyan, distinct
-        // from the magenta `accent_running` used for subagents) also
-        // lives here.
+        // ANSI16 has no teal slot; the model teal folds onto cyan.
+        // The `running` indicator (legacy cyan, distinct from the magenta `accent_running` used for subagents) also lives here.
         use ratatui::style::Color;
         let t = Theme::groknight().ansi16_chrome_overrides(true);
-        assert_eq!(t.accent_feedback, Color::LightCyan);
         assert_eq!(t.accent_model, Color::LightCyan);
         assert_eq!(t.running, Color::LightCyan);
     }
@@ -1027,25 +1033,23 @@ mod tests {
     #[test]
     fn ansi16_overrides_border_hierarchy_is_distinct() {
         // Border hierarchy:
-        //   prompt_border (dim, idle) → muted (selection) → high-contrast (focused)
-        // On dark canvas, `prompt_border` and `hover_border` share
-        // `DarkGray` (one tier above canvas), `selection_border` takes
-        // `Gray` (silver), and `prompt_border_active` takes `White`.
-        // On light canvas, `prompt_border` takes `Gray` (silver — sits
-        // closest to White), and `selection_border` + `hover_border`
-        // both take `DarkGray`. The selection-vs-active distinction
-        // survives in both polarities via `prompt_border_active`.
+        //   prompt_border (muted, idle) → muted (selection) → high-contrast (focused)
+        // On dark canvas, idle prompt and selection share `Gray` (silver)
+        // so the frame survives palettes that tune ANSI 8 near-bg;
+        // `hover_border` stays `DarkGray`, `prompt_border_active` is `White`.
+        // On light canvas, `prompt_border` / `selection_border` /
+        // `hover_border` all sit on `DarkGray`; focus is `Black`.
         use ratatui::style::Color;
         let t_dark = Theme::groknight().ansi16_chrome_overrides(true);
         assert_eq!(t_dark.hover_border, Color::DarkGray);
-        assert_eq!(t_dark.prompt_border, Color::DarkGray);
+        assert_eq!(t_dark.prompt_border, Color::Gray);
         assert_eq!(t_dark.selection_border, Color::Gray);
         assert_eq!(t_dark.prompt_border_active, Color::White);
         assert_ne!(t_dark.selection_border, t_dark.prompt_border_active);
 
         let t_light = Theme::grokday().ansi16_chrome_overrides(false);
         assert_eq!(t_light.hover_border, Color::DarkGray);
-        assert_eq!(t_light.prompt_border, Color::Gray);
+        assert_eq!(t_light.prompt_border, Color::DarkGray);
         assert_eq!(t_light.selection_border, Color::DarkGray);
         assert_eq!(t_light.prompt_border_active, Color::Black);
         assert_ne!(t_light.selection_border, t_light.prompt_border_active);
@@ -1141,92 +1145,6 @@ mod tests {
                 Color::Black,
                 "{name} should collapse to Black without the override"
             );
-        }
-    }
-
-    /// Root-cause ratchet: ANSI16 chrome elevates dark surfaces to DarkGray
-    /// (the light-bleed the operator reported). DOGE must not use this path.
-    #[test]
-    fn ansi16_chrome_overrides_elevate_doge_surfaces_to_dark_gray() {
-        use ratatui::style::Color;
-        let elevated = Theme::doge().ansi16_chrome_overrides(true);
-        assert_eq!(elevated.bg_light, Color::DarkGray);
-        assert_eq!(elevated.bg_highlight, Color::DarkGray);
-        assert_eq!(elevated.bg_hover, Color::DarkGray);
-        assert_eq!(elevated.bg_visual, Color::DarkGray);
-    }
-
-    /// Pin undoes ANSI16 elevation — pure Rgb(0,0,0) canvas, no charcoal.
-    #[test]
-    fn doge_pin_pure_black_backgrounds_undoes_ansi16_elevation() {
-        use ratatui::style::Color;
-        let pure = Color::Rgb(0, 0, 0);
-        let pinned = Theme::doge()
-            .ansi16_chrome_overrides(true)
-            .pin_doge_pure_black_backgrounds();
-        for (name, c) in [
-            ("bg_base", pinned.bg_base),
-            ("bg_light", pinned.bg_light),
-            ("bg_dark", pinned.bg_dark),
-            ("bg_highlight", pinned.bg_highlight),
-            ("bg_hover", pinned.bg_hover),
-            ("bg_terminal", pinned.bg_terminal),
-            ("scrollbar_bg", pinned.scrollbar_bg),
-            ("diff_delete_bg", pinned.diff_delete_bg),
-            ("diff_insert_bg", pinned.diff_insert_bg),
-            ("bg_visual", pinned.bg_visual),
-            ("paste_bg", pinned.paste_bg),
-            ("md_code_bg", pinned.md_code_bg),
-        ] {
-            assert_eq!(c, pure, "{name} must be pure black after pin");
-        }
-    }
-
-    /// Windows contrast boost must not invent charcoal when a slot already
-    /// matches the canvas (DOGE flat pure-black case).
-    #[test]
-    fn windows_contrast_boost_identity_black_stays_pure_black() {
-        use ratatui::style::Color;
-        let pure = Color::Rgb(0, 0, 0);
-        let boosted = Theme::doge().windows_contrast_boost(true);
-        for (name, c) in [
-            ("bg_base", boosted.bg_base),
-            ("bg_light", boosted.bg_light),
-            ("bg_dark", boosted.bg_dark),
-            ("bg_highlight", boosted.bg_highlight),
-            ("bg_hover", boosted.bg_hover),
-            ("bg_visual", boosted.bg_visual),
-            ("scrollbar_bg", boosted.scrollbar_bg),
-            ("md_code_bg", boosted.md_code_bg),
-        ] {
-            assert_eq!(c, pure, "{name} must stay pure black (no charcoal push)");
-        }
-    }
-
-    /// After Basic quantize + DOGE pin (the path `Theme::current` takes for
-    /// DOGE), every background is pure Rgb(0,0,0) — never named Black or
-    /// DarkGray that host profiles wash into charcoal.
-    #[test]
-    fn doge_basic_quantize_then_pin_keeps_pure_black_canvas() {
-        use ratatui::style::Color;
-        let pure = Color::Rgb(0, 0, 0);
-        let t = Theme::doge()
-            .quantized(color_support::ColorLevel::Basic)
-            .pin_doge_pure_black_backgrounds();
-        for (name, c) in [
-            ("bg_base", t.bg_base),
-            ("bg_light", t.bg_light),
-            ("bg_dark", t.bg_dark),
-            ("bg_highlight", t.bg_highlight),
-            ("bg_hover", t.bg_hover),
-            ("bg_terminal", t.bg_terminal),
-            ("scrollbar_bg", t.scrollbar_bg),
-            ("bg_visual", t.bg_visual),
-            ("md_code_bg", t.md_code_bg),
-            ("paste_bg", t.paste_bg),
-        ] {
-            assert_eq!(c, pure, "{name}");
-            assert_ne!(c, Color::DarkGray, "{name} must not be elevated");
         }
     }
 

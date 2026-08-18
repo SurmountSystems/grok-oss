@@ -19,7 +19,7 @@ use xai_grok_pager::render::Renderable;
 use xai_grok_pager::scrollback::state::ScrollbackState;
 use xai_grok_pager::scrollback::wrappers::EntryRenderer;
 use xai_grok_pager::theme::Theme;
-use xai_grok_pager::views::prompt_widget::PromptStyle;
+use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle};
 use xai_grok_pager::views::turn_status;
 /// Left inset (columns) for every auxiliary live-region row: the status row,
 /// the info bar, the exit hint, and the todo panel — and the prompt's
@@ -81,10 +81,11 @@ pub(super) fn prompt_style(
         chrome: true,
         chrome_pad_left: live_left_inset(appearance),
         chrome_pad_right: 0,
-        bg_override: Some(Color::Reset),
+        bg: PromptBg::Canvas(Color::Reset),
         accent_color_override: input_mode.accent_color(theme),
         border_color_override: None,
         prefix_override: input_mode.prefix_override(theme),
+        placeholder_when_focused: false,
         placeholder_override: input_mode.placeholder_override(multiline),
         show_accent_line: false,
         show_borders: false,
@@ -326,6 +327,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 &mut agent.last_btw_selection_model,
                 None,
                 &[],
+                None,
             );
             agent.last_btw_area = btw_area;
         }
@@ -403,12 +405,7 @@ fn live_tail_renderer<'a>(
     cwd: &'a std::path::Path,
     tick: u64,
 ) -> EntryRenderer<'a> {
-    EntryRenderer::new(entry, theme)
-        .with_appearance(appearance.clone())
-        .with_cwd(Some(cwd))
-        .with_tick(tick)
-        .with_flat_background(true)
-        .with_hide_accent(true)
+    super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, tick)
 }
 /// Render the uncommitted tail (entries past the commit frontier), bottom-anchored
 /// so the most recent output is always visible; the topmost visible entry is
@@ -511,12 +508,11 @@ fn minimal_advance_phase_timer(
 /// surfaces the same rich activity detail (`Run …` / `Thinking…` /
 /// `Waiting on subagent…` / `Retrying (attempt N)…` / `Cancelling…`), the
 /// per-phase + turn timers, and the "… still running" cue (running commands /
-/// monitors / loops / background subagents, shown while idle or parked) —
-/// instead of collapsing everything to "working…". Keyboard-only, so the
-/// mouse `[stop]` / `[↓]` buttons are suppressed (`None`), and
-/// `flat_background` keeps the row transparent like the rest of the live
-/// region. When the widget would draw nothing (plain idle or parked, no
-/// watchers) a small `minimal · /help` hint is shown instead.
+/// monitors / loops / background subagents) — instead of collapsing
+/// everything to "working…". Keyboard-only, so the mouse `[stop]` / `[↓]`
+/// buttons are suppressed (`None`), and `flat_background` keeps the row
+/// transparent like the rest of the live region. When the widget would draw
+/// nothing a small `minimal · /help` hint is shown instead.
 fn render_minimal_status(
     buf: &mut Buffer,
     area: Rect,
@@ -542,17 +538,12 @@ fn render_minimal_status(
     let watchers = minimal_api::watchers(agent);
     let drain_blocked = minimal_api::drain_blocked(agent);
     let parked = minimal_api::renders_parked(agent);
-    // Minimal is keyboard-only and does not own process-level global pause
-    // chrome; AgentView::global_work_paused is crate-private. Pass false so
-    // status visibility matches idle-without-pause semantics.
-    let global_paused = false;
     if !turn_status::should_show(
         &agent.session.state,
         drain_blocked,
         minimal_api::mcp_init_progress(agent),
         watchers,
         parked,
-        global_paused,
     ) {
         render_idle_hint(buf, area, theme);
         return;
@@ -585,7 +576,7 @@ fn render_minimal_status(
             flat_background: true,
             held_queue: minimal_api::held_queue_count(agent),
             held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
-            global_paused,
+            global_paused: false,
         },
     );
 }
@@ -630,7 +621,6 @@ fn render_prompt_info(
     transcript_hint: &str,
     theme: &Theme,
 ) {
-    use xai_grok_pager::views::context_bar::fmt_tokens;
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
@@ -659,19 +649,26 @@ fn render_prompt_info(
             segs.push((label.to_string(), base.fg(color)));
         }
         let used = agent.context_state.as_ref().map(|c| c.used);
-        let total = agent
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or_else(|| agent.session.models.get_context_window());
-        if let (Some(used), Some(total)) = (used, total)
-            && total > 0
+        let catalog = agent.session.models.get_context_window().or_else(|| {
+            agent
+                .context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling = catalog.map(|window| {
+            xai_grok_shell::util::config::apply_economic_context_cap(
+                window,
+                xai_grok_pager::appearance::cache::load_economic_mode(),
+            )
+        });
+        if let Some(used) = used
+            && let Some(chip) =
+                xai_grok_pager::views::context_bar::context_chip_token_text(used, sampling, catalog)
+            && let Some(gate) =
+                xai_grok_pager::views::context_bar::context_chip_gate_window(sampling, catalog)
         {
-            let pct = xai_token_estimation::usage_percentage(used, total);
-            segs.push((
-                format!("{} / {} ({:.0}%)", fmt_tokens(used), fmt_tokens(total), pct),
-                base,
-            ));
+            let pct = xai_token_estimation::usage_percentage(used, gate);
+            segs.push((format!("{chip} ({pct:.0}%)"), base));
         }
     }
     if queued > 0 {
@@ -820,6 +817,46 @@ mod tests {
             painted_height.saturating_add(super::super::commit::MINIMAL_BLOCK_GAP)
         );
     }
+    /// The tail and the committed footprint are one builder with a different
+    /// tick; this is the net for anyone tempted to fork them again.
+    #[test]
+    fn the_animation_tick_never_changes_a_blocks_height() {
+        use xai_grok_pager::scrollback::RenderBlock;
+        use xai_grok_pager::scrollback::entry::ScrollbackEntry;
+        minimal_api::set_show_thinking_blocks(true);
+        let theme = Theme::current();
+        let cwd = std::path::PathBuf::from("/tmp");
+        let appearance = super::super::commit::committed_appearance(
+            &xai_grok_pager::appearance::AppearanceConfig::default(),
+        );
+        let long = "reasoning that wraps a good few times even at a hundred and \
+                    twenty columns because it simply keeps going and going and going";
+        for block in [
+            RenderBlock::thinking(long),
+            RenderBlock::agent_message(long),
+            RenderBlock::execute("ls -la"),
+        ] {
+            let entry = ScrollbackEntry::new(block);
+            for width in [20u16, 40, 80, 120] {
+                let live =
+                    live_tail_renderer(&entry, &theme, &appearance, &cwd, 7).desired_height(width);
+                let committed = live_tail_renderer(
+                    &entry,
+                    &theme,
+                    &appearance,
+                    &cwd,
+                    super::super::commit::COMMITTED_TICK,
+                )
+                .desired_height(width);
+                assert_eq!(
+                    live, committed,
+                    "{:?} @{width}: a block's height must not depend on the tick, or the \
+                     prompt jumps on commit",
+                    entry.block
+                );
+            }
+        }
+    }
     #[test]
     fn minimal_status_shows_rich_activity_and_idle_hint() {
         use xai_grok_pager::acp::tracker::TurnActivity;
@@ -943,7 +980,9 @@ mod tests {
             ..Default::default()
         });
         let theme = Theme::current();
-        let area = Rect::new(0, 0, 80, 1);
+        // Two-meter chip plus `N queued · /queue` is longer than the old
+        // unlabeled used/total form. 80 columns clipped the trailing hint.
+        let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         render_prompt_info(&mut buf, area, &a, 3, "ctrl+o transcript", &theme);
         let text: String = (0..area.width)
@@ -953,6 +992,7 @@ mod tests {
         assert!(text.contains("2.0M"), "total context window: {text:?}");
         assert!(text.contains('%'), "percentage: {text:?}");
         assert!(text.contains("3 queued"), "queued count: {text:?}");
+        assert!(text.contains("/queue"), "queued inspection cue: {text:?}");
         assert!(
             text.trim_end().ends_with("ctrl+o transcript"),
             "trailing transcript hint: {text:?}"

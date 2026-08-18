@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod doom_loop;
 pub mod error;
 pub mod messages;
+pub mod provider_error;
 pub mod serde_helpers;
 pub mod tool_overrides;
 pub mod types;
@@ -20,11 +21,13 @@ pub use self::doom_loop::{
     DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,
 };
 pub use self::error::{
-    EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result, SamplingError,
-    credit_exhausted_user_message, format_http_status, http_status_label, is_context_length_error,
+    ApiErrorCode, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,
+    ResponseModelMetadata, Result, SamplingError, SentCredential, credit_exhausted_user_message,
+    format_http_status, http_status_label, is_context_length_error,
     is_credentials_rejected_message, is_credit_exhausted_message, is_edge_outage_status,
-    is_transient_api_status, outage_exhausted_user_message, status_user_message,
-    strip_api_error_status_prefix, user_facing_api_error_message,
+    is_retryable_api_status, is_transient_api_status, outage_exhausted_user_message,
+    parse_error_code, status_user_message, strip_api_error_status_prefix,
+    user_facing_api_error_message,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

@@ -1,5 +1,29 @@
 #![allow(dead_code)]
 use super::*;
+/// `SessionActor` turn futures overflow the default test thread stack.
+/// Production session threads use 8 MiB; these tests use 16 MiB.
+pub(crate) fn run_on_large_stack(name: &str, body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+/// Current-thread tokio + `LocalSet`. `start_paused` keeps auto-advance
+/// for backoff-ladder tests (same as `#[tokio::test(start_paused = true)]`).
+pub(crate) fn block_on_local(start_paused: bool, fut: impl std::future::Future<Output = ()>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(start_paused)
+        .build()
+        .expect("current-thread runtime");
+    rt.block_on(async {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(fut).await;
+    });
+}
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
@@ -113,18 +137,29 @@ async fn test_agent_from_config(
     use xai_grok_tools::registry::types::SessionContext;
     let builder = crate::tools::bridge::ToolBridge::get_builder();
     let fs: std::sync::Arc<dyn AsyncFileSystem> = std::sync::Arc::new(LocalFs);
+    // Unique resources_state.json per agent. A shared `/tmp/tool_state.json`
+    // loads leftover `ReportedTaskCompletions` and makes
+    // "must not report" probes (`get().is_none()`) fail even when admit/queue
+    // never marked an id.
+    static TEST_AGENT_STATE_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let state_dir = std::env::temp_dir().join(format!(
+        "grok-test-agent-{}-{}",
+        std::process::id(),
+        TEST_AGENT_STATE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let ctx = SessionContext {
         backend,
         fs,
         cwd: std::path::PathBuf::from("/tmp"),
-        session_folder: std::env::temp_dir().join("grok-test"),
+        session_folder: state_dir.clone(),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: std::path::PathBuf::from("/tmp/tool_state.json"),
+        state_path: state_dir.join("tool_state.json"),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),
@@ -180,11 +215,32 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    create_test_actor_with_terminal(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        Arc::new(DummyTerminal {}),
+    )
+    .await
+}
+#[cfg(test)]
+pub(crate) async fn create_test_actor_with_terminal(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<xai_acp_lib::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    terminal: Arc<dyn crate::terminal::AsyncTerminalRunner>,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let cwd = xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
     let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
         cwd.to_path_buf(),
     ));
-    let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
         "test-actor".to_string(),
@@ -202,10 +258,11 @@ pub(crate) async fn create_test_actor_ex(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
+        front_message_committed: false,
         nudges_used_this_session: 0,
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -241,17 +298,21 @@ pub(crate) async fn create_test_actor_ex(
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback: None,
         auth_manager: None,
+        is_chat_kind: false,
         state,
         notifications: NotificationSender {
             gateway: GatewaySender::new(gateway_tx),
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence_tx,
+            disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
-        mcp_strategy: McpInitStrategy::Blocking,
+        mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
+        delivery_tools: std::cell::RefCell::new(Vec::new()),
+        attach_non_interactive: std::cell::Cell::new(false),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -279,12 +340,14 @@ pub(crate) async fn create_test_actor_ex(
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
             previous_model: std::cell::Cell::new(None),
             compaction_mode: xai_chat_state::CompactionMode::Transcript,
             verbatim_input: true,
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
             flush_config: crate::config::MemoryFlushConfig::default(),
@@ -369,7 +432,6 @@ pub(crate) async fn create_test_actor_ex(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        managed_mcp_expires_at: std::sync::Mutex::new(None),
         initial_client_mcp_servers: vec![],
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(HashMap::new()),
@@ -379,6 +441,7 @@ pub(crate) async fn create_test_actor_ex(
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
+        last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -398,9 +461,13 @@ pub(crate) async fn create_test_actor_ex(
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
+        turn_summary_task: std::cell::RefCell::new(None),
+        turn_summary_generation: std::cell::Cell::new(0),
+        turn_summary_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
@@ -518,6 +585,20 @@ pub(crate) fn input_with_origin_rx(
     };
     (item, rx)
 }
+/// A plain Agent-mode `queue_input` request with every optional field defaulted.
+#[cfg(test)]
+pub(crate) fn queue_input_request(
+    prompt_blocks: Vec<acp::ContentBlock>,
+    prompt_id: &str,
+    respond_to: oneshot::Sender<PromptTurnResult>,
+) -> QueueInputRequest {
+    QueueInputRequest::new(
+        prompt_blocks,
+        prompt_id.to_string(),
+        PromptMode::Agent,
+        respond_to,
+    )
+}
 /// A running-turn `AgentTask` stub: a 60s sleeper that keeps the turn "in
 /// flight" until aborted. Assign to `state.running_task`; requires a
 /// `LocalSet` (`spawn_local`).
@@ -602,17 +683,21 @@ pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {
         "{site} must not leave {{DISCIPLINE_BLOCK}} unsubstituted:\n{reminder}"
     );
 }
+/// An actor whose persistence channel answers the `FlushAndAck` barrier, so a
+/// turn driven with a `persist_ack` resolves (bare `build_actor` never acks).
 #[cfg(test)]
-pub(crate) fn assert_resume_recap_discipline_tracking_order(text: &str, recap_marker: &str) {
-    let recap_idx = text.find(recap_marker).unwrap_or_else(|| {
-        panic!("resume reminder must include block recap `{recap_marker}`:\n{text}");
+pub(crate) async fn actor_with_persistence_drain() -> std::sync::Arc<SessionActor> {
+    let (gateway_tx, mut gateway_rx) =
+        tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+    tokio::task::spawn_local(async move { while gateway_rx.recv().await.is_some() {} });
+    let (persistence_tx, mut persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = persistence_rx.recv().await {
+            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
     });
-    assert_goal_discipline_in_reminder(text, "goal_resume");
-    let discipline_idx = text
-        .find("<task_completion_discipline>")
-        .expect("resume reminder must include discipline block");
-    assert!(
-        recap_idx < discipline_idx,
-        "resume reminder must place recap before discipline (recap={recap_idx} discipline={discipline_idx}):\n{text}"
-    );
+    std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
 }

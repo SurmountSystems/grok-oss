@@ -260,19 +260,34 @@ pub fn compute_peek_fields(
                 if let Some(p) = agent.permission_queue.front() {
                     let q = sanitize_display_text(&p.title).into_owned();
                     // Live scope-aware labels: the peek's answer path attaches
-                    // the same selection meta, so the label must match it.
-                    let selected_words: Option<String> = p
+                    // the same selection meta, so each row's label must match
+                    // its own count (allow and deny scopes are independent).
+                    let selected_words = p.bash_highlights.as_ref().map(|h| {
+                        crate::views::permission_view::allow_scope_label(
+                            h,
+                            p.bash_command_raw.as_deref(),
+                            p.bash_selection_count,
+                        )
+                    });
+                    let deny_selected_words = p
                         .bash_highlights
                         .as_ref()
-                        .filter(|_| p.bash_selection_count > 0)
-                        .map(|h| h.highlighted_words[..p.bash_selection_count].join(" "));
+                        .filter(|_| p.bash_deny_selection_count > 0)
+                        .map(|h| h.highlighted_words[..p.bash_deny_selection_count].join(" "));
                     let opts = p
                         .options
                         .iter()
                         .map(|opt| {
+                            let row_words = if opt.option_id.0.as_ref()
+                                == crate::views::permission_view::REJECT_ALWAYS_COMMAND_OPTION_ID
+                            {
+                                deny_selected_words.as_deref()
+                            } else {
+                                selected_words.as_deref()
+                            };
                             let name = crate::views::permission_view::option_label_for_selection(
                                 opt,
-                                selected_words.as_deref(),
+                                row_words,
                                 p.mcp_scope.as_ref(),
                             );
                             (
@@ -571,7 +586,7 @@ pub fn render_peek_panel(
     live_tail: Option<PeekLiveTailArgs<'_>>,
     empty_hint: Option<&str>,
 ) -> PeekRenderResult {
-    use crate::views::prompt_widget::PromptStyle;
+    use crate::views::prompt_widget::{PromptBg, PromptStyle};
     use ratatui::widgets::{Block, BorderType, Borders, Widget};
     use unicode_width::UnicodeWidthStr;
     if area.area() == 0 || area.height < 3 || area.width < 20 {
@@ -724,13 +739,16 @@ pub fn render_peek_panel(
                             show_prefix: false,
                             vpad_top: 0,
                             chrome: false,
-                            bg_override: Some(theme.bg_base),
+                            bg: PromptBg::Canvas(theme.bg_base),
                             image_preview: false,
                             ..PromptStyle::default()
                         };
                         let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
                         if selected && panel.focused {
-                            caret = res.cursor_pos;
+                            // Software box caret hides the terminal cursor
+                            // (`draw` returns `cursor_pos: None`). Peek still
+                            // reports the insertion cell for mouse routing.
+                            caret = res.caret_cell.or(res.cursor_pos);
                         }
                     }
                 }
@@ -863,7 +881,7 @@ pub fn render_peek_panel(
         show_prefix: false,
         vpad_top: 0,
         chrome: false,
-        bg_override: Some(theme.bg_base),
+        bg: PromptBg::Canvas(theme.bg_base),
         placeholder_override: Some("reply\u{2026}"),
         image_preview: false,
         ..PromptStyle::default()
@@ -875,16 +893,22 @@ pub fn render_peek_panel(
             color: theme.accent_running,
         },
     );
-    let caret = reply
-        .draw(
-            buf,
-            text_area,
-            overlay_area,
-            &widget_style,
-            None,
-            voice_overlay,
-        )
-        .cursor_pos;
+    let reply_draw = reply.draw(
+        buf,
+        text_area,
+        overlay_area,
+        &widget_style,
+        None,
+        voice_overlay,
+    );
+    // Software box caret hides the terminal cursor (`cursor_pos` is None).
+    // Peek still reports the insertion cell so a focused reply has a caret
+    // for mouse routing.
+    let caret = if panel.focused {
+        reply_draw.caret_cell.or(reply_draw.cursor_pos)
+    } else {
+        None
+    };
     // The clickable reply rect spans all reply rows and includes the
     // `❯ ` prefix column for a fatter mouse target; the widget maps
     // clicks left of its text area to position 0.
@@ -934,7 +958,7 @@ pub fn reply_row_count(
 }
 
 /// The header label for the peek panel, e.g. `"Thinking"` / `"Thought"`,
-/// `"Response"`, `"Edit"`, `"Read"`, `"Bash"`, `"Working"`, …
+/// `"Response"`, `"Edit"`, `"Read"`, `"Bash"`, `"Preparing"`, `"Working"`, …
 ///
 /// While the turn is RUNNING the label follows the live turn activity
 /// (`Thinking` / `Responding` / a running tool / `Working` when waiting),
@@ -971,6 +995,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             // Blocked on a suppressed tool (task output / wait / sleep) → keep
             // the compact "Working" the peek showed before this was surfaced.
             Some(TurnActivity::Waiting(_)) => return "Working".to_string(),
+            Some(TurnActivity::WritingToolCall(_)) => return "Preparing".to_string(),
             // Turn running but no live activity (e.g. just granted a
             // permission and waiting for tool results / the next inference) →
             // "Working", never a stale response.
@@ -1593,7 +1618,7 @@ mod tests {
     }
 
     /// The reply input renders the typed draft (not the dim
-    /// placeholder) and paints the software box caret (hardware unreported).
+    /// placeholder) and reports a caret position.
     #[test]
     fn render_peek_shows_typed_reply_and_caret() {
         use ratatui::buffer::Buffer;
@@ -1604,10 +1629,6 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("ship it");
-        // set_text preserves cursor; park at end so the insertion cell is
-        // blank and the software box caret paints there (not reverse-video
-        // on a grapheme).
-        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 5),
@@ -1631,31 +1652,7 @@ mod tests {
         assert!(content.contains("ship it"), "got: {content:?}");
         // No placeholder once the user has typed.
         assert!(!content.contains("reply\u{2026}"), "got: {content:?}");
-        // Software box caret owns the insertion cell; hardware cursor stays
-        // hidden (`PromptRenderResult::cursor_pos` is None → peek caret None).
-        // Solid half paints full-block glyph; empty half is plain space (not
-        // scannable as a unique glyph — wall-clock phase may land either way).
-        assert!(
-            res.caret.is_none(),
-            "focused reply paints the software box caret; hardware caret unreported"
-        );
-        let filled = crate::glyphs::cursor_box_filled();
-        let mut solid_plate = false;
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                if cell.symbol() == filled {
-                    solid_plate = true;
-                }
-                // Never reintroduce hole-punch mini-badge.
-                assert_ne!(
-                    cell.symbol(),
-                    "\u{25a0}",
-                    "reply must not paint black-square hole-punch caret"
-                );
-            }
-        }
-        let _ = solid_plate; // empty phase is valid; solid is optional by clock
+        assert!(res.caret.is_some(), "reply input must report a caret");
         assert!(res.reply_rect.is_some(), "reply rect must be reported");
     }
 
@@ -1964,7 +1961,7 @@ mod tests {
 
     /// When the reject option is highlighted, the panel renders an inline
     /// feedback field (the typed text), hides the `❯ reply` row, and
-    /// paints the software box caret on the feedback field.
+    /// reports a caret into the feedback.
     #[test]
     fn render_peek_reject_option_shows_inline_feedback() {
         use ratatui::buffer::Buffer;
@@ -1991,7 +1988,6 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("do it differently");
-        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 8),
@@ -2020,22 +2016,8 @@ mod tests {
         );
         // The `❯ reply` row is hidden while answering.
         assert!(!content.contains("reply"), "got: {content:?}");
-        // Software box caret on the feedback field; hardware caret unreported.
-        // Empty half is space (not unique in content scan); solid is optional
-        // by wall-clock phase. Hole-punch square must never appear.
-        assert!(
-            res.caret.is_none(),
-            "focused feedback paints the software box caret; hardware caret unreported"
-        );
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                assert_ne!(
-                    buf[(x, y)].symbol(),
-                    "\u{25a0}",
-                    "feedback must not paint black-square hole-punch caret"
-                );
-            }
-        }
+        // Caret reports into the feedback field.
+        assert!(res.caret.is_some(), "feedback input must report a caret");
         assert!(
             res.reply_rect.is_some(),
             "feedback slot rect must be reported for mouse routing"

@@ -91,10 +91,9 @@ pub async fn status(cwd: &Path) -> Result<GitStatusData> {
                 (ChangeType::Create, rest.trim())
             } else if let Some(rest) = line.strip_prefix("D ") {
                 (ChangeType::Delete, rest.trim())
-            } else if let Some(rest) = line.strip_prefix("R ") {
-                (ChangeType::Rename, rest.trim())
             } else {
-                return None;
+                let rest = line.strip_prefix("R ")?;
+                (ChangeType::Rename, rest.trim())
             };
             Some(GitFileChange {
                 path: path.to_string(),
@@ -166,6 +165,8 @@ pub async fn commit(cwd: &Path, message: &str) -> Result<CommitResult> {
             output: Some("Commit described and new change started".to_string()),
         },
         warning: None,
+        // The structured outcome is a git-backend concept.
+        outcome: None,
     })
 }
 

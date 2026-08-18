@@ -59,15 +59,30 @@ pub fn canonicalize_remote(url: &str) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let mut child = Command::new("git")
-        .args(args)
+    use std::sync::Arc;
+
+    use crate::util::{ProcessGroup, global_process_scope};
+    use xai_tty_utils::detach_std_command;
+
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    // Own process group so a hung probe can be killed as a tree, and so the
+    // global session scope can reap it if this thread wedges.
+    detach_std_command(&mut cmd);
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+    let mut child = cmd.spawn().ok()?;
+    let group = ProcessGroup::new()
+        .and_then(|mut group| {
+            group.attach_std(&child)?;
+            Ok(Arc::new(group))
+        })
         .ok()?;
+    let _enrolled = global_process_scope().register(&group);
 
-    // Soft timeout: if git hangs, kill and treat as missing.
+    // Soft timeout: if git hangs, kill the enrolled tree and treat as missing.
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
@@ -83,7 +98,7 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
             }
             Ok(None) => {
                 if start.elapsed() > Duration::from_secs(GIT_TIMEOUT_SECS) {
-                    let _ = child.kill();
+                    let _ = group.kill();
                     let _ = child.wait();
                     return None;
                 }

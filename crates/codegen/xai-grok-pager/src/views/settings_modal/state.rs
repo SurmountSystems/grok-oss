@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
-    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
-    dynamic_enum_choices,
+    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
+    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
+    current_value_for, dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -54,6 +54,8 @@ pub enum SettingsKeyOutcome {
     /// Used by `d`-reset-in-picker to revert preview before opening
     /// the reset-confirm overlay.
     ActionPair(Action, Action),
+    /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
+    ActionThenClose(Action),
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
@@ -157,6 +159,14 @@ pub(super) enum SettingsMode {
     },
 }
 
+/// Is the open sub-pane a [`crate::settings::is_consent_chooser`] pane?
+pub(super) fn mode_is_consent_chooser(mode: &SettingsMode) -> bool {
+    matches!(
+        mode,
+        SettingsMode::PickingEnum { key, .. } if crate::settings::is_consent_chooser(key)
+    )
+}
+
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to
 /// avoid clippy `large_enum_variant`.
 pub struct SettingsModalState {
@@ -202,6 +212,10 @@ pub struct SettingsModalState {
     /// `rows` in Browse, `picker_choice_rects` in PickingEnum,
     /// always `None` in EditingValue.
     pub hover_row: Option<usize>,
+    /// When true, Esc/Enter from `PickingEnum` close the modal instead of
+    /// returning to Browse. Set by deep-link open (`OpenSettingsFocus`
+    /// / `/privacy`); cleared on leave from the picker.
+    pub close_on_picker_exit: bool,
 }
 
 impl SettingsModalState {
@@ -240,6 +254,17 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
+            close_on_picker_exit: false,
+        }
+    }
+
+    /// Why a Browse row cannot be edited (`None` = editable). Consulted by
+    /// both render and input.
+    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
+        if key == "coding_data_sharing" {
+            self.pager_snapshot.coding_data_sharing_lock
+        } else {
+            None
         }
     }
 
@@ -489,6 +514,7 @@ impl SettingsModalState {
         self.hover_row = None;
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
+        self.close_on_picker_exit = false;
     }
 
     pub fn focus_filter(&mut self) {
@@ -551,6 +577,9 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
+            if self.row_lock(key).is_some() {
+                return false;
+            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -806,7 +835,7 @@ pub(super) fn setting_row_visible(
 }
 
 fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that
@@ -851,7 +880,6 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
-        "hide_header" => Some(Action::SetHideHeader(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
@@ -870,18 +898,9 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
-        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
-        "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
-        "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
-        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
-        "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
-        "invert_scroll" => Some(Action::SetInvertScroll(new)),
-        "show_tips" => Some(Action::SetShowTips(new)),
-        "auto_update" => Some(Action::SetAutoUpdate(new)),
-        "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "economic_mode" => Some(Action::SetEconomicMode(new)),
         "resume_canceled_turn_on_restart" => Some(Action::SetResumeCanceledTurnOnRestart(new)),
@@ -903,7 +922,19 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }),
         "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
         "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
+        "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
+        "hide_header" => Some(Action::SetHideHeader(new)),
+        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
+        "allow_worktree" => Some(Action::SetAllowWorktree(new)),
+        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
+        "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
+        "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
+        "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
+        "invert_scroll" => Some(Action::SetInvertScroll(new)),
+        "show_tips" => Some(Action::SetShowTips(new)),
+        "auto_update" => Some(Action::SetAutoUpdate(new)),
+        "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         _ => None,
     }
 }
@@ -920,10 +951,12 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "permission_mode" => None,
         "coding_data_sharing" => None,
         "plan_mode" => None,
-        "plan_approval_park" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
+        "plan_approval_park" => None,
+        "cancel_subagents_on_turn_cancel" => None,
+        "auto_compact_threshold_percent" => None,
         _ => None,
     }
 }
@@ -965,14 +998,16 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
-        "plan_approval_park" => match choice {
-            "soft" | "modal" => Some(Action::SetPlanApprovalPark(choice.to_string())),
-            _ => None,
-        },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
+        "default_reasoning_effort" => match choice {
+            "low" | "medium" | "high" => {
+                Some(Action::SetDefaultReasoningEffort(choice.to_string()))
+            }
+            _ => None,
+        },
         "render_mermaid" => {
             crate::appearance::RenderMermaid::from_canonical(choice).map(Action::SetRenderMermaid)
         }
@@ -982,6 +1017,7 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "scroll_mode" => {
             crate::appearance::ScrollMode::from_canonical(choice).map(Action::SetScrollMode)
         }
+        "plan_approval_park" => Some(Action::SetPlanApprovalPark(choice.to_string())),
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
@@ -1141,7 +1177,7 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     choices
         .iter()
         .filter(|c| {

@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -64,8 +64,9 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
         } else {
             format!("{icon} {branch}")
         };
-        // Branch glyph + name: primary white (no DIM — gray chrome was too heavy).
-        let git_style = Style::default().fg(theme.text_primary);
+        let git_style = Style::default()
+            .fg(theme.text_primary)
+            .add_modifier(Modifier::DIM);
         parts.push(Span::styled(git_text, git_style));
         parts.push(Span::styled(" ", info_style));
     }
@@ -125,7 +126,6 @@ fn collapse_home(dir: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Modifier;
 
     #[test]
     fn format_cwd_plain_repo() {
@@ -182,30 +182,6 @@ mod tests {
         assert_eq!(
             format_cwd_display(Path::new("/work/xai/frontend/apps"), None),
             "/work/xai/frontend/apps",
-        );
-    }
-
-    /// Branch glyph + name use primary white without DIM (status chrome contrast).
-    #[test]
-    fn location_line_branch_chrome_is_primary_white_not_dim() {
-        let cwd = Path::new("/tmp/grok-theme-branch-chrome-test-cwd");
-        git_info::update_from_notification(cwd, Some("fix/interject-no-cancel"), None);
-        let theme = Theme::doge();
-        let line = location_line_at(&theme, cwd);
-        let git = line
-            .spans
-            .iter()
-            .find(|s| s.content.contains("fix/interject-no-cancel"))
-            .expect("branch span present");
-        assert_eq!(
-            git.style.fg,
-            Some(theme.text_primary),
-            "branch name + icon must be text_primary (white on DOGE), got {:?}",
-            git.style.fg
-        );
-        assert!(
-            !git.style.add_modifier.contains(Modifier::DIM),
-            "branch chrome must not be DIM gray"
         );
     }
 }

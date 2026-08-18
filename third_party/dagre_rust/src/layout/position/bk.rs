@@ -268,7 +268,7 @@ pub fn vertical_alignment(
                 .filter(|w| pos.contains_key(w))
                 .collect();
             if ws.len() > 0 {
-                ws.sort_by(|w1, w2| pos.get(w1).unwrap().cmp(pos.get(w2).unwrap()));
+                ws.sort_by_key(|w| pos.get(w).copied().unwrap());
                 let mp = (ws.len() as f32 - 1.0) / 2.0;
                 let mut i = mp as usize;
                 let il = mp.ceil() as usize;

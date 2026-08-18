@@ -197,11 +197,7 @@ pub struct TodoProgress {
 impl TodoProgress {
     /// Percent complete 0–100 (0 when total is 0).
     pub fn pct(&self) -> u32 {
-        if self.total == 0 {
-            0
-        } else {
-            (self.completed * 100) / self.total
-        }
+        (self.completed * 100).checked_div(self.total).unwrap_or(0)
     }
 
     /// One-line summary for tool output / prompts.
@@ -1011,13 +1007,13 @@ impl xai_tool_runtime::Tool for TodoWriteTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "todo_write",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
         xai_tool_protocol::ToolCapabilities {
-            is_read_only: true,
+            is_read_only: false,
             tool_scope: Some(xai_tool_protocol::ToolScope::Read),
             ..Default::default()
         }

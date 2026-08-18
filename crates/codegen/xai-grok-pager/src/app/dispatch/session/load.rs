@@ -9,15 +9,15 @@ use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect};
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::AgentView;
+#[cfg(feature = "local-workspace")]
+use crate::app::app_view::ActiveView;
 use crate::app::app_view::AppView;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
-use crate::app::dispatch::queue::{
-    force_drain_queue_past_background, maybe_drain_queue, note_peek_page_flip,
-};
+use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
 use crate::app::dispatch::status::notify_session_ready;
 use crate::app::dispatch::transcript::extensions_modal_tab_fetches;
@@ -36,6 +36,11 @@ pub(in crate::app::dispatch) fn dispatch_load_session(
     chat_kind: bool,
 ) -> Vec<Effect> {
     if !app.session_startup_allowed() {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.deferred_startup.history_load_as_build = app.welcome_history_load_as_build;
+            app.welcome_history_load_as_build = false;
+        }
         app.deferred_startup.session =
             Some(crate::app::session_startup::DeferredSessionStartup::Load {
                 session_id,
@@ -113,26 +118,55 @@ pub(in crate::app::dispatch) fn focus_if_session_already_open(
     switch_to_agent(app, existing_id, SwitchCause::Load);
     Some(existing_id)
 }
+/// Matches effects `is_chat_path` after history-bypass clearing of
+/// `SessionFlags.chat_mode`: conversation-entry bit OR (sticky `--chat`
+/// and not local-disk history bypass). Gateway resumes (no bypass) are
+/// Chat; history-bypass local-disk rows stay Build.
+///
+/// Used by load and fork so `rename_kind()` matches the lane `LoadSession`
+/// is stamped onto.
+pub(in crate::app::dispatch) fn session_opens_as_chat(app: &AppView, chat_kind: bool) -> bool {
+    if chat_kind {
+        return true;
+    }
+    #[cfg(feature = "local-workspace")]
+    if app.welcome_history_load_as_build {
+        return false;
+    }
+    app.chat_mode
+}
 fn dispatch_load_session_ungated(
     app: &mut AppView,
     session_id: String,
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
 ) -> Vec<Effect> {
-    if crate::app::session_startup::chat_mode_refuses_local_build_load(
-        app.chat_mode,
-        chat_kind,
-        &session_id,
-        &app.cwd,
-    ) {
+    #[cfg(feature = "local-workspace")]
+    let bypass_chat_refusal = app.welcome_history_load_as_build;
+    #[cfg(not(feature = "local-workspace"))]
+    let bypass_chat_refusal = false;
+    if !bypass_chat_refusal
+        && crate::app::session_startup::chat_mode_refuses_local_build_load(
+            app.chat_mode,
+            chat_kind,
+            &session_id,
+            &app.cwd,
+        )
+    {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
         app.show_toast(crate::app::session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL);
         return vec![];
     }
     invalidate_picker_fetch_on_dismiss(app);
-    if let Some(existing_id) = focus_if_session_already_open(app, &session_id, chat_kind) {
-        // Already in this process: no SessionLoaded. Still auto-resume when
-        // the last primary turn ended in error (403 / Internal error).
-        return try_auto_resume_error_idle_on_reopen(app, existing_id);
+    if focus_if_session_already_open(app, &session_id, chat_kind).is_some() {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
+        return vec![];
     }
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
@@ -140,9 +174,9 @@ fn dispatch_load_session_ungated(
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
     let loading_msg = if matches!(app.restore_code, Some(true)) {
-        format!("Restoring code for session {}...", &session_id)
+        format!("Restoring code for session {}...", session_id)
     } else {
-        format!("Loading session {}...", &session_id)
+        format!("Loading session {}...", session_id)
     };
     let loading_placeholder_id = scrollback.push_block(RenderBlock::system(loading_msg));
     let agent = AgentView::new(
@@ -154,7 +188,10 @@ fn dispatch_load_session_ungated(
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
             cwd: session_cwd.clone().unwrap_or_else(|| app.cwd.clone()),
-            is_worktree: false,
+            is_worktree: crate::app::session_startup::parent_session_is_worktree(
+                &session_id,
+                session_cwd.as_deref().unwrap_or(app.cwd.as_path()),
+            ),
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
@@ -178,7 +215,6 @@ fn dispatch_load_session_ungated(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -187,6 +223,7 @@ fn dispatch_load_session_ungated(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    let conversation_entry = session_opens_as_chat(app, chat_kind);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
     agent_mut.attached_as_viewer = true;
     agent_mut.begin_replay_window();
@@ -209,23 +246,47 @@ fn dispatch_load_session_ungated(
     agent_mut.apply_app_scoped_gates(
         app.sharing_enabled,
         app.usage_visible,
+        !app.has_external_auth_provider,
         app.chat_mode,
         app.screen_mode,
         &app.active_announcements,
         &app.tier_restricted_commands,
     );
     agent_mut.chat_kind = chat_kind || app.chat_mode;
-    agent_mut.apply_credit_balance(
-        app.credit_balance.clone(),
-        app.auto_topup.clone(),
-        app.openrouter_credit_balance,
-    );
+    agent_mut.conversation_entry = conversation_entry;
+    #[cfg(feature = "local-workspace")]
+    {
+        let history_build = app.welcome_history_load_as_build;
+        let local_intent = match &app.welcome_session_local_workspace {
+            Some(Some(_)) => true,
+            Some(None) => false,
+            None => {
+                if chat_kind {
+                    false
+                } else {
+                    crate::app::session_startup::active_local_workspace()
+                        .ok()
+                        .flatten()
+                        .is_some()
+                }
+            }
+        };
+        let (mode, cli_locked) =
+            crate::views::welcome::workspace_mode::indicator_for_opening_session(
+                chat_kind,
+                history_build,
+                app.local_workspace_startup_locked,
+                local_intent,
+            );
+        agent_mut.workspace_mode = mode;
+        agent_mut.workspace_mode_cli_locked = cli_locked;
+    }
+    agent_mut.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
     agent_mut
         .prompt
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
-    app.mark_project_picker_done();
     switch_to_agent(app, agent_id, SwitchCause::Load);
     vec![Effect::LoadSession {
         agent_id,
@@ -322,6 +383,29 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
         return effects;
     }
     let chat_kind = source == "conversation";
+    #[cfg(feature = "local-workspace")]
+    if app.chat_mode && matches!(app.active_view, ActiveView::Welcome) {
+        if app.local_workspace_startup_locked {
+            crate::views::welcome::workspace_mode::log_cli_lock_wins(app.welcome_workspace_mode);
+        } else {
+            let mode = crate::views::welcome::WelcomeWorkspaceMode::from_history_source(&source);
+            if app.welcome_workspace_mode != mode {
+                crate::views::welcome::workspace_mode::log_history_source(
+                    "history_auto_switch",
+                    Some(mode),
+                    None,
+                    Some(source.as_str()),
+                );
+                app.welcome_workspace_mode = mode;
+            }
+            if chat_kind {
+                app.welcome_session_local_workspace = None;
+            }
+        }
+        if !chat_kind {
+            app.welcome_history_load_as_build = true;
+        }
+    }
     if chat_kind {
         return dispatch_load_session(app, session_id, None, true);
     }
@@ -339,12 +423,20 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
         );
     }
     if source == "remote" || source == "both" {
-        if let Some(existing_id) = focus_if_session_already_open(app, &session_id, false) {
-            return try_auto_resume_error_idle_on_reopen(app, existing_id);
+        if focus_if_session_already_open(app, &session_id, false).is_some() {
+            #[cfg(feature = "local-workspace")]
+            {
+                app.welcome_history_load_as_build = false;
+            }
+            return vec![];
         }
         app.show_toast("Restoring session from remote...");
         dispatch_load_session_with_restore(app, session_id, cwd)
     } else {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
         app.show_toast("Session not found locally");
         vec![]
     }
@@ -421,7 +513,37 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
         app.show_toast("Chat conversations can't be resumed in a worktree");
         return vec![];
     }
+    #[cfg(feature = "local-workspace")]
+    if app.chat_mode && matches!(app.active_view, ActiveView::Welcome) {
+        if app.local_workspace_startup_locked {
+            crate::views::welcome::workspace_mode::log_cli_lock_wins(app.welcome_workspace_mode);
+        } else {
+            let mode = crate::views::welcome::WelcomeWorkspaceMode::from_history_source(&source);
+            if app.welcome_workspace_mode != mode {
+                crate::views::welcome::workspace_mode::log_history_source(
+                    "history_auto_switch",
+                    Some(mode),
+                    None,
+                    Some(source.as_str()),
+                );
+                app.welcome_workspace_mode = mode;
+            }
+        }
+        app.welcome_history_load_as_build = true;
+    }
     dispatch_new_worktree_session(app, Some(session_id), None, None, None, None, None)
+}
+fn keep_picker_entry(
+    entry: &crate::app::app_view::SessionPickerEntry,
+    source: &str,
+    session_id: &str,
+    match_id_only: bool,
+) -> bool {
+    if match_id_only {
+        entry.id != session_id
+    } else {
+        entry.source != source || entry.id != session_id
+    }
 }
 /// Remove a deleted session identity from the modal session picker and the
 /// welcome-screen picker, then re-anchor the selection on a real row.
@@ -432,6 +554,7 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
     app: &mut AppView,
     source: &str,
     session_id: &str,
+    match_id_only: bool,
 ) {
     use crate::views::modal::ActiveModal;
     use crate::views::session_picker::build_entry_map;
@@ -450,14 +573,12 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
     {
         if pending_delete
             .as_ref()
-            .is_some_and(|(pending_source, pending_id, _)| {
-                pending_source == source && pending_id == session_id
-            })
+            .is_some_and(|pd| pd.source == source && pd.session_id == session_id)
         {
             *pending_delete = None;
         }
         if let Some(list) = entries.as_mut() {
-            list.retain(|entry| entry.source != source || entry.id != session_id);
+            list.retain(|entry| keep_picker_entry(entry, source, session_id, match_id_only));
         }
         if let Some(hits) = content_results.as_mut() {
             hits.retain(|h| h.session_id != session_id);
@@ -478,8 +599,15 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
         );
         reanchor_grouped_selection(state, &map);
     }
+    if app
+        .session_picker_pending_delete
+        .as_ref()
+        .is_some_and(|pd| pd.source == source && pd.session_id == session_id)
+    {
+        app.session_picker_pending_delete = None;
+    }
     if let Some(list) = app.session_picker_entries.as_mut() {
-        list.retain(|entry| entry.source != source || entry.id != session_id);
+        list.retain(|entry| keep_picker_entry(entry, source, session_id, match_id_only));
     }
     if let Some(hits) = app.session_picker_content_results.as_mut() {
         hits.retain(|h| h.session_id != session_id);
@@ -649,13 +777,18 @@ fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
     let seq = app.session_picker_list_seq;
     if query.is_empty() {
         set_chat_search_loading(app, false);
-        return vec![Effect::FetchSessionList { query: None, seq }];
+        return vec![Effect::FetchSessionList {
+            query: None,
+            seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
+        }];
     }
     set_chat_search_loading(app, true);
     if force {
         vec![Effect::FetchSessionList {
             query: Some(query),
             seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
         }]
     } else {
         vec![Effect::DebounceSessionSearch { query, seq }]
@@ -772,8 +905,8 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
             false,
         );
     }
-    if let Some(existing_id) = focus_if_session_already_open(app, &session_id, false) {
-        return try_auto_resume_error_idle_on_reopen(app, existing_id);
+    if focus_if_session_already_open(app, &session_id, false).is_some() {
+        return vec![];
     }
     app.show_toast("Restoring session from remote...");
     dispatch_load_session_with_restore(app, session_id, cwd)
@@ -785,17 +918,31 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
     session_id: String,
     session_cwd: String,
 ) -> Vec<Effect> {
-    if crate::app::session_startup::chat_mode_refuses_local_build_load(
-        app.chat_mode,
-        false,
-        &session_id,
-        &app.cwd,
-    ) {
+    #[cfg(feature = "local-workspace")]
+    let bypass_chat_refusal = app.welcome_history_load_as_build;
+    #[cfg(not(feature = "local-workspace"))]
+    let bypass_chat_refusal = false;
+    if !bypass_chat_refusal
+        && crate::app::session_startup::chat_mode_refuses_local_build_load(
+            app.chat_mode,
+            false,
+            &session_id,
+            &app.cwd,
+        )
+    {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
         app.show_toast(crate::app::session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL);
         return vec![];
     }
-    if let Some(existing_id) = focus_if_session_already_open(app, &session_id, false) {
-        return try_auto_resume_error_idle_on_reopen(app, existing_id);
+    if focus_if_session_already_open(app, &session_id, false).is_some() {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
+        return vec![];
     }
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
@@ -813,7 +960,10 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
             cwd: app.cwd.clone(),
-            is_worktree: false,
+            is_worktree: crate::app::session_startup::parent_session_is_worktree(
+                &session_id,
+                &app.cwd,
+            ),
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
             next_queue_id: 0,
@@ -837,7 +987,6 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -846,6 +995,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    let conversation_entry = session_opens_as_chat(app, false);
     {
         let agent = app.agents.get_mut(&agent_id).unwrap();
         agent.attached_as_viewer = true;
@@ -861,17 +1011,36 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
             app.usage_visible,
+            !app.has_external_auth_provider,
             app.chat_mode,
             app.screen_mode,
             &app.active_announcements,
             &app.tier_restricted_commands,
         );
         agent.chat_kind = app.chat_mode;
-        agent.apply_credit_balance(
-            app.credit_balance.clone(),
-            app.auto_topup.clone(),
-            app.openrouter_credit_balance,
-        );
+        agent.conversation_entry = conversation_entry;
+        #[cfg(feature = "local-workspace")]
+        {
+            let history_build = app.welcome_history_load_as_build;
+            let local_intent = match &app.welcome_session_local_workspace {
+                Some(Some(_)) => true,
+                Some(None) => false,
+                None => crate::app::session_startup::active_local_workspace()
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            };
+            let (mode, cli_locked) =
+                crate::views::welcome::workspace_mode::indicator_for_opening_session(
+                    false,
+                    history_build,
+                    app.local_workspace_startup_locked,
+                    local_intent,
+                );
+            agent.workspace_mode = mode;
+            agent.workspace_mode_cli_locked = cli_locked;
+        }
+        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
         agent
             .prompt
             .slash_controller
@@ -886,308 +1055,6 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
     }]
 }
 #[allow(clippy::too_many_arguments)]
-/// Snapshot mid-work death evidence **before** `finish_turn` / zombie finalize
-/// clear running tools, blocking waits, and unfinished subagent rows.
-///
-/// Counts as interrupted when:
-/// - unfinished subagent records (even if the primary already completed —
-///   parent success with live children / killall mid-child), **or**
-/// - primary did **not** complete in this load's replay **and** any of:
-///   - parent/child scrollback still running
-///   - tracker mid-turn activity (suppressed wait tools never hit scrollback)
-///   - open turn: agent work after last user prompt with no turn-terminal event
-///
-/// **Replay residue after a completed primary:** during `session/load`, durable
-/// `TurnCompleted` sets [`AgentView::last_primary_user_turn_completed_in_replay`]
-/// but does **not** call `finish_turn`. Running scrollback entries and tracker
-/// `current_agent_msg` / thinking / pending tools therefore often remain until
-/// `handle_session_loaded` calls `finish_turn` **after** this snapshot. That
-/// residue is **not** mid-work. Treating it as interrupted made every clean
-/// completed session look mid-work, so the stale-marker gate never dropped and
-/// reopen / `/rebuild` re-fired leftover `canceled_turn_resume.json` (dogfood
-/// 2026-08-08 session `019faf9d…`: immediate `prompt.drain` len 14 for
-/// `??? [Image #1]` on grok-oss after a completed primary).
-///
-/// Iso dogfood shape still interrupts: parent parked on suppressed
-/// `get_command_or_subagent_output`, all children finished, **no** durable
-/// primary terminal (`last_primary_user_turn_completed_in_replay == false`).
-pub(crate) fn session_looks_interrupted_mid_work(agent: &AgentView) -> bool {
-    // Live children always win — parent may already have a completed terminal.
-    if agent.subagent_sessions.values().any(|s| !s.finished) {
-        return true;
-    }
-    // Completed primary in this load: ignore parent stream residue until
-    // finish_turn. Only unfinished children (above) keep resume alive.
-    if agent.last_primary_user_turn_completed_in_replay {
-        return false;
-    }
-    agent.scrollback.has_running_entries()
-        || agent
-            .subagent_views
-            .values()
-            .any(|child| child.scrollback.has_running_entries())
-        || agent.session.tracker.has_in_flight_mid_turn_activity()
-        || scrollback_has_open_turn_without_terminal(agent)
-}
-
-/// After the last resumable user prompt, agent work started but no
-/// `TurnCompleted` / `TurnCancelled` / `TurnFailed` was recorded — typical
-/// killall / process death mid-turn (PromptResponse never landed).
-///
-/// **Replay caveat:** during `session/load`, durable primary-user
-/// `TurnCompleted` updates are recorded on
-/// [`AgentView::last_primary_user_turn_completed_in_replay`] and are **not**
-/// pushed as scrollback `SessionEvent` terminals. Without that flag, every
-/// clean completed session looks "open" and false-fires auto-resume of the
-/// last user prompt (dogfood: re-sent "Still nothing!!! [Image #1]" on reopen).
-fn scrollback_has_open_turn_without_terminal(agent: &AgentView) -> bool {
-    // Durable terminal for the last primary user turn arrived in this load's
-    // replay — not an open/interrupted turn.
-    if agent.last_primary_user_turn_completed_in_replay {
-        return false;
-    }
-    let len = agent.scrollback.len();
-    let mut last_user_idx: Option<usize> = None;
-    for idx in 0..len {
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            continue;
-        };
-        if let RenderBlock::UserPrompt(b) = &entry.block {
-            if b.is_bash || b.is_cron || b.is_interjection {
-                continue;
-            }
-            if b.text.trim().is_empty() {
-                continue;
-            }
-            last_user_idx = Some(idx);
-        }
-    }
-    let Some(user_idx) = last_user_idx else {
-        return false;
-    };
-    let mut saw_agent_work = false;
-    let mut saw_terminal = false;
-    for idx in (user_idx + 1)..len {
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            continue;
-        };
-        match &entry.block {
-            RenderBlock::SessionEvent(b) if b.event.is_turn_terminal() => {
-                saw_terminal = true;
-            }
-            RenderBlock::AgentMessage(_)
-            | RenderBlock::Thinking(_)
-            | RenderBlock::ToolCall(_)
-            | RenderBlock::Subagent(_)
-            | RenderBlock::BgTask(_) => {
-                saw_agent_work = true;
-            }
-            _ => {}
-        }
-    }
-    saw_agent_work && !saw_terminal
-}
-
-/// Last non-empty user prompt text suitable for cancel-resume re-queue.
-///
-/// Skips bash, cron, and mid-turn interjections. Full block text (not first
-/// line only) so `/implement …` skill lines re-enter the same send path.
-pub(crate) fn last_resumable_user_prompt_text(agent: &AgentView) -> Option<String> {
-    let len = agent.scrollback.len();
-    for idx in (0..len).rev() {
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            continue;
-        };
-        if let RenderBlock::UserPrompt(b) = &entry.block {
-            if b.is_bash || b.is_cron || b.is_interjection {
-                continue;
-            }
-            let text = b.text.trim();
-            if text.is_empty() {
-                continue;
-            }
-            return Some(text.to_string());
-        }
-    }
-    None
-}
-
-/// Last primary user turn ended as an **error-class** failure (not clean
-/// success, not user cancel).
-///
-/// Evidence (either):
-/// - Durable load replay: [`AgentView::last_primary_user_turn_failed_in_replay`]
-///   (`stop_reason == "error"` on primary-user turn_completed), **or**
-/// - Scrollback: after the last resumable user prompt, the last turn-terminal
-///   `SessionEvent` is [`SessionEvent::TurnFailed`] (live push path; tests).
-///
-/// Used so reopen / `/rebuild` relaunch auto-resumes work that died on API
-/// Internal error / 403 / failed sampling instead of leaving the session idle
-/// with only the yellow error lines. Clean `TurnCompleted` success and user
-/// `TurnCancelled` without a marker stay non-auto.
-pub(crate) fn session_last_turn_ended_in_error(agent: &AgentView) -> bool {
-    if agent.last_primary_user_turn_failed_in_replay {
-        return true;
-    }
-    let len = agent.scrollback.len();
-    let mut last_user_idx: Option<usize> = None;
-    for idx in 0..len {
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            continue;
-        };
-        if let RenderBlock::UserPrompt(b) = &entry.block {
-            if b.is_bash || b.is_cron || b.is_interjection {
-                continue;
-            }
-            if b.text.trim().is_empty() {
-                continue;
-            }
-            last_user_idx = Some(idx);
-        }
-    }
-    let Some(user_idx) = last_user_idx else {
-        return false;
-    };
-    let mut last_terminal: Option<&SessionEvent> = None;
-    for idx in (user_idx + 1)..len {
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            continue;
-        };
-        if let RenderBlock::SessionEvent(b) = &entry.block
-            && b.event.is_turn_terminal()
-        {
-            last_terminal = Some(&b.event);
-        }
-    }
-    matches!(last_terminal, Some(SessionEvent::TurnFailed { .. }))
-}
-
-/// When there is **no** `canceled_turn_resume.json` but the loaded session
-/// should auto-continue, recover a one-shot resume from history.
-///
-/// Returns prompt text to re-queue when a last user prompt exists and either:
-/// - mid-work interruption evidence (unfinished children / open turn / …), or
-/// - the last primary turn ended in **error** (failed sampling / Internal
-///   error / 403 as turn failure).
-///
-/// Does **not** invent work for clean completed turns or for user cancel
-/// without a marker.
-pub(crate) fn recover_interrupted_turn_from_session(agent: &AgentView) -> Option<String> {
-    if !session_looks_interrupted_mid_work(agent) && !session_last_turn_ended_in_error(agent) {
-        return None;
-    }
-    last_resumable_user_prompt_text(agent)
-}
-
-/// Auto-resume when the operator "reopens" a session that is **already open**
-/// in this process and idle after an **error-class** turn (dogfood 2026-08-09
-/// evening: bitmagi / iso / surmount-server sat yellow-403 idle while markers
-/// stayed on disk).
-///
-/// Cold `SessionLoaded` already resumes error terminals (marker path + history
-/// path). `focus_if_session_already_open` used to only switch the visible agent
-/// and return no effects, so multi-session / picker reopen never re-entered
-/// the resume path. That left product-theme processes idle after 403 even when
-/// the load-path fix was in the binary.
-///
-/// Scope: **error terminals only** (not cancel markers, not clean success).
-/// Cancel resume stays restart / cold-load only. Does not re-fire a busy turn.
-pub(in crate::app::dispatch) fn try_auto_resume_error_idle_on_reopen(
-    app: &mut AppView,
-    agent_id: AgentId,
-) -> Vec<Effect> {
-    let resume_enabled = app.current_ui.resume_canceled_turn_on_restart_enabled();
-    let Some(agent) = app.agents.get_mut(&agent_id) else {
-        return vec![];
-    };
-    if agent.session.loading_replay || agent.session.state.is_busy() {
-        return vec![];
-    }
-    if !resume_enabled {
-        return vec![];
-    }
-    if !session_last_turn_ended_in_error(agent) {
-        return vec![];
-    }
-
-    let cwd = agent.session.cwd.to_string_lossy().into_owned();
-    let sid = agent
-        .session
-        .session_id
-        .as_ref()
-        .map(|s| s.0.to_string())
-        .unwrap_or_default();
-    if sid.is_empty() {
-        return vec![];
-    }
-
-    let marker =
-        xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid)
-            .ok()
-            .flatten();
-    let prompt_text = marker
-        .as_ref()
-        .filter(|m| {
-            xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
-                true,
-                Some(m),
-            )
-        })
-        .map(|m| m.prompt_text.clone())
-        .or_else(|| last_resumable_user_prompt_text(agent));
-    let Some(prompt_text) = prompt_text.filter(|t| !t.trim().is_empty()) else {
-        tracing::info!(
-            session = %sid,
-            "canceled_turn_resume: already-open error idle but no user prompt to re-queue"
-        );
-        agent.show_toast(
-            &xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
-                "no user prompt to re-queue",
-            ),
-        );
-        return vec![];
-    };
-    let prompt_id = marker.as_ref().and_then(|m| m.prompt_id.clone());
-
-    tracing::info!(
-        session = %sid,
-        prompt_len = prompt_text.len(),
-        had_marker = marker.is_some(),
-        "canceled_turn_resume: applying error-idle auto-resume on already-open reopen"
-    );
-    agent.session.enqueue_prompt_front(prompt_text.clone());
-    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, &sid);
-
-    let drain = force_drain_queue_past_background(agent);
-    let turn_started = drain.effects.iter().any(|e| {
-        matches!(
-            e,
-            Effect::SendPrompt { .. }
-                | Effect::SendPromptBlocks { .. }
-                | Effect::SetModeThenPrompt { .. }
-        )
-    });
-    if turn_started {
-        agent.show_toast(xai_grok_shell::session::canceled_turn_resume::auto_resume_toast());
-    } else {
-        agent.show_toast(
-            &xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
-                "queue drain did not start a turn",
-            ),
-        );
-        if let Some(built) = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
-            &prompt_text,
-            prompt_id.as_deref(),
-            chrono::Utc::now().to_rfc3339(),
-        ) {
-            let _ = xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
-                &cwd, &sid, &built,
-            );
-        }
-    }
-    drain.effects
-}
-
 pub(in crate::app::dispatch) fn handle_session_loaded(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1197,29 +1064,25 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_summary: Option<String>,
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
+    scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
         agent_id,
         session_id,
     );
+    let resume_canceled_turn = app.current_ui.resume_canceled_turn_on_restart_enabled();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
+        agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
+        agent.arm_late_replay_grace();
         agent.session.restore_degree = restore_degree;
-        // Capture resume evidence **before** finish_turn clears running
-        // tools/agent messages and before zombie finalize marks subagents done.
-        // Marker path does not need this; history recovery does.
-        // Covers mid-work killall **and** last turn ended in error (403 /
-        // Internal error) so reopen does not leave the session idle.
-        let history_resume_prompt = recover_interrupted_turn_from_session(agent);
-        let interrupted_for_log = session_looks_interrupted_mid_work(agent);
-        let error_terminal_for_log = session_last_turn_ended_in_error(agent);
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
         if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
@@ -1273,257 +1136,25 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             for child in agent.subagent_views.values_mut() {
                 child.scrollback.finish_all_running();
             }
-            // Cold load after killall / process death: subagent rows may still
-            // show unfinished=false from replay (SubagentFinished never landed).
-            // Those children are dead with this process. Finalize so the local
-            // queue is not held forever and cancel-resume can auto-start.
-            for info in agent.subagent_sessions.values_mut() {
-                if !info.finished {
-                    info.finished = true;
-                    info.pending_kill = false;
-                    info.kill_requested_at = None;
-                    info.activity_label = None;
-                }
-            }
         }
         let mut effects = Vec::new();
         if let Some(directive) = agent.pending_first_prompt.take() {
             agent.session.enqueue_prompt_front(directive);
         }
-        // Auto-resume an interrupted/canceled turn on session open (default on).
-        // Covers Esc cancel, SIGTERM/killall (eager or signal-path marker), and
-        // graceful Quit. Only when not already adopting a live running prompt
-        // from the leader. Path must match write side: cwd + session id string
-        // (same as `session_id.0`), not a Display that could drift.
-        //
-        // Product contract: toast + **automatically start** the interrupted
-        // prompt as a live turn (SendPrompt path), not composer-only. Clear
-        // the one-shot marker when we enqueue, then force-drain so the turn
-        // actually runs. Successful drain re-eager-writes for the new active
-        // turn (second killall still works). If drain fails, re-persist the
-        // marker so a later reopen can retry instead of leaving the session idle.
-        let mut resume_toast: Option<String> = None;
-        let mut resume_applied = false;
-        let mut resume_rewarm: Option<(String, String, String, Option<String>)> = None;
+        // Continue interrupted turn: marker on disk + setting on (default).
+        // Not `/resume` session pick. Skip when this load is adopting a live turn.
         if !adopting {
-            let resume_enabled = app.current_ui.resume_canceled_turn_on_restart_enabled();
-            let cwd = agent.session.cwd.to_string_lossy().into_owned();
-            // Prefer bound session id; hydrate_sid is the load request id and
-            // matches after `bind_session_id` above.
-            let sid = agent
-                .session
-                .session_id
-                .as_ref()
-                .map(|s| s.0.to_string())
-                .unwrap_or_else(|| hydrate_sid.0.to_string());
-            let marker = xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(
-                &cwd, &sid,
-            )
-            .ok()
-            .flatten();
-            match marker.as_ref() {
-                // A) Marker path when present (Esc / SIGTERM / eager turn /
-                // mid-`/rebuild` cancel / kept after error). Refuse **stale**
-                // markers after a primary user turn finished **successfully**
-                // in this load's replay (no mid-work, no error terminal):
-                // eager write + missed clear left `canceled_turn_resume.json`
-                // that re-fired clean prompts on every reopen/`/rebuild`
-                // (dogfood: "??? [Image #1]" and "Still nothing!!!" loops).
-                // Error-class terminals keep the marker and auto-resume
-                // (operator: last thing was an error → continue that work).
-                Some(marker)
-                    if xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
-                        resume_enabled,
-                        Some(marker),
-                    ) =>
-                {
-                    let stale_after_successful_complete = agent
-                        .last_primary_user_turn_completed_in_replay
-                        && !interrupted_for_log
-                        && !error_terminal_for_log;
-                    if stale_after_successful_complete {
-                        tracing::info!(
-                            session = %sid,
-                            prompt_len = marker.prompt_text.len(),
-                            "canceled_turn_resume: dropping stale marker after successful primary turn (no mid-work, no error)"
-                        );
-                        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
-                            &cwd, &sid,
-                        );
-                    } else {
-                        let prompt_text = marker.prompt_text.clone();
-                        let prompt_id = marker.prompt_id.clone();
-                        tracing::info!(
-                            session = %sid,
-                            prompt_len = prompt_text.len(),
-                            error_terminal = error_terminal_for_log,
-                            "canceled_turn_resume: applying marker on session load (auto-start)"
-                        );
-                        agent.session.enqueue_prompt_front(prompt_text.clone());
-                        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
-                            &cwd, &sid,
-                        );
-                        resume_toast = Some(
-                            xai_grok_shell::session::canceled_turn_resume::auto_resume_toast()
-                                .to_string(),
-                        );
-                        resume_applied = true;
-                        resume_rewarm = Some((cwd, sid, prompt_text, prompt_id));
-                    }
-                }
-                Some(_) if !resume_enabled => {
-                    tracing::info!(
-                        session = %sid,
-                        "canceled_turn_resume: marker present but resume_canceled_turn_on_restart is off"
-                    );
-                }
-                Some(marker) => {
-                    tracing::info!(
-                        session = %sid,
-                        prompt_len = marker.prompt_text.len(),
-                        "canceled_turn_resume: marker present but not auto-resume eligible"
-                    );
-                }
-                // B) No marker: recover from unfinished children / running
-                // scrollback / suppressed wait tools / open turn / **error
-                // terminal** + last user prompt (killall without marker file,
-                // or turn failed after marker was cleared).
-                None if resume_enabled => {
-                    if let Some(prompt_text) = history_resume_prompt {
-                        tracing::info!(
-                            session = %sid,
-                            prompt_len = prompt_text.len(),
-                            interrupted = interrupted_for_log,
-                            error_terminal = error_terminal_for_log,
-                            "canceled_turn_resume: recovering turn from session history (no marker; mid-work or error)"
-                        );
-                        // Write a marker as we re-queue so a second SIGTERM mid-drain
-                        // still has durable resume text (same shape as Esc/killall).
-                        if let Some(built) =
-                            xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
-                                &prompt_text,
-                                None,
-                                chrono::Utc::now().to_rfc3339(),
-                            )
-                        {
-                            let _ = xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
-                                &cwd, &sid, &built,
-                            );
-                        }
-                        agent.session.enqueue_prompt_front(prompt_text.clone());
-                        let _ =
-                            xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
-                                &cwd, &sid,
-                            );
-                        resume_toast = Some(
-                            xai_grok_shell::session::canceled_turn_resume::auto_resume_interrupted_toast(
-                            )
-                            .to_string(),
-                        );
-                        resume_applied = true;
-                        resume_rewarm = Some((cwd, sid, prompt_text, None));
-                    } else if interrupted_for_log || error_terminal_for_log {
-                        tracing::info!(
-                            session = %sid,
-                            interrupted = interrupted_for_log,
-                            error_terminal = error_terminal_for_log,
-                            "canceled_turn_resume: resume evidence on load but no user prompt to re-queue"
-                        );
-                        resume_toast = Some(
-                            xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
-                                "no user prompt to re-queue",
-                            ),
-                        );
-                    }
-                }
-                None if interrupted_for_log || error_terminal_for_log => {
-                    tracing::info!(
-                        session = %sid,
-                        interrupted = interrupted_for_log,
-                        error_terminal = error_terminal_for_log,
-                        "canceled_turn_resume: resume evidence on load but resume_canceled_turn_on_restart is off"
-                    );
-                    resume_toast = Some(
-                        xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
-                            "resume on restart is off in settings",
-                        ),
-                    );
-                }
-                None => {}
-            }
+            apply_canceled_turn_resume_on_load(agent, resume_canceled_turn);
         }
-        // Cancel-resume must start a turn even if residual background holds
-        // remain (defense in depth after zombie finalize above). Normal load
-        // keeps the standard drain so live-children hold still applies when
-        // we did not just re-queue a killall interrupt.
-        let drain = if resume_applied {
-            force_drain_queue_past_background(agent)
-        } else {
-            maybe_drain_queue(agent)
-        };
+        let drain = maybe_drain_queue(agent);
         let page_flip_entry = drain.page_flip_entry;
-        let turn_started = drain.effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::SendPrompt { .. }
-                    | Effect::SendPromptBlocks { .. }
-                    | Effect::SetModeThenPrompt { .. }
-            )
-        });
-        if resume_applied {
-            let resume_sid = agent
-                .session
-                .session_id
-                .as_ref()
-                .map(|s| s.0.to_string())
-                .unwrap_or_else(|| hydrate_sid.0.to_string());
-            if turn_started {
-                tracing::info!(
-                    session = %resume_sid,
-                    "canceled_turn_resume: session load drain started SendPrompt (marker or history)"
-                );
-            } else {
-                tracing::info!(
-                    session = %resume_sid,
-                    "canceled_turn_resume: session load drain blocked (will re-warm marker)"
-                );
-                // Loud dogfood: enqueue happened but turn did not start.
-                resume_toast = Some(
-                    xai_grok_shell::session::canceled_turn_resume::interrupted_resume_failed_toast(
-                        "queue drain did not start a turn",
-                    ),
-                );
-            }
-        }
         effects.extend(drain.effects);
-        if let Some((cwd, sid, prompt_text, prompt_id)) = resume_rewarm
-            && !turn_started
-        {
-            tracing::warn!(
-                session = %sid,
-                "cancel-resume enqueued on session load but drain did not start a turn; \
-                 re-writing canceled_turn_resume.json for a later reopen"
-            );
-            if let Some(marker) =
-                xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
-                    &prompt_text,
-                    prompt_id.as_deref(),
-                    chrono::Utc::now().to_rfc3339(),
-                )
-            {
-                let _ = xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
-                    &cwd, &sid, &marker,
-                );
-            }
-        }
-        if let Some(toast) = resume_toast {
-            agent.show_toast(&toast);
-        }
         let cwd = agent.session.cwd.clone();
-        effects.push(Effect::HydrateSessionTitleFromDisk {
+        effects.push(Effect::HydrateSessionMetaFromDisk {
             agent_id,
             session_id: hydrate_sid.clone(),
             cwd: cwd.clone(),
+            last_turn_summary_gen: agent.last_turn_summary_gen,
         });
         agent.session.prompt_history_loading = true;
         effects.push(Effect::FetchPromptHistory {
@@ -1544,15 +1175,17 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
+            force_refresh: false,
         });
-        if let Some((model_id, effort)) = deferred {
+        if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
             effects.push(Effect::SwitchModel {
                 agent_id,
                 session_id: hydrate_sid.clone(),
-                model_id,
-                effort,
-                prev_model_id: None,
+                model_id: switch.model_id,
+                effort: switch.effort,
+                prev_model_id: switch.prev_model_id,
             });
         }
         if std::mem::take(&mut agent.pending_extensions_fetch)
@@ -1564,10 +1197,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 hydrate_sid.clone(),
             ));
         }
-        effects.push(Effect::RegisterActiveSession {
-            session_id: hydrate_sid,
-            cwd: agent.session.cwd.display().to_string(),
-        });
+        if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
+            effects.push(effect);
+        }
         notify_session_ready(&app.notification_service, agent);
         crate::memory_release::release_retained_memory_with("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
@@ -1575,6 +1207,77 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     }
     vec![]
 }
+
+/// True when replay shows the last real user turn already finished
+/// successfully (`TurnCompleted` after that prompt). A leftover
+/// `canceled_turn_resume.json` is then stale: drop it, do not re-fire.
+fn primary_user_turn_finished_successfully(scrollback: &ScrollbackState) -> bool {
+    let len = scrollback.len();
+    let mut last_user: Option<usize> = None;
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(block) = &entry.block {
+            if block.is_bash || block.is_cron {
+                continue;
+            }
+            last_user = Some(idx);
+            break;
+        }
+    }
+    let Some(user_idx) = last_user else {
+        return false;
+    };
+    let mut last_terminal: Option<&SessionEvent> = None;
+    for idx in (user_idx + 1)..len {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::SessionEvent(block) = &entry.block
+            && block.event.is_turn_terminal()
+        {
+            last_terminal = Some(&block.event);
+        }
+    }
+    matches!(last_terminal, Some(SessionEvent::TurnCompleted { .. }))
+}
+
+/// Re-queue a canceled mid-turn once when the session marker is present and
+/// continue-interrupted-turn is on. Toast is **Continuing interrupted turn**,
+/// not `/resume` session pick. One-shot: the marker is cleared after enqueue.
+/// A leftover marker after a successful primary-turn finish is dropped.
+fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: bool) {
+    use xai_grok_shell::session::canceled_turn_resume::{
+        auto_resume_toast, clear_canceled_turn_resume, load_canceled_turn_resume,
+        should_auto_resume_on_restart,
+    };
+    let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+        return;
+    };
+    let cwd = agent.session.cwd.to_string_lossy().into_owned();
+    let Ok(Some(marker)) = load_canceled_turn_resume(&cwd, &sid) else {
+        return;
+    };
+    if primary_user_turn_finished_successfully(&agent.scrollback) {
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return;
+    }
+    if !resume_enabled {
+        return;
+    }
+    if !should_auto_resume_on_restart(true, Some(&marker)) {
+        return;
+    }
+    let text = marker.prompt_text;
+    if text.trim().is_empty() {
+        return;
+    }
+    agent.show_toast(auto_resume_toast());
+    agent.session.enqueue_prompt_front(text);
+    let _ = clear_canceled_turn_resume(&cwd, &sid);
+}
+
 pub(in crate::app::dispatch) fn handle_session_load_failed(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1615,6 +1318,7 @@ pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
         return vec![Effect::FetchSessionList {
             query: (!query.is_empty()).then_some(query),
             seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
         }];
     }
     if live_deep_search_seq(app) != Some(seq) {
@@ -1683,25 +1387,54 @@ pub(in crate::app::dispatch) fn handle_session_restored(
     agent_id: AgentId,
     local_session_id: String,
 ) -> Vec<Effect> {
-    if crate::app::session_startup::chat_mode_refuses_local_build_load(
-        app.chat_mode,
-        false,
-        &local_session_id,
-        &app.cwd,
-    ) {
+    #[cfg(feature = "local-workspace")]
+    let bypass_chat_refusal = app.welcome_history_load_as_build;
+    #[cfg(not(feature = "local-workspace"))]
+    let bypass_chat_refusal = false;
+    if !bypass_chat_refusal
+        && crate::app::session_startup::chat_mode_refuses_local_build_load(
+            app.chat_mode,
+            false,
+            &local_session_id,
+            &app.cwd,
+        )
+    {
+        #[cfg(feature = "local-workspace")]
+        {
+            app.welcome_history_load_as_build = false;
+        }
         refuse_chat_mode_build_agent(app, agent_id);
         return vec![];
     }
     let sid = clear_stale_session_id(app, &local_session_id);
+    let conversation_entry = session_opens_as_chat(app, false);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "SessionRestored");
         agent.bind_session_id(sid);
         agent.chat_kind = app.chat_mode;
-        agent.apply_credit_balance(
-            app.credit_balance.clone(),
-            app.auto_topup.clone(),
-            app.openrouter_credit_balance,
-        );
+        agent.conversation_entry = conversation_entry;
+        #[cfg(feature = "local-workspace")]
+        {
+            let history_build = app.welcome_history_load_as_build;
+            let local_intent = match &app.welcome_session_local_workspace {
+                Some(Some(_)) => true,
+                Some(None) => false,
+                None => crate::app::session_startup::active_local_workspace()
+                    .ok()
+                    .flatten()
+                    .is_some(),
+            };
+            let (mode, cli_locked) =
+                crate::views::welcome::workspace_mode::indicator_for_opening_session(
+                    false,
+                    history_build,
+                    app.local_workspace_startup_locked,
+                    local_intent,
+                );
+            agent.workspace_mode = mode;
+            agent.workspace_mode_cli_locked = cli_locked;
+        }
+        agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
         agent.scrollback.push_block(RenderBlock::system(format!(
             "Session restored. Loading {local_session_id}..."
         )));
@@ -1721,6 +1454,10 @@ pub(in crate::app::dispatch) fn handle_session_restore_failed(
     error: String,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Session restore failed");
+    #[cfg(feature = "local-workspace")]
+    {
+        app.welcome_history_load_as_build = false;
+    }
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionRestoreFailed") {
             return vec![];

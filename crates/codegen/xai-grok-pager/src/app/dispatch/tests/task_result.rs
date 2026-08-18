@@ -354,9 +354,9 @@ fn stale_workflows_result_does_not_repaint_replaced_session_modal() {
 }
 
 fn foreign_resume_hint(
-    tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool,
-) -> xai_grok_workspace::foreign_sessions::RecentForeignSession {
-    xai_grok_workspace::foreign_sessions::RecentForeignSession {
+    tool: xai_grok_foreign_sessions::ForeignSessionTool,
+) -> xai_grok_foreign_sessions::RecentForeignSession {
+    xai_grok_foreign_sessions::RecentForeignSession {
         tool,
         native_id: "native-session".into(),
         age: std::time::Duration::from_secs(30),
@@ -366,11 +366,10 @@ fn foreign_resume_hint(
 #[test]
 fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
     let mut launch = test_app();
-    launch.foreign_session_compat =
-        xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
-            cursor: true,
-            ..Default::default()
-        };
+    launch.foreign_session_compat = xai_grok_foreign_sessions::EnabledForeignSessionSources {
+        cursor: true,
+        ..Default::default()
+    };
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -404,14 +403,14 @@ fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
             canonical_cwd: canonical_cwd.clone(),
             launch_token,
             hint: Some(foreign_resume_hint(
-                xai_grok_workspace::foreign_sessions::ForeignSessionTool::Cursor,
+                xai_grok_foreign_sessions::ForeignSessionTool::Cursor,
             )),
         }),
         &mut launch,
     );
     assert_eq!(
         launch.foreign_resume_hint().map(|hint| hint.tool),
-        Some(xai_grok_workspace::foreign_sessions::ForeignSessionTool::Cursor)
+        Some(xai_grok_foreign_sessions::ForeignSessionTool::Cursor)
     );
 
     let mut stale = test_app();
@@ -429,7 +428,7 @@ fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
             canonical_cwd: canonical_cwd.clone(),
             launch_token: launch_token + 1,
             hint: Some(foreign_resume_hint(
-                xai_grok_workspace::foreign_sessions::ForeignSessionTool::Codex,
+                xai_grok_foreign_sessions::ForeignSessionTool::Codex,
             )),
         }),
         &mut stale,
@@ -451,11 +450,10 @@ fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
 #[test]
 fn foreign_resume_result_rejects_startup_conflict_before_completion() {
     let mut app = test_app();
-    app.foreign_session_compat =
-        xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
-            cursor: true,
-            ..Default::default()
-        };
+    app.foreign_session_compat = xai_grok_foreign_sessions::EnabledForeignSessionSources {
+        cursor: true,
+        ..Default::default()
+    };
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -476,7 +474,7 @@ fn foreign_resume_result_rejects_startup_conflict_before_completion() {
             canonical_cwd,
             launch_token,
             hint: Some(foreign_resume_hint(
-                xai_grok_workspace::foreign_sessions::ForeignSessionTool::Cursor,
+                xai_grok_foreign_sessions::ForeignSessionTool::Cursor,
             )),
         }),
         &mut app,
@@ -1034,10 +1032,9 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     // PersistPreferredModel effect emitted.
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-            &effects[0],
-            Effect::PersistPreferredModel { model_id: mid, .. }
-    if *mid == model_id.clone()
-        ));
+        &effects[0],
+        Effect::PersistPreferredModel { model_id: mid, .. } if *mid == model_id.clone()
+    ));
 }
 
 #[test]
@@ -1490,6 +1487,7 @@ fn no_deferred_switch_means_no_extra_effect() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1501,6 +1499,62 @@ fn no_deferred_switch_means_no_extra_effect() {
             .any(|e| matches!(e, Effect::SwitchModel { .. }))
     );
     assert!(!app.agents[&id].session.model_switch_pending);
+}
+
+#[test]
+fn session_success_arms_finish_startup_obligation() {
+    xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
+    let id = AgentId(0);
+    let results = [
+        TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "new-session".into(),
+            models: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: "resumed-session".into(),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: "worktree-session".into(),
+            worktree_path: std::path::PathBuf::from("/tmp/wt"),
+            session_cwd: std::path::PathBuf::from("/tmp/wt"),
+            models: None,
+            scheduler_background_loops: None,
+        },
+        TaskResult::WorktreeForked {
+            agent_id: id,
+            session_id: "forked-session".into(),
+            worktree_path: std::path::PathBuf::from("/tmp/wt"),
+            session_cwd: std::path::PathBuf::from("/tmp/wt"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: None,
+        },
+    ];
+
+    for result in results {
+        let mut app = test_app_with_agent();
+        app.agents.get_mut(&id).unwrap().session.session_id = None;
+        app.pending_startup = Some(xai_grok_telemetry::startup::PendingStartup::new());
+        let label = format!("{result:?}");
+
+        dispatch(Action::TaskComplete(result), &mut app);
+
+        assert!(
+            app.pending_startup.is_none(),
+            "a usable session must take the startup obligation: {label}",
+        );
+    }
 }
 
 #[test]
@@ -1694,13 +1748,18 @@ fn delete_session_complete_removes_only_matching_source_and_id() {
         .active_modal
         .as_mut()
     {
-        *pending_delete = Some(("local".into(), "s1".into(), "/r".into()));
+        *pending_delete = Some(crate::views::session_picker::PendingDelete {
+            source: "local".into(),
+            session_id: "s1".into(),
+            cwd: "/r".into(),
+        });
     }
 
     let _ = dispatch_task_result(
         TaskResult::DeleteSessionComplete {
             source: "local".into(),
             session_id: "s1".into(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
         },
         &mut app,
     );
@@ -1781,6 +1840,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         TaskResult::DeleteSessionComplete {
             source: "both".into(),
             session_id: "shared".into(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
         },
         &mut app,
     );
@@ -1878,6 +1938,7 @@ fn delete_remote_session_clears_modal_and_welcome_content_hits() {
         TaskResult::DeleteSessionComplete {
             source: "remote".into(),
             session_id: "remote-only".into(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
         },
         &mut app,
     );
@@ -1973,6 +2034,133 @@ fn rename_session_failed_keeps_local_display_name_and_pushes_system_block() {
     assert!(
         text.contains("Couldn't rename session: boom"),
         "system block must surface the error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_failed_restores_pin_and_pushes_system_block() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = Some("Manual".into());
+        a.generated_session_title = Some("Auto".into());
+    }
+    let _ = dispatch_reset_session_title(&mut app);
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto")
+    );
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleFailed {
+            agent_id: AgentId(0),
+            error: "boom".into(),
+            previous_display_name: Some("Manual".into()),
+            previous_generated_title: Some("Auto".into()),
+        },
+        &mut app,
+    );
+
+    assert_eq!(
+        app.agents[&AgentId(0)].display_name.as_deref(),
+        Some("Manual"),
+        "failed unpin must restore the optimistic-cleared pin"
+    );
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto"),
+        "failed unpin must restore the pre-clear generated title"
+    );
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    assert_eq!(
+        scrollback.len(),
+        scrollback_len_before + 1,
+        "system block must be appended"
+    );
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Couldn't reset session title: boom"),
+        "system block must surface the error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_failed_does_not_restore_after_unpin_fanout() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = Some("Manual".into());
+        a.generated_session_title = Some("Auto".into());
+    }
+    let _ = dispatch_reset_session_title(&mut app);
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.title_unpin_committed = true;
+        a.display_name = None;
+        a.generated_session_title = Some("Auto".into());
+    }
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleFailed {
+            agent_id: AgentId(0),
+            error: "transport dropped".into(),
+            previous_display_name: Some("Manual".into()),
+            previous_generated_title: Some("Auto".into()),
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&AgentId(0)];
+    assert!(
+        agent.display_name.is_none(),
+        "dropped RPC after fan-out must not re-pin"
+    );
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Auto"));
+    assert!(!agent.title_unpin_committed);
+    let last = agent
+        .scrollback
+        .entry(agent.scrollback.len() - 1)
+        .expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Session title reset to auto"),
+        "committed unpin should confirm, not error; got: {text:?}"
+    );
+}
+
+#[test]
+fn reset_session_title_complete_pushes_system_block() {
+    let mut app = test_app_with_agent();
+    if let Some(a) = app.agents.get_mut(&AgentId(0)) {
+        a.display_name = None;
+        a.generated_session_title = None;
+    }
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+
+    let _effects = dispatch_task_result(
+        TaskResult::ResetSessionTitleComplete {
+            agent_id: AgentId(0),
+        },
+        &mut app,
+    );
+
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    let scrollback = &app.agents[&AgentId(0)].scrollback;
+    assert_eq!(scrollback.len(), scrollback_len_before + 1);
+    let last = scrollback.entry(scrollback.len() - 1).expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Session title reset to auto"),
+        "got: {text:?}"
     );
 }
 
@@ -2811,73 +2999,5 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
     assert!(
         app.agents[&AgentId(0)].toast.is_none(),
         "Build-mode modal non-empty degraded list stays silent"
-    );
-}
-
-/// Mid-`/rebuild` progress updates toast only (stable height). Must not push
-/// scrollback system blocks (would fight footer layout and flood transcript).
-/// Paired with `xai-grok-update` capture contracts: raw cargo never hits the TTY.
-#[test]
-fn rebuild_progress_updates_bar_and_toast_not_scrollback() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let before_len = app.agents[&id].scrollback.len();
-    let msg = "Compiling xai-grok-pager (12 packages)".to_string();
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::RebuildProgress {
-            agent_id: id,
-            message: msg.clone(),
-            fraction: 0.42,
-        }),
-        &mut app,
-    );
-    let agent = &app.agents[&id];
-    assert_eq!(
-        agent.scrollback.len(),
-        before_len,
-        "RebuildProgress must not push scrollback blocks"
-    );
-    let progress = agent
-        .rebuild_progress
-        .as_ref()
-        .expect("rebuild_progress strip must be set");
-    assert!(
-        (progress.fraction - 0.42).abs() < 1e-5,
-        "fraction stored: {}",
-        progress.fraction
-    );
-    assert_eq!(progress.detail, msg);
-    let toast = agent.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
-    assert!(
-        toast.contains("42%") && toast.contains("Compiling"),
-        "expected toast to carry percent + stage, got {toast:?}"
-    );
-    assert!(
-        xai_grok_update::is_stable_height_progress_line(&msg),
-        "stage payload must be stable-height: {msg:?}"
-    );
-}
-
-/// Contract: out-of-range fractions are clamped when applied to agent state.
-#[test]
-fn rebuild_progress_clamps_fraction_on_dispatch() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::RebuildProgress {
-            agent_id: id,
-            message: "overflow".into(),
-            fraction: 2.5,
-        }),
-        &mut app,
-    );
-    let progress = app.agents[&id]
-        .rebuild_progress
-        .as_ref()
-        .expect("progress set");
-    assert!(
-        (progress.fraction - 1.0).abs() < 1e-5,
-        "must clamp to 1.0, got {}",
-        progress.fraction
     );
 }

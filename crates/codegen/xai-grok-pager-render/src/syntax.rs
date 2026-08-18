@@ -445,4 +445,38 @@ mod tests {
         );
         theme_cache::reset_for_test();
     }
+
+    /// Same-role syntax tokens must not flip colour. `doge.tmTheme` used to
+    /// declare two "Object Property" rules (cyan vs white) so identifiers in
+    /// one code fence mixed on the same line.
+    #[test]
+    fn doge_tmtheme_object_property_rules_share_one_foreground() {
+        let text = std::str::from_utf8(doge_tmtheme_bytes()).expect("utf-8");
+        let mut hexes = Vec::new();
+        let mut search = text;
+        while let Some(name_at) = search.find("<string>Object Property</string>") {
+            let chunk = &search[name_at..search.len().min(name_at + 600)];
+            let fg_key = chunk
+                .find("<key>foreground</key>")
+                .expect("Object Property rule must set foreground");
+            let after = &chunk[fg_key..];
+            let hash = after
+                .find('#')
+                .expect("Object Property foreground must be a #RRGGBB hex colour");
+            let hex = after[hash..hash + 7].to_ascii_uppercase();
+            hexes.push(hex);
+            search = &search[name_at + "<string>Object Property</string>".len()..];
+        }
+        assert!(
+            hexes.len() >= 2,
+            "fixture: doge.tmTheme still has two Object Property rules, got {hexes:?}"
+        );
+        let first = &hexes[0];
+        for hex in &hexes {
+            assert_eq!(
+                hex, first,
+                "Object Property scopes must share one DOGE token, got {hexes:?}"
+            );
+        }
+    }
 }

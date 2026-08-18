@@ -15,10 +15,23 @@ pub struct CancellationContext {
     pub tool_name: Option<String>,
     pub reason: Option<String>,
     pub hook_name: Option<String>,
-    /// What triggered the cancel (`"send_now"`, `"esc"`, `"ctrl_c"`); surfaced
-    /// as `cancelTrigger` on the `PromptResponse`/`TurnCompleted` `_meta`.
-    /// `None` for graceful in-turn cancels and older clients.
+    /// What triggered the cancel (e.g. `"send_now"`, `"esc"`, `"mouse"`);
+    /// surfaced as `cancelTrigger` on the turn-end `_meta`.
     pub trigger: Option<String>,
+}
+/// Failure surface of a `/btw` side question. Kept typed until the ACP
+/// boundary so `handle_btw` can route model errors through the canonical
+/// [`map_sampling_err_to_acp`](crate::sampling::error::map_sampling_err_to_acp)
+/// (typed rate-limit / auth codes) instead of a flattened string.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SideQuestionError {
+    #[error("side question model call failed: {0}")]
+    Sampling(#[from] xai_grok_sampling_types::SamplingError),
+    #[error("failed to prepare client: {0}")]
+    PrepareClient(String),
+    #[error("No response from model")]
+    EmptyResponse,
 }
 /// Prompt completion kind returned to the ACP layer.
 #[derive(Debug, Clone)]
@@ -28,7 +41,7 @@ pub enum PromptCompletionKind {
     /// Completed so goal continuation is not re-queued under an active goal.
     StationarityEnded,
     Cancelled {
-        category: Option<xai_file_utils::events::types::CancellationCategory>,
+        category: Option<xai_grok_session_events::types::CancellationCategory>,
         context: Option<CancellationContext>,
     },
     MaxTurnsReached {
@@ -62,7 +75,7 @@ pub struct PromptTurnOk {
 }
 /// Result of a prompt turn, containing the stop reason, accumulated token count,
 /// and an optional turn-end signals snapshot (for trace metadata enrichment).
-pub type PromptTurnResult = Result<PromptTurnOk, acp::Error>;
+pub(crate) type PromptTurnResult = Result<PromptTurnOk, acp::Error>;
 /// Convenience: successful end-of-turn result.
 pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> PromptTurnResult {
     Ok(PromptTurnOk {
@@ -122,7 +135,74 @@ pub struct TaskWakeAdmission {
     pub respond_to: oneshot::Sender<bool>,
     pub fallback: TaskWakeFallback,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownKind {
+    /// Running work survives (idle unload, process quiesce, subagent teardown).
+    Graceful,
+    CancelRunningTurn,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CancelTrigger {
+    Esc,
+    CtrlC,
+    SendNow,
+    Shutdown,
+    SessionClose,
+    SessionDelete,
+    Client(String),
+}
+impl CancelTrigger {
+    /// Parse a client's `_meta.cancelTrigger`. Internal spellings land in
+    /// [`Self::Client`], so a client-supplied string never maps to an
+    /// internal trigger.
+    pub fn from_client(s: &str) -> Self {
+        match s {
+            "esc" => Self::Esc,
+            "ctrl_c" => Self::CtrlC,
+            other => Self::Client(other.to_string()),
+        }
+    }
+    /// Stop gesture (Esc/Ctrl+C/`Client`); unrecognized wire names fail closed.
+    pub fn is_stop_gesture(&self) -> bool {
+        matches!(self, Self::Esc | Self::CtrlC | Self::Client(_))
+    }
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Esc => "esc",
+            Self::CtrlC => "ctrl_c",
+            Self::SendNow => "send_now",
+            Self::Shutdown => "shutdown",
+            Self::SessionClose => "session_close",
+            Self::SessionDelete => "session_delete",
+            Self::Client(s) => s,
+        }
+    }
+}
+#[derive(Debug, Clone, Default)]
+pub struct CancelOptions {
+    pub cancel_subagents: bool,
+    pub kill_background_tasks: bool,
+    pub rewind_if_no_output: bool,
+    /// [`CancelTrigger::is_stop_gesture`] arms the task-wake barrier.
+    pub trigger: Option<CancelTrigger>,
+    /// Drives the cancel-rate metric.
+    pub user_initiated: bool,
+}
+
 pub enum SessionCommand {
+    SetAutoCompactThreshold {
+        auto_compact_threshold_percent: u8,
+        auto_compact_threshold_tokens: Option<u64>,
+    },
+
+    RestoreTodoBoard {
+        plan_state: Option<crate::tools::todo::TodoState>,
+    },
+
+    ClearCompletedTodos {
+        respond_to: oneshot::Sender<usize>,
+    },
+
     Initialize {
         system_prompt: String,
     },
@@ -138,19 +218,6 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
-    /// Resume hook: rehydrate the todo board from Resources
-    /// (`resources_state.json`) and fall back to `plan.json` when tool state
-    /// is empty. Emits an ACP `Plan` update so the UI board matches durable
-    /// state after load.
-    RestoreTodoBoard {
-        plan_state: Option<crate::tools::todo::TodoState>,
-    },
-    /// Operator **Clear finished**: archive completed/cancelled active todos,
-    /// persist Resources + plan.json, re-emit ACP `Plan`. Responds with the
-    /// number of items cleared (0 = no-op).
-    ClearCompletedTodos {
-        respond_to: oneshot::Sender<usize>,
-    },
     GetToolOverrides {
         respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
     },
@@ -227,20 +294,6 @@ pub enum SessionCommand {
         /// `None` keeps percent mode.
         auto_compact_threshold_tokens: Option<u64>,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
-    },
-    /// Live-apply auto-compact threshold without a model switch.
-    ///
-    /// Fired when Settings commits `auto_compact_threshold_percent` /
-    /// tokens (ACP `x.ai/auto_compact_threshold_changed`). Updates the
-    /// session's `compaction.threshold_percent` / `threshold_tokens` Cells
-    /// so the next gate check uses the new boundary without restart.
-    ///
-    /// When `auto_compact_threshold_tokens` is `Some`, absolute-token mode
-    /// wins and `auto_compact_threshold_percent` is treated as a display
-    /// hint (the handler may recompute display % from the session window).
-    SetAutoCompactThreshold {
-        auto_compact_threshold_percent: u8,
-        auto_compact_threshold_tokens: Option<u64>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
@@ -402,7 +455,7 @@ pub enum SessionCommand {
     /// Flush the replay buffer and persistence, then signal completion.
     /// Used during reconnect to ensure all buffered content is persisted before replay.
     FlushComplete {
-        respond_to: oneshot::Sender<()>,
+        respond_to: oneshot::Sender<std::io::Result<()>>,
     },
     /// Update MCP servers for an existing session (used during reconnect or
     /// mid-session via the `x.ai/session/update_mcp_servers` extension method).
@@ -413,6 +466,13 @@ pub enum SessionCommand {
     UpdateMcpServers {
         mcp_servers: Vec<acp::McpServer>,
         respond_to: oneshot::Sender<Result<(), acp::Error>>,
+    },
+    /// Re-apply per-attachment policy (MCP init strategy, delivery tools)
+    /// from a resident `session/load` whose request carried explicit
+    /// `startupHints`. Spawn-time structural hints are NOT touched. Sent
+    /// fire-and-forget alongside `UpdateMcpServers` on the reconnect rail.
+    UpdateAttachPolicy {
+        startup_hints: Box<crate::session::StartupHints>,
     },
     /// Toggle an MCP server on/off within the session actor's event loop.
     /// Atomic read-modify-write avoids TOCTOU races with background config
@@ -498,6 +558,7 @@ pub enum SessionCommand {
     /// Routes through the ToolBridge's TerminalBackend (lock-free, Arc-shared).
     KillBackgroundTask {
         task_id: String,
+        source: xai_grok_tools::types::KillSource,
         respond_to: oneshot::Sender<Result<xai_grok_tools::types::KillOutcome, String>>,
     },
     DeleteScheduledTask {
@@ -607,13 +668,15 @@ pub enum SessionCommand {
         new_text: String,
         editor: Option<String>,
     },
-    /// Hold a queued prompt out of combine-on-promote while a client edits it
-    /// in the composer. Released via [`Self::ReleaseCombineEdit`].
-    HoldCombineEdit {
+    /// Hold a queued prompt while a client edits it in the composer: skip it as
+    /// a combine follower **and** block promote while it is the queue front.
+    /// Released via [`Self::ReleaseEdit`], or cleared by edit / remove / interject.
+    HoldEdit {
         id: String,
     },
-    /// Release a previous [`Self::HoldCombineEdit`].
-    ReleaseCombineEdit {
+    /// Release a previous [`Self::HoldEdit`]. Re-kicks the promoter so a
+    /// previously held front can start when the session is idle.
+    ReleaseEdit {
         id: String,
     },
     /// Atomically interject a queued (not-yet-running) prompt into the running
@@ -635,24 +698,8 @@ pub enum SessionCommand {
         /// no-ops the whole thing, edited text included).
         new_text: Option<String>,
     },
-    /// Cancel the running turn. `kill_background_tasks` distinguishes a hard
-    /// teardown (subagent shutdown — drains the whole queue) from a normal
-    /// interactive cancel (Ctrl+C — preserves queued user prompts so the next
-    /// one auto-runs). Ctrl+C tears down the running turn and queued terminal
-    /// task-completion wakes; other cancel triggers tear down only the running
-    /// turn. The follow-up `maybe_start_running_task` promotes the next item.
-    Cancel {
-        cancel_subagents: bool,
-        kill_background_tasks: bool,
-        rewind_if_pristine: bool,
-        /// Free-form discriminator for *what* triggered the cancel, taken from
-        /// the `session/cancel` request `_meta.cancelTrigger` (e.g. `"esc"`,
-        /// `"ctrl_c"`). `None` for older clients and programmatic teardowns
-        /// (subagent shutdown). Recorded in the `mid_turn_abort` turn-end's
-        /// `cancellation_context` JSON; the category stays `MidTurnAbort`.
-        trigger: Option<String>,
-    },
-    Shutdown,
+    Cancel(CancelOptions),
+    Shutdown(ShutdownKind),
     /// Force-trigger a feedback request notification for local client testing.
     /// Bypasses all heuristics, sampling, and cooldown checks.
     TriggerTestFeedback {
@@ -694,10 +741,8 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<Option<String>>,
     },
     /// Ask a side question without interrupting the current turn.
-    /// The session snapshots the conversation context, makes a tool-free
-    /// model call, and returns the answer + `btw_session_id`. Follow-up
-    /// turns reuse `btw_session_id` and pass `prior_turns` so the model
-    /// sees the full side-thread.
+    /// The session snapshots the conversation context, makes a single
+    /// tool-free model call, and returns the response text.
     SideQuestion {
         question: String,
         /// When set, continue this btw thread (same id for telemetry + history).
@@ -818,4 +863,19 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+}
+#[cfg(test)]
+mod cancel_trigger_tests {
+    use super::CancelTrigger;
+    #[test]
+    fn only_stop_gestures_arm_the_wake_barrier() {
+        assert!(!CancelTrigger::SendNow.is_stop_gesture());
+        assert!(!CancelTrigger::SessionDelete.is_stop_gesture());
+        assert!(!CancelTrigger::Shutdown.is_stop_gesture());
+        assert!(!CancelTrigger::SessionClose.is_stop_gesture());
+        assert!(CancelTrigger::Esc.is_stop_gesture());
+        assert!(CancelTrigger::CtrlC.is_stop_gesture());
+        assert!(CancelTrigger::from_client("mouse").is_stop_gesture());
+        assert!(CancelTrigger::from_client("some_future_gesture").is_stop_gesture());
+    }
 }

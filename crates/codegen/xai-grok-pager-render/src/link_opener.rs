@@ -5,8 +5,34 @@
 //! open a link safely without duplicating platform-specific logic.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::terminal::hyperlinks::SchemeFilter;
+use xai_tty_utils::{ProcessGroup, global_process_scope};
+
+/// Fire-and-forget OS helper: spawn, enroll, background-wait while holding the
+/// process-group Arc so session kill_all can still reap, and Windows job drop
+/// does not kill a still-running helper.
+fn spawn_enrolled_os_helper(mut command: std::process::Command) -> std::io::Result<()> {
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+    let mut child = command.spawn()?;
+    let group = ProcessGroup::new().and_then(|mut group| {
+        group.attach_std(&child)?;
+        Ok(Arc::new(group))
+    })?;
+    if !global_process_scope().register(&group) {
+        let _ = group.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(
+            "process scope closed; OS helper aborted",
+        ));
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        drop(group);
+    });
+    Ok(())
+}
 
 /// Outcome of attempting to open a URL in the system browser/handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +71,12 @@ pub fn browser_open_likely_available() -> bool {
     browser_open_likely_available_from_env(&env)
 }
 
-/// User-facing copy when the browser opener cannot run. Includes the full
-/// URL on its own line so it is easy to select/copy in the TUI.
+/// User-facing copy when the browser opener cannot run.
+///
+/// URL first, one line: welcome toast is a single row and truncates from the
+/// right, so the URL must stay the prefix. Scrollback uses the same string.
 pub fn browser_unavailable_message(url: &str) -> String {
-    format!("Could not open a browser. Open this URL manually:\n{url}")
+    format!("{url} Could not open a browser. Open this URL manually.")
 }
 
 /// Open a URL in the system's default browser/handler.
@@ -105,9 +133,9 @@ pub fn open_url(url: &str) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    xai_grok_tools::util::detach_std_command(&mut command);
-    match command.spawn() {
-        Ok(_) => true,
+    xai_tty_utils::detach_std_command(&mut command);
+    match spawn_enrolled_os_helper(command) {
+        Ok(()) => true,
         Err(e) => {
             // Redact URL to avoid leaking sensitive query params to logs.
             let redacted = url::Url::parse(url)
@@ -168,8 +196,8 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
     #[cfg(all(not(test), not(target_os = "windows")))]
     {
-        match build_open_path_command(path).spawn() {
-            Ok(_) => true,
+        match spawn_enrolled_os_helper(build_open_path_command(path)) {
+            Ok(()) => true,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "failed to open file natively");
                 false
@@ -228,8 +256,8 @@ fn reveal_in_explorer(path: &std::path::Path) -> bool {
     xai_tty_utils::detach_std_command(&mut command);
     // explorer.exe returns exit code 1 even on success, so a successful spawn
     // is the best signal we have.
-    match command.spawn() {
-        Ok(_) => true,
+    match spawn_enrolled_os_helper(command) {
+        Ok(()) => true,
         Err(e) => {
             tracing::warn!(path = %target.display(), error = %e, "failed to reveal file in Explorer");
             false
@@ -572,8 +600,9 @@ mod tests {
         let msg = browser_unavailable_message(url);
         assert!(msg.contains("Could not open a browser"));
         assert!(msg.contains(url));
-        // URL on its own line for easy select/copy in the TUI.
-        assert!(msg.lines().any(|l| l == url));
+        // URL first, one line: welcome toast truncates from the right.
+        assert!(msg.starts_with(url), "{msg}");
+        assert!(!msg.contains('\n'), "{msg}");
     }
 
     #[test]

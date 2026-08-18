@@ -1289,15 +1289,25 @@ fn durable_fallback_rejects_running_status() {
 fn drain_cancelled_finish_cmds(
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
     id: &str,
+    expected_error: &str,
 ) -> usize {
     let mut count = 0;
     while let Ok(cmd) = cmd_rx.try_recv() {
         if let SessionCommand::XaiSessionNotification { notification } = cmd
-            && let SessionUpdate::SubagentFinished { subagent_id, status, error, .. } = &notification
-                .update && subagent_id == id
+            && let SessionUpdate::SubagentFinished {
+                subagent_id,
+                status,
+                error,
+                will_wake,
+                ..
+            } = &notification.update && subagent_id == id
         {
             assert_eq!(status, "cancelled");
-            assert_eq!(error.as_deref(), Some("interrupted by process restart"));
+            assert_eq!(error.as_deref(), Some(expected_error));
+            assert!(
+                    !*will_wake,
+                    "synthesized orphan finish must not auto-wake"
+                );
             count += 1;
         }
     }
@@ -1321,10 +1331,14 @@ fn drain_cancelled_finish_broadcasts(
                 args.request.params.get(),
             )
             .expect("params must deserialize as SessionNotification");
-        if let SessionUpdate::SubagentFinished { subagent_id, status, .. } = &notification
+        if let SessionUpdate::SubagentFinished { subagent_id, status, will_wake, .. } = &notification
             .update && subagent_id == id
         {
             assert_eq!(status, "cancelled");
+            assert!(
+                    !*will_wake,
+                    "synthesized orphan finish must not auto-wake"
+                );
             count += 1;
         }
     }
@@ -1402,9 +1416,60 @@ async fn reconcile_with_inspections(
                 "parent-x",
                 gateway,
                 parent_cmd_tx,
+                ORPHAN_RECONCILE_REASON,
+                std::sync::Arc::new(tokio::sync::Mutex::new(())),
             ),
             respond,
         );
+}
+async fn live_reconcile_with_inspections(
+    inspections: HashMap<String, Option<SubagentInspection>>,
+    session_dir: &Path,
+    gateway: &GatewaySender,
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+) {
+    live_reconcile_with_heal_lock(
+            inspections,
+            session_dir,
+            gateway,
+            parent_cmd_tx,
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        )
+        .await
+}
+async fn live_reconcile_with_heal_lock(
+    inspections: HashMap<String, Option<SubagentInspection>>,
+    session_dir: &Path,
+    gateway: &GatewaySender,
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    heal_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let backend = ChannelBackend::new(event_tx);
+    let respond = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            let SubagentEvent::Inspect(request) = event else {
+                continue;
+            };
+            let value = inspections.get(&request.subagent_id).cloned().flatten();
+            let _ = request.respond_to.send(value);
+        }
+    });
+    tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reconcile_live_orphaned_subagents(
+                &backend,
+                session_dir,
+                "parent-x",
+                gateway,
+                parent_cmd_tx,
+                heal_lock,
+            ),
+        )
+        .await
+        .expect("live reconcile must not hang");
+    drop(backend);
+    let _ = respond.await;
 }
 #[tokio::test]
 async fn reconcile_orphan_flips_running_meta_to_cancelled() {
@@ -1430,7 +1495,10 @@ async fn reconcile_orphan_flips_running_meta_to_cancelled() {
     assert_eq!(reread.status, "cancelled");
     assert_eq!(reread.tool_calls, Some(0));
     assert_eq!(reread.turns, Some(0));
-    assert_eq!(drain_cancelled_finish_cmds(&mut cmd_rx, id), 1);
+    assert_eq!(
+            drain_cancelled_finish_cmds(&mut cmd_rx, id, ORPHAN_RECONCILE_REASON),
+            1
+        );
     assert_eq!(
             drain_cancelled_finish_broadcasts(&mut gateway_rx, id),
             1
@@ -1507,7 +1575,344 @@ async fn reconcile_reemits_shared_actor_terminal_outcome() {
             &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
         )
         .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(7));
+    assert_eq!(reread.turns, Some(2));
+}
+#[tokio::test]
+async fn live_reconcile_finalizes_running_meta_not_in_coordinator() {
+    use crate::test_support::lsp_runtime::test_gateway_with_receiver;
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-orphan";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), None)]),
+            session_dir.path(),
+            &gateway,
+            Some(&cmd_tx),
+        )
+        .await;
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "cancelled");
+    assert_eq!(reread.tool_calls, Some(0));
+    assert_eq!(reread.turns, Some(0));
+    assert_eq!(
+            drain_cancelled_finish_cmds(&mut cmd_rx, id, LIVE_ORPHAN_RECONCILE_REASON),
+            1
+        );
+    assert_eq!(
+            drain_cancelled_finish_broadcasts(&mut gateway_rx, id),
+            1
+        );
+}
+#[tokio::test]
+async fn live_reconcile_skips_live_coordinator_child() {
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-keep";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    live_reconcile_with_inspections(
+            HashMap::from([
+                (
+                    id.to_string(),
+                    Some(
+                        inspection(
+                            id,
+                            SubagentSnapshotStatus::Running {
+                                turn_count: 1,
+                                tool_call_count: 0,
+                                tokens_used: 0,
+                                context_window_tokens: 0,
+                                context_usage_pct: 0,
+                                tools_used: Vec::new(),
+                                error_count: 0,
+                            },
+                        ),
+                    ),
+                ),
+            ]),
+            session_dir.path(),
+            &test_gateway(),
+            None,
+        )
+        .await;
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
     assert_eq!(reread.status, "running");
+}
+#[tokio::test]
+async fn live_reconcile_reemitted_finish_has_will_wake_false() {
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-raced";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    live_reconcile_with_inspections(
+            HashMap::from([
+                (
+                    id.to_string(),
+                    Some(
+                        inspection(
+                            id,
+                            SubagentSnapshotStatus::Completed {
+                                output: "done".to_string(),
+                                tool_calls: 3,
+                                turns: 1,
+                                worktree_path: None,
+                            },
+                        ),
+                    ),
+                ),
+            ]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    let finish = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+        .find_map(|command| {
+            let SessionCommand::XaiSessionNotification { notification } = command else {
+                return None;
+            };
+            let SessionUpdate::SubagentFinished { status, will_wake, .. } = notification
+                .update else {
+                return None;
+            };
+            Some((status, will_wake))
+        });
+    assert_eq!(finish, Some(("completed".to_string(), false)));
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(3));
+    assert_eq!(reread.turns, Some(1));
+}
+#[tokio::test]
+async fn live_reconcile_persists_terminal_meta_so_second_tick_is_noop() {
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-once";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let completed = inspection(
+        id,
+        SubagentSnapshotStatus::Completed {
+            output: "done".to_string(),
+            tool_calls: 4,
+            turns: 2,
+            worktree_path: None,
+        },
+    );
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), Some(completed.clone()))]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    assert_eq!(
+            std::iter::from_fn(|| cmd_rx.try_recv().ok())
+                .filter(|command| matches!(
+                    command,
+                    SessionCommand::XaiSessionNotification {
+                        notification: SessionNotification {
+                            update: SessionUpdate::SubagentFinished { .. },
+                            ..
+                        }
+                    }
+                ))
+                .count(),
+            1
+        );
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), Some(completed))]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    assert!(cmd_rx.try_recv().is_err(), "second tick must not re-emit");
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), None)]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+    assert!(cmd_rx.try_recv().is_err());
+}
+#[tokio::test]
+async fn live_reconcile_overlapping_ticks_emit_once() {
+    use crate::test_support::lsp_runtime::test_gateway_with_receiver;
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-race";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let completed = inspection(
+        id,
+        SubagentSnapshotStatus::Completed {
+            output: "done".to_string(),
+            tool_calls: 4,
+            turns: 2,
+            worktree_path: None,
+        },
+    );
+    let inspections = HashMap::from([(id.to_string(), Some(completed))]);
+    let heal_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    tokio::join!(
+            live_reconcile_with_heal_lock(
+                inspections.clone(),
+                session_dir.path(),
+                &gateway,
+                Some(&cmd_tx),
+                heal_lock.clone(),
+            ),
+            live_reconcile_with_heal_lock(
+                inspections,
+                session_dir.path(),
+                &gateway,
+                Some(&cmd_tx),
+                heal_lock,
+            ),
+        );
+    let cmd_finishes = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+        .filter(|command| {
+            matches!(
+                    command,
+                    SessionCommand::XaiSessionNotification {
+                        notification: SessionNotification {
+                            update: SessionUpdate::SubagentFinished { .. },
+                            ..
+                        }
+                    }
+                )
+        })
+        .count();
+    assert_eq!(cmd_finishes, 1);
+    let mut gateway_finishes = 0;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+            continue;
+        };
+        let notification: SessionNotification = serde_json::from_str(
+                args.request.params.get(),
+            )
+            .unwrap();
+        if matches!(
+                notification.update,
+                SessionUpdate::SubagentFinished { ref subagent_id, .. } if subagent_id == id
+            ) {
+            gateway_finishes += 1;
+        }
+    }
+    assert_eq!(gateway_finishes, 1);
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+}
+#[tokio::test]
+async fn live_reconcile_ignores_terminal_on_disk_meta() {
+    for status in ["completed", "failed", "cancelled"] {
+        let session_dir = tempfile::TempDir::new().unwrap();
+        let id = format!("sa-term-{status}");
+        let sub_dir = session_dir.path().join("subagents").join(&id);
+        let mut meta = running_test_meta(&id, "parent-x");
+        meta.status = status.to_string();
+        write_subagent_meta(&sub_dir, &meta);
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        live_reconcile_with_inspections(
+                HashMap::from([(id.clone(), None)]),
+                session_dir.path(),
+                &test_gateway(),
+                Some(&cmd_tx),
+            )
+            .await;
+        let reread: SubagentMeta = serde_json::from_str(
+                &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(reread.status, status);
+        assert!(
+                cmd_rx.try_recv().is_err(),
+                "terminal on-disk meta must not emit on a live tick ({status})"
+            );
+    }
+}
+#[tokio::test]
+async fn live_reconcile_persists_failed_and_cancelled_inspection() {
+    let cases = [
+        (
+            SubagentSnapshotStatus::Failed {
+                error: "boom".to_string(),
+            },
+            "failed",
+        ),
+        (
+            SubagentSnapshotStatus::Cancelled {
+                reason: Some("stop".to_string()),
+            },
+            "cancelled",
+        ),
+    ];
+    for (status, expected) in cases {
+        let session_dir = tempfile::TempDir::new().unwrap();
+        let id = format!("sa-insp-{expected}");
+        let sub_dir = session_dir.path().join("subagents").join(&id);
+        write_subagent_meta(&sub_dir, &running_test_meta(&id, "parent-x"));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        live_reconcile_with_inspections(
+                HashMap::from([(id.clone(), Some(inspection(&id, status)))]),
+                session_dir.path(),
+                &test_gateway(),
+                Some(&cmd_tx),
+            )
+            .await;
+        let finish = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find_map(|command| {
+                let SessionCommand::XaiSessionNotification { notification } = command
+                else {
+                    return None;
+                };
+                let SessionUpdate::SubagentFinished { status, will_wake, .. } = notification
+                    .update else {
+                    return None;
+                };
+                Some((status, will_wake))
+            });
+        assert_eq!(finish, Some((expected.to_string(), false)));
+        let reread: SubagentMeta = serde_json::from_str(
+                &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(reread.status, expected);
+    }
 }
 #[tokio::test]
 async fn reconcile_dedups_replay_and_running_meta_sources() {
@@ -1524,7 +1929,10 @@ async fn reconcile_dedups_replay_and_running_meta_sources() {
             Some(&cmd_tx),
         )
         .await;
-    assert_eq!(drain_cancelled_finish_cmds(&mut cmd_rx, id), 1);
+    assert_eq!(
+            drain_cancelled_finish_cmds(&mut cmd_rx, id, ORPHAN_RECONCILE_REASON),
+            1
+        );
 }
 #[test]
 fn resume_rejects_conflicting_subagent_type() {
@@ -1698,6 +2106,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: Some("prev-agent-id".into()),
         workflow_run_id: None,
+        depth: Some(1),
     };
     let json = serde_json::to_value(&notification).unwrap();
     assert_eq!(json["resumed_from"], "prev-agent-id");
@@ -1719,6 +2128,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        depth: None,
     };
     let json = serde_json::to_value(&fresh).unwrap();
     assert!(json.get("resumed_from").is_none());
@@ -1810,11 +2220,23 @@ async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
     let mut models = indexmap::IndexMap::new();
-    models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.supports_backend_search = true;
+    models.insert("grok-4.5".to_string(), entry);
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
+    ctx.parent_chat_state
+        .as_ref()
+        .unwrap()
+        .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+            api_backend: crate::sampling::ApiBackend::Responses,
+            base_url: "https://api.x.ai/v1".to_string(),
+            ..test_sampling_config("grok-4.5")
+        });
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
+    assert!(config.supports_backend_search);
+    assert_eq!(config.extra_response_includes, ["no_inline_citations"]);
 }
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_uses_session_model_id() {
@@ -1855,6 +2277,140 @@ async fn read_parent_sampling_config_ignores_global_default() {
             ctx.models_manager.current_model_id().0.as_ref(),
         );
 }
+/// Every subagent config path must carry the live bearer resolver: a
+/// config frozen at spawn 401s for the rest of the subagent's life once
+/// the parent rotates its token (the wake-from-sleep failure mode).
+/// First-party base URL so the assertion holds whether the catalog memo
+/// reports `NotByok` or `Unknown`.
+#[tokio::test]
+async fn read_parent_sampling_config_fallback_wires_bearer_resolver() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_chat_state = None;
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    );
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert!(config.bearer_resolver.is_some());
+}
+/// The inherit-live path honors `would_strip_fallback_key` like the
+/// other two paths (it used to install the resolver unconditionally,
+/// stripping a no-session parent's env-key fallback).
+#[tokio::test]
+async fn read_parent_sampling_config_live_never_strips_a_fallback_key() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    );
+    ctx.auth = None;
+    let chat = spawn_test_parent_chat_state("grok-4.5");
+    chat.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("xai-env-fallback".to_string()),
+        auth_type: xai_chat_state::AuthType::SessionToken,
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(chat);
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert!(
+            config.bearer_resolver.is_none(),
+            "with no session, the live path must not displace a fallback key"
+        );
+    assert_eq!(config.api_key.as_deref(), Some("xai-env-fallback"));
+}
+/// `would_strip_fallback_key` on the inherit-fallback path: the baseline
+/// keeps the env `XAI_API_KEY` even while `auth_type` flips to
+/// `SessionToken`, and no resolver may displace it.
+#[tokio::test]
+async fn read_parent_sampling_config_fallback_never_strips_a_fallback_key() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_chat_state = None;
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    );
+    ctx.auth = None;
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    ctx.sampling_config.api_key = Some("xai-env-fallback".to_string());
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert!(config.bearer_resolver.is_none());
+    assert_eq!(config.api_key.as_deref(), Some("xai-env-fallback"));
+}
+#[tokio::test]
+async fn read_parent_sampling_config_fallback_no_resolver_for_api_key_method() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_chat_state = None;
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::XAI_API_KEY_METHOD_ID,
+    );
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert!(config.bearer_resolver.is_none());
+}
+/// The override path wires the resolver for a session key regardless of
+/// freshness. Hard-expired (the post-sleep 401 window) is the case that
+/// matters: gating on wire-validity would freeze the subagent for life;
+/// the sampler strips the dead seeded key at request time instead.
+#[test]
+fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys() {
+    for auth in [
+        crate::auth::GrokAuth {
+            key: "session-jwt".into(),
+            ..crate::auth::GrokAuth::test_default()
+        },
+        crate::auth::GrokAuth {
+            key: "hard-expired-session-jwt".into(),
+            create_time: chrono::Utc::now() - chrono::Duration::hours(2),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            ..crate::auth::GrokAuth::test_default()
+        },
+    ] {
+        let key = auth.key.clone();
+        let mut ctx = ctx_with_toggle(HashMap::new());
+        ctx.auth_method_id = acp::AuthMethodId::new(
+            crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+        );
+        ctx.auth = Some(auth);
+        ctx.available_models
+            .insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+        let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
+        assert!(config.bearer_resolver.is_some(), "key={key}");
+    }
+}
+/// `would_strip_fallback_key` on the override path. `XAI_API_KEY`'s
+/// presence varies by environment, so assert the rule itself rather
+/// than one branch of it.
+#[test]
+fn resolve_model_override_to_config_never_strips_a_fallback_key() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    );
+    ctx.auth = None;
+    ctx.available_models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+    let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
+    assert_eq!(
+            config.bearer_resolver.is_some(),
+            config.api_key.is_none(),
+            "with no session, a resolver is installed only when it displaces nothing"
+        );
+}
+/// A wired resolver is the sampler's sole auth source, so it must never
+/// displace a per-model key.
+#[test]
+fn resolve_model_override_to_config_no_resolver_for_byok_model() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.auth_method_id = acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    );
+    let mut byok = test_model_entry("byok-model");
+    byok.api_key = Some("sk-byok".to_string());
+    ctx.available_models.insert("byok-model".to_string(), byok);
+    let (config, _) = resolve_model_override_to_config("byok-model", &ctx).unwrap();
+    assert!(config.bearer_resolver.is_none());
+    assert_eq!(config.api_key.as_deref(), Some("sk-byok"));
+}
 #[tokio::test]
 async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
     let mut entry = test_model_entry("grok-4.5");
@@ -1871,28 +2427,28 @@ async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
 }
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catalog() {
-    let mut entry = test_model_entry("composer-2-fast");
+    let mut entry = test_model_entry("grok-4.5");
     entry.info.supports_backend_search = true;
     let mut models = indexmap::IndexMap::new();
-    models.insert("composer-2-fast".to_string(), entry);
+    models.insert("grok-4.5".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new("composer-2-fast");
+    ctx.model_id = acp::ModelId::new("auto");
     ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.api_backend = crate::sampling::ApiBackend::Responses;
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
     ctx.sampling_config.supports_backend_search = false;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
         models,
-        acp::ModelId::new("composer-2-fast"),
+        acp::ModelId::new("auto"),
         ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
-    assert_eq!(model_id.0.as_ref(), "composer-2-fast");
-    assert!(
-            config.supports_backend_search,
-            "fallback path should also resolve backend-tools capability from the catalog"
-        );
+    assert_eq!(model_id.0.as_ref(), "auto");
+    assert!(config.supports_backend_search);
+    assert_eq!(config.extra_response_includes, ["no_inline_citations"]);
 }
 #[tokio::test]
 async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog() {
@@ -1900,7 +2456,7 @@ async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog
     let mut entry = test_model_entry("grok-4.5");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
     let mut models = indexmap::IndexMap::new();
-    models.insert("auto".to_string(), entry);
+    models.insert("grok-4.5".to_string(), entry);
     let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
     ctx.sampling_config.compactions_remaining = None;
     let (config, _model_id) = read_parent_sampling_config(&ctx).await;
@@ -1913,24 +2469,24 @@ async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_from_catalog() {
     use xai_grok_sampling_types::CompactionsRemaining;
-    let mut entry = test_model_entry("composer-2-fast");
+    let mut entry = test_model_entry("grok-4.5");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
     let mut models = indexmap::IndexMap::new();
-    models.insert("composer-2-fast".to_string(), entry);
+    models.insert("grok-4.5".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.model_id = acp::ModelId::new("composer-2-fast");
+    ctx.model_id = acp::ModelId::new("auto");
     ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
+    ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.sampling_config.compactions_remaining = None;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
         models,
-        acp::ModelId::new("composer-2-fast"),
+        acp::ModelId::new("auto"),
         ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
-    assert_eq!(model_id.0.as_ref(), "composer-2-fast");
+    assert_eq!(model_id.0.as_ref(), "auto");
     assert_eq!(
             config.compactions_remaining,
             Some(CompactionsRemaining::Dynamic(true)),
@@ -2338,7 +2894,7 @@ fn persona_injection_into_empty_conversation() {
 mod cancellation_error_message_tests {
     use super::super::cancellation_error_message;
     use crate::session::commands::CancellationContext;
-    use xai_file_utils::events::types::CancellationCategory;
+    use xai_grok_session_events::types::CancellationCategory;
     #[test]
     fn permission_rejected_with_context() {
         let ctx = CancellationContext {

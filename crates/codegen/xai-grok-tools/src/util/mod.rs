@@ -16,6 +16,7 @@ pub mod path_suggestions;
 pub mod plan_validate;
 pub(crate) mod query_tools;
 pub mod remap;
+pub mod rust_edit_verify;
 pub mod serde_base64;
 pub mod session_reader;
 pub mod shell_env_policy;
@@ -26,6 +27,7 @@ pub mod truncate;
 pub mod ulid;
 pub mod unicode_confusables;
 
+pub use crate::implementations::grok_build::grep::ripgrep::rg_path;
 pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]
 pub use env::detach_from_tty;
@@ -40,10 +42,12 @@ pub use shell_env_policy::{
     apply_shell_environment_policy,
 };
 pub use spawn::{
-    ProcessGroup, ProcessScope, detach_command, global_process_scope, new_process_group,
+    ProcessGroup, ProcessScope, detach_command, detach_search_command, global_process_scope,
+    new_process_group, reap_killed_search_child,
 };
 pub use truncate::{
     DEFAULT_SOFT_WRAP_WIDTH, ceil_char_boundary, estimate_tokens, floor_char_boundary,
-    soft_wrap_line, soft_wrap_lines, truncate_line, truncate_str, truncate_str_with_marker,
+    format_bytes, soft_wrap_line, soft_wrap_lines, truncate_line, truncate_str,
+    truncate_str_with_marker,
 };
 pub use xai_tty_utils::detach_std_command;
