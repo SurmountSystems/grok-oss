@@ -121,10 +121,13 @@ cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_fro
 cargo test -p xai-grok-shell --lib -- resolve_subagents_copies_allow_worktree
 ```
 
-### 3. grok-oss SQL extras (Token Economy ledger /spend; not SuperGrok dollar credits)
+### 3. grok-oss SQL extras (Token Economy ledger `/spend`; extra SQL, not SuperGrok dollar credits)
 
 `$GROK_HOME/grok_oss.db` is the Token Economy ledger, not the session store.
-This class is extra SQL in that ledger. It is not SuperGrok dollar credits.
+This class is extra SQL in that ledger (more tables than the session store).
+It is not SuperGrok dollar credits. The heading keeps `SQL extras` so
+`assert-process-pins` still matches. Do not teach extras as a SuperGrok
+dollar-credits nickname.
 `open_creates_schema_and_version` is not this class.
 
 | path::test | Contract |
@@ -176,16 +179,30 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
 
 Rank-only tests in `supergrok_identity_rank.rs` are not this class.
 
+Do not flatten remaining to zero from `usagePct` / `creditUsagePercent` 100
+plus missing SuperGrok Heavy. Never invent used-up included SuperGrok period
+limits from that snapshot. SuperGrok Heavy ranking optional label is not
+this class. Human prose next to `*_extras*` identifiers says SuperGrok
+dollar credits.
+
 | path::test | Contract |
 |------------|----------|
 | `sampling_config_auto_use_fills_console_hop_after_included_full` | `sampling_config` fills console failover when included SuperGrok period limits are full |
 | `sampling_config_auto_use_omits_console` / `sampling_config_auto_use_omits_console_while_supergrok_included_headroom` | While included SuperGrok period limits still have room, stay on SuperGrok (no console hop) |
 | `resolve_model_to_sampling_config_auto_use` | Resolve path uses the same auto-use hop policy |
 | `sampling_config_auto_use_extras_keep_session_console_failover` | SuperGrok dollar credits keep session plus console failover (single SuperGrok identity) |
-| `sampling_config_hops_to_sibling_included_before_extras` | Personal included SuperGrok period limits full + extras hops to Business included before SuperGrok dollar credits |
-| `afterburner_does_not_skip_mark_when_sibling_has_included_remaining` | After-burner extras skip the out of included SuperGrok period limits mark only when every distinct included pool is exhausted |
+| `sampling_config_hops_to_sibling_included_before_extras` | Personal included SuperGrok period limits full hops to Business included before SuperGrok dollar credits |
+| `sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console` | Team included remaining + personal exhausted stays Team, not SuperGrok dollar credits or console |
+| `sampling_config_hop_personal_remaining_team_exhausted` | Personal included remaining + Team exhausted hops to personal |
+| `sampling_config_hop_both_remaining_team_first_then_personal` | Both included remaining: Team / Business first, then personal |
+| `sampling_config_hop_both_included_exhausted_dollar_credits_before_console` | Both included exhausted: SuperGrok dollar credits before console |
+| `sampling_config_hop_missing_heavy_false_100_keeps_sibling_included` | usage 100 + missing SuperGrok Heavy does not flatten sibling included remaining |
+| `sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team` | SuperGrok dollar credits on both + missing Heavy keeps Team included remaining |
+| `afterburner_does_not_skip_mark_when_sibling_has_included_remaining` | After-burner skip of the out of included SuperGrok period limits mark only when every distinct included pool is exhausted |
 | `align_after_billing_switches_sticky_personal_full_to_business_included` | After billing, `align_to_ranked_free_period_primary` switches sticky personal-full to Business included |
 | `prepare_sampler_for_turn_aligns_to_ranked_included_primary` | Per-turn reconstruct uses the ranked included SuperGrok period primary JWT |
+| `prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling` | Per-turn reconstruct does not flatten remaining from 100% + missing Heavy on the off sibling |
+| `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both` | Per-turn reconstruct does not flatten remaining when SuperGrok dollar credits sit on both identities |
 | `pick_prefers_business_included_before_personal_when_both_have_remaining` | When both stored SuperGrok logins still have included remaining, pick Business / Team first |
 | `order_credentials_business_included_before_personal_when_both_have_room` | Credential order spends Business included before personal included while both have room |
 | `limits_snapshot_second_process_reads_file_and_does_not_http` | Second grok-oss process reads `$GROK_HOME/limits_snapshot.json` and does not call SuperGrok billing HTTP |
@@ -193,12 +210,30 @@ Rank-only tests in `supergrok_identity_rank.rs` are not this class.
 | `limits_snapshot_never_writes_access_tokens` | Shared snapshot never stores JWTs or API keys |
 | `billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http` | `x.ai/billing` uses the snapshot hub instead of unconditionally HTTP-ing siblings |
 
+Rank neighbors (not hop by themselves; do not treat these as class 5 proof):
+`hop_does_not_switch_to_console_while_stored_business_included_remaining`,
+`hop_team_included_remaining_personal_exhausted_not_dollar_credits_or_console`,
+`hop_personal_included_remaining_team_exhausted_to_personal`,
+`hop_both_included_remaining_team_business_first_then_personal`,
+`hop_both_included_exhausted_supergrok_dollar_credits_before_console`,
+`hop_missing_heavy_or_false_100_does_not_exhaust_sibling_with_remaining`,
+`hop_dollar_credits_on_both_missing_heavy_keeps_team_remaining`,
+`hop_dollar_credits_on_both_missing_heavy_keeps_personal_remaining`.
+
 ```bash
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
+  sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console \
+  sampling_config_hop_personal_remaining_team_exhausted \
+  sampling_config_hop_both_remaining_team_first_then_personal \
+  sampling_config_hop_both_included_exhausted_dollar_credits_before_console \
+  sampling_config_hop_missing_heavy_false_100_keeps_sibling_included \
+  sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team \
   resolve_model_to_sampling_config_auto_use \
   afterburner_does_not_skip_mark_when_sibling_has_included_remaining \
   align_after_billing_switches_sticky_personal_full_to_business_included \
   prepare_sampler_for_turn_aligns_to_ranked_included_primary \
+  prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling \
+  prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both \
   pick_prefers_business_included_before_personal_when_both_have_remaining \
   order_credentials_business_included_before_personal_when_both_have_room \
   limits_snapshot_second_process_reads_file_and_does_not_http \
@@ -277,16 +312,24 @@ class 2 (click-to-copy rows).
 
 AUTO compact gates on the sampling window. When that window is smaller than
 the catalog window, the footer chip must name both. Do not paint unlabeled
-catalog 500k as the AUTO gate.
+catalog 500k as the AUTO gate. Session sampling comes from GetSessionInfo /
+AutoCompactStarted. `refresh_context_used` must not copy catalog into that
+field.
 
 | path::test | Contract |
 |------------|----------|
 | `xai-grok-pager` `context_chip_names_sampling_window_when_catalog_differs` | Chip names sampling and catalog when they differ |
 | `xai-grok-pager` `context_chip_hover_percent_uses_sampling_window_when_catalog_differs` | Hover percent is of the sampling window |
+| `xai-grok-pager` `footer_chip_uses_session_sampling_window_when_economic_cache_is_off` | Footer chip uses the session sampling window when the pager economic cache is off |
+| `xai-grok-pager` `refresh_context_used_does_not_copy_catalog_into_session_sampling` | `refresh_context_used` does not copy catalog 500k into session sampling |
+| `xai-grok-shell` `spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on` | Spawn seeds the sampling window at the economic cap when disk economic is on |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- context_chip_names_sampling_window_when_catalog_differs \
-  context_chip_hover_percent_uses_sampling_window_when_catalog_differs
+  context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
+  footer_chip_uses_session_sampling_window_when_economic_cache_is_off \
+  refresh_context_used_does_not_copy_catalog_into_session_sampling
+cargo test -p xai-grok-shell --lib -- spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on
 ```
 
 #### Plan present is not operator Approve
@@ -557,6 +600,91 @@ cargo test -p xai-grok-pager --lib -- \
   format_activity_label_unlimited_retry_has_no_u32_max_fraction
 cargo test -p xai-grok-tools --lib -- task_spawn_rejects_or_replaces_second_live_same_description
 cargo test -p xai-grok-agent --lib -- implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked
+```
+
+#### L1 Subagents list is L2-only
+
+L1 live chrome shows L2 coordinators only. Each L2 row may append a live
+L3 count. L3 specialists do not get their own L1 rows or names.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `live_subagent_list_shows_only_l2_and_reports_live_l3_count` | Live list is L2-only and reports a live L3 count |
+| `xai-grok-pager` `l2_row_shows_live_l3_count_not_specialist_names` | Tasks pane L2 row shows `N specialists`, not L3 names |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  live_subagent_list_shows_only_l2_and_reports_live_l3_count \
+  l2_row_shows_live_l3_count_not_specialist_names
+```
+
+#### `/start` plus leftover cancel-resume marker
+
+`/start` is not `/resume`. Idle clean sessions do not invent a turn.
+Mid-turn `/rebuild` writes `canceled_turn_resume.json`. Idle completed
+turns do not write a marker and do not re-fire the last prompt. Load
+drops a leftover marker after a successful primary-turn finish.
+
+| path::test | Contract |
+|------------|----------|
+| `start_while_globally_paused_continues_interrupted_turn_once` | Global pause plus `/start` continues the interrupted turn once |
+| `start_on_idle_clean_session_does_not_invent_a_turn` | Idle clean `/start` does not invent a turn |
+| `start_with_cancel_resume_marker_continues_interrupted_turn` | Marker present: `/start` continues that turn |
+| `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn` | Mid-turn `/rebuild` writes the marker; load continues |
+| `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt` | Idle completed `/rebuild` does not write a marker or re-fire |
+| `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully` | Load drops a leftover marker after a successful primary-turn finish |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  start_while_globally_paused_continues_interrupted_turn_once \
+  start_on_idle_clean_session_does_not_invent_a_turn \
+  start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
+  handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
+  session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully
+```
+
+#### ForceRefresh on explicit `/limits`
+
+Explicit TUI `/limits` open and CLI `grok-oss limits` collect are
+ForceRefresh. Background FetchBilling is HonorTtl. ForceRefresh without
+a management key does not clear Management caches.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `management_meter_cache_policy_collect_force_background_honor_ttl` | Collect is ForceRefresh; background poll is HonorTtl |
+| `xai-grok-pager` `should_clear_management_meter_caches_force_with_key_only` | ForceRefresh without a management key does not clear Management caches |
+| `xai-grok-shell` `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh` | Explicit get-billing snapshot mode is ForceRefresh |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  management_meter_cache_policy_collect_force_background_honor_ttl \
+  should_clear_management_meter_caches_force_with_key_only
+cargo test -p xai-grok-shell --lib -- \
+  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh
+```
+
+#### Spawn-prompt fold plus last-answer caps
+
+Parent ingest only. Live L2 still executes the full spawn prompt. Stored
+child output can still be the full last answer. No automatic on-disk
+last-answer report. Filter `fold_spawn_prompt` matches the fold `fn`s.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-sampling-types` `huge_spawn_prompt_becomes_pointer_with_description_and_report` | Spawn prompt over 40k becomes a pointer (description + size + report path if any) |
+| `xai-chat-state` `parent_estimated_tokens_omit_huge_spawn_prompt` | Parent estimated tokens omit the huge spawn prompt body |
+| `xai-tool-types` `to_model_text_caps_huge_last_answer_for_parent_ingest` | Huge last answers are capped for parent ingest |
+| `xai-grok-tools` `completed_subagent_task_output_is_capped_or_points_at_report` | Completed poll output is capped or points at a report |
+| `xai-grok-tools` `blocking_spawn_subagent_completed_to_prompt_format_is_capped` | Blocking-spawn prompt format is capped |
+
+```bash
+cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt
+cargo test -p xai-chat-state --lib -- parent_estimated_tokens_omit_huge_spawn_prompt
+cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_parent_ingest
+cargo test -p xai-grok-tools --lib -- \
+  completed_subagent_task_output_is_capped_or_points_at_report \
+  blocking_spawn_subagent_completed_to_prompt_format_is_capped
 ```
 
 ---
@@ -891,10 +1019,18 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
 
 # 5. Dual-auth hop after included SuperGrok period limits are full
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
+  sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console \
+  sampling_config_hop_personal_remaining_team_exhausted \
+  sampling_config_hop_both_remaining_team_first_then_personal \
+  sampling_config_hop_both_included_exhausted_dollar_credits_before_console \
+  sampling_config_hop_missing_heavy_false_100_keeps_sibling_included \
+  sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team \
   resolve_model_to_sampling_config_auto_use \
   afterburner_does_not_skip_mark_when_sibling_has_included_remaining \
   align_after_billing_switches_sticky_personal_full_to_business_included \
   prepare_sampler_for_turn_aligns_to_ranked_included_primary \
+  prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling \
+  prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both \
   pick_prefers_business_included_before_personal_when_both_have_remaining \
   order_credentials_business_included_before_personal_when_both_have_room \
   limits_snapshot_second_process_reads_file_and_does_not_http \
@@ -957,8 +1093,24 @@ cargo test -p xai-grok-pager --lib -- \
   compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct \
   format_supergrok_session_with_weekly_and_extras \
   live_subagent_list_does_not_show_two_rows_with_the_same_description \
-  format_activity_label_unlimited_retry_has_no_u32_max_fraction
-cargo test -p xai-grok-tools --lib -- task_spawn_rejects_or_replaces_second_live_same_description
+  format_activity_label_unlimited_retry_has_no_u32_max_fraction \
+  live_subagent_list_shows_only_l2_and_reports_live_l3_count \
+  l2_row_shows_live_l3_count_not_specialist_names \
+  start_while_globally_paused_continues_interrupted_turn_once \
+  start_on_idle_clean_session_does_not_invent_a_turn \
+  start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
+  handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
+  session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully \
+  context_chip_names_sampling_window_when_catalog_differs \
+  context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
+  footer_chip_uses_session_sampling_window_when_economic_cache_is_off \
+  refresh_context_used_does_not_copy_catalog_into_session_sampling \
+  management_meter_cache_policy_collect_force_background_honor_ttl \
+  should_clear_management_meter_caches_force_with_key_only
+cargo test -p xai-grok-tools --lib -- task_spawn_rejects_or_replaces_second_live_same_description \
+  completed_subagent_task_output_is_capped_or_points_at_report \
+  blocking_spawn_subagent_completed_to_prompt_format_is_capped
 cargo test -p xai-grok-agent --lib -- implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked
 cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers \
   build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
@@ -969,6 +1121,12 @@ cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_
   distinct_roots_each_keep_one_search get_results_does_not_keep_a_stale_search_alive
 cargo test -p xai-grok-shell --test test_image_strip_recovery -- \
   poisoned_image_session_recovers_within_the_failing_turn
+cargo test -p xai-grok-shell --lib -- \
+  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh \
+  spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on
+cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt
+cargo test -p xai-chat-state --lib -- parent_estimated_tokens_omit_huge_spawn_prompt
+cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_parent_ingest
 cargo test -p xai-grok-sampler --lib -- wait_before_attempt_aborts_on_cancel retry_footer_reason \
   retry_footer_backoff stream_headers_timeout_defaults
 cargo test -p xai-grok-sampler --test stream_headers_timeout
@@ -983,7 +1141,10 @@ just check   # full gate before push/PR; cannot fail a deleted catalog test
 `retrying_activity_label_*`, `retrying_label_shows_timeout_*`,
 `shell_collision_contract_covers_every_pager_command_and_alias`,
 `default_title_items_include_agents`, `title_escape_never_empty_payload`,
-`title_updates_gated_only_by_title_enabled`).
+`title_updates_gated_only_by_title_enabled`,
+`Command::Rebuild`, `run_rebuild_command` as a land filter, economic-mode
+slash BuiltinAction, SuperGrok Heavy ranking optional label,
+`default_multipoll_out_dir`, Hierarchical fast path cargo `fn`).
 
 **Dogfood screenshot list** (after assert + catalog; operator check, not the
 only check): Human/agent rails, titled composer white frame with yellow title

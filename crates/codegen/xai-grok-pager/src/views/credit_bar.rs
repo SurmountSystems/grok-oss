@@ -6,6 +6,8 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use super::context_bar::fmt_pct5;
+use super::progress_bar::progress_bar_spans;
 use crate::theme::Theme;
 
 /// Credit balance state from the billing API.
@@ -1335,6 +1337,10 @@ pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) ->
 /// dollar credits remain, paints SuperGrok dollar credits `$`, not bare included
 /// `100%` as if included still drives. When included usage is unknown, paints
 /// honest `...%`, never a silent `0%`.
+///
+/// Hover (`hovered = true`) swaps the included SuperGrok period limits chip in
+/// place to a progress bar plus [`fmt_pct5`], same pattern as the context-window
+/// chip. SuperGrok dollar credits and console team prepaid keep their `$` text.
 pub fn credit_bar_line_for_session(
     balance: &CreditBalance,
     hovered: bool,
@@ -1380,6 +1386,16 @@ pub fn credit_bar_line_for_session(
         }
     };
 
+    // Combined remaining is for multi-pool chrome (stay on included while
+    // a sibling pool still has room). Color thresholds are on the live
+    // reading when there is only one distinct pool so 79.9 stays success
+    // and 80.0 is warning. Reconstructing used % from floored remaining
+    // would turn 79.9 into 80 and paint the wrong color.
+    let included_fill_pct = if combined.distinct_pool_count > 1 {
+        included_pct
+    } else {
+        balance.usage_pct
+    };
     let color = if on_extras {
         let cents = balance.prepaid_balance_cents.map(i64::abs).unwrap_or(0);
         if cents <= LOW_BALANCE_CENTS {
@@ -1387,25 +1403,38 @@ pub fn credit_bar_line_for_session(
         } else {
             theme.accent_success
         }
+    } else if included_fill_pct >= 100.0 {
+        theme.accent_error
+    } else if included_fill_pct >= 80.0 {
+        theme.warning
     } else {
-        // Combined remaining is for multi-pool chrome (stay on included while
-        // a sibling pool still has room). Color thresholds are on the live
-        // reading when there is only one distinct pool so 79.9 stays success
-        // and 80.0 is warning. Reconstructing used % from floored remaining
-        // would turn 79.9 into 80 and paint the wrong color.
-        let pct = if combined.distinct_pool_count > 1 {
-            included_pct
-        } else {
-            balance.usage_pct
-        };
-        if pct >= 100.0 {
-            theme.accent_error
-        } else if pct >= 80.0 {
-            theme.warning
-        } else {
-            theme.accent_success
-        }
+        theme.accent_success
     };
+
+    // In-place hover swap, same as the context-window chip: progress bar plus
+    // fmt_pct5 at the default chip width. Only when this chip is naming
+    // included SuperGrok period limits. SuperGrok dollar credits stay `$`.
+    // CreditBalance has used %, not a remaining count. Do not invent 490/510.
+    if hovered && !on_extras {
+        const PCT_WIDTH: u16 = 5;
+        const BAR_PCT_GAP: u16 = 1;
+        let min_width = BAR_PCT_GAP + PCT_WIDTH;
+        let natural_width = text.chars().count() as u16;
+        let total_width = natural_width.max(min_width);
+        let bar_width = total_width.saturating_sub(min_width);
+        let mut spans = progress_bar_spans(
+            bar_width,
+            (included_fill_pct / 100.0) as f32,
+            color,
+            theme.bg_highlight,
+        );
+        spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+        spans.push(Span::styled(
+            fmt_pct5(included_fill_pct),
+            Style::default().fg(color).bg(theme.bg_base),
+        ));
+        return Some(Line::from(spans));
+    }
 
     let style = Style::default().fg(color).bg(theme.bg_base);
     Some(Line::from(Span::styled(text, style)))
@@ -1615,6 +1644,10 @@ mod tests {
             grok_build_usage_pct: None,
             included_usage_known: true,
         }
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     fn or_bal(cents: i64) -> OpenRouterCreditBalance {
@@ -2864,13 +2897,254 @@ mod tests {
     fn test_credit_bar_line_shows_percentage() {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text = line_text(&line);
         // Compact status: included SuperGrok period limits used % (no "Credits used").
         assert_eq!(text, "included SuperGrok period limits · 24%");
         assert!(!text.contains("Credits"));
         assert!(
             !text.contains("intent ·") && !text.split_whitespace().any(|w| w == "intent"),
             "must not use bare intent as paying-path label: {text}"
+        );
+    }
+
+    /// Named contract: hovering the credits chip while it names included
+    /// SuperGrok period limits swaps the chip in place to a progress bar plus
+    /// [`crate::views::context_bar::fmt_pct5`], same pattern as the
+    /// context-window hover. CreditBalance has used %, not a remaining count.
+    /// Do not invent 490/510, SuperGrok Heavy remaining, or dollar credits.
+    #[test]
+    fn included_supergrok_period_limits_hover_shows_bar_and_fmt_pct5() {
+        let theme = Theme::default();
+        let line = credit_bar_line(&bal(3.0), true, &theme);
+        let text = line_text(&line);
+        assert!(
+            text.ends_with("3.00%"),
+            "hovered included SuperGrok period limits must use fmt_pct5, got: {text:?}"
+        );
+        let has_bar_glyph = text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            has_bar_glyph,
+            "hovered included SuperGrok period limits must paint a progress bar, got: {text:?}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "hover swaps the whole chip like context (name disappears while hovered): {text:?}"
+        );
+        assert!(
+            !text.contains("490") && !text.contains("510"),
+            "must not invent a 490/510 remaining count: {text:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("heavy"),
+            "must not flatten SuperGrok Heavy into this hover: {text:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text:?}"
+        );
+        let bar_span = line.spans.iter().find(|s| {
+            let c = s.content.as_ref();
+            !c.trim().is_empty() && !c.contains('%')
+        });
+        assert_eq!(
+            bar_span.and_then(|s| s.style.fg),
+            Some(theme.accent_success),
+            "included hover bar stays included success color at 3%, not the context gradient"
+        );
+    }
+
+    fn bal_with_weekly_period_end(
+        pct: f64,
+        period_end_at: chrono::DateTime<chrono::Utc>,
+    ) -> CreditBalance {
+        CreditBalance {
+            period_end_at: Some(period_end_at),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(pct)
+        }
+    }
+
+    /// Named contract: when the live mapper has set `period_end_at` and the
+    /// period type is weekly, the default (non-hover) included SuperGrok period
+    /// limits chip appends compact linear-burn pace. Do not invent remaining.
+    #[test]
+    fn included_supergrok_period_limits_default_chip_appends_compact_pace_when_period_end_known() {
+        let theme = Theme::default();
+        let now = chrono::Utc::now();
+        // Mid weekly period: end is 3.5 days from now so start (end - 7 days)
+        // is 3.5 days ago (~50% elapsed). 62% used → ahead of linear burn.
+        let end = now + chrono::Duration::hours(84);
+        let start = end - chrono::Duration::days(7);
+        let usage = 62.0;
+        let expected_chip =
+            xai_grok_shell::token_economy::compute_period_pacing(usage, start, end, now)
+                .expect("mid-period weekly bounds compute")
+                .compact_label();
+        assert!(
+            expected_chip.contains("ahead of linear burn"),
+            "fixture must be ahead of linear burn, got {expected_chip:?}"
+        );
+        let line = credit_bar_line(&bal_with_weekly_period_end(usage, end), false, &theme);
+        let text = line_text(&line);
+        assert_eq!(
+            text,
+            format!("included SuperGrok period limits · 62% · {expected_chip}")
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("remaining"),
+            "must not invent remaining: {text:?}"
+        );
+    }
+
+    /// Hover still swaps to a bar plus fmt_pct5. Width matches the default
+    /// string after compact pace is appended.
+    #[test]
+    fn included_supergrok_period_limits_hover_keeps_bar_when_default_includes_pace() {
+        let theme = Theme::default();
+        let now = chrono::Utc::now();
+        let end = now + chrono::Duration::hours(84);
+        let bal = bal_with_weekly_period_end(62.0, end);
+        let default = credit_bar_line(&bal, false, &theme);
+        let hover = credit_bar_line(&bal, true, &theme);
+        let default_text = line_text(&default);
+        let hover_text = line_text(&hover);
+        assert!(
+            default_text.contains("ahead of linear burn"),
+            "default must include compact pace so hover width includes it: {default_text:?}"
+        );
+        assert!(
+            hover_text.ends_with(fmt_pct5(62.0).as_str()),
+            "hovered included SuperGrok period limits must use fmt_pct5, got: {hover_text:?}"
+        );
+        let has_bar_glyph = hover_text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            has_bar_glyph,
+            "hovered included SuperGrok period limits must paint a progress bar, got: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains("included SuperGrok period limits"),
+            "hover swaps the whole chip like context: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains("ahead of linear burn")
+                && !hover_text.contains("behind linear burn")
+                && !hover_text.contains("on linear burn"),
+            "hover does not paint pace glyphs; they stay on the default string: {hover_text:?}"
+        );
+        assert_eq!(
+            default.width(),
+            hover.width(),
+            "hover width must match paced default: default={default_text:?} hover={hover_text:?}"
+        );
+    }
+
+    /// Unknown reset timestamp: omit pace. Do not invent an ahead percent.
+    #[test]
+    fn included_supergrok_period_limits_omits_pace_when_period_end_unknown() {
+        let theme = Theme::default();
+        let text = line_text(&credit_bar_line(&bal(24.0), false, &theme));
+        assert_eq!(text, "included SuperGrok period limits · 24%");
+        assert!(!text.contains("ahead of linear burn"));
+        assert!(!text.contains("behind linear burn"));
+        assert!(!text.contains("on linear burn"));
+    }
+
+    /// Hovered included SuperGrok period limits chip must keep the default
+    /// chip width so the status row does not shift.
+    #[test]
+    fn included_supergrok_period_limits_hover_width_matches_default() {
+        let theme = Theme::default();
+        for pct in [0.0, 3.0, 24.0, 79.9, 80.0, 99.4] {
+            let default = credit_bar_line(&bal(pct), false, &theme);
+            let hover = credit_bar_line(&bal(pct), true, &theme);
+            assert_eq!(
+                default.width(),
+                hover.width(),
+                "default vs hover width mismatch at {pct}%: default={:?} hover={:?}",
+                line_text(&default),
+                line_text(&hover),
+            );
+        }
+    }
+
+    /// SuperGrok dollar credits on the same chip (included period full) must
+    /// not pretend they are included SuperGrok period limits on hover.
+    #[test]
+    fn supergrok_dollar_credits_hover_does_not_paint_included_period_bar() {
+        let theme = Theme::default();
+        let extras = CreditBalance {
+            prepaid_balance_cents: Some(453),
+            ..bal(100.0)
+        };
+        let default = credit_bar_line_for_session(&extras, false, &theme, false)
+            .expect("SuperGrok dollar credits meter must paint");
+        let hover = credit_bar_line_for_session(&extras, true, &theme, false)
+            .expect("SuperGrok dollar credits meter must paint");
+        let hover_text = line_text(&hover);
+        assert_eq!(line_text(&default), hover_text);
+        assert!(
+            hover_text.contains("SuperGrok dollar credits") && hover_text.contains("4.53"),
+            "hover must keep SuperGrok dollar credits $, got: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains('%'),
+            "must not paint included-period % while SuperGrok dollar credits drive: {hover_text:?}"
+        );
+        let has_bar_glyph = hover_text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            !has_bar_glyph,
+            "must not paint an included-period bar on SuperGrok dollar credits: {hover_text:?}"
+        );
+    }
+
+    /// Console team prepaid on the same chip must not become an included
+    /// SuperGrok period limits bar on hover.
+    #[test]
+    fn console_live_hover_does_not_paint_included_period_bar() {
+        let theme = Theme::default();
+        let hover = credit_status_line_for_live_session(
+            Some(&bal(3.0)),
+            SamplingIdentityKind::ConsoleKey,
+            Some(25_00),
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            true,
+            &theme,
+            false,
+        )
+        .expect("console live meter must paint");
+        let text = line_text(&hover);
+        assert!(
+            text.contains("console") && text.contains("$25"),
+            "console hover must stay console team prepaid, got: {text:?}"
+        );
+        assert!(
+            !text.contains('%'),
+            "must not paint included SuperGrok period limits % on console live hover: {text:?}"
+        );
+        let has_bar_glyph = text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            !has_bar_glyph,
+            "must not paint an included-period bar on console live: {text:?}"
         );
     }
 

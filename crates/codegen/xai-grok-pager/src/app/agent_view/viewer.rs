@@ -131,10 +131,8 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Plan-approval `Esc` doesn't close the viewer (use `q` / `Ctrl+\`),
-        // but it still clears a transient visual selection or accepted search
-        // matcher first, so the graduated dashboard-overlay back-out (which
-        // declines to fire while a matcher is active) isn't left dead-ended.
+        // Plan-approval Esc dismisses the pane after visual/search clear.
+        // That is not Approve and not Exit / abandon. Empty Ctrl+C abandons.
         if in_plan_approval && key!(Esc).matches(key) {
             if let Some(ref mut viewer) = self.line_viewer {
                 if viewer.list_state.visual_mode {
@@ -146,6 +144,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
+            self.cancel_line_viewer();
             return InputOutcome::Changed;
         }
 
@@ -487,9 +486,7 @@ impl AgentView {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Click on close button -> cancel.
                 if close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    if self.plan_approval_view.is_none() {
-                        self.cancel_line_viewer();
-                    }
+                    self.cancel_line_viewer();
                     return InputOutcome::Changed;
                 }
                 // Click on fullscreen button -> toggle fullscreen.

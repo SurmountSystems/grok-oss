@@ -1917,18 +1917,24 @@ pub(super) fn credit_balance_from_config(
     // Same included SuperGrok period used percent as /limits
     // (`credit_balance_from_billing_config`). Do not invent a second formula.
     let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
-    let period_end_display = c
+    // Same RFC 3339 parse as CLI `credit_balance_from_billing_config`: keep
+    // the UTC instant so included SuperGrok period limits pace can compute.
+    // Missing or unparseable end → omit pace (do not invent).
+    let period_end_raw = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
+        .or(c.billing_period_end);
+    let period_end_at = period_end_raw.as_ref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let period_end_display = period_end_at.map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%B %-d, %H:%M")
+            .to_string()
+    });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1957,6 +1963,7 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
+        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),

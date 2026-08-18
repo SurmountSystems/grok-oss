@@ -194,13 +194,14 @@ less than product code and tests. Do not invent long essays or git nags.
    standard for external limits and policy*.
    **Plan revise (pinned 2026-08-03):** on plan panel **Revise**, rewrite
    session `plan.md` and re-present; do not invent `ask:*` queues as a
-   substitute. **Clarify** is answer-only. Host:
+   substitute. Idle CTAs are Approve / Comment / Revise / Exit. **Comment**
+   is the hub. **Clarify** only after Comment, and is answer-only. Host:
    `~/.grok/AGENTS.md` § *Plan approval* item 8.
    **Plan present ≠ Approve (pinned 2026-08-10):** `exit_plan_mode` tool
    success and “Plan ready” soft-park are **present for review**, not operator
    approval. Always-approve is tool permissions only. Empty freeform Enter
    never approves (clickable Approve). After one decisive
-   Approve or Quit, do not re-arm CTAs until a new present. After Revise or
+   Approve or Exit, do not re-arm CTAs until a new present. After Revise or
    Clarify, wait for re-present (no idle “Plan written / Click or /view-plan”
    CTA re-arm mid-rewrite). User-guide `19-plan-mode`; FORK plan-approval
    bullets P1–P2.
@@ -344,7 +345,7 @@ goes up.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. Spawn L3s. Stay token-efficient. Throw context away after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
+| **L2 subagent** | Parallelize. **MUST spawn L3**. Stay token-efficient. Throw context away after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
 | **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (**forbidden**) |
 
 **Hierarchical fast path (pinned 2026-08-16).** The main thread may do
@@ -357,7 +358,8 @@ these three things without spawning L2:
 That is the **Hierarchical fast path**. It is not a license to diagnose,
 implement, or walk many files in the main thread. Still three layers for
 implement work, multi-file diagnosis, CI, and regressions. L2 still
-always spawns L3 for tool work.
+always **MUST spawn L3** for tool work. **Do not compact-and-continue**
+a product restore on L2.
 
 L1 and L2 may still use `spawn_subagent`, `todo_write`,
 `get_command_or_subagent_output` / wait, and read the short on-disk report they
@@ -425,7 +427,7 @@ intent, or recon survival from prose alone.
 
 - First tool turn for multi-file / CI / regression / “where do skills live?” is
   **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
-  L2. L2 always spawns L3 for the greps, reads, and edits. L2 does not do them.
+  L2. L2 always **MUST spawn L3** for the greps, reads, and edits. L2 does not do them.
 - Verify against **code and load paths** (and live trees) before asserting
   (L3 does that work; L1/L2 read the short report).
 - Read short on-disk reports; do not re-prove the subagent in the parent.
@@ -470,12 +472,12 @@ Process that must survive recon: pin on **branch** (`AGENTS`, `FORK`,
 `docs/upstream-*`) **and** host when both apply. Detail:
 `doc/dev/research/where-skills-come-from-2026-07-24.md`, user-guide `08-skills.md`.
 
-### Skill maintenance must revise carefully (pinned 2026-08-17)
+### Skill maintenance must revise carefully (pinned 2026-08-17; standing 2026-08-18)
 
-The next skill-maintenance run must read current `AGENTS.md`, `FORK.md`, and
+Future `/skill-maintenance` runs must read current `AGENTS.md`, `FORK.md`, and
 product seams, then revise skill bodies. Do not treat copy-sync as enough.
-This wave changed hop honesty, plan pane, L1 lean remaining-work pointers,
-and report location.
+This is standing law for those future runs. The 2026-08-18 careful-revise wave
+already happened. Do not treat this pin as an owed next run.
 
 ## Survive recon (process pins on the branch)
 
@@ -578,3 +580,4 @@ Prefer no worktrees (`allow_worktree = false` default). Campaign + reports:
 
 - `xai-*` crates/paths stay for upstream mergeability.
 - Novel Surmount crates/names: **`grok-*`** / **`grok-oss`** (no `xai-` prefix).
+- Product CLI is **`grok-oss`** (`PRODUCT_CLI_NAME`). Start `grok-oss`, not bare `grok`.

@@ -51,7 +51,10 @@ or code — not only here. Closed campaign history:
   marker (the older rebuild-auto-resume-after-error slice). Soft-stop
   **button** and mid-sample freeze-without-cancel are **not** shipped.
   CLI `grok-oss rebuild` is documented; clap has no `Rebuild` variant.
-  TUI `/rebuild` is the wired operator path. Included SuperGrok period C4
+  TUI `/rebuild` is the wired operator path. `/economic-mode` is a pager
+  command that queues text only; the shell has no BuiltinAction. Do not
+  list that slash as shipped. Lasting leftover honesty: [`FORK.md`](FORK.md)
+  Product **Economic mode** and **Versioning**. Included SuperGrok period C4
   stays server ticket (below §4). Post-dogfood process feature still open:
   thoughtful todos (next Open bullet). Operator dogfood after install stays
   open in this item until someone actually runs `/rebuild` (this wave did

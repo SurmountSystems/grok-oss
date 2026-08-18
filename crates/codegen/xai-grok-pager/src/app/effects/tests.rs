@@ -491,6 +491,11 @@ fn expected_period_end_display(rfc3339: &str) -> String {
         .format("%B %-d, %H:%M")
         .to_string()
 }
+fn expected_period_end_at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .expect("test fixture is valid RFC 3339")
+        .with_timezone(&chrono::Utc)
+}
 #[test]
 fn credit_balance_prefers_current_period_end_over_billing_period_end() {
     let end = "2026-06-08T20:00:00Z";
@@ -504,9 +509,19 @@ fn credit_balance_prefers_current_period_end_over_billing_period_end() {
         billing_period_end: Some("2026-07-01T20:00:00Z".into()),
         ..empty_billing_config()
     };
+    let bal = credit_balance_from_config(c);
     assert_eq!(
-            credit_balance_from_config(c).period_end_display.as_deref(),
+            bal.period_end_display.as_deref(),
             Some(expected_period_end_display(end).as_str())
+        );
+    assert_eq!(
+            bal.period_end_at,
+            Some(expected_period_end_at(end)),
+            "live FetchBilling mapper must keep the RFC 3339 period end so included SuperGrok period limits pace can compute"
+        );
+    assert_eq!(
+            bal.period_type.as_deref(),
+            Some("USAGE_PERIOD_TYPE_WEEKLY")
         );
 }
 #[test]
@@ -545,9 +560,15 @@ fn credit_balance_falls_back_to_billing_period_end() {
         billing_period_end: Some(end.into()),
         ..empty_billing_config()
     };
+    let bal = credit_balance_from_config(c);
     assert_eq!(
-            credit_balance_from_config(c).period_end_display.as_deref(),
+            bal.period_end_display.as_deref(),
             Some(expected_period_end_display(end).as_str())
+        );
+    assert_eq!(
+            bal.period_end_at,
+            Some(expected_period_end_at(end)),
+            "billing_period_end fallback must also set period_end_at"
         );
 }
 #[test]
@@ -569,10 +590,11 @@ fn credit_balance_period_end_falls_back_when_current_period_has_no_end() {
 }
 #[test]
 fn credit_balance_period_end_none_when_unavailable() {
+    let bal = credit_balance_from_config(empty_billing_config());
+    assert!(bal.period_end_display.is_none());
     assert!(
-            credit_balance_from_config(empty_billing_config())
-                .period_end_display
-                .is_none()
+            bal.period_end_at.is_none(),
+            "unknown reset must not invent a period end timestamp"
         );
 }
 #[test]

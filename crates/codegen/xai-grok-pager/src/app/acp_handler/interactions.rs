@@ -207,6 +207,9 @@ pub(super) fn handle_exit_plan_mode(
     let keep_draft = !agent.prompt.text().trim().is_empty();
     let live_cursor = agent.prompt.cursor();
     let stashed = agent.prompt.stash();
+    // Live mid-turn present auto-opens. Resume / restore re-park keeps the
+    // waiter and does not dock the side panel.
+    let is_restore = params.tool_call_id.starts_with("exit-plan-mode-resume-");
     let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
 
     agent.plan_comments.clear();
@@ -236,7 +239,9 @@ pub(super) fn handle_exit_plan_mode(
     crate::appearance::cache::set_plan_approval_force_modal(
         app.current_ui.plan_approval_force_modal(),
     );
-    agent.show_plan_preview_if_available();
+    if !is_restore {
+        agent.show_plan_preview_if_available();
+    }
 
     if agent.line_viewer.is_some() {
         if let Some(ref mut viewer) = agent.line_viewer {

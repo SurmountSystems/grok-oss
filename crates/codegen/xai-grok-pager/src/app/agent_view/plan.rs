@@ -131,6 +131,27 @@ impl AgentView {
     pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
         self.plan_decision_resolved = false;
         self.plan_feedback_in_flight = None;
+        self.persist_plan_decision_resolved_flag(false);
+    }
+
+    /// Apply `plan_decision_resolved` from this session's `plan_mode.json`.
+    /// New process after Approve/Quit must not re-present Plan ready.
+    pub(crate) fn apply_persisted_plan_decision_on_load(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        if xai_grok_shell::session::plan_mode::load_plan_decision_resolved(&cwd, &sid) {
+            self.plan_decision_resolved = true;
+        }
+    }
+
+    fn persist_plan_decision_resolved_flag(&self, resolved: bool) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        xai_grok_shell::session::plan_mode::persist_plan_decision_resolved(&cwd, &sid, resolved);
     }
 
     /// Status chrome for the plan decision loop.
@@ -325,9 +346,13 @@ impl AgentView {
     }
 
     /// After a turn ends in plan mode with no live reverse-request chrome,
-    /// park the five-CTA panel. Live soft-park is a no-op here.
+    /// park a waiter and the idle click cue. Do not auto-dock the side panel
+    /// (resume / rebuild / first paint). Live `exit_plan_mode` still docks.
     pub(crate) fn surface_idle_plan_review_if_needed(&mut self) {
         if self.plan_approval_view.is_some() {
+            return;
+        }
+        if self.session.state.is_turn_running() {
             return;
         }
         if !self.should_arm_plan_decision_chrome() {
@@ -337,7 +362,6 @@ impl AgentView {
             return;
         }
         self.park_local_idle_plan_decision_if_needed();
-        self.show_plan_preview_if_available();
     }
 
     /// Honest toast when a follow-up is queued while Revise/Clarify is in flight.
@@ -419,8 +443,10 @@ impl AgentView {
     fn close_plan_review(&mut self, pav: PlanApprovalViewState, action: &'static str) {
         self.plan_mode_pending = Some(false);
         // Sticky until a new `exit_plan_mode` present: survives pending clear
-        // when the shell still reports plan mode.
+        // when the shell still reports plan mode. Persist so rebuild does not
+        // re-present leftover plan.md.
         self.plan_decision_resolved = true;
+        self.persist_plan_decision_resolved_flag(true);
         self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
@@ -642,6 +668,12 @@ impl AgentView {
                 } else {
                     self.prompt.set_text("");
                 }
+                return InputOutcome::Changed;
+            }
+            let empty_composer =
+                self.prompt.text().trim().is_empty() && self.prompt.images.is_empty();
+            if empty_composer {
+                self.cancel_line_viewer();
                 return InputOutcome::Changed;
             }
             if let Some(ref mut pav) = self.plan_approval_view {
@@ -2680,5 +2712,185 @@ mod plan_remaining_chrome_leftover_tests {
             agent.prompt.text()
         );
         assert!(!agent.prompt.can_send());
+    }
+}
+
+/// Rebuild / resume must not auto-dock plan review. Empty-composer Esc
+/// dismisses the pane and keeps the waiter. Not Approve, not Exit.
+#[cfg(test)]
+mod plan_rebuild_resume_and_esc_dismiss_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+    use crate::views::prompt_widget::StashedPrompt;
+    use agent_client_protocol as acp;
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::Rect;
+    use xai_acp_lib::AcpResult;
+
+    fn install_live_park(
+        agent: &mut AgentView,
+        plan_content: &str,
+    ) -> tokio::sync::oneshot::Receiver<AcpResult<acp::ExtResponse>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-esc-dismiss".into(),
+            plan_content: Some(plan_content.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt::default(),
+            tx,
+        ));
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.show_plan_preview_if_available();
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        rx
+    }
+
+    fn type_esc(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        )
+    }
+
+    #[test]
+    fn empty_composer_esc_dismisses_plan_side_panel_keeps_waiter() {
+        let mut agent = make_agent();
+        let mut rx = install_live_park(&mut agent, "# Esc dismiss\n\nKeep the waiter\n");
+        assert!(agent.line_viewer.is_some(), "fixture: pane is open");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        let outcome = type_esc(&mut agent);
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Esc must be consumed as dismiss; got {outcome:?}"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "empty-composer Esc must close the plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc dismisses the viewer, not the waiter"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Esc must not send an ACP plan outcome"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "closed pane must keep the idle click cue so /view-plan can reopen"
+        );
+    }
+
+    #[test]
+    fn empty_composer_esc_does_not_abandon_or_approve() {
+        let mut agent = make_agent();
+        let mut rx = install_live_park(&mut agent, "# Esc is not decide\n\nBody\n");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+
+        let _ = type_esc(&mut agent);
+        assert!(
+            !agent.plan_decision_resolved,
+            "Esc dismiss is not Approve and not Exit"
+        );
+        assert!(agent.plan_approval_view.is_some());
+        match rx.try_recv() {
+            Err(_) => {}
+            Ok(Ok(raw)) => {
+                let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+                let outcome = parsed["outcome"].as_str().unwrap_or("");
+                assert!(
+                    outcome != "abandoned" && outcome != "approved",
+                    "Esc must not approve or abandon; got {parsed:?}"
+                );
+            }
+            Ok(Err(err)) => panic!("Esc must not fail the waiter: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_close_button_dismisses_pane_when_parked() {
+        let mut agent = make_agent();
+        let mut rx = install_live_park(&mut agent, "# Close button\n\nBody\n");
+        let close = Rect::new(10, 1, 3, 1);
+        {
+            let viewer = agent
+                .line_viewer
+                .as_mut()
+                .expect("fixture: parked pane is open");
+            viewer.close_button_area = Some(close);
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 20));
+            viewer.last_popup_area = Some(Rect::new(0, 0, 80, 16));
+        }
+
+        let outcome = agent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: close.x,
+                row: close.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "close (x) must be consumed; got {outcome:?}"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "close (x) must dismiss the parked plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "close (x) keeps the waiter"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "close (x) is not Approve and not Exit"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "close (x) must not send an ACP outcome"
+        );
+    }
+
+    #[test]
+    fn commenting_esc_still_steps_back_to_preview() {
+        let mut agent = make_agent();
+        let mut rx = install_live_park(&mut agent, "# Comment Esc\n\nBody\n");
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Commenting;
+        }
+        agent.prompt.set_text("a line note");
+
+        let first = type_esc(&mut agent);
+        assert!(
+            matches!(first, InputOutcome::Changed),
+            "first Esc from commenting must step back; got {first:?}"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "first Esc from commenting must not close the pane"
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview),
+            "first Esc from commenting must return to Preview"
+        );
+        assert!(agent.plan_approval_view.is_some());
+        assert!(rx.try_recv().is_err());
     }
 }

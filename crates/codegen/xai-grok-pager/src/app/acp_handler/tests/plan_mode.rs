@@ -1,6 +1,92 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    /// Mid-turn `exit_plan_mode` (not restore) still auto-opens the pane.
+    #[test]
+    fn live_exit_plan_mode_present_still_docks_side_panel() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Live present"));
+
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.line_viewer.is_some(),
+            "live mid-turn present must still auto-open the plan side panel"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+        );
+    }
+
+    /// Restore / resume re-park must keep the live waiter and must not dock.
+    #[test]
+    fn resume_restore_parks_waiter_without_docking_side_panel() {
+        use crate::app::actions::Action;
+        use crate::app::dispatch::dispatch;
+        use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "restore must park a live waiter"
+            );
+            assert!(
+                agent.line_viewer.is_none(),
+                "restore must not auto-dock the plan side panel"
+            );
+            assert_eq!(
+                agent.plan_loop_status_label(),
+                Some(PLAN_IDLE_REVIEW_STATUS),
+                "restore status is the idle click cue, not Side panel open"
+            );
+        }
+
+        let _ = dispatch(Action::ShowPlan, &mut app);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("/view-plan must reopen the restored waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "/view-plan must bind Approve to the restored waiter"
+            );
+            agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
     #[test]
     fn exit_plan_mode_auto_opens_inline_cursor_plan_preview() {
         let mut app = make_app_with_agent("sess-1");

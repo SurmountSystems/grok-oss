@@ -141,6 +141,34 @@ identifier that has no matching `fn`.
   Per-turn reconstruct:
   `prepare_sampler_for_turn_aligns_to_ranked_included_primary`
   (`session/acp_session_impl/sampler_turn.rs`).
+- [x] **Any stored SuperGrok login with included remaining before SuperGrok dollar credits**:
+  Any stored SuperGrok identity with remaining included SuperGrok period
+  limits stays ahead of SuperGrok dollar credits and console. Business /
+  Team included still ranks before personal when both have remaining. After
+  both included pools are exhausted, SuperGrok dollar credits rank before
+  console. Do **not** flatten remaining to zero from `usagePct` /
+  `creditUsagePercent` 100 plus missing SuperGrok Heavy. Prior remaining
+  stays. A memo without a usage reading still forces remaining 0. Used
+  percent below 100 still sets remaining from the percent helper. The
+  client must not invent used-up included SuperGrok period limits from a
+  100% + missing Heavy snapshot. SuperGrok Heavy ranking optional label is
+  **not** implemented. SuperGrok Heavy is a real distinct weekly pool. This
+  file does not diagnose product usage of that pool. Rank helpers alone
+  are still not hop. Crate: `xai-grok-shell` `agent/config_tests.rs`,
+  `session/acp_session_impl/sampler_turn.rs`. Tests:
+  `sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console`,
+  `sampling_config_hop_personal_remaining_team_exhausted`,
+  `sampling_config_hop_both_remaining_team_first_then_personal`,
+  `sampling_config_hop_both_included_exhausted_dollar_credits_before_console`,
+  `sampling_config_hop_missing_heavy_false_100_keeps_sibling_included`,
+  `sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team`,
+  `prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling`,
+  `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both`.
+  Existing identifiers
+  `sampling_config_hops_to_sibling_included_before_extras` and
+  `sampling_config_auto_use_extras_keep_session_console_failover` stay `fn`
+  names. Human prose next to them says SuperGrok dollar credits. This
+  file does not claim live Business remaining or a live window hop.
 - [x] **Business / Team included SuperGrok period limits before personal**:
   spend Business or Team included SuperGrok period limits before this login's
   personal included SuperGrok period limits. Crate: `xai-grok-shell`
@@ -173,7 +201,10 @@ identifier that has no matching `fn`.
 - [x] **Dual-auth resolve, 429, and credit memo (FORK claims; residual-aligned)**:
   first-party resolve merge (session primary + console failover by default;
   `preferred_method=api_key` reverses). Identity switch on credit / SuperGrok
-  Heavy usage-limit and plain 429. Exhausted-fingerprint memo lives in process
+  Heavy usage-limit and plain 429 (FORK claim, not a land class, not live
+  proof). SuperGrok Heavy ranking optional label is **not** implemented.
+  SuperGrok Heavy is a real distinct weekly pool. This file does not
+  diagnose product usage of that pool. Exhausted-fingerprint memo lives in process
   cache plus `$GROK_HOME/exhausted_credits/` (1h TTL; console-key success
   clears; session success does not). Rate-limit switch uses temporary shared
   `grok-rate-limit` cooldown, not the credit memo. `[auth] auto_use_included_limits`
@@ -200,6 +231,16 @@ identifier that has no matching `fn`.
   Dual `/limits` honesty (neighbor, not hop):
   `limits_json_lists_two_supergrok_principals_when_both_slots_exist`,
   `limits_json_honest_single_supergrok_session_cannot_see_team_plan`.
+  Explicit TUI `/limits` open and CLI `grok-oss limits` collect are
+  ForceRefresh. Background FetchBilling is HonorTtl. ForceRefresh without
+  a management key does not clear Management caches. First paint can still
+  be a fresh-by-TTL HonorTtl snapshot. Do not invent live used percent
+  from that file. Tests:
+  `management_meter_cache_policy_collect_force_background_honor_ttl`,
+  `should_clear_management_meter_caches_force_with_key_only`
+  (`xai-grok-pager` `limits_cmd.rs`);
+  `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh`
+  (`xai-grok-shell` `extensions/billing.rs`).
 - [x] **C4 server included-period debit is not a land class**: the client
   must not invent included SuperGrok period used percent. Optional hard block
   is `[auth] allow_spend_when_free_period_debit_unproven = false` (or env
@@ -212,11 +253,16 @@ identifier that has no matching `fn`.
   OpenRouter login require a secure backend. Only if all secure backends fail:
   clear error, no silent `provider_credentials.json` secret dump. FORK claims;
   not a land class. Diagnose with in-tree tests, not host D-Bus probes.
-- [x] **Economic mode**: soft-cap effective context at the Grok 4.5
-  long-context price cliff (~200k); `/economic-mode`; settings default on.
-  Separate from Token Economy implement-effort caps. **Do not claim** a
-  Token Economy or economic-mode `/settings` table row as cargo-proven (2026-08-15
-  seams walk did not re-prove those GUI rows).
+- [x] **Economic mode (cap shipped; slash leftover)**: soft-cap effective
+  context at the Grok 4.5 long-context price cliff (~200k) at spawn, model
+  switch, and header when `[ui] economic_mode` is on (settings default on
+  for **new** sessions). The Settings setter applies to new sessions.
+  `/economic-mode` is a pager command that queues that text only. The
+  shell has no BuiltinAction arm. Do **not** list `/economic-mode` as a
+  live slash or a cargo-proven BuiltinAction. Separate from Token Economy
+  implement-effort caps. **Do not claim** a Token Economy or economic-mode
+  `/settings` table row as cargo-proven (2026-08-15 seams walk did not
+  re-prove those GUI rows).
 - [x] **Token Economy (four pillars; `/spend` is the land class)**:
   (1) implement-loop effort 1-5 policy; (2) included SuperGrok billing-period
   linear-burn pacing on `/limits` and `/usage` (never dollar-ize period %);
@@ -239,11 +285,47 @@ identifier that has no matching `fn`.
   FORK claims; not a land class. Detail:
   `docs/dev/research/rca-auto-compact-early-fire.md`
 - [x] **Footer context chip names sampling vs catalog when they differ**:
-  AUTO compact gates on the sampling window (economic cap 200k). The chip
-  must not paint unlabeled `207K / 500K` as if catalog 500k were that gate.
-  Same honesty as the CompactionStarted banner. Test:
+  AUTO compact gates on the sampling window (economic cap 200k when that
+  Cell is on). The chip must not paint unlabeled `207K / 500K` as if
+  catalog 500k were that gate. Same honesty as the CompactionStarted
+  banner. Test:
   `context_chip_names_sampling_window_when_catalog_differs`
   (`xai-grok-pager` `views/context_bar.rs`).
+- [x] **Session sampling must not copy catalog 500k**: AUTO compact and
+  the footer chip gate on the sampling window, not catalog 500k. Session
+  sampling comes from GetSessionInfo / AutoCompactStarted.
+  `refresh_context_used` must not copy catalog into that field. Spawn
+  seeds the sampling window at the economic cap when disk economic is on.
+  Footer sampling can stay empty until GetSessionInfo / AutoCompactStarted;
+  then fallback is catalog plus pager economic cache (session field is no
+  longer poisoned to 500k). Tests:
+  `footer_chip_uses_session_sampling_window_when_economic_cache_is_off`
+  (`views/context_bar.rs`),
+  `refresh_context_used_does_not_copy_catalog_into_session_sampling`
+  (`app/acp_handler/tests/session_events.rs`),
+  `spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on`
+  (`xai-grok-shell` `session/acp_session_impl/spawn.rs`).
+- [x] **Parent ingest folds huge spawn prompts**: parent ingest folds
+  spawn prompts over 40k into a pointer (description + size + report path
+  if any). Live L2 execute still uses the full spawn prompt. Spawn
+  **tool-call arguments** on the parent assistant item can still count
+  until fold runs. Tests (filter `fold_spawn_prompt`):
+  `huge_spawn_prompt_becomes_pointer_with_description_and_report`,
+  `small_spawn_prompt_stays`, `read_file_args_are_not_folded`
+  (`xai-grok-sampling-types` `fold_spawn_prompt_parent_ingest_tests`);
+  `parent_estimated_tokens_omit_huge_spawn_prompt`
+  (`xai-chat-state` `actor/tests.rs`).
+- [x] **Parent ingest caps huge last answers**: parent ingest /
+  completed-poll / blocking-spawn prompt format cap huge last answers
+  (~40k) and point at an on-disk report if one exists. Stored child
+  output can still be the full string. There is no automatic on-disk
+  last-answer report. Tests:
+  `to_model_text_caps_huge_last_answer_for_parent_ingest`
+  (`xai-tool-types` `task.rs`),
+  `completed_subagent_task_output_is_capped_or_points_at_report`
+  (`xai-grok-tools` `task_output/mod.rs`),
+  `blocking_spawn_subagent_completed_to_prompt_format_is_capped`
+  (`xai-grok-tools` `task/mod.rs`).
 - [x] **Auto-run `/implement`**: after a successful turn, queue a follow-up
   implement block when present; **appends** after any already-queued prompts.
   FORK claims; not a land class.
@@ -265,11 +347,16 @@ identifier that has no matching `fn`.
   `peer_relaunch_declines_equal_identity_on_same_path`,
   `peer_relaunch_accepts_deleted_inode_even_when_identity_equal`,
   `leader_is_older_than_same_semver_git_sha_identity`. Fail-does-not-signal
-  alone is not this seam.
+  alone is not this seam. TUI `/rebuild` is the wired operator path. CLI
+  `grok-oss rebuild` is documented in user-guide and `xai-grok-update`
+  docs; clap has no `Rebuild` variant; `run_rebuild_command` is unwired.
+  Do not list a `Command::Rebuild` `fn`. Rebuild/reinstall by hand is the
+  CLI path today.
 - [x] **Running grok-oss sessions**: live TUI windows on this `$GROK_HOME`
   from `active_sessions.json`. Slash `/running` (alias `/windows`) and CLI
   `grok-oss running` / `grok-oss running --json`. Not Agent Dashboard, not
-  `/sessions`, not `/tasks`, not `/resume`, not `/start`. Identity is
+  `/sessions`, not `/tasks`, not `/resume`. Distinct from `/start` (that
+  slash starts paused or interrupted work in this process). Identity is
   `(pid, session_id)` so two windows on the same conversation both appear.
   Missing heartbeat is activity `unknown`. Title is the on-disk session
   summary. Never stores prompts, tool arguments, tokens, JWTs, file
@@ -283,6 +370,16 @@ identifier that has no matching `fn`.
   `running_cli_json_omits_prompt_text`,
   `rebuild_signals_each_pid_after_composite_key`. User-guide
   `04-slash-commands`, `17-sessions`, `23-dashboard` (cite only).
+- [x] **`/start` starts paused or interrupted work**: pager builtin, not
+  an alias of `/resume` (picker). Unpause if globally paused; else if a
+  valid `canceled_turn_resume.json` exists, toast **Continuing interrupted
+  turn...**, enqueue once, clear the marker, and drain. Soft-stop hold is
+  released. An idle clean session does not invent a turn. Operator-typed
+  `/start` applies even when `[ui] resume_canceled_turn_on_restart` is
+  off. Files: `slash/commands/start.rs`, `app/dispatch/start.rs`. Tests:
+  `start_while_globally_paused_continues_interrupted_turn_once`,
+  `start_on_idle_clean_session_does_not_invent_a_turn`,
+  `start_with_cancel_resume_marker_continues_interrupted_turn`.
 - [x] **`from_config` no-prefetch usable catalog**:
   `ModelsManager::from_config` with no prefetch argument is a zero-network
   boot and must produce a usable bundled catalog. Test:
@@ -317,8 +414,11 @@ identifier that has no matching `fn`.
   `child_task_description_is_concise` (`xai-grok-agent` `builder.rs`
   `CHILD_TASK_DESCRIPTION`),
   `default_max_allows_l2_to_spawn_l3` (`xai-grok-tools` `task/mod.rs`).
-  User-guide `16-subagents.md` has the paragraph; no dedicated cargo pin for
-  that sentence. A restack can keep AGENTS via `FORK_PATHS` and still drop
+  User-guide `16-subagents.md` has the three-layer paragraph and names
+  Hierarchical fast path (L1-only: one-command host question, one already
+  named path, or the asked-for report). No dedicated cargo `fn` for that
+  sentence. Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
+  A restack can keep AGENTS via `FORK_PATHS` and still drop
   `CHILD_TASK_DESCRIPTION`.
 - [x] **Soft interject only + Enter cue honesty**: mid-turn interject
   (Ctrl+Enter) injects into the current turn and **never cancels**. Cancel is
@@ -341,8 +441,17 @@ identifier that has no matching `fn`.
   (`same_batch_plan_write_before_exit_plan_mode_returns_new_body`). Dated
   2026-08-09 wave filter; not one of the seven product land classes.
 - [x] **Continue interrupted turn on restart**: `canceled_turn_resume.json`;
-  distinct from last-session on start. FORK claims; not a land class.
-  User-guide `17-sessions`.
+  distinct from last-session on start. Mid-turn `/rebuild` writes the
+  marker. Idle completed turns do not write a marker and do not re-fire
+  the last prompt. Load drops a leftover marker after a successful
+  primary-turn finish. Tests:
+  `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
+  `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
+  `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`
+  (`xai-grok-pager` `app/dispatch/rebuild.rs`). Still leftover (not
+  shipped): auto-resume after an error-terminal turn with no marker;
+  soft-stop button; mid-sample freeze without cancel. FORK claims plus
+  these named tests; not a land class. User-guide `17-sessions`.
 - [x] **OAuth 403 `bad-credentials` → auth path**: HTTP 403 with
   `unauthenticated:bad-credentials` classifies as auth, not included
   SuperGrok period limits. Dated 2026-08-09 wave filters on sampler types.
@@ -447,6 +556,18 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `task_spawn_rejects_or_replaces_second_live_same_description`,
   `format_activity_label_unlimited_retry_has_no_u32_max_fraction`,
   `implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked`.
+- [x] **L1 Subagents list is L2-only plus a live L3 count**: the L1
+  Subagents list, watching counts, and similar live chrome show only L2
+  coordinators. Each L2 row may append a live L3 count (`1 specialist` /
+  `N specialists`). L3 specialists do not get their own L1 rows or names.
+  Opening an L2 still shows that L2's specialists inside the L2 view.
+  Headless `ExtEvent::SubagentSpawned` is not the L1 list. Helpers:
+  `live_subagent_list`, `is_l2_list_row`, `format_live_l3_count`
+  (`xai-grok-pager` `app/subagent.rs`). Tests:
+  `live_subagent_list_shows_only_l2_and_reports_live_l3_count`
+  (`app/subagent.rs`),
+  `l2_row_shows_live_l3_count_not_specialist_names`
+  (`views/tasks_pane.rs`).
 - [x] **Always-on bubble copy is paint plus click**: flag on paints `⧉`. A
   full-width first line still paints a hit. Click on the human glyph copies
   that prompt. Click on the assistant glyph copies that message. Paint-only
@@ -588,7 +709,12 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   coordinator sentence; that is not the crate seam. Write new short reports
   under `~/.agents/reports/` on this machine. Do not add report files to the
   git tree. Historical `.agents/reports/foo.md` citations in this file are
-  finished-note names only.
+  finished-note names only. Product `grok-oss limits multipoll` default out
+  dir is `~/.agents/reports/limits-multipoll-<utc>/` (temp fallback if
+  HOME is empty). Shipped in `default_multipoll_out_dir`. No named `fn`.
+  Do not claim repo `.agents/reports/` is the live home. Fold helper
+  `first_report_path` matches any `.agents/reports/` substring (home or
+  leftover repo path). That is implementation, not a land class.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +
@@ -760,13 +886,13 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. | Plan honesty `fn`s under Chrome. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. | `running_slash_lists_sibling_fixture_row` |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). | `user_guide_skills_are_not_a_python_runtime` |
-| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. | Three-layer guide text shipped in code; no dedicated `fn`. |
-| [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `canceled_turn_resume.json`. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss` |
-| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Five CTAs. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. |
+| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. New reports under `~/.agents/reports/`. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`. |
+| [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
+| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
 | [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. | Cite only. No dedicated user-guide `fn`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
@@ -797,7 +923,9 @@ is not live TUI dogfood. This file does **not** claim a rebuilt interactive
    `[pause]`/`[resume]` + red `[stop]`; soft stop chord-only; composer Enter
    `send`/`queue`/`interject` cue; compact included SuperGrok period limits
    meter. Later Product / Chrome bullets and named `fn`s supersede this
-   snapshot when they disagree.
+   snapshot when they disagree. Later Product bullets for `/start` and
+   leftover `canceled_turn_resume.json` drop supersede this snapshot. Do
+   not revive idle Clarify as current leftover.
 3. **Still not shipped (honesty leftovers, not a demotion of shipped chrome)**
    - **Auto-resume after error terminal on rebuild/reopen**: expected
      operator contract if the last terminal was an error (not only the
@@ -810,6 +938,14 @@ is not live TUI dogfood. This file does **not** claim a rebuilt interactive
    - **Mid-sample freeze without cancel**: not shipped (global pause
      cancels turns; soft stop only stops queue drain after the current
      turn). Do not invent a media-player freeze metaphor.
+   - **CLI `grok-oss rebuild`**: not clap-wired. TUI `/rebuild` is the
+     wired path. Rebuild/reinstall by hand is the CLI path today.
+   - **`/economic-mode` slash**: pager queues the text only. No
+     BuiltinAction. Economic cap at spawn / model switch / header is
+     shipped.
+   - **SuperGrok Heavy ranking optional label**: not implemented. SuperGrok
+     Heavy is a real distinct weekly pool. This file does not diagnose
+     product usage of that pool.
 4. **Still open (residual, not this install alone)**
    - Included SuperGrok period flat % / server C4 debit: paste-ready ticket
      [`.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md`](.agents/reports/c4-xai-ticket-paste-ready-2026-08-07.md);
@@ -948,8 +1084,12 @@ cargo `fn`):
 5. **Dual-auth hop after included SuperGrok period limits are full.** Rank
    helpers are not hop. `sampling_config` must fill console failover after
    those included limits are full, and must omit it while they still have
-   room. Includes Business / Team included before personal, sibling included
-   before SuperGrok dollar credits, and the one-process limits flock.
+   room. Includes Business / Team included before personal, any stored
+   SuperGrok login with included remaining before SuperGrok dollar credits,
+   sibling included before SuperGrok dollar credits, and the one-process
+   limits flock. Do not flatten remaining to zero from usage percent 100
+   plus missing SuperGrok Heavy. Never invent used-up included SuperGrok
+   period limits. SuperGrok Heavy ranking optional label is not this class.
 6. **Last-session on start.** Interactive `grok-oss` opens the remembered
    last session for this working directory. It does not land on Welcome
    first.
@@ -1023,11 +1163,51 @@ that drops them while keeping the seven is still a seam loss):
 - User-guide cargo pins beyond skills + resume (`user_guide_operator_cli_examples_use_grok_oss`,
   `user_guide_does_not_claim_automatic_host_hop_is_unshipped`,
   `user_guide_names_token_economy_spend_order`).
+- L1 Subagents list is L2-only plus a live L3 count
+  (`live_subagent_list_shows_only_l2_and_reports_live_l3_count`,
+  `l2_row_shows_live_l3_count_not_specialist_names`).
+- `/start` plus leftover cancel-resume marker drop
+  (`start_while_globally_paused_continues_interrupted_turn_once`,
+  `start_on_idle_clean_session_does_not_invent_a_turn`,
+  `start_with_cancel_resume_marker_continues_interrupted_turn`,
+  `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
+  `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
+  `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`).
+- ForceRefresh on explicit `/limits`
+  (`management_meter_cache_policy_collect_force_background_honor_ttl`,
+  `should_clear_management_meter_caches_force_with_key_only`,
+  `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh`).
+- Footer / session sampling window vs catalog
+  (`context_chip_names_sampling_window_when_catalog_differs`,
+  `context_chip_hover_percent_uses_sampling_window_when_catalog_differs`,
+  `footer_chip_uses_session_sampling_window_when_economic_cache_is_off`,
+  `refresh_context_used_does_not_copy_catalog_into_session_sampling`,
+  `spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on`).
+- Spawn-prompt fold plus last-answer caps
+  (`huge_spawn_prompt_becomes_pointer_with_description_and_report`,
+  `parent_estimated_tokens_omit_huge_spawn_prompt`,
+  `to_model_text_caps_huge_last_answer_for_parent_ingest`,
+  `completed_subagent_task_output_is_capped_or_points_at_report`,
+  `blocking_spawn_subagent_completed_to_prompt_format_is_capped`).
+- Any stored SuperGrok included remaining before SuperGrok dollar credits;
+  do not flatten remaining from usage percent 100 plus missing SuperGrok
+  Heavy (`sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console`,
+  `sampling_config_hop_personal_remaining_team_exhausted`,
+  `sampling_config_hop_both_remaining_team_first_then_personal`,
+  `sampling_config_hop_both_included_exhausted_dollar_credits_before_console`,
+  `sampling_config_hop_missing_heavy_false_100_keeps_sibling_included`,
+  `sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team`,
+  `prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling`,
+  `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both`).
+  Rank `hop_*` helpers are still not hop.
 
 **Not a cargo land class:** rustc 1.97.1 (file pin only;
 `rust-toolchain.toml` not in `FORK_PATHS`). Stuck-retry **pager** chrome is
 not fully proven. Token Economy `/settings` table rows were not re-proven on
-2026-08-15.
+2026-08-15. CLI `grok-oss rebuild` is not clap-wired. `/economic-mode` is
+not a live BuiltinAction. SuperGrok Heavy ranking optional label is not
+implemented. Empty `models_cache.json` miss has no named test. Live hop /
+live Business remaining / live TUI dogfood are unknown.
 
 ## Upstream regression filters
 
@@ -1173,6 +1353,55 @@ cargo test -p xai-grok-tools --lib -- rustfmt_argv_edition_2024_config_and_absol
   dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell \
   dangerous_cargo_test_package_lib_filter_is_not_refused
 
+# Extra: L1 Subagents list is L2-only plus a live L3 count
+cargo test -p xai-grok-pager --lib -- \
+  live_subagent_list_shows_only_l2_and_reports_live_l3_count \
+  l2_row_shows_live_l3_count_not_specialist_names
+
+# Extra: /start + leftover cancel-resume marker drop
+cargo test -p xai-grok-pager --lib -- \
+  start_while_globally_paused_continues_interrupted_turn_once \
+  start_on_idle_clean_session_does_not_invent_a_turn \
+  start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
+  handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
+  session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully
+
+# Extra: ForceRefresh on explicit /limits
+cargo test -p xai-grok-pager --lib -- \
+  management_meter_cache_policy_collect_force_background_honor_ttl \
+  should_clear_management_meter_caches_force_with_key_only
+cargo test -p xai-grok-shell --lib -- \
+  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh
+
+# Extra: sampling window vs catalog (chip + session field + spawn seed)
+cargo test -p xai-grok-pager --lib -- \
+  context_chip_names_sampling_window_when_catalog_differs \
+  context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
+  footer_chip_uses_session_sampling_window_when_economic_cache_is_off \
+  refresh_context_used_does_not_copy_catalog_into_session_sampling
+cargo test -p xai-grok-shell --lib -- \
+  spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on
+
+# Extra: spawn-prompt fold + last-answer caps
+cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt
+cargo test -p xai-chat-state --lib -- parent_estimated_tokens_omit_huge_spawn_prompt
+cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_parent_ingest
+cargo test -p xai-grok-tools --lib -- \
+  completed_subagent_task_output_is_capped_or_points_at_report \
+  blocking_spawn_subagent_completed_to_prompt_format_is_capped
+
+# Extra: hop flatten / any stored included remaining (rank hop_* is not this)
+cargo test -p xai-grok-shell --lib -- \
+  sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console \
+  sampling_config_hop_personal_remaining_team_exhausted \
+  sampling_config_hop_both_remaining_team_first_then_personal \
+  sampling_config_hop_both_included_exhausted_dollar_credits_before_console \
+  sampling_config_hop_missing_heavy_false_100_keeps_sibling_included \
+  sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team \
+  prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling \
+  prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both
+
 # Extra: user-guide fork pins beyond class 1 resume + class 7 skills
 cargo test -p xai-grok-pager --lib -- user_guide_does_not_claim_automatic_host_hop_is_unshipped \
   user_guide_names_token_economy_spend_order
@@ -1243,9 +1472,12 @@ grok-oss update --check --json
 `SOURCE_REV` at the repo root is a **monorepo export pin** (full upstream-side
 SHA recorded for the tree we absorbed), not a substitute for “what is HEAD.”
 
-If behind: from a checkout run **`/rebuild`** (TUI) or **`grok-oss rebuild`**
-(CLI), or rebuild/reinstall by hand, not the official
-`curl https://x.ai/cli/install.sh` path (that installs upstream **`grok`**).
+If behind: from a checkout run TUI **`/rebuild`** (wired, SHA-aware peer
+relaunch), or rebuild/reinstall by hand. CLI **`grok-oss rebuild`** is
+documented in the user-guide; clap has no `Rebuild` variant;
+`run_rebuild_command` is unwired. Do not present CLI rebuild as a wired
+command. Do not use the official `curl https://x.ai/cli/install.sh` path
+(that installs upstream **`grok`**).
 
 ## Multi-session rate limits
 

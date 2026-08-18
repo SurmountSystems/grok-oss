@@ -1000,6 +1000,107 @@ mod tests {
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
     }
 
+    /// Mid-turn cancel-resume plus leftover plan.md must continue the turn
+    /// and must not auto-open the plan side panel.
+    #[test]
+    fn rebuild_or_resume_does_not_auto_open_plan_side_panel_when_turn_is_owed() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+        use agent_client_protocol as acp;
+
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-resume-no-plan-dock";
+        let prompt = "continue this turn without docking plan review";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-rebuild-no-dock".into());
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent.session.in_flight_prompt = None;
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent.plan_mode_active = true;
+            agent.plan_mode_pending = None;
+            agent.plan_decision_resolved = false;
+            agent.latest_inline_plan_content =
+                Some("# Leftover plan\n\nDo not auto-open this pane\n".into());
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            let toast = agent
+                .toast
+                .as_ref()
+                .map(|(msg, _)| msg.as_str())
+                .unwrap_or("");
+            assert!(
+                toast.contains("Continuing interrupted turn"),
+                "re-exec session load must toast continue-interrupted-turn; got {toast:?}"
+            );
+            agent.surface_idle_plan_review_if_needed();
+            assert!(
+                agent.line_viewer.is_none(),
+                "rebuild/resume must not auto-open the plan side panel when a turn is owed"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "must not paint Plan ready. Side panel open while the turn continues"
+            );
+            let _ = PLAN_IDLE_REVIEW_STATUS;
+        }
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
     /// Named contract: `/rebuild` while the pane is idle after a completed
     /// user turn must not write `canceled_turn_resume.json` and must not
     /// auto re-fire that last prompt on re-exec session load. Mid-turn

@@ -14,8 +14,10 @@
 //!
 //! Soft-park is **non-capturing** for letter keys: `a` / `A` / `s` / `q` type
 //! into the composer or the plan pane box. Empty `?` still arms Clarify.
-//! Empty Enter never Approves. Default soft-park **auto-opens** the plan
-//! side panel (right pane; not a 75% overlay). Product approve path:
+//! Empty Enter never Approves. A live mid-turn `exit_plan_mode` still
+//! auto-opens the plan side panel. Resume / `--continue` parks the waiter
+//! and shows the idle click cue. Open the pane with `/view-plan` or a
+//! status click before Approve. Product approve path:
 //!
 //! 1. **Mouse** click on the painted footer **Approve** word (primary)
 //!
@@ -118,31 +120,25 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     )
     .context("spawn resumed pager")?;
 
-    // The shell re-parks `exit_plan_mode` on resume, so soft-park approval
-    // chrome can open immediately (default: auto-open side panel). Prefer
-    // chrome markers over SETUP_SENTINEL, which may sit under the panel.
-    // Without the shell re-park this times out.
-    //
-    // Markers, any of:
-    // - full TUI status (`Plan ready. Side panel open`)
-    // - minimal-mode card header (`Plan ready for review`)
-    // - word-only footer (`approve  |  clarify  |  revise  |  exit`), or
-    //   the same four words with space separators on a narrow dock.
-    // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
-    // must accept the fullscreen status line. Waiting only for the minimal
-    // card header times out even when the side-panel CTAs are already up.
+    // The shell re-parks `exit_plan_mode` on resume as a live waiter.
+    // Restore must not auto-dock the side panel. Success is the idle click
+    // cue (or `/view-plan`). Live mid-turn present still auto-opens.
     wait_for_any_text(
         &mut resumed,
-        &[
-            "Plan ready. Side panel open",
-            "Plan ready for review",
-            LABELED_FOOTER_STRIP,
-            NARROW_FOOTER_STRIP,
-            LABELED_APPROVE_CTA,
-        ],
+        &["Plan written. Click or /view-plan", "Plan ready for review"],
         WELCOME_TIMEOUT,
     )
-    .context("restored plan-ready chrome after resume")?;
+    .context("restored plan waiter after resume (idle cue, not Side panel open)")?;
+    if resumed.contains_text("Plan ready. Side panel open") {
+        bail!(
+            "resume must not auto-dock the plan side panel\n{}",
+            resumed.screen_contents()
+        );
+    }
+
+    resumed
+        .inject_keys(b"/view-plan\r")
+        .context("open restored waiter via /view-plan")?;
     wait_for_any_text(
         &mut resumed,
         &[
@@ -152,7 +148,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         ],
         WELCOME_TIMEOUT,
     )
-    .context("restored approval CTA chrome after --continue")?;
+    .context("/view-plan must bind Approve to the restored waiter")?;
     let screen = resumed.screen_contents();
     // History was seeded before quit; plan body from disk is a stronger signal
     // that the session was restored when chrome already covers the transcript.
@@ -166,8 +162,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Letters type; empty Enter never Approves. Default park auto-opens
-    // the right pane; click the painted Approve word (not card prose).
+    // Letters type; empty Enter never Approves. After /view-plan, click
+    // the painted Approve word (not card prose).
     click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))

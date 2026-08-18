@@ -907,8 +907,8 @@ impl AgentView {
         } = app_params;
         self.global_work_paused = global_paused;
         // A missed `exit_plan_mode` park still has chrome to arm and a plan
-        // body. Surface before layout so the first paint is Plan ready with
-        // the five-CTA panel, not the idle click cue.
+        // body. Surface a waiter and the idle click cue. Do not auto-dock
+        // the side panel after resume / rebuild / first paint.
         self.surface_idle_plan_review_if_needed();
         self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
@@ -3642,6 +3642,7 @@ impl AgentView {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
                 h.push(HintItem::new(key!(Tab), "prompt"));
+                h.push(HintItem::new(key!(Esc), "close"));
                 h
             } else if is_plan_viewer {
                 let on_casual_comment = viewer
@@ -6150,8 +6151,9 @@ mod plan_turn_row_revising_copy_tests {
 
     /// Live shot: `exit_plan_mode` never set `plan_approval_view` on this
     /// view, then turn-finalize ran, then a plan body exists and chrome
-    /// should arm. First paint must be Plan ready with the five-CTA panel,
-    /// not the idle click cue.
+    /// should arm. First paint parks a waiter and the idle click cue.
+    /// It must not auto-dock the right pane (resume / rebuild / missed
+    /// present). `/view-plan` and a live `exit_plan_mode` still open it.
     #[test]
     fn present_then_turn_finalize_without_park_still_paints_plan_ready_not_idle_click_cue() {
         let mut agent = make_agent();
@@ -6180,19 +6182,81 @@ mod plan_turn_row_revising_copy_tests {
 
         let text = draw_screen(&mut agent);
         assert!(
-            text.contains("Plan ready. Side panel open"),
-            "first paint after a missed present must be Plan ready. Side panel open:\n{text}"
+            agent.plan_approval_view.is_some(),
+            "missed present may still park a waiter"
         );
         assert!(
-            agent
-                .line_viewer
-                .as_ref()
-                .is_some_and(|v| v.plan_ref().is_some_and(|p| p.feedback_active)),
-            "side panel must be open with five CTAs (feedback_active)"
+            agent.line_viewer.is_none(),
+            "first paint after a missed present must not auto-dock the side panel"
+        );
+        assert!(
+            text.contains(PLAN_IDLE_REVIEW_STATUS),
+            "first paint after a missed present must be the idle click cue, not Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "must not auto-open Plan ready. Side panel open after a missed present:\n{text}"
+        );
+    }
+
+    /// After Approve / Quit, a new process with leftover plan.md must not
+    /// re-present Plan ready or dock the pane. Persist
+    /// `plan_decision_resolved` on plan_mode.json; do not infer from the
+    /// leftover markdown body alone.
+    #[test]
+    fn rebuild_or_resume_does_not_represent_resolved_plan_as_plan_ready() {
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resolved-plan-no-represent";
+
+        let mut decided = make_agent();
+        decided.session.session_id = Some(sid.into());
+        decided.session.cwd = cwd.clone();
+        decided.plan_mode_active = true;
+        decided.plan_mode_pending = None;
+        decided.latest_inline_plan_content =
+            Some("# Done\n\nWorkflow status: leftover markdown only\n".into());
+        park_exit_plan_mode(
+            &mut decided,
+            "# Done\n\nWorkflow status: leftover markdown only\n",
+        );
+        let _ = decided.approve_plan();
+        assert!(decided.plan_decision_resolved);
+        assert!(decided.plan_approval_view.is_none());
+
+        // New process: in-memory sticky is gone unless persist + load apply it.
+        let mut fresh = make_agent();
+        fresh.session.session_id = Some(sid.into());
+        fresh.session.cwd = cwd;
+        fresh.plan_mode_active = true;
+        fresh.plan_mode_pending = None;
+        fresh.plan_decision_resolved = false;
+        fresh.latest_inline_plan_content =
+            Some("# Done\n\nWorkflow status: leftover markdown only\n".into());
+        fresh.apply_persisted_plan_decision_on_load();
+
+        let text = draw_screen(&mut fresh);
+        assert!(
+            fresh.plan_decision_resolved,
+            "Approve/Quit must survive rebuild via plan_mode.json, not leftover markdown"
+        );
+        assert!(
+            fresh.plan_approval_view.is_none(),
+            "must not park a new local idle panel after a resolved plan"
+        );
+        assert!(
+            fresh.line_viewer.is_none(),
+            "must not open the plan viewer after a resolved plan"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "must not re-present Plan ready after Approve/Quit:\n{text}"
         );
         assert!(
             !text.contains(PLAN_IDLE_REVIEW_STATUS),
-            "must not paint idle Plan written. Click or /view-plan:\n{text}"
+            "must not re-arm idle Plan written after Approve/Quit:\n{text}"
         );
+        let _ = cwd_str;
     }
 }
