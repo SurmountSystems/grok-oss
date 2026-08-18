@@ -635,22 +635,12 @@ pub(crate) fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
     use xai_grok_tools::types::output::TodoWriteOutput;
     match output {
         ToolOutput::Todo(TodoWriteOutput::TodosUpdated(success)) => {
-            // Prefer state (has board ids) so Plan meta.id enables leaf-only
-            // badge math; fall back to todos vec without ids.
-            let entries = if !success.state.is_empty() {
-                success
-                    .state
-                    .todo_items_with_ids()
-                    .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
-                    .collect()
-            } else {
-                success
-                    .todos
-                    .iter()
-                    .cloned()
-                    .map(plan_entry_from_todo_item)
-                    .collect()
-            };
+            let entries = success
+                .todos
+                .iter()
+                .cloned()
+                .map(plan_entry_from_todo_item)
+                .collect();
             Some(acp::Plan::new(entries))
         }
         // Error variants (DuplicateId, etc.) don't produce Plan updates.

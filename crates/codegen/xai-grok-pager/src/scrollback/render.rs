@@ -48,11 +48,20 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
     content_width.saturating_sub(label_w) / 2
 }
 
-/// Width reserved for the timestamp (+ bubble ⧉ when both on) on message blocks.
+/// Width reserved for the timestamp on message blocks.
 ///
-/// Matches `EntryRenderer::timestamp_reserved()` / `message_right_chrome_reserve`.
+/// Matches the constant in `EntryRenderer::timestamp_reserved()`.
 fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    crate::scrollback::wrappers::message_right_chrome_reserve(block, appearance)
+    if appearance.show_timestamps
+        && matches!(
+            block,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+        )
+    {
+        10
+    } else {
+        0
+    }
 }
 
 /// Reusable scratch `Buffer` so clipped-entry rendering is greppable and not reallocated every frame.
@@ -146,6 +155,8 @@ pub struct ScrollRenderResult {
     pub inline_media: Vec<InlineMediaPlacement>,
     /// Diagram affordance rows to paint and register click hit-rects for.
     pub diagram_affordances: Vec<DiagramAffordancePlacement>,
+    /// Always-on bubble copy ⧉ hit rects: `(screen rect, entry_idx)`.
+    pub bubble_copy_hits: Vec<(ratatui::layout::Rect, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -481,7 +492,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 joiner_to_previous: None,
             });
         }
-        for (block_line_idx, line) in mapped_lines.iter().enumerate().skip(content_skip) {
+        for (screen_y, (block_line_idx, line)) in
+            (first_visible_content_y..).zip(mapped_lines.iter().enumerate().skip(content_skip))
+        {
             if screen_y >= max_y {
                 break;
             }
@@ -504,6 +517,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     // Scrollback content paints bidi-reordered; remap matches.
                     true,
                 );
+            }
+            if let Some(rect) = line.bubble_copy_button_rect(entry_row_layout.content.x, screen_y) {
+                result.bubble_copy_hits.push((rect, logical_idx));
             }
             if let (Some(range_id), Some(cols)) = (
                 line.selection_range,
@@ -532,7 +548,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 }
                 result.selection_model.push_line(resolved_line);
             }
-            screen_y += 1;
         }
 
         // Collect hyperlinks for the link overlay

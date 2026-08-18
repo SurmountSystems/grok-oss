@@ -35,6 +35,7 @@ use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
+use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
 pub const TASK_TOOL_NAME: &str = "task";
@@ -407,6 +408,9 @@ impl xai_tool_runtime::Tool for TaskTool {
                 .get::<CurrentPromptIdResource>()
                 .map(|p| p.0.clone())
                 .filter(|prompt_id| !prompt_id.is_empty());
+            let implement_loop_effort = res
+                .get::<ImplementLoopEffortResource>()
+                .and_then(|effort| effort.0);
             let foreground_wait = res.get::<SubagentForegroundWait>().cloned();
 
             (
@@ -419,6 +423,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 model_rejection_sink,
                 parent_session_id,
                 parent_prompt_id,
+                implement_loop_effort,
                 foreground_wait,
             )
         };
@@ -638,6 +643,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort,
             cancel_token: child_cancellation,
             spawn_root: SpawnRootSpan::new(spawn_root_span),
             tool_call_id: Some(ctx.call_id.as_str().to_owned()),
@@ -1017,7 +1023,8 @@ mod tests {
         let (backend, _rx) = make_backend();
         let mut resources = Resources::new();
         resources.insert(backend);
-        resources.insert(SubagentDepthCounter(1)); // first-level subagent
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(MaxSubagentDepth(1));
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-456".to_string()));
 
@@ -1026,7 +1033,7 @@ mod tests {
             test_ctx(resources.into_shared()),
             TaskToolInput {
                 description: "nested spawn".into(),
-                prompt: "should be rejected".into(),
+                prompt: "explicit max 1 still rejects L2 spawn".into(),
                 subagent_type: "explore".into(),
                 subagent_type_specified: false,
                 run_in_background: false,
@@ -1045,7 +1052,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("depth limit exceeded"),
-            "subagent at depth 1 must not spawn: {err}"
+            "explicit max 1 must still reject L2 spawn: {err}"
         );
     }
 
@@ -3359,6 +3366,47 @@ mod tests {
                 assert!(sub.output.contains("resumed"));
             }
             other => panic!("Expected SubagentCompleted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn implement_loop_effort_resource_threads_onto_subagent_request() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = resources_for_task(backend);
+        resources.insert(ImplementLoopEffortResource(Some(3)));
+        let shared = resources.into_shared();
+
+        let handle = tokio::spawn(async move {
+            let request = unwrap_spawn(rx.recv().await.unwrap());
+            assert_eq!(
+                request.implement_loop_effort,
+                Some(3),
+                "Task tool must copy live Token Economy --effort onto SubagentRequest"
+            );
+            let id = request.id.clone();
+            request
+                .result_tx
+                .send(SubagentResult {
+                    success: true,
+                    output: "ok".into(),
+                    subagent_id: id.clone(),
+                    child_session_id: id,
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(shared),
+            task_input("general-purpose", false),
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+        match result {
+            ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("ok")),
+            other => panic!("Expected SubagentCompleted, got {other:?}"),
         }
     }
 

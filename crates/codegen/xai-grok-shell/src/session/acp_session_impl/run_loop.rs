@@ -686,6 +686,22 @@ pub(super) async fn run_session(
                     };
 
                     match cmd {
+                        SessionCommand::SetAutoCompactThreshold {
+                            auto_compact_threshold_percent,
+                            auto_compact_threshold_tokens,
+                        } => {
+                            session.apply_auto_compact_threshold(
+                                auto_compact_threshold_percent,
+                                auto_compact_threshold_tokens,
+                            );
+                        }
+                        SessionCommand::RestoreTodoBoard { plan_state } => {
+                            session.restore_todo_board(plan_state).await;
+                        }
+                        SessionCommand::ClearCompletedTodos { respond_to } => {
+                            let n = session.clear_completed_todos().await;
+                            let _ = respond_to.send(n);
+                        }
                         SessionCommand::Initialize { system_prompt } => {
                             session.initialize(system_prompt).await;
                             let s = session.clone();
@@ -896,6 +912,7 @@ pub(super) async fn run_session(
                                         auth_type: r.auth_type,
                                         alpha_test_key: existing.alpha_test_key,
                                         client_version: existing.client_version,
+                                        failover_api_keys: r.failover_api_keys,
                                         failover_base_url: r.failover_base_url,
                                         session_base_url: r.session_base_url,
                                         session_identity_key: r.session_identity_key,

@@ -50,6 +50,10 @@ fn dispatch_engage_global_pause(app: &mut AppView) -> Vec<Effect> {
         .collect();
 
     app.global_work_pause.engage(Instant::now(), snapshots);
+    crate::app::active_session_heartbeat::set_global_work_paused(true);
+    for agent in app.agents.values() {
+        crate::app::active_session_heartbeat::write_from_agent(agent);
+    }
     let toast = app.global_work_pause.engage_toast();
     app.show_toast(&toast);
 
@@ -68,8 +72,12 @@ fn dispatch_engage_global_pause(app: &mut AppView) -> Vec<Effect> {
     effects
 }
 
-fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {
+pub(super) fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {
     let snaps = app.global_work_pause.disengage();
+    crate::app::active_session_heartbeat::set_global_work_paused(false);
+    for agent in app.agents.values() {
+        crate::app::active_session_heartbeat::write_from_agent(agent);
+    }
     let mut resumed_count = 0usize;
     let mut had_pending = false;
     let mut effects = Vec::new();

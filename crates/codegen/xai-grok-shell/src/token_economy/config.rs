@@ -45,7 +45,7 @@ pub struct TokenEconomyConfig {
     /// Injected when effort is missing under economic caps (1–5, must be ≤ max).
     /// Default 2.
     pub desired_implement_effort: u8,
-    /// Show free SuperGrok period linear-burn pacing in chrome.
+    /// Show included SuperGrok period linear-burn pacing in chrome.
     pub show_period_pacing: bool,
     /// Write local spend ledger rows into `grok_oss.db`.
     pub local_spend_ledger: bool,

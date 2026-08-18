@@ -160,12 +160,18 @@ pub async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             };
         }
     };
+    // Started strictly before the first token POST (`refresh_tokens` sends
+    // nothing before its first attempt); see [`ProbeScope::Exchange`]. The
+    // same probe drives `refresh_tokens`' in-call retry suppression, so the
+    // two decisions cannot drift.
+    let exchange_probe = SuspendProbe::start(ProbeScope::Exchange);
     let tokens = match refresh_tokens(
         &discovery.token_endpoint,
         refresh_tok,
         client_id,
         auth.principal_type.as_deref(),
         auth.principal_id.as_deref(),
+        &exchange_probe,
     )
     .await
     {
@@ -219,6 +225,8 @@ pub async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
                     "wall_ms": wall_ms,
                     "suspended_ms": suspended_ms,
                     "suspected_suspend": suspected_suspend,
+                    "exchange_suspended_ms": exchange_probe.suspended_ms(),
+                    "exchange_straddled": exchange_straddled,
                 })),
             );
             tracing::warn!(

@@ -27,7 +27,7 @@ pub use adapter::AcpTerminalAdapter;
 mod exit_watcher;
 mod output_recorder;
 
-pub mod pty_session;
+pub(crate) mod pty_session;
 
 mod streaming_local_terminal;
 pub use streaming_local_terminal::{
@@ -45,11 +45,17 @@ pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000;
 pub(crate) fn default_shell_path() -> &'static str {
     #[cfg(unix)]
     {
-        xai_grok_config::shell::unix_shell_path(xai_grok_config::shell::UnixShellKind::Bash)
+        {
+            let s = xai_grok_config::shell::unix_shell_path(
+                xai_grok_config::shell::UnixShellKind::Bash,
+            );
+            // Stable &str for process lifetime of the shell binary path.
+            Box::leak(s.to_string().into_boxed_str())
+        }
     }
     #[cfg(not(unix))]
     {
-        "/bin/bash".to_string()
+        "/bin/bash"
     }
 }
 
@@ -186,7 +192,7 @@ pub struct TerminalRunner {
 }
 
 impl TerminalRunner {
-    pub fn new(
+    pub(crate) fn new(
         notifier: Arc<dyn SessionNotificationSender>,
         session_id: agent_client_protocol::SessionId,
     ) -> Self {

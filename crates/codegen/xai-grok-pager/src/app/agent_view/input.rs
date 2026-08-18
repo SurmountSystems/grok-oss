@@ -285,16 +285,6 @@ impl AgentView {
             && key.modifiers.is_empty()
             && self.btw_state.is_some()
         {
-            if self
-                .btw_state
-                .as_ref()
-                .is_some_and(|s| s.follow_up_composing())
-            {
-                if let Some(btw) = self.btw_state.as_mut() {
-                    btw.set_follow_up_composing(false);
-                }
-                return Handled(Box::new(InputOutcome::Changed));
-            }
             return Handled(Box::new(self.dismiss_btw_panel()));
         }
         if self.active_pane != AgentPane::Prompt
@@ -303,66 +293,10 @@ impl AgentView {
         {
             return Delegate;
         }
-        // Follow-up composer (parity with full agent surface).
-        if let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key.modifiers.is_empty()
-            && let Some(btw) = self.btw_state.as_mut()
-            && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
-        {
-            if btw.follow_up_composing() {
-                match key.code {
-                    KeyCode::Enter => {
-                        if let Some((q, _, _)) = btw.take_follow_up_send() {
-                            return Handled(Box::new(InputOutcome::Action(
-                                Action::SendBtwFollowUp(q),
-                            )));
-                        }
-                        return Handled(Box::new(InputOutcome::Changed));
-                    }
-                    KeyCode::Backspace => {
-                        if let Some(draft) = btw.follow_up_draft_mut() {
-                            draft.pop();
-                        }
-                        return Handled(Box::new(InputOutcome::Changed));
-                    }
-                    KeyCode::Char(c) if !c.is_control() => {
-                        if let Some(draft) = btw.follow_up_draft_mut() {
-                            draft.push(c);
-                        }
-                        return Handled(Box::new(InputOutcome::Changed));
-                    }
-                    _ => {}
-                }
-            } else if key.code == KeyCode::Char('a') {
-                btw.set_follow_up_composing(true);
-                return Handled(Box::new(InputOutcome::Changed));
-            }
-        }
-        // Copy entire Done contents (same as full agent surface).
-        if let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key.modifiers.is_empty()
-            && key.code == KeyCode::Char('y')
-            && !self
-                .btw_state
-                .as_ref()
-                .is_some_and(|s| s.follow_up_composing())
-            && let Some(text) = self.btw_state.as_ref().and_then(|s| s.full_copy_text())
-            && !text.is_empty()
-        {
-            self.copy_to_clipboard(&text);
-            return Handled(Box::new(InputOutcome::Changed));
-        }
         let Some(btw_scroll_max) = self.btw_state.as_ref().and_then(|btw| {
             matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. }).then(|| {
                 let content_width = self.last_btw_area.width.saturating_sub(4) as usize;
-                let max_body = self
-                    .last_btw_area
-                    .height
-                    .saturating_sub(2)
-                    .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
-                    as usize;
+                let max_body = self.last_btw_area.height.saturating_sub(2) as usize;
                 btw.max_scroll_offset(content_width, max_body)
             })
         }) else {
@@ -377,12 +311,7 @@ impl AgentView {
         if key.kind == KeyEventKind::Release || !key.modifiers.is_empty() {
             return Delegate;
         }
-        let page = self
-            .last_btw_area
-            .height
-            .saturating_sub(2)
-            .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
-            .max(1) as usize;
+        let page = self.last_btw_area.height.saturating_sub(2).max(1) as usize;
         let Some(btw) = self.btw_state.as_mut() else {
             return Delegate;
         };
@@ -582,77 +511,7 @@ impl AgentView {
             && key.code == KeyCode::Esc
             && key.modifiers.is_empty()
         {
-            // Esc cancels in-panel follow-up compose first; second Esc dismisses.
-            if self
-                .btw_state
-                .as_ref()
-                .is_some_and(|s| s.follow_up_composing())
-            {
-                if let Some(btw) = self.btw_state.as_mut() {
-                    btw.set_follow_up_composing(false);
-                }
-                return InputOutcome::Changed;
-            }
             return self.dismiss_btw_panel();
-        }
-        // In-panel follow-up composer (Done + focused): `a` starts, typing fills
-        // draft, Enter sends SendBtwFollowUp, Esc cancels (handled above).
-        if self.active_pane == AgentPane::Prompt
-            && self.btw_focused
-            && let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key.modifiers.is_empty()
-            && let Some(btw) = self.btw_state.as_mut()
-            && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
-        {
-            if btw.follow_up_composing() {
-                match key.code {
-                    KeyCode::Enter => {
-                        if let Some((q, _, _)) = btw.take_follow_up_send() {
-                            // Non-empty question: dispatch reads prior turns +
-                            // session id from the still-open Done state.
-                            return InputOutcome::Action(Action::SendBtwFollowUp(q));
-                        }
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Backspace => {
-                        if let Some(draft) = btw.follow_up_draft_mut() {
-                            draft.pop();
-                        }
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Char(c) if !c.is_control() => {
-                        if let Some(draft) = btw.follow_up_draft_mut() {
-                            draft.push(c);
-                        }
-                        return InputOutcome::Changed;
-                    }
-                    _ => {}
-                }
-            } else if key.code == KeyCode::Char('a') {
-                btw.set_follow_up_composing(true);
-                return InputOutcome::Changed;
-            }
-        }
-        // Copy entire Done btw body (question + full answer, not viewport-only)
-        // when the panel is focused. `y` matches scrollback block-copy; must
-        // run before typing-returns-focus so Char('y') is not inserted.
-        // Disabled while composing so `y` can appear in the follow-up draft.
-        if self.active_pane == AgentPane::Prompt
-            && self.btw_focused
-            && !self
-                .btw_state
-                .as_ref()
-                .is_some_and(|s| s.follow_up_composing())
-            && let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key.modifiers.is_empty()
-            && key.code == KeyCode::Char('y')
-            && let Some(text) = self.btw_state.as_ref().and_then(|s| s.full_copy_text())
-            && !text.is_empty()
-        {
-            self.copy_to_clipboard(&text);
-            return InputOutcome::Changed;
         }
         if self.btw_state.is_some()
             && let Event::Mouse(mouse) = ev
@@ -670,21 +529,11 @@ impl AgentView {
         }
         let btw_scroll_max = if self.active_pane == AgentPane::Prompt
             && self.btw_focused
-            && !self
-                .btw_state
-                .as_ref()
-                .is_some_and(|s| s.follow_up_composing())
             && let Some(btw) = self.btw_state.as_ref()
             && matches!(btw, crate::views::btw_overlay::BtwOverlayState::Done { .. })
         {
             let content_width = self.last_btw_area.width.saturating_sub(4) as usize;
-            // Done reserves one row for the follow-up composer.
-            let max_body = self
-                .last_btw_area
-                .height
-                .saturating_sub(2)
-                .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
-                as usize;
+            let max_body = self.last_btw_area.height.saturating_sub(2) as usize;
             btw.max_scroll_offset(content_width, max_body)
         } else {
             0
@@ -695,12 +544,7 @@ impl AgentView {
             && key.modifiers.is_empty()
             && let Some(btw) = self.btw_state.as_mut()
         {
-            let page = self
-                .last_btw_area
-                .height
-                .saturating_sub(2)
-                .saturating_sub(crate::views::btw_overlay::FOLLOW_UP_COMPOSER_ROWS)
-                .max(1) as usize;
+            let page = self.last_btw_area.height.saturating_sub(2).max(1) as usize;
             match key.code {
                 KeyCode::Up => {
                     btw.scroll_up(1);
@@ -732,29 +576,6 @@ impl AgentView {
             {
                 return InputOutcome::Action(Action::VoiceToggle);
             }
-            // Minimal plan strip paints SoftParkCtaHits even when line_viewer is
-            // open (shared input path). Hit-test before line-viewer mouse so
-            // footer Approve/Quit stay primary under the compact strip.
-            if let Event::Mouse(mouse) = ev {
-                match mouse.kind {
-                    MouseEventKind::Moved => {
-                        if self
-                            .hit_soft_park_ctas
-                            .update_hover(mouse.column, mouse.row)
-                        {
-                            return InputOutcome::Changed;
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(outcome) =
-                            self.handle_soft_park_cta_click(mouse.column, mouse.row)
-                        {
-                            return outcome;
-                        }
-                    }
-                    _ => {}
-                }
-            }
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()
@@ -771,9 +592,6 @@ impl AgentView {
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
-                        // Plan approval (any focus): screenshots / file drops
-                        // attach to the shared plan composer. Do not swallow
-                        // into list-pane search when Preview is focused.
                         if self.plan_approval_view.is_some() {
                             return self.route_popup_paste(text);
                         }
@@ -816,14 +634,8 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
-                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                            && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
-                        {
-                            InputOutcome::Changed
-                        } else {
-                            self.prompt.handle_mouse(mouse);
-                            InputOutcome::Changed
-                        }
+                        self.prompt.handle_mouse(mouse);
+                        InputOutcome::Changed
                     } else {
                         self.handle_line_viewer_mouse(mouse)
                     }
@@ -1008,13 +820,18 @@ impl AgentView {
                     if let Some(outcome) = self.try_plan_overlay_agent_action(key, registry, true) {
                         return outcome;
                     }
-                    return self.handle_plan_feedback_key(key);
+                    self.handle_plan_feedback_key(key)
                 }
                 Event::Paste(text) => {
-                    // Soft-park Preview used to swallow paste (hidden prompt).
-                    // Screenshots on the plan path must attach for approve /
-                    // revise / clarify — same composer as Prompt focus.
-                    return self.route_popup_paste(text);
+                    if self
+                        .plan_approval_view
+                        .as_ref()
+                        .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
+                    {
+                        self.route_popup_paste(text)
+                    } else {
+                        InputOutcome::Unchanged
+                    }
                 }
                 Event::Mouse(mouse) => {
                     let mut changed = false;
@@ -1024,9 +841,6 @@ impl AgentView {
                             changed |= self
                                 .hit_plan_approval_status
                                 .update_hover(mouse.column, mouse.row);
-                            changed |= self
-                                .hit_soft_park_ctas
-                                .update_hover(mouse.column, mouse.row);
                             changed |= self.hit_context.update_hover(mouse.column, mouse.row);
                             changed |= self.hit_credits.update_hover(mouse.column, mouse.row);
                         }
@@ -1034,24 +848,15 @@ impl AgentView {
                             if self.hit_voice_stop_button.contains(mouse.column, mouse.row) {
                                 return InputOutcome::Action(Action::VoiceToggle);
                             }
-                            // Soft-park footer CTAs (mouse primary; works with draft).
-                            if let Some(outcome) =
-                                self.handle_soft_park_cta_click(mouse.column, mouse.row)
-                            {
-                                return outcome;
-                            }
-                            if self.try_copy_prompt_draft_at(mouse.column, mouse.row) {
-                                return InputOutcome::Changed;
-                            }
                             if self.hit_plan_button.contains(mouse.column, mouse.row) {
-                                self.reopen_plan_approval();
+                                self.open_plan_from_view_plan_or_status();
                                 return InputOutcome::Changed;
                             }
                             if self
                                 .hit_plan_approval_status
                                 .contains(mouse.column, mouse.row)
                             {
-                                self.reopen_plan_approval();
+                                self.open_plan_from_view_plan_or_status();
                                 return InputOutcome::Changed;
                             }
                         }
@@ -1062,22 +867,17 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
-                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                            && self.try_copy_prompt_draft_at(mouse.column, mouse.row)
-                        {
-                            return InputOutcome::Changed;
-                        }
                         self.prompt.handle_mouse(mouse);
                         return InputOutcome::Changed;
                     }
                     if changed {
-                        return InputOutcome::Changed;
+                        InputOutcome::Changed
+                    } else {
+                        InputOutcome::Unchanged
                     }
-                    // Not a soft-park chrome hit — let scrollback mouse handle
-                    // selection/scroll (do not swallow the click).
                 }
-                _ => return InputOutcome::Changed,
-            }
+                _ => InputOutcome::Changed,
+            };
         }
         if self.focused_card() == Some(BlockingCard::Question) {
             return match ev {
@@ -1206,8 +1006,6 @@ impl AgentView {
                     self.ephemeral_tip
                         .clear(crate::tips::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY);
                     self.btw_focused = false;
-                    // Path / file:// drops win synchronously (and skip the
-                    // clipboard raster so a Finder icon does not double-attach).
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
@@ -1439,16 +1237,6 @@ impl AgentView {
                 }
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
-                }
-                // Work B: idle primary with live standalone subagents still
-                // offers CancelTurn → stop-subagents panel / kill path.
-                let has_running_subagents = self
-                    .subagent_sessions
-                    .values()
-                    .any(|s| s.is_running() && s.workflow_run_id.is_none());
-                if has_running_subagents {
-                    self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
-                    return InputOutcome::Action(Action::CancelTurn);
                 }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()
@@ -1875,8 +1663,7 @@ mod btw_focus_tests {
         assert!(crate::minimal_api::finish_minimal_btw(
             &mut agent,
             request_id,
-            Ok(long_btw_answer()),
-            Some("btw-minimal-test".into()),
+            Ok(long_btw_answer())
         ));
         agent
     }
@@ -2083,67 +1870,13 @@ mod btw_focus_tests {
         assert!(agent.btw_state.is_none(), "Esc dismisses the /btw panel");
         assert!(!agent.btw_focused, "dismissing the panel clears its focus");
     }
-    /// Focused Done panel: `y` copies full Q/A (including scrolled-out lines)
-    /// and does not insert into the prompt.
-    #[test]
-    fn focused_y_copies_entire_btw_without_prompt_insert() {
-        let mut agent = prompt_focused_agent();
-        let reg = ActionRegistry::defaults();
-        let answer = long_btw_answer();
-        agent.btw_state = Some(BtwOverlayState::done("sky color?".into(), answer.clone()));
-        agent.btw_focused = true;
-        // Scroll down so the first lines leave the viewport — copy must still
-        // include them via full_copy_text, not the selection viewport model.
-        if let Some(btw) = agent.btw_state.as_mut() {
-            btw.scroll_down(10, 100);
-        }
-        let expected = agent
-            .btw_state
-            .as_ref()
-            .and_then(|s| s.full_copy_text())
-            .expect("Done is copyable");
-        assert!(expected.contains("line00"));
-        assert!(expected.contains("line39"));
-        assert!(expected.starts_with("/btw sky color?\n\n"));
-
-        let outcome = agent.handle_input(&key(KeyCode::Char('y')), &reg);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "y should be handled as copy, got {outcome:?}"
-        );
-        assert!(
-            agent.btw_focused,
-            "copy must leave the panel focused (not hand keys to the prompt)"
-        );
-        assert_eq!(
-            agent.prompt.text(),
-            "",
-            "y must not type into the prompt when btw is focused"
-        );
-        // full_copy_text contract is the clipboard payload; we do not assert
-        // host clipboard here (flaky in CI) — the path is copy_to_clipboard.
-        let _ = expected;
-    }
-    #[test]
-    fn unfocused_y_types_into_prompt() {
-        let mut agent = prompt_focused_agent();
-        let reg = ActionRegistry::defaults();
-        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
-        agent.btw_focused = false;
-        agent.handle_input(&key(KeyCode::Char('y')), &reg);
-        assert_eq!(
-            agent.prompt.text(),
-            "y",
-            "unfocused btw must not steal y from the prompt"
-        );
-    }
     #[test]
     fn minimal_permission_owns_esc_over_hidden_btw() {
         let mut agent = minimal_btw_agent();
         let reg = ActionRegistry::defaults();
         agent
             .permission_queue
-            .push_back(super::paste_key_tests::make_followup_permission_state());
+            .push_back(super::test_fixtures::make_followup_permission_state());
         agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert_minimal_btw_active(&agent, "permission");
         assert_eq!(
@@ -2219,7 +1952,7 @@ mod btw_focus_tests {
         agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
         agent
             .permission_queue
-            .push_back(super::paste_key_tests::make_followup_permission_state());
+            .push_back(super::test_fixtures::make_followup_permission_state());
         agent.handle_input(&key(KeyCode::Esc), &reg);
         assert!(agent.btw_state.is_none());
         assert!(!agent.permission_queue.is_empty());
@@ -2979,5 +2712,83 @@ mod subagent_forward_tests {
                 .is_empty(),
             "the effect must move, not duplicate"
         );
+    }
+}
+/// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in
+/// the composer, mirroring how a typed character focus-forwards into the prompt.
+#[cfg(test)]
+mod scrollback_paste_focus_forward_tests {
+    use super::test_fixtures::{make_agent, make_followup_permission_state};
+    use super::{AgentPane, AgentView};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::Event;
+    fn scrollback_agent() -> (AgentView, ActionRegistry) {
+        let mut agent = make_agent();
+        agent.vim_mode = false;
+        agent.set_active_pane(AgentPane::Scrollback, true);
+        (agent, ActionRegistry::defaults())
+    }
+    /// The `ActionThenForward` round-trip the event loop performs: dispatch `FocusPrompt`
+    /// to focus the prompt pane, then re-process the same paste through it so the text lands.
+    #[test]
+    fn paste_from_scrollback_round_trip_lands_in_composer() {
+        let (mut agent, reg) = scrollback_agent();
+        let paste = Event::Paste("pasted text".to_owned());
+        assert!(matches!(
+            agent.handle_input(&paste, &reg),
+            InputOutcome::ActionThenForward(Action::FocusPrompt)
+        ));
+        agent.set_active_pane(AgentPane::Prompt, false);
+        let out = agent.handle_input(&paste, &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), "pasted text");
+    }
+    /// A parked blocking card stays parked: `FocusPrompt` would unpark it and the
+    /// overlay would swallow the re-dispatched paste, so a paste here is inert.
+    #[test]
+    fn paste_from_scrollback_does_not_unpark_a_pending_overlay() {
+        let (mut agent, reg) = scrollback_agent();
+        agent
+            .permission_queue
+            .push_back(make_followup_permission_state());
+        assert!(agent.parked_card().is_some(), "card should be parked");
+        assert!(agent.focused_card().is_none());
+        let out = agent.handle_input(&Event::Paste("hello".to_owned()), &reg);
+        assert!(
+            matches!(out, InputOutcome::Unchanged),
+            "paste must not unpark a pending overlay, got {out:?}"
+        );
+        assert!(agent.parked_card().is_some(), "card must stay parked");
+        assert_eq!(agent.active_pane, AgentPane::Scrollback);
+    }
+    fn make_test_png(width: u32, height: u32) -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(width, height, Rgba([128, 64, 32, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+    /// A dragged image arrives as a `file://` bracketed paste; from a focused
+    /// scrollback it takes the same focus-forward round trip as a text paste.
+    #[test]
+    fn dragging_image_while_scrollback_focused_attaches_to_composer() {
+        let (mut agent, reg) = scrollback_agent();
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("drag.png");
+        std::fs::write(&png, make_test_png(8, 8)).unwrap();
+        let drop = Event::Paste(format!("file://{}", png.display()));
+        assert!(matches!(
+            agent.handle_input(&drop, &reg),
+            InputOutcome::ActionThenForward(Action::FocusPrompt)
+        ));
+        agent.set_active_pane(AgentPane::Prompt, false);
+        let out = agent.handle_input(&drop, &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(agent.prompt.text().contains("[Image #1]"));
     }
 }

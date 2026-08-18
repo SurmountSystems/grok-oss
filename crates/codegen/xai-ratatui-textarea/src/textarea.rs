@@ -2507,8 +2507,9 @@ impl TextArea {
         }
     }
 
-    /// Home / Super+Left when `move_up_at_bol` is false (visual row if wrapped);
+    /// Super+Left when `move_up_at_bol` is false (visual row if wrapped);
     /// Ctrl+A when true (logical line; already-at-BOL chains to previous line).
+    /// Bare Home is handled in `input` and stays on this logical line.
     pub fn move_cursor_to_beginning_of_line(&mut self, move_up_at_bol: bool) {
         if move_up_at_bol {
             self.apply_edit_command(EditCommand::MoveLogicalLineStart, None);
@@ -2523,8 +2524,9 @@ impl TextArea {
         self.set_cursor(bol);
     }
 
-    /// End / Super+Right when `move_down_at_eol` is false (visual row if wrapped);
+    /// Super+Right when `move_down_at_eol` is false (visual row if wrapped);
     /// Ctrl+E when true (logical line; already-at-EOL chains to next line).
+    /// Bare End is handled in `input` and stays on this logical line.
     pub fn move_cursor_to_end_of_line(&mut self, move_down_at_eol: bool) {
         if move_down_at_eol {
             self.apply_edit_command(EditCommand::MoveLogicalLineEnd, None);

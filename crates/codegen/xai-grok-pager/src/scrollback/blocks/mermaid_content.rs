@@ -760,7 +760,6 @@ mod tests {
             ThemeKind::TokyoNight,
             ThemeKind::RosePineMoon,
             ThemeKind::OscuraMidnight,
-            ThemeKind::Doge,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
         }

@@ -9,17 +9,70 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 };
 #[derive(Debug)]
 struct DummyTerminal;
+
+fn run_on_large_stack(name: &str, body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+fn block_on_local(fut: impl std::future::Future<Output = ()>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    rt.block_on(async {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(fut).await;
+    });
+}
+
+fn cancel_opts(
+    cancel_subagents: bool,
+    kill_background_tasks: bool,
+    rewind_if_no_output: bool,
+    trigger: Option<&str>,
+) -> crate::session::CancelOptions {
+    crate::session::CancelOptions {
+        cancel_subagents,
+        kill_background_tasks,
+        rewind_if_no_output,
+        trigger: trigger.map(crate::session::CancelTrigger::from_client),
+        user_initiated: trigger.is_some(),
+    }
+}
+
+/// Same gate as `SessionCommand::Cancel` in the actor run loop: bind the
+/// cancel outcome and drain queued notifications only when the barrier is
+/// `WakeBarrier::Clear`. An `Armed` stop-gesture barrier must outlive the
+/// cancel, so those sites skip the drain.
+async fn cancel_running_task_and_gate_drain(
+    actor: &Arc<SessionActor>,
+    options: crate::session::CancelOptions,
+) -> WakeBarrier {
+    let barrier = actor.cancel_running_task(options).await;
+    if barrier == WakeBarrier::Clear {
+        let (completion_tx, _completion_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+        SessionActor::maybe_drain_notifications(Arc::clone(actor), completion_tx).await;
+    }
+    barrier
+}
+
 #[async_trait::async_trait]
 impl AsyncTerminalRunner for DummyTerminal {
     async fn run(&self, _request: TerminalRunRequest) -> Result<TerminalRunResult, TerminalError> {
         Err(TerminalError::Other("dummy terminal".into()))
     }
 }
-#[tokio::test(flavor = "current_thread")]
-async fn persist_ack_waits_for_disk_flush_before_success() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn persist_ack_waits_for_disk_flush_before_success() {
+    run_on_large_stack("persist-ack", || {
+        block_on_local(async {
             let tmp = tempfile::TempDir::new().unwrap();
             let session_dir = tmp.path().join("session");
             let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
@@ -44,9 +97,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: "http://localhost".to_string(),
                 model: "test".to_string(),
                 context_window: 100_000,
@@ -370,13 +420,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     .any(|item| item.text_content().contains("hello persist")),
                 "loaded chat history should contain the just-persisted prompt"
             );
-            // Ack + disk check is the contract under test. Abort the remainder
-            // of the turn (model auth / sampling) so debug Config deserialization
-            // cannot overflow the test thread stack — same pattern as
-            // `handle_prompt_injects_interrupt_reminder_before_user_message`.
-            prompt_task.abort();
-        })
-        .await;
+            let _ = prompt_task.await.expect("prompt task should complete");
+        });
+    });
 }
 #[tokio::test(flavor = "current_thread")]
 async fn plain_user_prompt_without_persist_ack_still_sends_flush_barrier_behind_its_echo() {
@@ -494,9 +540,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
             let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 vec![
-                        ConversationItem::system("sys"),
-                        ConversationItem::user("<user_info>OS Version: macos</user_info>"),
-                    ],
+                    ConversationItem::system("sys"),
+                    ConversationItem::user("<user_info>OS Version: macos</user_info>"),
+                ],
                 xai_grok_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
                     model: "test".to_string(),
@@ -525,7 +571,10 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 )
                 .await
                 .expect("request should build");
-            assert!(matches!(request.items.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Persist this memory reminder.")));
+            assert!(
+                matches!(request.items.first(), Some(ConversationItem::System(sys)) if
+                sys.content.contains("Persist this memory reminder."))
+            );
             let storage = crate::session::storage::JsonlStorageAdapter::with_explicit_session_dir(
                 session_dir.path().to_path_buf(),
             );
@@ -541,41 +590,37 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 .load_session_without_updates(&session_info)
                 .await
                 .unwrap();
-            assert!(matches!(loaded.chat_history.first(), Some(ConversationItem::System(sys)) if sys.content.contains("Persist this memory reminder.")));
-        })
-        .await;
+            assert!(
+                matches!(loaded.chat_history.first(), Some(ConversationItem::System(sys))
+                if sys.content.contains("Persist this memory reminder."))
+            );
+        });
+    });
 }
-#[tokio::test(flavor = "current_thread")]
-async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
+    // SessionActor plus process_conversation_turn_with_recovery overflows the
+    // default test thread stack in debug. Same named contract; larger stack.
+    std::thread::Builder::new()
+        .name("memory-injection-disabled".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            rt.block_on(async {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
             let session_dir = tempfile::tempdir().expect("tempdir");
             let session_info = crate::session::info::Info {
                 id: acp::SessionId::new("persist-memory-disabled"),
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
-            let cwd = AbsPathBuf::new(session_dir.path().to_path_buf()).unwrap();
-            let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
-                cwd.to_path_buf(),
-            ));
-            let terminal = Arc::new(DummyTerminal {});
-            let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
-            let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
-                "test-memory-disabled".to_string(),
-                cwd.to_path_buf(),
-                hunk_tx,
-                xai_hunk_tracker::TrackingMode::AgentOnly,
-                tokio_util::sync::CancellationToken::new(),
-            );
-            let tool_context =
-                ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: "http://localhost".to_string(),
                 model: "test-model".to_string(),
                 context_window: 100_000,
@@ -922,8 +967,13 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     .injection_count
                     .load(std::sync::atomic::Ordering::Relaxed)
             );
+                    })
+                    .await;
+            });
         })
-        .await;
+        .expect("spawn larger-stack test thread")
+        .join()
+        .expect("memory-injection-disabled thread");
 }
 /// Hard teardown (`kill_background_tasks = true`, the subagent-shutdown path) aborts the running turn AND drains every queued prompt.
 /// Each drained prompt gets a `Cancelled` response.
@@ -1309,14 +1359,14 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 >()
                 .await;
             assert!(
-                    scoped_prompt_id.is_none()
-                        || scoped_prompt_id.as_ref().is_some_and(|p| p.0.is_empty()),
-                    "CurrentPromptIdResource should be cleared on cancellation"
-                );
+                scoped_prompt_id.is_none() || scoped_prompt_id.as_ref().is_some_and(| p |
+                p.0.is_empty()),
+                "CurrentPromptIdResource should be cleared on cancellation"
+            );
             assert!(
-                    actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned").is_none(),
-                    "current_prompt_id should be cleared on cancellation"
-                );
+                actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned")
+                .is_none(), "current_prompt_id should be cleared on cancellation"
+            );
             let state = actor.state.lock().await;
             assert!(state.running_task.is_none());
             assert!(state.pending_inputs.is_empty());
@@ -1509,7 +1559,7 @@ async fn send_now_cancel_arms_no_interrupt_signals_and_resets_wait_depth() {
             assert_eq!(
                 depth.depth(),
                 0,
-                "a late old-generation guard drop must be a no-op"
+                "a late guard drop after the reset must not underflow"
             );
         })
         .await;
@@ -1610,6 +1660,92 @@ async fn handle_prompt_frames_interrupt_on_user_message() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor.events.set_pending_interrupt_reminder();
+            let assembled = "caller-owned follow-up";
+            let framed = actor.maybe_apply_interrupt_envelope(assembled.into(), true);
+            assert_eq!(framed, assembled, "verbatim text must stay byte-identical");
+            assert!(
+                !actor.events.take_pending_interrupt_reminder(),
+                "verbatim still consumes the one-shot"
+            );
+        })
+        .await;
+}
+/// Integration: with the one-shot armed, a real user turn driven through
+/// `handle_prompt` frames the query in the same envelope as an interjection
+/// (lead-in + `<user_query>` + unfinished-task trailer) instead of a
+/// preceding `<system-reminder>`. Synchronizes on the persist-ack (fires
+/// after the user item is pushed, before the model call), then aborts the
+/// turn so the dead-URL model call can't hang.
+#[test]
+fn handle_prompt_frames_interrupt_on_user_message() {
+    std::thread::Builder::new()
+        .name("handle-prompt-interrupt-frame".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            rt.block_on(async {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let actor = actor_with_persistence_drain().await;
+                        actor.events.set_pending_interrupt_reminder();
+                        let query = "follow-up after interrupt";
+                        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            query.to_string(),
+                        ))];
+                        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                        let actor_for_prompt = actor.clone();
+                        let prompt_task = tokio::task::spawn_local(async move {
+                            actor_for_prompt
+                                .handle_prompt(
+                                    "interrupt-wiring-test",
+                                    prompt_blocks,
+                                    PromptMode::Agent,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    false,
+                                    None,
+                                    Some(ack_tx),
+                                    None,
+                                )
+                                .await
+                        });
+                        assert!(ack_rx.await.is_ok(), "persist ack should resolve");
+                        let conv = actor.chat_state_handle.get_conversation().await;
+                        let user = conv
+                .iter()
+                .find(|item| {
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                        && item.text_content().contains(query)
+                })
+                .expect("the user message must be in the conversation");
+                        let text = user.text_content();
+                        let expected_assembled = format!("<user_query>\n{query}\n</user_query>");
+                        assert_eq!(text, frame_user_turn(INTERRUPT_NOTE, &expected_assembled));
+                        assert!(!actor.events.take_pending_interrupt_reminder());
+                        prompt_task.abort();
+                    })
+                    .await;
+            });
+        })
+        .expect("spawn larger-stack test thread")
+        .join()
+        .expect("handle-prompt-interrupt-frame thread");
+}
+/// Integration: a verbatim user turn must stay byte-identical to the caller
+/// text even when the interrupt one-shot is armed.
+#[test]
+fn handle_prompt_verbatim_skips_interrupt_envelope() {
+    run_on_large_stack("handle-prompt-verbatim", || {
+        block_on_local(async {
             let actor = actor_with_persistence_drain().await;
             actor.events.set_pending_interrupt_reminder();
             let query = "follow-up after interrupt";
@@ -1621,7 +1757,7 @@ async fn handle_prompt_frames_interrupt_on_user_message() {
             let prompt_task = tokio::task::spawn_local(async move {
                 actor_for_prompt
                     .handle_prompt(
-                        "interrupt-wiring-test",
+                        "interrupt-verbatim-test",
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -1698,8 +1834,60 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
             assert!(!user.text_content().contains(INTERRUPT_NOTE));
             assert!(!actor.events.take_pending_interrupt_reminder());
             prompt_task.abort();
-        })
-        .await;
+        });
+    });
+}
+/// Send-now must use the full interjection envelope (prefix + already-wrapped
+/// `<user_query>` + unfinished-task trailer), not the note prefix alone.
+#[test]
+fn handle_prompt_send_now_frames_interjection_envelope() {
+    run_on_large_stack("handle-prompt-send-now", || {
+        block_on_local(async {
+            let actor = actor_with_persistence_drain().await;
+            let query = "create /tmp/A";
+            let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                query.to_string(),
+            ))];
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            let actor_for_prompt = actor.clone();
+            let prompt_task = tokio::task::spawn_local(async move {
+                actor_for_prompt
+                    .handle_prompt(
+                        "send-now-envelope-test",
+                        prompt_blocks,
+                        PromptMode::Agent,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        true,
+                        None,
+                        Some(ack_tx),
+                        None,
+                    )
+                    .await
+            });
+            assert!(ack_rx.await.is_ok(), "persist ack should resolve");
+            let conv = actor.chat_state_handle.get_conversation().await;
+            let user = conv
+                .iter()
+                .find(|item| {
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                        && item.text_content().contains(query)
+                })
+                .expect("the send-now user message must be in the conversation");
+            let expected_assembled = format!("<user_query>\n{query}\n</user_query>");
+            assert_eq!(
+                user.text_content(),
+                frame_user_turn(
+                    xai_interjection_core::INTERJECTION_NOTE,
+                    &expected_assembled
+                )
+            );
+            prompt_task.abort();
+        });
+    });
 }
 /// Send-now must use the full interjection envelope, not the note prefix alone.
 /// The envelope is the prefix, the already-wrapped `<user_query>`, and the unfinished-task trailer.
@@ -1800,8 +1988,8 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                 "a synthetic-origin turn must not inject the interrupt envelope"
             );
             prompt_task.abort();
-        })
-        .await;
+        });
+    });
 }
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_running_task_interactive_preserves_queued_work() {
@@ -2465,14 +2653,11 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 .route(
                     "/v1/responses",
                     post(|| async {
-                        let chunk = serde_json::json!({
-                            "type": "response.output_text.delta",
-                            "sequence_number": 1,
-                            "item_id": "item-1",
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": "hi",
-                        });
+                        let chunk = serde_json::json!(
+                            { "type" : "response.output_text.delta", "sequence_number" :
+                            1, "item_id" : "item-1", "output_index" : 0, "content_index"
+                            : 0, "delta" : "hi", }
+                        );
                         let first = Ok::<
                             _,
                             std::convert::Infallible,
@@ -2488,9 +2673,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: format!("http://{addr}/v1"),
                 model: "test-model".to_string(),
                 api_backend: xai_grok_sampler::ApiBackend::Responses,
@@ -2879,9 +3061,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             assert!(
-                    !still_active,
-                    "cancel_running_task did not propagate to the sampler"
-                );
+                ! still_active, "cancel_running_task did not propagate to the sampler"
+            );
             server_task.abort();
         })
         .await;
@@ -2903,10 +3084,11 @@ async fn skill_reminder_deferred_while_turn_running_flushed_when_idle() {
             .await
             .iter()
             .filter(|item| {
-                matches!(item, ConversationItem::User(u) if u.content.iter().any(|p| matches!(
-                    p,
-                    xai_grok_sampling_types::ContentPart::Text { text } if text.contains("pdf-tools")
-                )))
+                matches!(
+                    item, ConversationItem::User(u) if u.content.iter().any(| p |
+                    matches!(p, xai_grok_sampling_types::ContentPart::Text { text } if
+                    text.contains("pdf-tools")))
+                )
             })
             .count()
     }

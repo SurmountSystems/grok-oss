@@ -303,7 +303,7 @@ pub(super) fn apply_auto_topup(
 pub(super) fn handle_billing_fetched(
     app: &mut AppView,
     agent_id: AgentId,
-    balance: crate::views::credit_bar::CreditBalanceFetch,
+    balance: Option<crate::views::credit_bar::CreditBalance>,
     silent: bool,
     subscription_tier: Option<String>,
     autotopup: crate::views::credit_bar::AutoTopupFetch,
@@ -313,72 +313,14 @@ pub(super) fn handle_billing_fetched(
     // Clear the cached balance and polling so the status bar agrees with the "No billing data available." message rather than showing a stale value
     app.credit_balance = balance.clone();
     apply_auto_topup(&mut app.auto_topup, &autotopup);
-    // OpenRouter: only overwrite when the fetch succeeded (`Some`).
-    if let Some(or) = openrouter_balance {
-        app.openrouter_credit_balance = Some(or);
-    }
-    // Console team prepaid (Management API): keep last good on miss.
-    if let Some(cents) = console_team_prepaid_cents {
-        app.console_team_prepaid_cents = Some(cents);
-    }
-    // Leave SuperGrok when included usage is full: if a console key is bound,
-    // mark the session out of allowance so the next sample prefers the console
-    // key without waiting for a 402 (extras would still succeed on SuperGrok and
-    // burn paid balance). Threshold is 100% (`INCLUDED_ALLOWANCE_EXHAUST_PCT`);
-    // poll floor remains 99% so we keep refreshing near the end of the pool
-    // (session-load + turn-end also fetch).
-    //
-    // When marked, sampler stays on the console key — update meter identity so
-    // the footer does not keep showing SuperGrok prepaid extras as spend.
-    //
-    // Only known included readings feed exhaust / ranking. Placeholder 0.0 with
-    // `included_usage_known: false` must not clear a Marked memo.
-    let exhaust_action = match app.credit_balance.as_ref() {
-        Some(bal) if should_apply_included_usage_side_effects(bal) => {
-            let grok_home = xai_grok_shell::util::grok_home::grok_home();
-            xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(bal.usage_pct, &grok_home)
-        }
-        _ => xai_grok_shell::auth::AllowanceExhaustAction::None,
-    };
-    // Meter honesty: Marked → console live; Cleared → SuperGrok again only when
-    // console is not the auth primary (preferred_method=api_key / is_api_key_auth).
-    let marked = matches!(
-        exhaust_action,
-        xai_grok_shell::auth::AllowanceExhaustAction::Marked
-    );
-    let cleared = matches!(
-        exhaust_action,
-        xai_grok_shell::auth::AllowanceExhaustAction::Cleared
-    );
-    if let Some(kind) = crate::views::credit_bar::sampling_identity_after_allowance_sync(
-        marked,
-        cleared,
-        app.is_api_key_auth,
-    ) {
-        for agent in app.agents.values_mut() {
-            agent.sampling_identity = kind;
-        }
-    }
-    app.billing_poll_wanted = app
-        .credit_balance
+    app.billing_poll_wanted = balance
         .as_ref()
-        .map(|b| {
-            // Near exhaust, or included meter still unknown (do not stick at 0%).
-            b.usage_pct >= 99.0 || !b.included_usage_known
-        })
-        // No SuperGrok balance (explicit clear or never warmed): SuperGrok-only
-        // poll off. OpenRouter / console team prepaid still keep polling below.
-        .unwrap_or(false)
-        // Keep polling when OpenRouter or console team prepaid is in use so the
-        // footer balance refreshes.
-        || app.openrouter_credit_balance.is_some()
-        || app.console_team_prepaid_cents.is_some();
+        .map(|b| b.usage_pct >= 99.0)
+        .unwrap_or(false);
     if let Some(tier) = subscription_tier {
         app.subscription_tier = Some(tier);
     }
     // Render the `/usage` summary from the now-current cached rule.
-    // Console live → name console team prepaid (or honest gap); never sell
-    // SuperGrok session extras as the live console spend.
     let summary_topup = app.auto_topup.clone();
     let tier_now = app.subscription_tier.clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -396,40 +338,16 @@ pub(super) fn handle_billing_fetched(
             state.ctx.subscription_tier = tier_now;
         }
         if !silent && !agent.chat_kind {
-            let live = agent.sampling_identity;
-            let prepaid = agent.console_team_prepaid_cents.or(app_console_prepaid);
-            // Branch 2b honesty: flat multi-sample SuperGrok poll + C6 when
-            // process postpaid cache shows OAuth class dominates. Do not invent
-            // flags (history/cache cold → false). Observed Build/extras come
-            // from the same series so flat note does not overclaim.
-            let flat_ev = xai_grok_shell::auth::flat_poll_evidence_from_history();
-            let oauth_postpaid_dominates =
-                xai_grok_shell::auth::cached_console_team_postpaid_default()
-                    .is_some_and(|m| m.oauth_class_dominates());
-            let msg =
-                crate::views::credit_bar::format_usage_summary_with_live_identity_gap_and_honesty(
-                    effective_supergrok.as_ref(),
-                    summary_topup.as_ref(),
-                    live,
-                    prepaid,
-                    prepaid_gap,
-                    flat_ev.unproven,
-                    flat_ev.observed_build,
-                    flat_ev.observed_extras,
-                    oauth_postpaid_dominates,
-                );
+            let msg = match &balance {
+                Some(bal) => {
+                    crate::views::credit_bar::format_usage_summary(bal, summary_topup.as_ref())
+                }
+                None => "No billing data available.".to_string(),
+            };
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(msg),
             ));
         }
-    }
-    // Keep open /limits modal meters in sync after silent or loud billing fetch.
-    if let Some(snap) = super::status::rebuild_limits_snapshot_for_agent(app, agent_id)
-        && let Some(agent) = app.agents.get_mut(&agent_id)
-        && let Some(crate::views::modal::ActiveModal::Limits { state }) =
-            agent.active_modal.as_mut()
-    {
-        state.apply_snapshot(snap);
     }
     vec![]
 }

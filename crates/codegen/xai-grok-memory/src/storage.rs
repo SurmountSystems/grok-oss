@@ -776,7 +776,11 @@ fn normalize_remote_url(url: &str) -> Option<String> {
                 .map(|(_, path)| path)?
         }
     } else {
-        return None;
+        // HTTPS/SSH-with-scheme: https://github.com/org/repo.git
+        url.split("//")
+            .nth(1)
+            .and_then(|after_scheme| after_scheme.split_once('/'))
+            .map(|(_, path)| path)?
     };
 
     let cleaned = path

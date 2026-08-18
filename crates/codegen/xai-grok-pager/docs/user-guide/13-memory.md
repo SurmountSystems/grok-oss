@@ -55,7 +55,7 @@ enabled = true
 
 ```bash
 export GROK_MEMORY=1
-grok
+grok-oss
 ```
 
 ### Force-Disable
@@ -321,23 +321,23 @@ lambda = 0.7             # 0.0 = max diversity, 1.0 = pure relevance
 
 ## CLI Commands
 
-The `grok memory` command manages memory from the shell. It has one subcommand, `clear`:
+The `grok-oss memory` command manages memory from the shell. It has one subcommand, `clear`:
 
 ```bash
 # Clear workspace memory (MEMORY.md, sessions/, and index.sqlite). This is the default scope.
-grok memory clear
+grok-oss memory clear
 
 # The same scope, stated explicitly
-grok memory clear --workspace
+grok-oss memory clear --workspace
 
 # Clear the global MEMORY.md
-grok memory clear --global
+grok-oss memory clear --global
 
 # Clear both workspace and global memory
-grok memory clear --all
+grok-oss memory clear --all
 
 # Skip the confirmation prompt (-y is the short form)
-grok memory clear --yes
+grok-oss memory clear --yes
 ```
 
 To edit memory from the shell, open the files in your editor directly -- for example, `$EDITOR ~/.grok/memory/MEMORY.md`.
@@ -468,6 +468,6 @@ $EDITOR ~/.grok/memory/MEMORY.md
 ### Debug Logging
 
 ```bash
-RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok
+RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok-oss
 grep "memory" /tmp/grok.log
 ```

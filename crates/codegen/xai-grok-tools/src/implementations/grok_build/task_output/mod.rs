@@ -395,6 +395,12 @@ impl TaskOutputTool {
 
 pub(crate) use xai_tool_types::MAX_MULTI_WAIT_IDS;
 
+/// Terminal task statuses as produced by `snapshot_to_result` /
+/// `format_subagent_snapshot`; multi-wait summaries count these as finished.
+pub(crate) fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "timed_out")
+}
+
 pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
     TaskOutputResult {
         task_id: task_id.to_string(),
@@ -683,7 +689,7 @@ pub(crate) fn format_subagent_snapshot(
                 "Subagent is still running.\n\
                  Type: {}\n\
                  Description: {}\n\
-                 Elapsed: {:.1}s\n\
+                 Elapsed: {elapsed}\n\
                  Progress: turn {turn_count}, {tool_call_count} tool calls, \
                  {tokens_k}K/{capacity_k}K tokens ({context_usage_pct}% context)\n\
                  Tools used: {tools_str}\n\
@@ -2334,6 +2340,138 @@ mod tests {
     }
 
     #[test]
+    fn format_running_subagent_long_wait_uses_minutes_not_raw_seconds() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-long".to_string(),
+            description: "compiled from src/systems".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 1,
+                tool_call_count: 1,
+                tokens_used: 1_000,
+                context_window_tokens: 128_000,
+                context_usage_pct: 1,
+                tools_used: vec!["bash".to_string()],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 943_000,
+        };
+        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let output = match result {
+            TaskOutputOutput::Result(r) => r.output,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        assert!(
+            output.contains("15m43s"),
+            "943 seconds must read as minutes, not a raw second count: {output}"
+        );
+        assert!(
+            !output.contains("943.0s")
+                && !output.contains("943s")
+                && !output.contains("943 seconds"),
+            "must not paint 943 as a raw second count: {output}"
+        );
+    }
+
+    // raw_output_bytes is body-only so identical Running state is stable across WaitHints.
+    #[test]
+    fn format_running_subagent_raw_output_bytes_stable_across_wait_hints() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-stable".to_string(),
+            description: "stable body".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 1,
+                tool_call_count: 2,
+                tokens_used: 3_000,
+                context_window_tokens: 128_000,
+                context_usage_pct: 2,
+                tools_used: vec!["bash".to_string()],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 1_000,
+        };
+        let expected_body = format!(
+            "Subagent is still running.\n\
+             Type: {}\n\
+             Description: {}\n\
+             Elapsed: {}\n\
+             Progress: turn 1, 2 tool calls, \
+             3K/128K tokens (2% context)\n\
+             Tools used: bash\n\
+             Errors: 0",
+            snap.subagent_type,
+            snap.description,
+            xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms)),
+        );
+        let not_requested = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        let clamped = match format_subagent_snapshot(
+            &snap,
+            WaitHint::Elapsed {
+                requested: Duration::from_secs(2_400),
+                waited: Duration::from_secs(600),
+            },
+        ) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        assert_eq!(not_requested.raw_output_bytes, expected_body.len());
+        assert_eq!(clamped.raw_output_bytes, expected_body.len());
+        assert_eq!(not_requested.raw_output_bytes, clamped.raw_output_bytes);
+        assert!(not_requested.output.starts_with(&expected_body));
+        assert!(clamped.output.starts_with(&expected_body));
+        assert_ne!(
+            not_requested.output.len(),
+            clamped.output.len(),
+            "hint variants must still produce different formatted output"
+        );
+    }
+
+    #[test]
+    fn format_completed_subagent_meta_long_wait_uses_minutes_not_raw_milliseconds() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-done".to_string(),
+            description: "find files".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Completed {
+                output: "Found 3 files".to_string(),
+                tool_calls: 5,
+                turns: 2,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 943_000,
+        };
+        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let output = match result {
+            TaskOutputOutput::Result(r) => r.output,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        assert!(
+            output.contains("duration=15m43s"),
+            "completed meta must use compact minutes, got: {output}"
+        );
+        assert!(
+            !output.contains("duration_ms="),
+            "raw millisecond field must not leak: {output}"
+        );
+        assert!(
+            !output.contains("943000")
+                && !output.contains("943s")
+                && !output.contains("943 seconds"),
+            "raw millisecond or second count must not leak: {output}"
+        );
+    }
+
+    #[test]
     fn format_running_subagent_with_no_tools_shows_none_yet() {
         let snap = SubagentSnapshot {
             subagent_id: "sub-new".to_string(),
@@ -2368,6 +2506,120 @@ mod tests {
             }
             other => panic!("Expected Result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn wait_running_subagent_to_prompt_format_is_status_only() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-run".to_string(),
+            description: "compiled from src/systems".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 4,
+                tool_call_count: 9,
+                tokens_used: 12_000,
+                context_window_tokens: 200_000,
+                context_usage_pct: 6,
+                tools_used: vec!["bash".to_string(), "read_file".to_string()],
+                error_count: 1,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 8_000,
+        };
+        let result = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        let prompt =
+            crate::types::output::ToolOutput::TaskOutput(TaskOutputOutput::Result(result.clone()))
+                .to_prompt_format();
+        for leak in [
+            "stdout",
+            "L3 dump",
+            "fn main",
+            "===== BEGIN TOOL OUTPUT =====",
+            "/tmp/child-tool.log",
+        ] {
+            assert!(
+                !prompt.contains(leak) && !result.output.contains(leak),
+                "running wait must not ingest child tool bodies ({leak}): {prompt}"
+            );
+        }
+        for field in [
+            "still running",
+            "Type:",
+            "Description:",
+            "Elapsed:",
+            "Progress:",
+            "Tools used:",
+            "Errors:",
+        ] {
+            assert!(
+                result.output.contains(field),
+                "running snapshot must keep progress field {field}: {}",
+                result.output
+            );
+        }
+        assert!(
+            prompt.len() < 4_000,
+            "running wait prompt must stay a short status card, got {} bytes",
+            prompt.len()
+        );
+    }
+
+    #[test]
+    fn completed_subagent_task_output_is_capped_or_points_at_report() {
+        let last_answer = "Z".repeat(200_000);
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-huge".to_string(),
+            description: "write report".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Completed {
+                output: last_answer.clone(),
+                tool_calls: 20,
+                turns: 6,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 12_000,
+        };
+        let result = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {other:?}"),
+        };
+        let prompt =
+            crate::types::output::ToolOutput::TaskOutput(TaskOutputOutput::Result(result.clone()))
+                .to_prompt_format();
+        assert!(
+            result.output.len() < 80_000,
+            "parent ToolResult must not store a 200k last answer verbatim ({} bytes)",
+            result.output.len()
+        );
+        assert!(
+            prompt.len() < 80_000,
+            "parent prompt_text must not store a 200k last answer verbatim ({} bytes)",
+            prompt.len()
+        );
+        assert!(
+            !result.output.contains(&last_answer) && !prompt.contains(&last_answer),
+            "200k-char last answer must not be stored verbatim on the parent ToolResult"
+        );
+        assert!(
+            result.truncated
+                || !result.output_file.is_empty()
+                || result.output.to_ascii_lowercase().contains("report")
+                || result
+                    .truncation_hint
+                    .to_ascii_lowercase()
+                    .contains("report")
+                || result.truncation_hint.contains("truncated"),
+            "capped last answer must mark truncated or point at a report: truncated={} file={} hint={}",
+            result.truncated,
+            result.output_file,
+            result.truncation_hint
+        );
     }
 
     #[tokio::test]

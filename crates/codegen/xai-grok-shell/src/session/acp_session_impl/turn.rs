@@ -1276,6 +1276,7 @@ impl SessionActor {
         }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
+        self.open_subagent_spawn_admission();
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
@@ -2901,6 +2902,14 @@ impl SessionActor {
                 && let Err(e) = self.run_compact_only(trigger_info, false).await
             {
                 tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
+                if Self::is_compact_cancelled_error(&e) {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
+                        context: Some(serde_json::json!({
+                            "reason": "auto_compact_cancelled",
+                        })),
+                    });
+                }
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
@@ -3546,10 +3555,6 @@ impl SessionActor {
                 .await;
             record_response_span.close();
             if let Some(text) = fallback_text {
-                // Fallback one-shots bypass the stream ChannelToken path —
-                // scrub here so UI matches stream/chat_state hygiene.
-                let text =
-                    crate::session::helpers::assistant_ascii_scrub::scrub_assistant_text(text);
                 tracing::warn!(
                     text_len = text.len(),
                     "emitting fallback AgentMessageChunk — no text chunks were streamed"
@@ -3903,6 +3908,16 @@ impl SessionActor {
             {
                 if let Err(e) = self.run_compact_only(trigger_info, false).await {
                     tracing::error!(error = %e, "Preflight overflow compaction failed");
+                    if Self::is_compact_cancelled_error(&e) {
+                        return Ok(TurnOutcome::Cancelled {
+                            category: Some(
+                                crate::session::events::CancellationCategory::MidTurnAbort,
+                            ),
+                            context: Some(serde_json::json!({
+                                "reason": "auto_compact_cancelled",
+                            })),
+                        });
+                    }
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }

@@ -2262,6 +2262,7 @@
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),
                     summary_preview: None,
+                    saved_too_little: false,
                 },
             ),
             &mut app,
@@ -2279,9 +2280,9 @@
         );
     }
 
-    /// Compaction must not wipe the user-visible todo board. Resources still
-    /// hold TodoState; the UI used to call `update_todos([])` on
-    /// AutoCompactCompleted, making the list look empty after compact.
+    /// Auto-compact refreshes the context bar. It must not wipe the UI todo
+    /// board. Resources still hold the board; a later Plan / todo_write
+    /// refresh still replaces via the normal ACP Plan path.
     #[test]
     fn auto_compact_completed_preserves_todo_board() {
         let mut app = make_app_with_agent("sess-compact");
@@ -2314,6 +2315,7 @@
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),
                     summary_preview: None,
+                    saved_too_little: false,
                 },
             ),
             &mut app,

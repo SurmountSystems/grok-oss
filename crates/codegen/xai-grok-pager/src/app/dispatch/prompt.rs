@@ -738,6 +738,9 @@ pub(super) fn dispatch_send_prompt_submission(
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
+    if let Some(toast) = implement_rewrite.toast {
+        agent.show_toast(&toast);
+    }
 
     // Paste-then-immediate-send: an image probe from a just-pasted Cmd+V is still off-thread
     // Stash this send and re-issue it once the probe completes so the image is never dropped from the built content blocks
@@ -1120,8 +1123,6 @@ pub(super) fn dispatch_send_prompt_submission(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
-                // Token Economy: clamp implement-loop effort on human /implement.
-                let pass_text = apply_implement_effort_on_submit(agent, pass_text);
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -1153,7 +1154,6 @@ pub(super) fn dispatch_send_prompt_submission(
     } else if !literal && crate::slash::commands::exit::is_exit_alias(trimmed) {
         if consume_input {
             agent.prompt.set_text("");
-            agent.clear_unsent_prompt_draft();
         }
         effects.extend(dispatch(Action::Quit, app));
         return effects;
@@ -1298,7 +1298,6 @@ pub(super) fn dispatch_send_prompt_submission(
             agent.note_draft_consumed();
         }
         tip_send_now_after_queue = queued_while_running;
-        ack_queued_after_local = queued_while_busy;
     }
 
     if tip_send_now_after_queue {
@@ -1308,6 +1307,9 @@ pub(super) fn dispatch_send_prompt_submission(
             .is_some_and(|agent| agent.held_queue_count() > 0);
         if !inline_hint_shown {
             maybe_show_send_now_tip(app);
+        }
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.maybe_toast_plan_feedback_queue();
         }
     }
 
@@ -1783,41 +1785,27 @@ pub(super) fn handle_prompt_response(
             // So treat the queue as non-empty (suppress TurnComplete and the idle escapes), mirroring the local non-empty-queue behavior
             let queue_empty =
                 agent.session.pending_prompts.is_empty() && pending_adoption.is_none();
-            let session_name = crate::notifications::title::resolve_session_title_name(
-                agent.display_name.as_deref(),
-                agent.generated_session_title.as_deref(),
-            )
-            .map(str::to_owned);
+            let session_name = agent
+                .display_name
+                .as_deref()
+                .or(agent.generated_session_title.as_deref());
 
             // Skip idle escapes when the queue is non-empty: the next turn starts immediately and would overwrite them (title flicker)
             if queue_empty {
                 let cwd_str = app.cwd.to_string_lossy();
                 let model = agent.session.models.current_model_name();
-                // Parent turn is idle, but L2 children may still be live.
-                // Forcing a fully idle DE title here races the next tick and
-                // can flush session-only OSC on draw (pending skips recompute).
-                let has_running_subagents =
-                    crate::app::app_view::agent_has_running_title_subagents(agent);
-                let subagent_wait =
-                    has_running_subagents.then_some(crate::acp::tracker::TurnActivity::Waiting(
-                        crate::acp::tracker::WaitingReason::Subagent,
-                    ));
-                // busy_agent_count under-counts other top-level agents (we only
-                // hold this AgentView). Next update_notifications tick fills.
-                let post_turn_title = crate::notifications::TitleState {
-                    session_name: session_name.as_deref(),
+                let idle_title = crate::notifications::TitleState {
+                    session_name,
                     model: model.as_deref(),
-                    activity: subagent_wait.as_ref(),
+                    activity: None,
                     has_pending_permissions: false,
                     cwd: Some(&cwd_str),
                     turn_elapsed: None,
-                    is_busy: has_running_subagents,
-                    busy_agent_count: usize::from(has_running_subagents),
+                    is_busy: false,
                     focused: true,
                 };
-                app.pending_notification_escapes = app
-                    .notification_service
-                    .build_idle_escapes(&post_turn_title);
+                app.pending_notification_escapes =
+                    app.notification_service.build_idle_escapes(&idle_title);
             }
 
             if kind != NotificationEventKind::TurnComplete || queue_empty {
@@ -2014,9 +2002,6 @@ pub(super) fn handle_prompt_response(
             silent: true,
             nonce: Default::default(),
         });
-        if let Some(toast) = soft_stop_toast {
-            agent.show_toast(&toast);
-        }
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }

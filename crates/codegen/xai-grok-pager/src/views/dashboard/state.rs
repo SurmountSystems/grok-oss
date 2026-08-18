@@ -970,7 +970,7 @@ fn read_subdirs(
             }
         }
     }
-    out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    out.sort_by_key(|a| a.label.to_lowercase());
     out
 }
 
@@ -4167,7 +4167,6 @@ fn dashboard_action_for_id(
         | ActionId::ToggleMouseCapture
         | ActionId::NextModel
         | ActionId::CancelTurn
-        | ActionId::ToggleGlobalPause
         | ActionId::ToggleYolo
         | ActionId::ToggleMultiline
         | ActionId::FocusPrompt
@@ -4178,7 +4177,6 @@ fn dashboard_action_for_id(
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink
         | ActionId::ToggleTodos
-        | ActionId::ClearCompletedTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal
         | ActionId::ToggleQueue
@@ -4206,8 +4204,7 @@ fn dashboard_action_for_id(
         | ActionId::DashboardOverlayExit
         | ActionId::DashboardOverlayPrev
         | ActionId::DashboardOverlayNext
-        | ActionId::DashboardOverlayStop
-        | ActionId::ToggleSoftStop => None,
+        | ActionId::DashboardOverlayStop => None,
     }
 }
 

@@ -728,6 +728,7 @@ mod tests {
 
     /// Git repo + stale linked-worktree registration (working tree deleted).
     fn plant_stale_git_worktree(repo: &Path, wt: &Path) {
+        xai_test_utils::require_git!();
         std::fs::create_dir_all(repo).unwrap();
         init_git_repo(repo);
         std::fs::write(repo.join("f.txt"), b"x").unwrap();

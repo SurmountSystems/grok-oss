@@ -103,6 +103,14 @@ pub struct SessionHandle {
     /// The model this session was created with (or switched to via setModel).
     /// Per-session tracking prevents cross-client contamination in leader mode where `MvpAgent.current_model_id` is shared mutable state.
     pub model_id: acp::ModelId,
+    /// Whether this session's scheduled fires run as detached background
+    /// subagents. Copied from the value the spawn resolved for the session's
+    /// [`AgentRebuildSpec`](crate::session::agent_rebuild::AgentRebuildSpec), so
+    /// it is pinned for the session's whole life exactly like the fire side.
+    /// Published to clients on the `session/new` / `session/load` response so
+    /// they describe the fires this session will actually get rather than
+    /// re-resolving a setting that may have flipped since spawn.
+    pub scheduler_background_loops: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The selected context window in tokens, 0 for none, shared with the session actor.
     pub context_window_selection: std::sync::Arc<std::sync::atomic::AtomicU64>,

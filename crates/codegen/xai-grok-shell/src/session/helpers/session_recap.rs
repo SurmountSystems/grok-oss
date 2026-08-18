@@ -177,6 +177,22 @@ pub(crate) fn budget_instruction_items(
     strip_reasoning: bool,
     context_window: u64,
 ) -> Vec<ConversationItem> {
+    budget_instruction_items(
+        conversation,
+        recap_instruction(tag),
+        strip_reasoning,
+        context_window,
+    )
+}
+
+/// Instruction-generic core of [`budget_recap_items`], shared with the
+/// turn-summary side-call.
+pub(crate) fn budget_instruction_items(
+    conversation: Vec<ConversationItem>,
+    instruction: String,
+    strip_reasoning: bool,
+    context_window: u64,
+) -> Vec<ConversationItem> {
     let effective_window = context_window.min(RECAP_CONTEXT_WINDOW_CAP);
     let prompt_budget = (effective_window.saturating_mul(RECAP_BUDGET_THRESHOLD_PERCENT) / 100)
         .saturating_sub(RECAP_BUDGET_HEADROOM_TOKENS);

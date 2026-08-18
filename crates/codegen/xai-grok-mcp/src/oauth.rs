@@ -164,6 +164,12 @@ async fn authenticate_with_fs_lock(
         }
     };
 
+    // Bounded, non-blocking poll instead of an unbounded `flock(LOCK_EX)`:
+    // the leader can legitimately hold this lock for minutes (user consent),
+    // but an abandoned/wedged leader must not park followers forever. On
+    // timeout we fall back to running our own flow (same as lock-acquisition
+    // failure), which the token-changed re-check below keeps from producing a
+    // duplicate consent when the leader did finish.
     let lock_file = tokio::task::spawn_blocking(move || {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
@@ -649,6 +655,19 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn oauth_consent_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_oauth_consent_timeout(BROWSER_AUTH_TIMEOUT);
+        assert!(
+            msg.contains("after 10m0s"),
+            "10-minute consent budget must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("600s") && !msg.contains("600 seconds"),
+            "raw second budget must not leak: {msg}"
+        );
     }
 
     #[test]

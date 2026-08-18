@@ -584,6 +584,75 @@ It has multiple lines."#;
         assert_eq!(body, content);
     }
 
+    #[tokio::test]
+    async fn load_skill_content_trusts_preloaded_body_with_leading_hr() {
+        let skill = SkillInfo {
+            name: "hr-body".to_string(),
+            display_name: None,
+            description: "test".to_string(),
+            short_description: None,
+            author: None,
+            argument_hint: None,
+            path: "chat-product://hr-body".to_string(),
+            scope: SkillScope::User,
+            config_source: None,
+            plugin_name: None,
+            plugin_version: None,
+            plugin_root: None,
+            plugin_data: None,
+            allowed_tools: None,
+            license: None,
+            compatibility: None,
+            metadata: None,
+            model: None,
+            effort: None,
+            user_invocable: true,
+            disable_model_invocation: false,
+            when_to_use: None,
+            has_user_specified_description: true,
+            paths: None,
+            enabled: true,
+            body: Some("---\n\nParagraph after a markdown HR.".to_string()),
+        };
+        let loaded = load_skill_content(&skill).await.unwrap();
+        assert_eq!(loaded, "---\n\nParagraph after a markdown HR.");
+    }
+
+    #[tokio::test]
+    async fn load_skill_content_rejects_synthetic_path_without_body() {
+        let skill = SkillInfo {
+            name: "pdf".to_string(),
+            display_name: None,
+            description: "test".to_string(),
+            short_description: None,
+            author: None,
+            argument_hint: None,
+            path: "chat-product://pdf".to_string(),
+            scope: SkillScope::Server,
+            config_source: None,
+            plugin_name: None,
+            plugin_version: None,
+            plugin_root: None,
+            plugin_data: None,
+            allowed_tools: None,
+            license: None,
+            compatibility: None,
+            metadata: None,
+            model: None,
+            effort: None,
+            user_invocable: true,
+            disable_model_invocation: false,
+            when_to_use: None,
+            has_user_specified_description: true,
+            paths: None,
+            enabled: true,
+            body: None,
+        };
+        let err = load_skill_content(&skill).await.unwrap_err();
+        assert!(err.contains("no preloaded body"), "{err}");
+        assert!(err.contains("chat-product://pdf"), "{err}");
+    }
+
     #[test]
     fn cap_skill_body_leaves_body_under_cap_untouched() {
         let mut body = "# Small skill\n\nDo the thing.".to_owned();

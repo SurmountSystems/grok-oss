@@ -836,6 +836,70 @@ mod tests {
     }
 
     #[test]
+    fn classify_cloudflare_522_is_retryable() {
+        let err = api_err(
+            StatusCode::from_u16(522).unwrap(),
+            "Connection to Grok timed out or was interrupted. (HTTP 522).",
+        );
+        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected RetryWithClientRebuild for 522, got {other:?}"),
+        }
+        match classify_error(&err, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } => {}
+            other => panic!("expected Retry for 522 attempt 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cloudflare_525_is_fatal_even_with_should_retry_true() {
+        // `x-should-retry: true` is deliberately ignored (only `false` is
+        // honored), so 525/526 stay Fatal whatever a future header says.
+        for should_retry in [None, Some(true)] {
+            let err = SamplingError::Api {
+                status: StatusCode::from_u16(525).unwrap(),
+                message: "Secure connection to Grok failed. (HTTP 525).".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry,
+                error_code: None,
+            };
+            match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+                RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                    assert_eq!(status.as_u16(), 525);
+                }
+                other => panic!("expected Fatal for 525 ({should_retry:?}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_clamps_and_jitters_retry_after_on_generic_path_but_not_on_429() {
+        // Cloudflare answers 52x with Retry-After: 60-120. Honoring that
+        // verbatim across 14 retries would stall the turn ~28 min, and an
+        // unjittered wait would re-hit the recovering origin in lockstep.
+        let edge = api_err_with_retry_after(StatusCode::from_u16(522).unwrap(), 120);
+        match classify_error(&edge, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { backoff } => {
+                // 30s clamp with +/-20% jitter.
+                assert!(backoff >= Duration::from_secs(24), "got {backoff:?}");
+                assert!(backoff <= Duration::from_secs(36), "got {backoff:?}");
+            }
+            other => panic!("expected Retry for 522, got {other:?}"),
+        }
+
+        // The 429 path keeps the full wait; its total is bounded by
+        // RATE_LIMIT_RETRY_THRESHOLD attempts and the parse-level 120s cap.
+        let rate_limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 120);
+        match classify_error(&rate_limited, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                assert_eq!(backoff, Duration::from_secs(120));
+            }
+            other => panic!("expected RetryWithBackoff for 429, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_5xx_subsequent_retry_uses_plain_retry() {
         let err = api_err(StatusCode::BAD_GATEWAY, "boom");
         match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
@@ -885,6 +949,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(12),
             should_retry: None,
+            error_code: None,
         };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { backoff } => {
@@ -927,7 +992,11 @@ mod tests {
 
     #[test]
     fn cloudflare_edge_range_is_transient() {
-        for code in [520u16, 521, 522, 523, 524, 525, 526, 527, 530] {
+        // Transient edge outages rebuild the HTTP client. Origin-TLS 525/526
+        // stay Fatal via RetryPolicy::edge_client (a broken cert never clears).
+        // is_transient_api_status may still list 525/526; classify uses
+        // is_retryable, which does not treat those two as retryable.
+        for code in [520u16, 521, 522, 523, 524, 527, 530] {
             assert!(
                 is_transient_api_status(code),
                 "{code} should be transient for classify"
@@ -940,6 +1009,15 @@ mod tests {
                 ),
                 "classify {code}"
             );
+        }
+        for code in [525u16, 526] {
+            let err = api_status_code(code, "edge");
+            match classify_error(&err, 0, 3, RATE_LIMIT_RETRY_THRESHOLD) {
+                RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                    assert_eq!(status.as_u16(), code);
+                }
+                other => panic!("expected Fatal for origin-TLS {code}, got {other:?}"),
+            }
         }
     }
 
@@ -1008,6 +1086,22 @@ mod tests {
             cloned.to_string().contains("line 1 column"),
             "original position text must survive the clone: {cloned}"
         );
+    }
+
+    /// The tee cell captures mid-stream errors via `clone_error`; dropping
+    /// the code there would silently disable mid-stream strip recovery.
+    #[test]
+    fn clone_error_preserves_stream_error_code() {
+        let cloned = clone_error(&SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        });
+        let SamplingError::StreamError { code, .. } = &cloned else {
+            panic!("expected StreamError, got {cloned:?}");
+        };
+        assert_eq!(*code, Some(ApiErrorCode::InvalidImage));
+        assert!(cloned.is_image_processing_error());
     }
 
     #[test]

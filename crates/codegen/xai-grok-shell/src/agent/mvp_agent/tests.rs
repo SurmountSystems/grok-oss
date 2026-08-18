@@ -1265,6 +1265,7 @@ pub(super) fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
+        scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
@@ -1345,6 +1346,33 @@ async fn set_session_model_does_not_cross_contaminate() {
         .as_ref(),
         "grok-3",
         "Session B's model must not be affected by session A's model change"
+    );
+}
+/// Seeded session slugs that are not in the catalog stay on Chat Completions
+/// and keep their id. `session/load` must not remap them onto grok-4.5 Responses.
+#[tokio::test]
+async fn seeded_test_model_keeps_chat_completions_backend() {
+    let agent = build_minimal_agent_for_tests();
+    let seeded = acp::ModelId::new("test-model");
+    let sampling = agent.resolve_sampling_config_for_model(&seeded, None);
+    assert_eq!(sampling.model, "test-model");
+    assert_eq!(
+        sampling.api_backend,
+        crate::sampling::ApiBackend::ChatCompletions,
+        "seeded test-model must use Chat Completions, not the default Responses catalog"
+    );
+    let entry = crate::agent::handlers::model_switch::model_entry_for_apply(&agent, &seeded)
+        .expect("seeded test-model must resolve via fallback");
+    assert_eq!(entry.info.model, "test-model");
+    assert_eq!(
+        entry.info.api_backend,
+        crate::sampling::ApiBackend::ChatCompletions
+    );
+    let vanished_grok = acp::ModelId::new("grok-4.3-not-in-this-catalog");
+    assert!(
+        crate::agent::handlers::model_switch::model_entry_for_apply(&agent, &vanished_grok)
+            .is_err(),
+        "vanished grok-* slugs must not take the seeded-model fallback"
     );
 }
 #[tokio::test]

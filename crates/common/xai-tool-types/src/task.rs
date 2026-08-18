@@ -353,18 +353,200 @@ impl SubagentCompletedOutput {
         format_resume_footer(&self.subagent_id, self.persona.as_deref())
     }
 
-    /// Render the full model-facing completion block: the answer text, the
+    /// Render the parent-facing completion block: the answer text, the
     /// `<subagent_meta>` line, and the `<subagent_result>` resume footer.
+    ///
+    /// Huge last answers are capped at 40k so ACP ingest does not replay the
+    /// full child transcript into parent context. The stored [`Self::output`]
+    /// field stays the full string for child-session views.
     pub fn to_model_text(&self) -> String {
-        format_subagent_completed(
+        let text = format_subagent_completed(
             &self.output,
             &self.subagent_id,
             self.tool_calls,
             self.turns,
             self.duration_ms,
             self.persona.as_deref(),
-        )
+        );
+        cap_parent_subagent_last_answer(&text)
     }
+}
+
+/// Same 40k parent ingest policy as bash / completed-poll ToolResults.
+const PARENT_SUBAGENT_LAST_ANSWER_BYTES: usize = 40_000;
+const PARENT_SUBAGENT_LAST_ANSWER_PREVIEW: usize = 2_000;
+
+fn cap_parent_subagent_last_answer(text: &str) -> String {
+    if text.len() <= PARENT_SUBAGENT_LAST_ANSWER_BYTES {
+        return text.to_string();
+    }
+    let mut end = PARENT_SUBAGENT_LAST_ANSWER_PREVIEW.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[Output truncated: {} of {} bytes shown. \
+         Full last answer is not stored on the parent ToolResult. \
+         Use read_file on the on-disk report if one exists.]",
+        &text[..end],
+        end,
+        text.len()
+    )
+}
+
+/// Plain-text CTA after a background-spawn notice.
+///
+/// Keep this unwrapped (no `<system-reminder>` / `<system_reminder>` tags).
+/// Hardcoding either tag in shared tool text clashes with harness-specific
+/// wrappers and can make UIs hide the whole spawn result as a reminder block.
+/// Harness-owned reminders go through `format_with_reminders` with
+/// `system_reminder_tag`.
+pub const BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK: &str =
+    "Do not only poll the child. Continue unfinished parent work now.";
+
+/// How many asks *before* the latest one may still count as leftover parent
+/// exec. Older implement/fix history after the user switched to review-only
+/// must not keep the CTA on.
+const PRIOR_EXEC_LOOKBACK: usize = 2;
+
+/// Whether background-spawn text should tell the parent to keep its own work.
+///
+/// `user_asks` are recent parent user texts (oldest → newest), not including
+/// this spawn's tool call. `child_description` / `child_prompt` are the spawn
+/// being acknowledged.
+///
+/// Returns true only when the latest ask (or either of the two before it)
+/// shows unfinished parent exec work besides the delegated child job.
+/// No user asks → false.
+pub fn should_continue_parent_work(
+    user_asks: &[String],
+    child_description: &str,
+    child_prompt: &str,
+) -> bool {
+    let child = format!("{child_description}\n{child_prompt}");
+    let Some((last, prior)) = user_asks.split_last() else {
+        return false;
+    };
+    let skip = prior.len().saturating_sub(PRIOR_EXEC_LOOKBACK);
+    let recent_prior = &prior[skip..];
+    if recent_prior.iter().any(|a| blob_has_exec(a)) {
+        return true;
+    }
+    if blob_has_exec(last) && (blob_is_delegate(last) || blob_is_delegate(&child)) {
+        return true;
+    }
+    if blob_has_exec(last) && !blob_is_delegate(last) {
+        return true;
+    }
+    // "while waiting, spawn …" — parent still has the waiting work.
+    let last_l = last.to_ascii_lowercase();
+    if last_l.contains("while waiting") || last_l.contains("whilst waiting") {
+        return true;
+    }
+    false
+}
+
+fn blob_has_exec(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "smoke",
+        "op_chain",
+        "ci fail",
+        "ci failure",
+        "still fail",
+        "still fails",
+        "failing",
+        "bazel test",
+        "pytest",
+        "cargo test",
+        "npm test",
+        "deploy",
+        "bringup",
+        "implement",
+        "unfinished",
+        "rebase",
+        "adler",
+        "nondetermin",
+        "fix the ",
+        "fix these ",
+        "fix all ",
+        "gt submit",
+        "check ",
+        " bug",
+        "bugs",
+        "run the test",
+        "run tests",
+        "pass/fail",
+        "integration test",
+        "hw5",
+        "pr check",
+        "ci check",
+    ];
+    NEEDLES.iter().any(|n| t.contains(n))
+}
+
+fn blob_is_delegate(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "spawn an agent",
+        "spawn a subagent",
+        "spawn a agent",
+        "spawn subagent",
+        "spawn agent",
+        "spawn as many",
+        "spawn 4",
+        "spawn four",
+        "/pr-babysit",
+        "pr-babysit",
+        "/code-review",
+        "/review",
+        "review this pr",
+        "review the pr",
+        "review this pull",
+        "code review",
+        "colossus-review",
+        "peer review",
+        "subagent review",
+        "independent review",
+        "reviewer",
+    ];
+    NEEDLES.iter().any(|n| t.contains(n))
+}
+
+/// Model-facing names used by the background-subagent notices. The retrieval
+/// tool and both of its parameters are host-renameable (tool randomization),
+/// so callers resolve them (e.g. from their `TemplateRenderer`) instead of
+/// baking the canonical names into the notice text.
+#[derive(Clone, Copy, Debug)]
+pub struct BackgroundNoticeNaming<'a> {
+    /// Task-result retrieval tool (canonical: `get_task_output`).
+    pub task_output_tool: &'a str,
+    /// Its ids parameter (canonical: `task_ids`).
+    pub task_ids_param: &'a str,
+    /// Its wait parameter (canonical: `timeout_ms`).
+    pub timeout_ms_param: &'a str,
+}
+
+impl BackgroundNoticeNaming<'static> {
+    /// Canonical grok-build names, for hosts without renaming.
+    pub const CANONICAL: Self = Self {
+        task_output_tool: "get_task_output",
+        task_ids_param: "task_ids",
+        timeout_ms_param: "timeout_ms",
+    };
+}
+
+/// Shared retrieval line for background notices: names this id and the
+/// host-facing get-output tool/params. Polling policy lives in the system prompt.
+fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) -> String {
+    let BackgroundNoticeNaming {
+        task_output_tool,
+        task_ids_param,
+        timeout_ms_param,
+    } = *naming;
+    format!(
+        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and a positive {timeout_ms_param}."
+    )
 }
 
 /// Plain-text CTA after a background-spawn notice.
@@ -659,6 +841,23 @@ pub fn format_subagent_backgrounded_on_turn_end(
 /// Render the full model-facing completion block for a finished subagent:
 /// the answer text, a `<subagent_meta>` line carrying run stats, and the
 /// `<subagent_result>` resume footer.
+/// Model-facing `<subagent_meta>` line. Duration is compact human text, not
+/// raw milliseconds, so a model cannot invent a second count from the tag.
+pub fn format_subagent_meta_line(
+    subagent_id: &str,
+    subagent_type: &str,
+    tool_calls: u32,
+    turns: u32,
+    duration_ms: u64,
+) -> String {
+    let duration =
+        xai_tty_utils::format_human_duration(std::time::Duration::from_millis(duration_ms));
+    format!(
+        "<subagent_meta>id={subagent_id}, type={subagent_type}, \
+         tool_calls={tool_calls}, turns={turns}, duration={duration}</subagent_meta>"
+    )
+}
+
 pub fn format_subagent_completed(
     output: &str,
     subagent_id: &str,
@@ -1546,6 +1745,63 @@ mod tests {
     }
 
     #[test]
+    fn to_model_text_caps_huge_last_answer_for_parent_ingest() {
+        let last_answer = "Z".repeat(200_000);
+        let output = SubagentCompletedOutput {
+            output: last_answer.clone(),
+            subagent_id: "sub-huge".into(),
+            subagent_type: "general-purpose".into(),
+            tool_calls: 20,
+            turns: 6,
+            duration_ms: 12_000,
+            worktree_path: None,
+            persona: None,
+            resume_from_hint: "sub-huge".into(),
+            persona_hint: None,
+        };
+        let text = output.to_model_text();
+        assert!(
+            text.len() < 80_000,
+            "parent ACP ingest must not carry a 200k last answer ({} bytes)",
+            text.len()
+        );
+        assert!(
+            !text.contains(&last_answer),
+            "200k-char last answer must not appear verbatim in to_model_text"
+        );
+        assert!(
+            output.output == last_answer,
+            "stored output stays the full child last answer"
+        );
+        assert!(
+            text.to_ascii_lowercase().contains("report")
+                || text.to_ascii_lowercase().contains("truncated"),
+            "capped last answer must mark truncated or point at a report: {text}"
+        );
+    }
+
+    #[test]
+    fn format_subagent_completed_long_wait_uses_minutes_not_raw_milliseconds() {
+        let text = format_subagent_completed("answer", "sub-1", "explore", 3, 2, 943_000, None);
+        assert!(
+            text.contains("<subagent_meta>"),
+            "expected a meta line, got: {text}"
+        );
+        assert!(
+            text.contains("duration=15m43s"),
+            "943000 ms must print as compact minutes, got: {text}"
+        );
+        assert!(
+            !text.contains("duration_ms="),
+            "raw millisecond field must not leak: {text}"
+        );
+        assert!(
+            !text.contains("943000") && !text.contains("943s") && !text.contains("943 seconds"),
+            "raw millisecond or second count must not leak: {text}"
+        );
+    }
+
+    #[test]
     fn is_terminal_by_status() {
         assert!(!result_with_status("running").is_terminal());
         assert!(!result_with_status("pending").is_terminal());
@@ -1740,6 +1996,54 @@ mod tests {
     fn task_tool_input_schema_omits_subagent_type() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         assert!(schema["properties"].get("subagent_type").is_none());
+    }
+
+    #[test]
+    fn task_output_input_accepts_singular_task_id_alias() {
+        // Canonical plural form (unchanged).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_ids": ["a", "b"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["a", "b"]);
+
+        // Singular key with a bare string — the shape models organically send
+        // (mirroring kill_task's singular task_id).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": "abc-123", "timeout_ms": 0}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["abc-123"]);
+        assert_eq!(input.timeout_ms, Some(0));
+
+        // Singular key with an array also works.
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": ["x", "y"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["x", "y"]);
+
+        // Plural key with a bare string.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_ids": "solo"}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["solo"]);
+
+        // Bare number (observed: an OS PID) becomes a string id, so the tool
+        // answers "Task 228 not found" instead of a deserialize error.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_id": 228}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["228"]);
+    }
+
+    #[test]
+    fn task_output_input_schema_does_not_advertise_the_alias() {
+        // The leniency is wire-only: the advertised schema must keep exactly
+        // the canonical properties (task_ids, timeout_ms) so tool-definition
+        // dumps and param randomization are unaffected.
+        let schema = serde_json::to_value(schemars::schema_for!(TaskOutputToolInput)).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("task_ids"));
+        assert!(props.contains_key("timeout_ms"));
+        assert!(
+            !props.contains_key("task_id"),
+            "singular alias must not leak into the schema: {props:?}"
+        );
+        assert_eq!(props.len(), 2);
+        // And task_ids stays a plain string array.
+        assert_eq!(props["task_ids"]["type"], "array");
+        assert_eq!(props["task_ids"]["items"]["type"], "string");
     }
 
     #[test]

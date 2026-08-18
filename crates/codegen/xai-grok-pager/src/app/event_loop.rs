@@ -233,7 +233,8 @@ pub(crate) struct RunResult {
     /// When set, the process should re-exec into the other screen mode after terminal restore.
     /// See `/minimal` and `/fullscreen`.
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
-    /// When set, re-exec the newly installed binary after `/rebuild`.
+    /// When set, the process should re-exec onto the newly installed binary
+    /// after terminal restore (`/rebuild` invoker or peer SIGUSR1).
     pub rebuild_relaunch: Option<super::app_view::RebuildRelaunch>,
 }
 /// In-flight reconnect re-initialization, tied to the agents whose reload windows it opened.
@@ -1311,10 +1312,6 @@ pub(crate) async fn run(
         if !app.consumer_account() {
             app.usage_visible = false;
             app.sync_billing_surface_to_agents();
-            for agent in app.agents.values_mut() {
-                agent.sampling_identity =
-                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
-            }
         }
     }
     let voice_mode_enabled = crate::app::resolve_voice_mode_live(
@@ -1395,14 +1392,6 @@ pub(crate) async fn run(
             user_config.as_ref(),
             managed_config.as_ref(),
             remote_settings.as_ref(),
-        )
-        .value,
-    );
-    crate::appearance::cache::set_always_expand_thinking(
-        xai_grok_shell::util::config::resolve_always_expand_thinking(
-            requirements.as_ref(),
-            user_config.as_ref(),
-            managed_config.as_ref(),
         )
         .value,
     );
@@ -1792,17 +1781,7 @@ pub(crate) async fn run(
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::NewAuto { new_folder_notice } => {
-            // Soft yellow informational banner (not an error): empty workspace.
-            if *new_folder_notice {
-                app.startup_warnings.push(crate::startup::StartupWarning {
-                    severity: crate::startup::WarningSeverity::Warning,
-                    message: crate::app::session_startup::new_folder_startup_message().to_string(),
-                    action: None,
-                });
-            }
-            None
-        }
+        MaterializedStartup::NewAuto => None,
     };
     if let Some(action) = startup_action {
         let effs = dispatch::dispatch(action, &mut app);
@@ -2157,6 +2136,9 @@ pub(crate) async fn run(
             // Leader disconnect: the bridge fires cancel when the IPC channel closes
             // Without this arm the loop would hang because AppView holds the client-side tx, keeping acp_rx open
             _ = connection_cancel.cancelled() => {
+                // Leader IPC cancel wins this biased select over quit-notify.
+                // Arm peer rebuild here so SIGUSR1 / request-file races still
+                // re-exec instead of a clean quit that never comes back.
                 let _ = dispatch::rebuild::arm_peer_rebuild_before_exit(
                     &mut app,
                     dispatch::rebuild::PeerRebuildExitReason::LeaderDisconnect,
@@ -3026,31 +3008,12 @@ struct InitialConfigSessionBools {
     show_tips: Option<bool>,
     auto_update: Option<bool>,
     ask_user_question_timeout_enabled: Option<bool>,
-    auto_compact_threshold_percent: Option<u8>,
-    auto_compact_threshold_tokens: Option<u64>,
 }
 fn load_initial_config_session_bools() -> InitialConfigSessionBools {
     let Ok(root) = xai_grok_shell::config::load_effective_config() else {
         return InitialConfigSessionBools::default();
     };
     let cli_bool = |key: &str| -> Option<bool> { root.get("cli")?.get(key)?.as_bool() };
-    let session = root.get("session");
-    let auto_compact = session
-        .and_then(|s| s.get("auto_compact_threshold_percent"))
-        .and_then(|v| {
-            v.as_integer()
-                .and_then(|i| u8::try_from(i).ok())
-                .or_else(|| v.as_str()?.parse().ok())
-        })
-        .filter(|p| *p <= 100);
-    let auto_compact_tokens = session
-        .and_then(|s| s.get("auto_compact_threshold_tokens"))
-        .and_then(|v| {
-            v.as_integer()
-                .and_then(|i| u64::try_from(i).ok())
-                .or_else(|| v.as_str()?.replace('_', "").parse().ok())
-        })
-        .filter(|t| *t > 0);
     InitialConfigSessionBools {
         show_tips: cli_bool("show_tips"),
         auto_update: cli_bool("auto_update"),
@@ -3059,8 +3022,6 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
             .and_then(|t| t.get("ask_user_question"))
             .and_then(|a| a.get("timeout_enabled"))
             .and_then(|v| v.as_bool()),
-        auto_compact_threshold_percent: auto_compact,
-        auto_compact_threshold_tokens: auto_compact_tokens,
     }
 }
 /// Sync shell `sessionRecap` into the execution gate and every place that offers `/recap`.
@@ -6223,7 +6184,7 @@ mod tests {
         );
     }
 
-    // ── make_run_result exit info ────────────────────────────────────────
+    // ── finish_run exit info ──────────────────────────────────────────────
 
     /// App focused on an agent (session `test-session`) with a seeded
     /// prompt → prompt → response exchange in its scrollback.
@@ -6242,9 +6203,9 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_fullscreen_quit_builds_summary() {
-        let app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+    fn finish_run_fullscreen_quit_builds_summary() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert_eq!(info.session_id, "test-session");
         assert!(!info.minimal);
         let summary = info.summary.expect("summary on fullscreen quit");
@@ -6258,7 +6219,7 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_unanswered_prompt_omits_stale_response() {
+    fn finish_run_unanswered_prompt_omits_stale_response() {
         use crate::scrollback::block::RenderBlock;
         let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
         let ActiveView::Agent(id) = app.active_view else {
@@ -6269,7 +6230,7 @@ mod tests {
             .unwrap()
             .scrollback
             .push_block(RenderBlock::user_prompt("now rerun the whole suite"));
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         let summary = info.summary.expect("prompt alone still summarizes");
         assert_eq!(
             summary.last_prompt.as_deref(),
@@ -6280,32 +6241,54 @@ mod tests {
     }
 
     #[test]
-    fn make_run_result_inline_and_minimal_quits_omit_summary() {
-        let app = seeded_quit_app(crate::app::ScreenMode::Inline);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+    fn finish_run_inline_and_minimal_quits_omit_summary() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Inline);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
         assert!(!info.minimal);
 
-        let app = seeded_quit_app(crate::app::ScreenMode::Minimal);
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Minimal);
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
         assert!(info.minimal);
     }
 
     #[test]
-    fn make_run_result_empty_session_omits_summary() {
+    fn finish_run_empty_session_omits_summary() {
         let mut app = crate::app::app_view::tests::test_app_with_agent();
         app.screen_mode = crate::app::ScreenMode::Fullscreen;
-        let info = make_run_result(&app).exit_info.expect("agent exit info");
+        let info = finish_run(&mut app).exit_info.expect("agent exit info");
         assert!(info.summary.is_none());
     }
 
     #[test]
-    fn make_run_result_non_agent_views_have_no_exit_info() {
+    fn finish_run_non_agent_views_have_no_exit_info() {
         for view in [ActiveView::Welcome, ActiveView::AgentDashboard] {
             let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
             app.active_view = view;
-            assert!(make_run_result(&app).exit_info.is_none());
+            assert!(finish_run(&mut app).exit_info.is_none());
         }
+    }
+
+    /// Contract: a successful `/rebuild` arms `rebuild_relaunch` and the
+    /// quit tail must carry it so this process execs the new binary.
+    /// A failed install never sets the field (see handle_rebuild_done).
+    #[test]
+    fn finish_run_carries_rebuild_relaunch_when_armed() {
+        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
+        app.rebuild_relaunch = Some(crate::app::app_view::RebuildRelaunch {
+            session_id: "test-session".into(),
+            installed_exe: std::path::PathBuf::from("/tmp/grok-oss-new"),
+            minimal: false,
+        });
+        let result = finish_run(&mut app);
+        let armed = result
+            .rebuild_relaunch
+            .expect("quit tail must carry rebuild re-exec");
+        assert_eq!(armed.session_id, "test-session");
+        assert_eq!(
+            armed.installed_exe,
+            std::path::PathBuf::from("/tmp/grok-oss-new")
+        );
     }
 }

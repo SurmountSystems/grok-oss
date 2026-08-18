@@ -587,6 +587,42 @@ async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) ->
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
+// session/add_local_workspace (add-only; local-workspace feature)
+
+#[cfg(feature = "local-workspace")]
+async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        session_id: acp::SessionId,
+        #[serde(default)]
+        meta: Option<acp::Meta>,
+    }
+
+    let params: Params = parse_params(args)?;
+    let cwd = {
+        let h = agent
+            .resident_handle(&params.session_id)
+            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        std::path::PathBuf::from(&h.info.cwd)
+    };
+    // Gate on actual chat kind — not `requires_gateway` (true for non-chat
+    // GatewayAttach; false for unknown ids).
+    if !agent.is_chat_kind_session(&params.session_id) {
+        return Err(acp::Error::invalid_params().data(serde_json::json!({
+            "code": "local_workspace_chat_only",
+            "message": "x.ai/session/add_local_workspace is only available on chat-kind sessions",
+        })));
+    }
+
+    let result = agent
+        .add_local_workspace_mid_session(&params.session_id, params.meta, &cwd)
+        .await?;
+    ExtMethodResult::success(result)
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
 // internal/reload_skills
 
 /// Reload skills for ALL active sessions. Called by the skills file watcher

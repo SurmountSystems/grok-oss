@@ -22,6 +22,19 @@ fn plan_path_from_prompt(prompt: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Pull the planner's plan-file path from the prompt by its backtick-quoted
+/// `.md` token, so rewording the surrounding sentence can't silently break the
+/// fake (which would otherwise write nothing and fail far from the cause).
+fn plan_path_from_prompt(prompt: &str) -> Option<String> {
+    // Backtick-delimited tokens sit at the odd indices of the split.
+    prompt
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|token| token.ends_with(".md"))
+        .map(str::to_owned)
+}
+
 /// Spawn behaviour knobs for the planner-coordinator stub.
 enum SpawnBehaviour {
     /// Parse `{PLAN_FILE}` out of the prompt, write `body` there, then respond `Done`.
@@ -133,6 +146,41 @@ fn spawn_planner_coordinator_capturing(
                             }
                         } else {
                             plan_written(&req, plan_path.as_deref(), body)
+                        }
+                    }
+                    SpawnBehaviour::WaitForCancelsThenWrite {
+                        cancels,
+                        started,
+                        objectives,
+                        body,
+                    } => {
+                        objectives.lock().unwrap().push(req.prompt.clone());
+                        let spawn = count_task.load(SeqOrd::SeqCst);
+                        let _ = started.send(spawn);
+                        if spawn <= *cancels {
+                            req.cancel_token.cancelled().await;
+                            SubagentResult {
+                                success: false,
+                                error: Some("cancelled".into()),
+                                cancelled: true,
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
+                        } else {
+                            if let Some(p) = plan_path.as_deref() {
+                                let _ = std::fs::create_dir_all(
+                                    std::path::Path::new(p).parent().unwrap(),
+                                );
+                                let _ = std::fs::write(p, body);
+                            }
+                            SubagentResult {
+                                success: true,
+                                output: StdArc::from("Done"),
+                                subagent_id: req.id.clone(),
+                                child_session_id: req.id.clone(),
+                                ..Default::default()
+                            }
                         }
                     }
                     SpawnBehaviour::NoWriteThenDone => SubagentResult {

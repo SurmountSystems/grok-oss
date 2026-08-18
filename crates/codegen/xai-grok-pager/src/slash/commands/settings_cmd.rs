@@ -84,21 +84,6 @@ mod tests {
     fn aliases_are_registered() {
         let cmd = SettingsCommand;
         assert_eq!(cmd.name(), "settings");
-        assert_eq!(
-            cmd.aliases(),
-            &["config", "preferences", "prefs", "options"]
-        );
-    }
-
-    /// Discoverability: `/options` must resolve as a settings alias so users
-    /// who think "options" find the same modal as `/settings` / `/config`.
-    #[test]
-    fn options_alias_is_settings_alias() {
-        let cmd = SettingsCommand;
-        assert!(
-            cmd.aliases().contains(&"options"),
-            "expected 'options' in settings aliases, got {:?}",
-            cmd.aliases()
-        );
+        assert_eq!(cmd.aliases(), &["config", "preferences", "prefs"]);
     }
 }

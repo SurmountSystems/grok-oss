@@ -926,6 +926,15 @@ mod tests {
         );
     }
     #[test]
+    fn profile_confines_only_for_non_off_profiles() {
+        assert!(!super::profile_confines("off"));
+        assert!(!super::profile_confines("none"));
+        assert!(super::profile_confines("strict"));
+        assert!(super::profile_confines("read-only"));
+        assert!(super::profile_confines("readonly"));
+        assert!(super::profile_confines("my-custom-profile"));
+    }
+    #[test]
     fn known_launch_guard_is_linux_only() {
         assert_eq!(
             restrict_network_at_known_linux_launches(true, true),

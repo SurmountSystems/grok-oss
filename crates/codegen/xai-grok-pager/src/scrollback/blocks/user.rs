@@ -198,14 +198,6 @@ impl UserPromptBlock {
         terminal_native: bool,
     ) -> Option<ratatui::style::Color> {
         use ratatui::style::Color;
-        // DOGE pure 8-colour: never ANSI Gray / DarkGray band. Follow theme
-        // surfaces (pure black) so Human chrome stays green rail + black canvas.
-        if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
-            return match theme.bg_light {
-                Color::Reset => None,
-                c => Some(c),
-            };
-        }
         if terminal_native {
             None
         } else {
@@ -463,19 +455,17 @@ impl BlockContent for UserPromptBlock {
 
         let prompt_cfg = &ctx.appearance.scrollback.blocks.prompt;
         let compact = ctx.appearance.prompt.compact;
-        let lines = self.wrap_prompt_lines(
+        let mut lines = self.wrap_prompt_lines(
             ctx.width,
             max_lines,
             prompt_cfg.show_prefix && !compact,
             ctx.is_selected,
         );
+        super::append_bubble_copy_button(&mut lines, ctx);
 
         BlockOutput { lines }
     }
 
-    /// Static left rail (`┃` via EntryRenderer + `HorizontalLayout::ACCENT`).
-    /// Same geometry as idle Recap's white tool rail; colour is Human green
-    /// on DOGE (`theme.accent_user`). Shares the pointer / OSC 12 token.
     fn accent(&self, _ctx: &BlockContext) -> Option<AccentStyle> {
         let theme = Theme::current();
         // Match prompt pointer: Reset (terminal-native / NO_COLOR) → Cyan so
@@ -680,24 +670,6 @@ mod tests {
                 .all(|s| !s.style.add_modifier.contains(Modifier::REVERSED)),
             "selected prompt carries no reverse video (picker + dim tail cue it)"
         );
-    }
-
-    /// Skill-token paint asserts need a distinct `accent_skill` vs body.
-    /// Under process `NO_COLOR`, `Theme::current()` collapses every slot to
-    /// `Reset`, so color filters match body too. Pin TrueColor + GrokNight
-    /// (skill blue ≠ body fg ≠ user accent) for the hold of each paint test.
-    fn pin_skill_paint_theme() -> crate::theme::cache::ThemePinGuard {
-        let guard = crate::theme::cache::pin_theme();
-        let theme = Theme::current();
-        assert_ne!(
-            theme.accent_skill, theme.text_primary,
-            "pin_theme must yield a colored skill accent distinct from body"
-        );
-        assert_ne!(
-            theme.accent_skill, theme.accent_user,
-            "skill accent must stay distinct from Human rail/pointer under pin"
-        );
-        guard
     }
 
     #[test]
@@ -925,51 +897,6 @@ mod tests {
             "split token must stay teal on every row: {teal_by_line:?}"
         );
         assert_eq!(teal_by_line.concat(), "/pr-workflow");
-    }
-
-    /// DOGE palette contract: skill tokens stay pure green (`accent_skill`),
-    /// body stays white (`text_primary`). Same green as Human rail/pointer is
-    /// intentional — body contrast (white) is what keeps `/commands` readable
-    /// on the black canvas. Prefix off so the skill filter does not also catch
-    /// the green Human pointer.
-    #[test]
-    fn doge_skill_tokens_are_green_distinct_from_body() {
-        use ratatui::style::Color;
-
-        let doge = Theme::doge();
-        assert_eq!(doge.accent_skill, Color::Rgb(0, 255, 0));
-        assert_eq!(doge.text_primary, Color::Rgb(255, 255, 255));
-        assert_eq!(doge.accent_user, Color::Rgb(0, 255, 0));
-        assert_ne!(doge.accent_skill, doge.text_primary);
-
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        // pin_theme already forced TrueColor; DOGE skill/body stay distinct.
-        let theme = Theme::current();
-        assert_eq!(theme.accent_skill, Color::Rgb(0, 255, 0));
-        assert_eq!(theme.text_primary, Color::Rgb(255, 255, 255));
-
-        let block = UserPromptBlock::with_skill_tokens("run /commit please", vec![4..11]);
-        // show_prefix=false: Human pointer is also green under DOGE (same
-        // primary as skill). Wrap still emits an empty prefix span in
-        // accent_user green — ignore empty content when filtering.
-        let lines = block.wrap_prompt_lines(80, None, false, false);
-        let skill: Vec<&str> = lines[0]
-            .content
-            .spans
-            .iter()
-            .filter(|s| !s.content.is_empty() && s.style.fg == Some(theme.accent_skill))
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(skill, vec!["/commit"]);
-        let body: Vec<&str> = lines[0]
-            .content
-            .spans
-            .iter()
-            .filter(|s| !s.content.is_empty() && s.style.fg == Some(theme.text_primary))
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(body, vec!["run ", " please"]);
     }
 
     #[test]
@@ -1357,9 +1284,9 @@ mod tests {
     }
 
     /// DOGE theme table: Human token is pure green. Live `accent()` follows
-    /// `Theme::current()` (quantized; under `NO_COLOR` → Reset → Cyan fallback
-    /// matching the pointer). Pure-green RGB is asserted on `Theme::doge()`
-    /// (hermetic). Live rail must never paint gray/white Human chrome.
+    /// `Theme::current()` after pinning `ThemeKind::Doge` (not `pin_theme()`,
+    /// which forces GrokNight). Under `NO_COLOR`, slots are Reset and the
+    /// product falls back to Cyan (same as the pointer).
     #[test]
     fn user_prompt_block_accent_is_green_rail_under_doge_default() {
         use ratatui::style::Color;
@@ -1372,6 +1299,12 @@ mod tests {
         );
         assert_eq!(doge.accent_success, Color::Rgb(0, 255, 0));
         assert_ne!(doge.accent_user, Color::Rgb(255, 255, 255));
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
 
         let accent = UserPromptBlock::new("hi")
             .accent(&accent_test_ctx())
@@ -1386,8 +1319,6 @@ mod tests {
             "Human rail must not be gray/white: {:?}",
             accent.color
         );
-        // When live theme still carries pure green (truecolor DOGE), rail is green.
-        // Under NO_COLOR, Theme::current() slots are Reset and product falls back to Cyan.
         let live = Theme::current().accent_user;
         let expected = match live {
             Color::Reset => Color::Cyan,
@@ -1415,5 +1346,50 @@ mod tests {
         assert_eq!(prefix_fg, expected, "pointer uses Human accent_user");
         let rail = block.accent(&accent_test_ctx()).expect("rail on").color;
         assert_eq!(Some(rail), expected, "rail matches pointer Human colour");
+    }
+
+    /// Fullscreen paint: Human prompt left cell is `┃` in `accent_user`.
+    /// `accent()` returning green is not enough if EntryRenderer never paints it.
+    #[test]
+    fn user_prompt_entry_renderer_paints_green_rail() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let expected = match theme.accent_user {
+            Color::Reset => Color::Cyan,
+            c => c,
+        };
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello from the human"));
+        let renderer = EntryRenderer::new(&entry, &theme);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let c = buf.cell((0, y))?;
+                (c.symbol() == bar).then_some(c.clone())
+            })
+            .expect("Human prompt must paint a left ┃ rail");
+        assert_eq!(
+            rail.fg, expected,
+            "painted rail must be Human accent_user, got {:?}",
+            rail.fg
+        );
+        assert_ne!(rail.fg, theme.accent_running);
+        assert_ne!(rail.fg, Color::Rgb(255, 255, 255));
     }
 }

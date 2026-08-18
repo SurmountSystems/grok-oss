@@ -153,7 +153,7 @@ impl AuthUrlMode {
         }
     }
     /// Back-compat flag for older clients that only read `external_provider`.
-    pub fn is_external_provider(self) -> bool {
+    pub(crate) fn is_external_provider(self) -> bool {
         matches!(self, Self::Command)
     }
 }
@@ -253,7 +253,7 @@ pub async fn run_external_auth_provider(
     Ok((auth, true))
 }
 /// GUI auth: bridges external provider stderr to `url_tx`, pipes code submission via `code_rx`.
-pub async fn run_auth_flow_with_stderr_bridge(
+pub(crate) async fn run_auth_flow_with_stderr_bridge(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
@@ -336,7 +336,7 @@ pub async fn run_auth_flow_with_stderr_bridge(
 }
 /// Full auth chain: cache, then refresh, then external provider, then interactive (OIDC/OAuth2/legacy).
 /// When `url_tx` and `code_rx` are `None`, falls back to stderr/stdin (CLI mode).
-pub async fn run_auth_flow(
+pub(crate) async fn run_auth_flow(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
@@ -449,6 +449,64 @@ pub(super) async fn run_auth_flow_steps(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
+    reauth: bool,
+    force_interactive: bool,
+    on_stderr: Option<StderrCallback>,
+    url_tx: Option<Rc<RefCell<Option<oneshot::Sender<AuthUrlInfo>>>>>,
+    code_rx: Option<mpsc::Receiver<String>>,
+    login_override: LoginTransportOverride,
+) -> anyhow::Result<(GrokAuth, bool)> {
+    let result = run_auth_flow_steps(
+        auth_manager,
+        grok_com_config,
+        reauth,
+        force_interactive,
+        on_stderr,
+        url_tx,
+        code_rx,
+        login_override,
+    )
+    .await;
+    if let Err(err) = &result
+        && let Some(event) = login_failure_event(err)
+    {
+        xai_grok_telemetry::session_ctx::log_event(event);
+    }
+    result
+}
+
+/// `None` when nothing in the chain failed over HTTP (the user backed out, the
+/// loopback listener couldn't bind, the id_token didn't validate) rather than
+/// inventing a transport verdict for it.
+fn login_failure_event(err: &anyhow::Error) -> Option<LoginFailed> {
+    let source = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())?;
+    Some(LoginFailed {
+        error_kind: failure_kind(
+            crate::http::TransportFailure::classify(source).kind,
+            source.is_decode(),
+        ),
+        os_error: crate::http::find_os_error_code(source),
+    })
+}
+
+/// A body that won't parse is a decode failure, not a transport one — even
+/// though `reqwest` also reports it as a body-phase error.
+fn failure_kind(transport: TransportFailureKind, is_decode: bool) -> LoginFailureKind {
+    if is_decode {
+        return LoginFailureKind::Decode;
+    }
+    match transport {
+        TransportFailureKind::Unreachable => LoginFailureKind::TransportConnect,
+        TransportFailureKind::Interrupted => LoginFailureKind::TransportInterrupted,
+        TransportFailureKind::Permanent => LoginFailureKind::TransportPermanent,
+    }
+}
+
+async fn run_auth_flow_steps(
+    auth_manager: &Arc<AuthManager>,
+    grok_com_config: &GrokComConfig,
     reauth: bool,
     force_interactive: bool,
     on_stderr: Option<StderrCallback>,
@@ -729,34 +787,6 @@ pub fn report_signed_in(auth: &GrokAuth) {
         Some(ref email) => eprintln!("✓ Signed in as {email}"),
         None => eprintln!("✓ Signed in"),
     }
-    report_stored_supergrok_principals_if_multi();
-}
-
-/// After login, if auth.json holds 2+ SuperGrok principals, print labels +
-/// fingerprints (same honesty as console multi-add / doctor). No-op on one.
-fn report_stored_supergrok_principals_if_multi() {
-    let home = crate::util::grok_home::grok_home();
-    let path = home.join("auth.json");
-    let Ok(map) = super::storage::read_auth_json(&path) else {
-        return;
-    };
-    let listings = super::model::list_supergrok_principal_listings(&map);
-    if listings.len() < 2 {
-        return;
-    }
-    eprintln!(
-        "SuperGrok sessions stored ({}): labels and fingerprints only",
-        listings.len()
-    );
-    for (i, p) in listings.iter().enumerate() {
-        eprintln!(
-            "  {}. {} ({}) · fingerprint {}",
-            i + 1,
-            p.role_label,
-            p.mode_label,
-            p.fingerprint
-        );
-    }
 }
 /// CLI auth entrypoint. For GUI, use `run_auth_flow_with_stderr_bridge`.
 pub async fn ensure_authenticated(
@@ -983,16 +1013,6 @@ pub fn perform_logout(
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
         } else {
-            // Logout of current SuperGrok identity: drop its multi-slot too.
-            // Sibling SuperGrok principals (other multi-slots) stay so personal
-            // + Business multi-login is not wiped by logging out only one.
-            if let Some(ref a) = auth {
-                let base = auth_manager.grok_com_config().auth_scope();
-                let multi = super::model::multi_slot_scope_for_auth(&base, a);
-                if multi != base {
-                    let _ = auth_manager.remove_scope(&multi);
-                }
-            }
             auth_manager.clear()?;
         }
         clear_orphan_managed_config();

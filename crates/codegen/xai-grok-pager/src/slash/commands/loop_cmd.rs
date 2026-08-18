@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::{
-    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
 };
 
 use crate::slash::command::{
@@ -90,12 +90,17 @@ impl SlashCommand for LoopCommand {
         required_tools: LOOP_REQUIRED_TOOLS,
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             return CommandResult::Message(loop_usage_message().to_string());
         }
 
         let (interval_token, prompt) = parse_loop_args(args);
+        let fire_mode = if ctx.pager_state.scheduler_background_loops {
+            LoopFireMode::Detached
+        } else {
+            LoopFireMode::InSession
+        };
 
         // Show a concrete cadence only for an unambiguous leading token; otherwise show a neutral placeholder
         // The authoritative schedule arrives when the model calls scheduler_create, whose ScheduledTaskCreated replaces this provisional entry
@@ -107,7 +112,7 @@ impl SlashCommand for LoopCommand {
         CommandResult::InjectSkill {
             display_text: format!("/loop {args}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                loop_schedule_instruction(args),
+                loop_schedule_instruction(args, fire_mode),
             ))],
             display_as_skill: false,
             scheduled_task_preview: Some(ScheduledTaskPreview {
@@ -230,6 +235,10 @@ mod tests {
     }
 
     fn run_loop(args: &str) -> CommandResult {
+        run_loop_with_background_loops(args, true)
+    }
+
+    fn run_loop_with_background_loops(args: &str, background_loops: bool) -> CommandResult {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = CommandExecCtx {
@@ -335,7 +344,6 @@ mod tests {
                 };
                 assert_eq!(text.text, loop_schedule_instruction(args));
             }
-            other => panic!("expected InjectSkill, got {other:?}"),
         }
     }
 

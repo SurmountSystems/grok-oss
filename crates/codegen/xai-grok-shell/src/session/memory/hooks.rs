@@ -17,7 +17,7 @@
 //! - **Minimum conversation gate:** Skip sessions with fewer than 3 *real* user prompts or under 50 total query bytes.
 //!   Synthetic metadata-only prefixes and auto-continue markers are excluded.
 //! - **`save_on_end` config gate:** Skipped when `[memory.session].save_on_end = false`.
-//! - **SIGTERM:** Triggered via `SessionCommand::Shutdown` handler
+//! - **SIGTERM:** Triggered via `SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful)` handler
 
 use crate::sampling::ConversationItem;
 use crate::session::memory::storage::{MemoryStorage, slugify};
@@ -83,7 +83,7 @@ pub fn on_session_end(
     if !save_on_end {
         tracing::debug!("session end: save_on_end=false, skipping memory summary");
         return SessionEndResult::Skipped;
-    }
+    };
 
     let Some(real_queries) = queries_meeting_session_end_threshold(conversation) else {
         return SessionEndResult::Skipped;

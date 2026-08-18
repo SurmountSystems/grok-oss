@@ -1206,7 +1206,11 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
         call_count: calls.clone(),
     }));
     let _ = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1225,7 +1229,11 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
         ..GrokAuth::test_default()
     });
     let _ = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1264,7 +1272,11 @@ async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
         delay: StdDuration::ZERO,
     }));
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect_err("persist failure must surface an error");
     assert!(
@@ -1928,7 +1940,11 @@ async fn permanent_rtr_clears_only_the_tried_side_when_rts_diverge() {
     }
     mgr.set_refresher(Arc::new(TriedDiskRtr(calls.clone())));
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -3379,6 +3395,7 @@ async fn refresh_chain_server_rejected_bypasses_valid_token_double_check() {
         .refresh_chain(
             crate::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         )
         .await;
     assert_eq!(
@@ -3423,10 +3440,12 @@ async fn refresh_chain_server_rejected_concurrent_skips_redundant_refresh() {
         mgr1.refresh_chain(
             crate::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         ),
         mgr2.refresh_chain(
             crate::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
         ),
     );
     assert_eq!(r1.unwrap().key, "fresh-token");
@@ -3460,6 +3479,7 @@ async fn refresh_chain_pre_request_short_circuits_on_valid_token() {
         .refresh_chain(
             crate::token_type::TokenType::OidcSession,
             RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
         )
         .await;
     assert_eq!(result.unwrap().key, "still-good");

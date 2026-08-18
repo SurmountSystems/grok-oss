@@ -39,7 +39,7 @@ use xai_grok_shell::session::{ContextInfo, count_detail};
 /// ◈ Skills            2.4k tokens  (0.2%) · 21 skills
 /// ◈ MCP servers        320 tokens  (0.1%) ·  4 servers
 ///
-/// Auto-compact at 95% · ~812k tokens remaining
+/// Auto-compact at 85% · ~812k tokens remaining
 ///
 /// Turns: 5 · Tool calls: 12 · Compactions: 0
 /// ```
@@ -637,7 +637,7 @@ mod tests {
             message_tokens: 29_900,
             free_tokens: 963_300,
             usage_pct: 4,
-            auto_compact_threshold_percent: 95,
+            auto_compact_threshold_percent: 85,
             usage_categories: vec![],
         }
     }
@@ -718,7 +718,7 @@ mod tests {
         // At/above the auto-compact threshold the "triggers next turn" line already says everything the tip would
         // The tip is suppressed to avoid stacking two contradicting warning-styled lines (manual /compact vs. auto-compact about to fire).
         let mut snap = snapshot();
-        snap.usage_pct = 95; // at the auto-compact threshold (snapshot default)
+        snap.usage_pct = 85; // the historical default (and value in snapshot() helper)
         let block = ContextInfoBlock::new(snap, "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);
@@ -732,8 +732,8 @@ mod tests {
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
         assert!(
-            all.contains("Auto-compact at 95%") && all.contains("tokens remaining"),
-            "expected `Auto-compact at 95% · ~X tokens remaining` line, got:\n{all}"
+            all.contains("Auto-compact at 85%") && all.contains("tokens remaining"),
+            "expected `Auto-compact at 85% · ~X tokens remaining` line, got:\n{all}"
         );
     }
 
@@ -750,7 +750,7 @@ mod tests {
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
         assert!(
-            all.contains("~3.8m tokens remaining"),
+            all.contains("~3.4m tokens remaining"),
             "expected ETA to use millions, got:\n{all}"
         );
     }
@@ -763,8 +763,8 @@ mod tests {
         let lines = block.build_lines(&theme, BarLayout::WIDE);
         let all = all_text(&lines);
         assert!(
-            all.contains("~913k tokens remaining"),
-            "expected `~913k tokens remaining`, got:\n{all}"
+            all.contains("~813k tokens remaining"),
+            "expected `~813k tokens remaining`, got:\n{all}"
         );
     }
 
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn build_lines_shows_imminent_auto_compact_at_threshold() {
         let mut snap = snapshot();
-        snap.usage_pct = 95;
+        snap.usage_pct = 85;
         let block = ContextInfoBlock::new(snap, "grok-4");
         let theme = test_theme();
         let lines = block.build_lines(&theme, BarLayout::WIDE);

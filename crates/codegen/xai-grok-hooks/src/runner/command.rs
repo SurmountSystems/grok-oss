@@ -830,6 +830,9 @@ fn parse_stop_result(
     match exit_code {
         0 => (HookRunnerResult::Stop(StopHookOutcome::default()), elapsed),
         GATE_EXIT_CODE => {
+            // Full trimmed stderr on purpose: a stop block's feedback is
+            // model-facing instruction text, often multi-line (deny reasons
+            // keep one capped line — see `stderr_first_line`).
             let feedback = stderr.trim();
             let block_reason = if feedback.is_empty() {
                 format!("Blocked by stop hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
@@ -1079,7 +1082,7 @@ mod tests {
         }
 
         let (unknown, _) =
-            parse_blocking_result(r#"{"decision":"maybe"}"#, 0, "test", Duration::ZERO);
+            parse_blocking_result(r#"{"decision":"maybe"}"#, "", 0, "test", Duration::ZERO);
         assert!(matches!(unknown, HookRunnerResult::Failed(_)));
     }
 
@@ -1464,6 +1467,125 @@ mod tests {
         }
         let (fail, _) = parse_blocking_result(r#"{"detail":"x"}"#, "", 1, "test", Duration::ZERO);
         assert!(matches!(fail, HookRunnerResult::Failed(_)));
+    }
+
+    /// Failure results and exit-2 deny reasons carry the hook's first stderr
+    /// line (stderr is the hook's feedback channel), instead of only an
+    /// exit code.
+    #[test]
+    fn blocking_result_surfaces_stderr() {
+        let deny_reason = |result: HookRunnerResult| match result {
+            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => reason,
+            other => panic!("expected Deny, got {other:?}"),
+        };
+
+        let (deny, _) = parse_blocking_result(
+            "",
+            "  \nrejected by policy\nmore\n",
+            2,
+            "test",
+            Duration::ZERO,
+        );
+        assert_eq!(deny_reason(deny), "rejected by policy");
+
+        let (fail, _) = parse_blocking_result("", "config missing\n", 1, "test", Duration::ZERO);
+        match fail {
+            HookRunnerResult::Failed(error) => assert!(
+                error.contains("exit code 1") && error.contains("config missing"),
+                "failure must carry exit code AND stderr text, got: {error}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        // A JSON deny without a usable reason also falls back to stderr.
+        let (json_deny, _) = parse_blocking_result(
+            r#"{"decision":"deny","reason":"  "}"#,
+            "quota exceeded\n",
+            0,
+            "test",
+            Duration::ZERO,
+        );
+        assert_eq!(deny_reason(json_deny), "quota exceeded");
+    }
+
+    /// One huge stderr line (capture allows 64 KB with no newline) must not
+    /// become the whole deny reason: the excerpt is capped on a char boundary
+    /// with an ellipsis, and multibyte chars survive the cut.
+    #[test]
+    fn stderr_line_is_capped() {
+        let long = "é".repeat(MAX_STDERR_LINE_CHARS + 50);
+        let capped = stderr_first_line(&long).expect("non-empty line");
+        assert_eq!(capped.chars().count(), MAX_STDERR_LINE_CHARS + 1);
+        assert!(capped.ends_with('\u{2026}'));
+
+        let (deny, _) = parse_blocking_result("", &long, 2, "test", Duration::ZERO);
+        match deny {
+            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => {
+                assert!(reason.chars().count() <= MAX_STDERR_LINE_CHARS + 1);
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+
+        // At the cap: no ellipsis, nothing lost.
+        let exact = "x".repeat(MAX_STDERR_LINE_CHARS);
+        assert_eq!(stderr_first_line(&exact).as_deref(), Some(exact.as_str()));
+    }
+
+    /// A blank JSON `reason` is not a reason: command hooks fall back to the
+    /// stderr line, and with no fallback (the HTTP handler has no stderr
+    /// channel) the generic deny message is used — never the blank string.
+    #[test]
+    fn blank_json_reason_falls_back() {
+        let blank = || GateHookJson {
+            decision: "deny".to_string(),
+            reason: Some("  ".to_string()),
+        };
+        let with_fallback =
+            gate_json_to_decision(blank(), "h", Some("quota exceeded")).expect("valid decision");
+        assert!(
+            matches!(with_fallback, HookDecision::Deny { ref reason, .. } if reason == "quota exceeded")
+        );
+
+        let without_fallback = gate_json_to_decision(blank(), "h", None).expect("valid decision");
+        assert!(
+            matches!(without_fallback, HookDecision::Deny { ref reason, .. } if reason == "denied by hook 'h'")
+        );
+    }
+
+    /// Unknown JSON decision values fail with the stderr line attached, like
+    /// every other failure on the gate path.
+    #[test]
+    fn unknown_decision_failure_carries_stderr() {
+        let (result, _) = parse_blocking_result(
+            r#"{"decision":"maybe"}"#,
+            "config missing\n",
+            1,
+            "test",
+            Duration::ZERO,
+        );
+        match result {
+            HookRunnerResult::Failed(error) => assert!(
+                error.contains("maybe") && error.contains("config missing"),
+                "got: {error}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// The observe path reports `exit code N: <first stderr line>` so the
+    /// scrollback and log record are diagnosable without hunting for output.
+    /// Unix-only like the sibling real-process tests: the script relies on
+    /// POSIX `sh` semantics (`>&2`).
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn observe_failure_carries_stderr_line() {
+        let spec = make_shell_spec("echo 'disk full' >&2; exit 1");
+        let (result, _) =
+            run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe).await;
+        match result {
+            HookRunnerResult::Failed(error) => assert_eq!(error, "exit code 1: disk full"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2091,11 +2213,7 @@ mod tests {
             return;
         }
 
-        // Probe: exit 0 if /dev/tty cannot be opened (detached), exit 1 if it
-        // can. Prefer `(: >/dev/tty)` over bare `exec 3>/dev/tty` — on bash
-        // 5.x a failed `exec`-only redirection aborts the shell with status 1
-        // before `|| exit 0` runs, so a correctly detached child looked like a
-        // failure. A colon-command redirect continues and hits `|| exit 0`.
+        // exit 0 if /dev/tty is inaccessible (DETACHED), exit 1 if accessible
         let spec = make_shell_spec("(: >/dev/tty) 2>/dev/null && exit 1 || exit 0");
         let envelope = make_envelope();
         let ctx = make_ctx();
@@ -2105,8 +2223,7 @@ mod tests {
 
         assert!(
             matches!(result, HookRunnerResult::Success),
-            "hook child should not be able to open /dev/tty after detach \
-             (setsid + TIOCNOTTY), got {:?}",
+            "hook child should not be able to open /dev/tty after setsid(), got {:?}",
             result
         );
     }

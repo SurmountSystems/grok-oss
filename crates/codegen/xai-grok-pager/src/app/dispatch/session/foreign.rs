@@ -45,6 +45,23 @@ pub(in crate::app::dispatch) fn next_picker_list_generation(app: &mut AppView) -
     app.session_picker_list_seq
 }
 
+/// Kind facet for welcome multi-source history under `--chat`.
+///
+/// Sandbox → `chat` (gateway); Local → `build` (local-disk). Modal / non-welcome
+/// fetches leave this `None` so the shell keeps its default chat-mode force.
+pub(in crate::app::dispatch) fn welcome_history_kind_filter(app: &AppView) -> Option<Vec<String>> {
+    #[cfg(feature = "local-workspace")]
+    {
+        if app.chat_mode && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome) {
+            return Some(vec![
+                app.welcome_workspace_mode.history_kind_filter().to_string(),
+            ]);
+        }
+    }
+    let _ = app;
+    None
+}
+
 pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -> Vec<Effect> {
     // The wipe below destroys the welcome picker state that any still-pending result was issued for So the welcome generation reallocates on every call, even when the fetch belongs to an open modal, which gets its own fresh generation
     // So the welcome generation reallocates on every call, even when the fetch belongs to an open modal, which gets its own fresh generation

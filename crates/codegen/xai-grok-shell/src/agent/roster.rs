@@ -150,7 +150,7 @@ pub(crate) fn merge_roster(
     }));
 
     // Most-recently-changed first.
-    entries.sort_by(|a, b| b.last_change_unix_ms.cmp(&a.last_change_unix_ms));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.last_change_unix_ms));
     entries
 }
 
@@ -362,6 +362,41 @@ mod merge_roster_tests {
             panic!("expected one roster row: {out:?}");
         };
         assert_eq!(row.last_turn_summary, None);
+    }
+
+    #[test]
+    fn last_turn_summary_adopted_from_summary_for_resident_and_dormant() {
+        let mut with = summary("a", None, 1);
+        with.last_turn_summary = Some("Fixed the roster merge".into());
+        let mut dormant = summary("b", None, 2);
+        dormant.last_turn_summary = Some("Explained the roster".into());
+
+        let out = merge_roster(
+            vec![resident("a", RosterActivity::Idle, 9_000)],
+            vec![with, dormant, summary("c", None, 3)],
+        );
+
+        let by_id = |id: &str| out.iter().find(|e| e.session_id == id).unwrap();
+        assert_eq!(
+            by_id("a").last_turn_summary.as_deref(),
+            Some("Fixed the roster merge")
+        );
+        assert_eq!(
+            by_id("b").last_turn_summary.as_deref(),
+            Some("Explained the roster")
+        );
+        assert_eq!(by_id("c").last_turn_summary, None);
+    }
+
+    /// Disk is authoritative: a rewind-cleared `summary.json` clears a
+    /// resident row whose delta cache still carries the old value
+    /// (self-healing poll).
+    #[test]
+    fn last_turn_summary_cleared_disk_clears_resident_row() {
+        let mut entry = resident("a", RosterActivity::Idle, 9_000);
+        entry.last_turn_summary = Some("Stale cached".into());
+        let out = merge_roster(vec![entry], vec![summary("a", None, 1)]);
+        assert_eq!(out[0].last_turn_summary, None);
     }
 
     #[test]

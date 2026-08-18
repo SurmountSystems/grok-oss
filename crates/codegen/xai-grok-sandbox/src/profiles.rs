@@ -1025,6 +1025,97 @@ read_write = ["/tmp/ci-artifacts"]
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Custom-profile resolve: allow entries are normalized, deny entries are not.
+    #[test]
+    fn custom_profile_strips_allow_globs_keeps_deny_globs() {
+        if skip_if_host_hook_write_deny_unresolvable() {
+            return;
+        }
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig {
+            profiles: HashMap::from([(
+                "cargo".to_string(),
+                ProfileConfig {
+                    extends: Some("workspace".to_string()),
+                    restrict_network: None,
+                    read_only: vec!["/opt/tooling/**".to_string()],
+                    read_write: vec![
+                        "/home/user/.cargo/registry/cache/**".to_string(),
+                        "/home/user/.cargo/registry/index".to_string(),
+                    ],
+                    deny: vec!["**/.env".to_string(), "/secrets/**".to_string()],
+                },
+            )]),
+        };
+        let resolved = ProfileName::Custom("cargo".to_string())
+            .resolve_profile(&workspace, &config)
+            .expect("cargo profile resolves");
+
+        // Custom entries are appended after the base profile's own paths.
+        assert_eq!(
+            resolved.read_write[resolved.read_write.len() - 2..],
+            [
+                PathBuf::from("/home/user/.cargo/registry/cache"),
+                PathBuf::from("/home/user/.cargo/registry/index"),
+            ]
+        );
+        assert_eq!(resolved.read_only, [PathBuf::from("/opt/tooling")]);
+        assert_eq!(
+            resolved.deny,
+            [PathBuf::from("**/.env"), PathBuf::from("/secrets/**")]
+        );
+    }
+
+    /// Building the capability set pre-creates missing `read_write` dirs; a
+    /// trailing-`/**` entry must create/grant the parent, never a literal `**` dir.
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
+    fn capability_set_trailing_glob_does_not_create_starstar_dir() {
+        if skip_if_host_hook_write_deny_unresolvable() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "grok-sandbox-starstar-capset-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let cache = root.join("cache");
+        std::fs::create_dir_all(cache.join("registry-a1b2")).unwrap();
+        let allow_glob = format!(
+            "{}/**",
+            dunce::canonicalize(&cache)
+                .unwrap_or_else(|_| cache.clone())
+                .display()
+        );
+
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = SandboxConfig {
+            profiles: HashMap::from([(
+                "cargo".to_string(),
+                ProfileConfig {
+                    extends: Some("workspace".to_string()),
+                    restrict_network: None,
+                    read_only: vec![],
+                    read_write: vec![allow_glob],
+                    deny: vec![],
+                },
+            )]),
+        };
+
+        ProfileName::Custom("cargo".to_string())
+            .to_capability_set_with_config(&workspace, &config)
+            .expect("capability set builds");
+
+        let starstar = cache.join("**");
+        assert!(
+            !starstar.exists(),
+            "normalized allow path must not create a literal '**' directory at {starstar:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn project_cannot_redefine_global_profile() {
         // Global "secure" with a real deny list must win over a project hollow-out.

@@ -23,7 +23,7 @@ const MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS: i64 = 10 * 60;
 /// Only the 404 "no device endpoint" case is typed, because the login flow matches on it to fall back to loopback. Every other device-code failure stays a plain `anyhow` error.
 /// Wrapping one in a `#[error(transparent)]` variant hides the `reqwest::Error` the login funnel classifies. Transparent forwards `source()` past the error it wraps.
 #[derive(Debug, Error)]
-pub enum DeviceCodeError {
+pub(crate) enum DeviceCodeError {
     #[error(
         "Device-code login is not available for this deployment. \
          Try `grok login` or set XAI_API_KEY instead."
@@ -59,7 +59,7 @@ fn detect_cli_surface() -> ClientSurface {
 /// Result of requesting a device code from the server.
 /// Callers display `verification_uri` and `user_code` to the user, then pass this struct to `complete_device_code_login`.
 #[derive(Debug, Clone)]
-pub struct DeviceCode {
+pub(crate) struct DeviceCode {
     pub verification_uri: String,
     pub verification_uri_complete: Option<String>,
     pub user_code: String,

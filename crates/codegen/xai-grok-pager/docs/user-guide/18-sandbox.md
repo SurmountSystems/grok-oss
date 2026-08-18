@@ -10,10 +10,10 @@ Sandbox mode is off by default.
 
 ```bash
 # Run with workspace sandbox (read everywhere, write to CWD + temp dirs + ~/.grok/)
-grok --sandbox workspace
+grok-oss --sandbox workspace
 
 # Read-only mode (read everywhere, write only to ~/.grok/ + temp dirs)
-grok --sandbox read-only
+grok-oss --sandbox read-only
 
 # Most restrictive profile (read CWD + system paths + ~/.grok, write CWD + ~/.grok/sessions + temp dirs, no child network)
 grok --sandbox strict
@@ -97,7 +97,7 @@ deny = ["/data/shared-secrets", "**/.env", "**/*.pem"]
 Use the custom profile:
 
 ```bash
-grok --sandbox project
+grok-oss --sandbox project
 ```
 
 A custom profile can't reuse a built-in name. `--sandbox devbox` always runs the built-in `devbox` profile, shadowing any `[profiles.devbox]` you define.
@@ -200,8 +200,8 @@ The sandbox is **irreversible** once applied. The agent cannot relax restriction
 ## Resuming Sessions
 
 The profile a session was started with is saved with the session and is **fixed
-for the life of the session**. When you resume it (`grok --resume <id>`,
-`grok --continue`, or `grok -r`), Grok restores that same profile automatically —
+for the life of the session**. When you resume it (`grok-oss --resume <id>`,
+`grok-oss --continue`, or `grok-oss -r`), Grok OSS restores that same profile automatically.
 so a session started with `--sandbox workspace` won't silently come back under a
 stricter default and break commands that previously worked.
 

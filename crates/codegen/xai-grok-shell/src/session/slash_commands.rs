@@ -113,53 +113,6 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::ContextInfo,
     },
     BuiltinCommand {
-        name: "economic-mode",
-        description: "Cap context at 200K for cheaper Grok 4.5 pricing (on by default)",
-        argument_hint: Some("on|off|status|global on|global off"),
-        aliases: &["economic", "econ"],
-        gate: BuiltinGate::AlwaysOn,
-        resolve: |args| {
-            let trimmed = args.trim().to_lowercase();
-            match trimmed.as_str() {
-                "" => BuiltinAction::EconomicMode {
-                    enabled: None,
-                    persist_global: false,
-                    status_only: false,
-                },
-                "on" | "enable" | "true" | "1" => BuiltinAction::EconomicMode {
-                    enabled: Some(true),
-                    persist_global: false,
-                    status_only: false,
-                },
-                "off" | "disable" | "false" | "0" => BuiltinAction::EconomicMode {
-                    enabled: Some(false),
-                    persist_global: false,
-                    status_only: false,
-                },
-                "status" | "?" => BuiltinAction::EconomicMode {
-                    enabled: None,
-                    persist_global: false,
-                    status_only: true,
-                },
-                "global on" | "global enable" => BuiltinAction::EconomicMode {
-                    enabled: Some(true),
-                    persist_global: true,
-                    status_only: false,
-                },
-                "global off" | "global disable" => BuiltinAction::EconomicMode {
-                    enabled: Some(false),
-                    persist_global: true,
-                    status_only: false,
-                },
-                _ => BuiltinAction::EconomicMode {
-                    enabled: None,
-                    persist_global: false,
-                    status_only: true,
-                },
-            }
-        },
-    },
-    BuiltinCommand {
         name: "hooks-trust",
         description: "Trust this project for hook execution",
         argument_hint: None,
@@ -1256,13 +1209,6 @@ pub(super) enum BuiltinAction {
     FlushMemory,
     Dream,
     ContextInfo,
-    /// Cap effective context at 200K for pricing. `enabled: None` with
-    /// `status_only: false` means toggle; `persist_global` writes `[ui].economic_mode`.
-    EconomicMode {
-        enabled: Option<bool>,
-        persist_global: bool,
-        status_only: bool,
-    },
     HooksTrust,
     HooksList,
     HooksAdd {
@@ -1325,7 +1271,6 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
             BuiltinAction::ContextInfo => "context",
-            BuiltinAction::EconomicMode { .. } => "economic-mode",
             BuiltinAction::HooksTrust => "hooks-trust",
             BuiltinAction::HooksList => "hooks-list",
             BuiltinAction::HooksAdd { .. } => "hooks-add",
@@ -1359,11 +1304,6 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
             BuiltinAction::ContextInfo => false,
-            BuiltinAction::EconomicMode {
-                enabled,
-                persist_global,
-                status_only,
-            } => enabled.is_some() || *persist_global || *status_only,
             BuiltinAction::HooksTrust => false,
             BuiltinAction::HooksList => false,
             BuiltinAction::HooksAdd { .. } => true,
@@ -1532,23 +1472,18 @@ pub(super) async fn build_skill_information_for_refs(
                 } else {
                     Some(sk.args.as_str())
                 };
-                // Host-mint once per skill expansion so ${RUN_ID} and the
-                // envelope run_id attribute stay consistent (no model/shell).
-                let run_id = mint_skill_run_id();
                 apply_substitutions(
                     &mut content,
                     args,
                     &SubstitutionContext {
                         skill_dir,
                         session_id: Some(session_id),
-                        run_id: Some(run_id.as_str()),
+                        run_id: None,
                         plugin_root: info.plugin_root.as_deref(),
                         plugin_data: info.plugin_data.as_deref(),
                     },
                 );
-                skill_blocks.push(build_skill_block_with_run_id(
-                    &sk.name, &sk.args, &content, &run_id,
-                ));
+                skill_blocks.push(build_skill_block(&sk.name, &sk.args, &content));
             }
             Err(e) => {
                 let body_less_product =
@@ -1625,6 +1560,7 @@ pub(super) fn resolve_human_intent(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
+    loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) =
         crate::session::slash_authority::parse_slash_prefix(&prompt_blocks)
@@ -1638,7 +1574,7 @@ pub(super) fn resolve_human_intent(
         && availability.allows(prompt_cmd.gate)
     {
         let mut blocks = match prompt_cmd.name {
-            "loop" => build_loop_prompt_blocks(args),
+            "loop" => build_loop_prompt_blocks(args, loop_fire_mode),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1710,7 +1646,7 @@ fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
     let text = if args.trim().is_empty() {
         loop_usage_message().to_string()
     } else {
-        loop_schedule_instruction(args)
+        loop_schedule_instruction(args, mode)
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }

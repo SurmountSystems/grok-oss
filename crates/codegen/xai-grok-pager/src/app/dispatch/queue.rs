@@ -161,7 +161,7 @@ pub(super) struct QueueDrain {
 }
 
 impl QueueDrain {
-    pub(crate) fn blocked() -> Self {
+    fn blocked() -> Self {
         Self {
             effects: Vec::new(),
             page_flip_entry: None,
@@ -499,31 +499,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
 
             let combined_segs = queued.combined_texts.clone();
-            // Deferred enter-plan is checked first so wire/images/combined arms
-            // cannot drop the mode switch. Slash `/plan <desc>` only stamps
-            // plain text today; non-plain enter-plan rows fail closed to
-            // `SetModeThenPrompt` (display text + skill ranges) rather than
-            // sending agent-mode blocks.
-            let effects = if queued.enter_plan_mode {
-                if queued.wire_blocks.is_some() || !queued.images.is_empty() || multi {
-                    tracing::warn!(
-                        target: "qtrace",
-                        has_wire = queued.wire_blocks.is_some(),
-                        image_count = queued.images.len(),
-                        multi,
-                        "enter_plan_mode row had non-plain payload; draining as plain SetModeThenPrompt"
-                    );
-                }
-                agent.plan_mode_pending = Some(true);
-                vec![Effect::SetModeThenPrompt {
-                    session_id,
-                    mode_id: acp::SessionModeId::new("plan"),
-                    agent_id,
-                    text: queued.text,
-                    prompt_id,
-                    skill_token_ranges: queued.skill_token_ranges,
-                }]
-            } else if let Some(mut blocks) = queued.wire_blocks {
+            let effects = if let Some(mut blocks) = queued.wire_blocks {
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
                 // Without the annotation, replay shows the raw skill instructions instead of the user-facing display text
@@ -964,11 +940,10 @@ pub(crate) fn apply_turn_start_shim(
     let page_flip_entry = if let Some(segments) = multi_segments {
         let (prompt_idx, first_id, last_id, all_ids) =
             paint_or_reuse_combined_user_bubbles(agent, &segments);
-        let restore = text
-            .clone()
-            .unwrap_or_else(|| xai_prompt_queue::join_texts(segments.iter().map(String::as_str)));
-        agent.session.note_cancel_resume_prompt_text(&restore);
         if rewindable {
+            let restore = text.clone().unwrap_or_else(|| {
+                xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
+            });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
             // An adopted turn arrives with text only, never the original attachments, so a Ctrl+C rewind restores just the joined text
             // The local drain path, which owns the data, restores images/chips.
@@ -1060,23 +1035,13 @@ pub(crate) fn apply_turn_start_shim(
                 Some(RenderBlock::UserPrompt(ub)) if ub.text != text => ub.text.clone(),
                 _ => text,
             };
-            agent.session.note_cancel_resume_prompt_text(&restore_text);
-            if rewindable {
-                agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
-                    text: restore_text,
-                    images: Vec::new(),
-                    scrollback_entry: prompt_entry_id,
-                    combined_scrollback_entries: Vec::new(),
-                    chip_elements: Vec::new(),
-                });
-            }
-        }
-        // Interject-fallback turns persist the user echo without a live
-        // broadcast (shell `UserEchoMode::PersistOnly`). `start_turn` armed
-        // `expect_user_echo`; clear it so a stuck skip does not swallow the
-        // next real turn's echo.
-        if prompt_id.starts_with(INTERJECT_FALLBACK_PROMPT_PREFIX) {
-            agent.session.tracker.clear_user_echo_skip();
+            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                text: restore_text,
+                images: Vec::new(),
+                scrollback_entry: prompt_entry_id,
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
         }
         if skip_entry_top {
             // Send-now: follow at the tail; never entry-top jump.
@@ -1132,12 +1097,7 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
-    // Fearless global pause: hold every session's queue until resume.
-    if app.global_work_pause.is_active() {
-        return vec![];
-    }
-    // Soft stop holding: current turn finished; do not start further queue items.
-    if app.soft_stop.blocks_drain() {
+    if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
     }
     let drain = {
@@ -1150,36 +1110,9 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
     drain.effects
 }
 
-/// Force-drain past background-subagent hold; same page-flip bookkeeping.
-pub(crate) fn force_drain_queue_past_background_and_note_peek(
-    app: &mut AppView,
-    agent_id: AgentId,
-) -> Vec<Effect> {
-    if app.global_work_pause.is_active() {
-        return vec![];
-    }
-    // Explicit send-now while soft-stop holds: release the hold (user intent
-    // to start work) then drain.
-    if app.soft_stop.is_holding() {
-        let _ = app.soft_stop.toggle();
-        app.show_toast("Soft stop cleared for send-now");
-    }
-    let drain = {
-        let Some(agent) = app.agents.get_mut(&agent_id) else {
-            return vec![];
-        };
-        force_drain_queue_past_background(agent)
-    };
-    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
-    drain.effects
-}
-
 /// Try to drain the next queued prompt (triggered after editing completes).
 pub(super) fn dispatch_drain_queue(app: &mut AppView) -> Vec<Effect> {
     if app.reconnect_pending {
-        return vec![];
-    }
-    if app.global_work_pause.is_active() {
         return vec![];
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -2545,6 +2478,48 @@ mod tests {
     }
 
     #[test]
+    fn shim_interject_fallback_reuses_interjection_bubble() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt("steer-a"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt("steer-b"));
+        let before = agent.scrollback.len();
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-a".into(),
+            Some("steer-a".into()),
+            "prompt",
+            None,
+        );
+        apply_turn_start_shim(
+            agent,
+            "interject-fallback-b".into(),
+            Some("steer-b".into()),
+            "prompt",
+            None,
+        );
+        assert_eq!(agent.scrollback.len(), before);
+        match &agent.scrollback.entry(0).unwrap().block {
+            RenderBlock::UserPrompt(ub) => {
+                assert!(!ub.is_interjection);
+                assert_eq!(ub.text, "steer-a");
+            }
+            other => panic!("expected user bubble, got {other:?}"),
+        }
+        match &agent.scrollback.entry(1).unwrap().block {
+            RenderBlock::UserPrompt(ub) => {
+                assert!(!ub.is_interjection);
+                assert_eq!(ub.text, "steer-b");
+            }
+            other => panic!("expected user bubble, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn drain_reports_page_flip_only_when_prompt_starts() {
         crate::appearance::cache::set_page_flip_on_send(true);
         let mut app = test_app_with_agent();
@@ -2824,83 +2799,6 @@ mod tests {
         }
     }
 
-    /// Regression (dogfood): soft interject / queue interject paints once via
-    /// `x.ai/session/interjection` (or optimistic local push). When the
-    /// interjection misses the running turn and the shell converts it to an
-    /// `interject-fallback-*` prompt, the turn-start shim must reuse that
-    /// interjection bubble — not push a second identical green human rail.
-    #[test]
-    fn shim_reuses_interjection_bubble_for_interject_fallback_turn() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let text = "Also it appears we've had a regression [Image #1]";
-        // Live paint already happened (dispatch_interject and/or broadcast).
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(text));
-        let before = agent.scrollback.len();
-        agent.note_self_originated_prompt("interject-fallback-019e24b7-test");
-        apply_turn_start_shim(
-            agent,
-            "interject-fallback-019e24b7-test".into(),
-            Some(text.into()),
-            "prompt",
-            None,
-        );
-        assert_eq!(
-            agent.scrollback.len(),
-            before,
-            "interject-fallback adoption must not paint a second user bubble"
-        );
-        assert_eq!(
-            user_prompt_count(agent, text),
-            1,
-            "exactly one human rail for the interjected text"
-        );
-        assert!(
-            !agent.session.tracker.expects_user_echo(),
-            "fallback has no live user-echo; skip must not stick for the next turn"
-        );
-        let last = agent.scrollback.entry(before - 1).expect("trailing entry");
-        match &last.block {
-            RenderBlock::UserPrompt(ub) => {
-                assert_eq!(ub.text, text);
-                assert!(
-                    ub.is_interjection,
-                    "reused bubble keeps interjection flag (shell numbering)"
-                );
-            }
-            other => panic!("expected user prompt, got {other:?}"),
-        }
-    }
-
-    /// A normal (non-fallback) turn must not steal a trailing mid-turn
-    /// interjection bubble that happens to share the same text.
-    #[test]
-    fn shim_does_not_claim_interjection_for_ordinary_prompt_id() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        let text = "same text";
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt(text));
-        let before = agent.scrollback.len();
-        agent.note_self_originated_prompt("ordinary-prompt-id");
-        apply_turn_start_shim(
-            agent,
-            "ordinary-prompt-id".into(),
-            Some(text.into()),
-            "prompt",
-            None,
-        );
-        assert_eq!(
-            agent.scrollback.len(),
-            before + 1,
-            "ordinary adoption must still paint its own turn-start bubble"
-        );
-        assert_eq!(user_prompt_count(agent, text), 2);
-    }
-
     #[test]
     fn shim_paints_one_bubble_per_combined_segment() {
         let mut app = test_app_with_agent();
@@ -3043,11 +2941,9 @@ mod tests {
             .count()
     }
 
-    /// Soft queue interject never paints at dispatch — multi-client paint is
-    /// the shell's `x.ai/session/interjection` broadcast (see
-    /// `dispatch_queue_interject_shared`). Cancel-and-send paint is gone.
+    /// Queue-row send-now paints at dispatch; the adoption reuses the block.
     #[test]
-    fn interject_contract_queue_shared_no_paint_at_dispatch() {
+    fn queue_interject_shared_paints_user_block_at_arm() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         {
@@ -3079,21 +2975,20 @@ mod tests {
         let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
             user_prompt_count(agent, "ty"),
-            0,
-            "soft queue interject must not paint a user block at dispatch"
+            1,
+            "send-now must paint the user block at dispatch"
         );
-        assert!(
-            agent.expect_send_now_cancel.is_none(),
-            "soft queue interject must not arm send-now cancel"
-        );
+        // The adoption shim reuses the painted block instead of double-pushing.
+        agent.note_self_originated_prompt("p-ty");
+        apply_turn_start_shim(agent, "p-ty".into(), Some("ty".into()), "prompt", None);
         assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Interjection sent"),
+            user_prompt_count(agent, "ty"),
+            1,
+            "turn-start adoption must reuse the dispatch-painted block"
         );
     }
 
-    /// No paint when idle (adoption renders the drain) or for bash rows;
-    /// no false "Interjection sent" toast either (shell would no-op).
+    /// No paint when idle (adoption renders the drain) or for bash rows.
     #[test]
     fn queue_interject_shared_skips_paint_when_not_arming_or_bash() {
         let mut app = test_app_with_agent();
@@ -3120,12 +3015,10 @@ mod tests {
         );
         assert_eq!(user_prompt_count(test_agent(&app, id), "idle row"), 0);
 
-        // Bash row mid-turn: effect may still fire (legacy callers), but no
-        // paint and no success toast (UI refuses bash before dispatch).
+        // Bash row mid-turn: armed, but its adoption paints no user block.
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
-            agent.toast = None;
             agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
                 id: "p-bash".into(),
                 version: 1,
@@ -3286,24 +3179,40 @@ mod tests {
     }
 
     /// Edited paint outranks the adoption's stale mirror text.
-    ///
-    /// Soft `QueueInterjectShared` no longer paints optimistically (shell
-    /// broadcast owns multi-client paint). Set up an edited painted block the
-    /// same way other shim paint tests do (`push_send_now_user_block` with
-    /// `edited = true`) so this asserts adoption-shim law only.
     #[test]
     fn shim_keeps_edited_paint_over_stale_adoption_text() {
         let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.note_self_originated_prompt("p-ed");
-        // Edited override: paint carries fresher text than the mirror adoption.
-        push_send_now_user_block(agent, "p-ed", "prompt", "edited body", true);
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+                id: "p-ed".into(),
+                version: 1,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: "original".into(),
+                position: 0,
+                combined_texts: None,
+            }];
+        }
+        let _ = dispatch(
+            Action::QueueInterjectShared {
+                id: "p-ed".into(),
+                expected_version: 1,
+                new_text: Some("edited body".into()),
+            },
+            &mut app,
+        );
+        let agent = app.agents.get_mut(&id).unwrap();
         assert_eq!(
             user_prompt_count(agent, "edited body"),
             1,
             "the paint must show the edited text the shell will run"
         );
         // Adoption captures the pre-edit mirror text; the edited paint wins.
+        agent.note_self_originated_prompt("p-ed");
         apply_turn_start_shim(
             agent,
             "p-ed".into(),
@@ -4003,25 +3912,14 @@ mod tests {
         assert_eq!(agent.held_queue_count(), 1);
         assert!(
             !agent.held_queue_top_sendable(),
-            "a bash top row must not advertise Enter-to-interject"
+            "a bash top row must not advertise Enter-send-now"
         );
 
         agent.session.pending_prompts.clear();
         agent.session.enqueue_prompt("plain follow-up".into());
         assert!(agent.held_queue_top_sendable());
 
-        // Deferred enter-plan is prompt-like for display but refuses force —
-        // do not advertise "Enter to interject".
-        agent.session.pending_prompts.clear();
-        agent
-            .session
-            .enqueue_enter_plan_prompt("plan follow-up".into(), Vec::new());
-        assert!(
-            !agent.held_queue_top_sendable(),
-            "enter-plan top row must not advertise interject"
-        );
-
-        // Server bash top: refuse soft interject (same as local bash).
+        // A server row (renders first in the merge) is always sendable.
         agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
             id: "srv-1".into(),
             version: 0,
@@ -4035,16 +3933,8 @@ mod tests {
         agent.session.pending_prompts.clear();
         agent.session.enqueue_bash_command("still bash".into());
         assert!(
-            !agent.held_queue_top_sendable(),
-            "server bash top must not advertise Enter-to-interject"
-        );
-
-        // Server plain prompt top: advertise.
-        agent.shared_queue[0].kind = "prompt".into();
-        agent.shared_queue[0].text = "server follow-up".into();
-        assert!(
             agent.held_queue_top_sendable(),
-            "server plain prompt top must advertise Enter-to-interject"
+            "a server top row sends now regardless of kind"
         );
     }
 

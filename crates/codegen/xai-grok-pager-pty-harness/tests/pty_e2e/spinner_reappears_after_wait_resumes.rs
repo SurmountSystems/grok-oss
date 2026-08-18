@@ -97,7 +97,7 @@ async fn spinner_reappears_after_wait_resumes() {
     // Parked look: the parked cue takes the status row (parks write no transcript row) and the running chrome (cancel keybar) drops
     // The session reads as stopped
     harness
-        .wait_for_text("Worked for", Duration::from_secs(60))
+        .wait_for_text("1 command still running", Duration::from_secs(60))
         .unwrap_or_else(|_| {
             panic!(
                 "parked watching cue never appeared; screen:\n{}\n--- non-system messages ---\n{}",

@@ -2970,7 +2970,7 @@ pub fn render_extensions_modal(
                 match state.workflows_data {
                     TabDataState::Loaded(ref workflows) => {
                         let query_lower = state.picker_state.query().to_lowercase();
-                        let visible: Vec<&WorkflowInfo> = workflows
+                        let mut visible: Vec<&WorkflowInfo> = workflows
                             .iter()
                             .filter(|workflow| workflow.has_usable_command_name())
                             .filter(|w| {
@@ -2979,43 +2979,56 @@ pub fn render_extensions_modal(
                                     || w.description.to_lowercase().contains(&query_lower)
                             })
                             .collect();
+                        visible.sort_by(|a, b| cmp_str_ci(&a.name, &b.name));
                         if !visible.is_empty() {
-                            entry_labels.push("Workflows".to_string());
+                            let searching = !state.picker_state.query().is_empty();
+                            let collapsed = !searching
+                                && state
+                                    .skills_collapsed_groups
+                                    .contains(SKILLS_WORKFLOWS_GROUP_KEY);
+                            let count = visible.len();
+                            entry_labels.push(if count == 1 {
+                                "Workflows (1 workflow)".to_string()
+                            } else {
+                                format!("Workflows ({count} workflows)")
+                            });
                             entry_right_labels.push(String::new());
                             entry_desc_lines.push(vec![]);
                             entry_summary_lines.push(vec![]);
                             entry_fields.push(vec![]);
-                            entry_is_header.push(true);
+                            entry_is_header.push(false);
                             entry_dimmed.push(false);
                             entry_indent.push(0);
                             entry_data_indices.push(None);
-                            entry_group_keys.push(None);
+                            entry_group_keys.push(Some(SKILLS_WORKFLOWS_GROUP_KEY.to_string()));
                             entry_badge_text.push(String::new());
                             entry_badge_color.push(None);
-                            for wf in visible {
-                                entry_labels.push(wf.name.clone());
-                                entry_right_labels.push(format!("({})", wf.source));
-                                if wf.description.is_empty() {
-                                    entry_desc_lines.push(vec![]);
-                                } else {
-                                    entry_desc_lines.push(vec![wf.description.clone()]);
+                            if !collapsed {
+                                for wf in visible {
+                                    entry_labels.push(wf.name.clone());
+                                    entry_right_labels.push(format!("({})", wf.source));
+                                    if wf.description.is_empty() {
+                                        entry_desc_lines.push(vec![]);
+                                    } else {
+                                        entry_desc_lines.push(vec![wf.description.clone()]);
+                                    }
+                                    entry_summary_lines.push(vec![]);
+                                    let mut fields = Vec::new();
+                                    if let Some(ref p) = wf.path {
+                                        fields.push(("path".to_string(), p.clone()));
+                                    }
+                                    if let Some(ref w) = wf.when_to_use {
+                                        fields.push(("when to use".to_string(), w.clone()));
+                                    }
+                                    entry_fields.push(fields);
+                                    entry_is_header.push(false);
+                                    entry_dimmed.push(false);
+                                    entry_indent.push(1);
+                                    entry_data_indices.push(None);
+                                    entry_group_keys.push(None);
+                                    entry_badge_text.push(String::new());
+                                    entry_badge_color.push(None);
                                 }
-                                entry_summary_lines.push(vec![]);
-                                let mut fields = Vec::new();
-                                if let Some(ref p) = wf.path {
-                                    fields.push(("path".to_string(), p.clone()));
-                                }
-                                if let Some(ref w) = wf.when_to_use {
-                                    fields.push(("when to use".to_string(), w.clone()));
-                                }
-                                entry_fields.push(fields);
-                                entry_is_header.push(false);
-                                entry_dimmed.push(false);
-                                entry_indent.push(0);
-                                entry_data_indices.push(None);
-                                entry_group_keys.push(None);
-                                entry_badge_text.push(String::new());
-                                entry_badge_color.push(None);
                             }
                         }
                     }

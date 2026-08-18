@@ -103,15 +103,22 @@ impl EnvKeys {
         &self,
         mut getenv: impl FnMut(&str) -> Option<String>,
     ) -> Option<String> {
-        self.resolve_all_values_with(&mut getenv).into_iter().next()
+        for name in self.names() {
+            if let Some(value) = getenv(name)
+                && !value.trim().is_empty()
+            {
+                return Some(value);
+            }
+        }
+        None
     }
     /// All distinct non-blank values from configured names (each name may
     /// expand to multiple keys via commas/newlines). Order preserved.
-    pub fn resolve_all_values(&self) -> Vec<String> {
+    pub(crate) fn resolve_all_values(&self) -> Vec<String> {
         self.resolve_all_values_with(|name| std::env::var(name).ok())
     }
     /// Testable multi-value resolve.
-    pub fn resolve_all_values_with(
+    pub(crate) fn resolve_all_values_with(
         &self,
         mut getenv: impl FnMut(&str) -> Option<String>,
     ) -> Vec<String> {
@@ -531,6 +538,8 @@ pub struct ModelsConfig {
     #[serde(skip)]
     pub default_is_campaign_driven: bool,
     /// Persisted effort for the default model; applied in `resolve_model_catalog`.
+    /// Fork contract: baked catalog default is Grok 4.6 at medium. Unset
+    /// means use the baked card; operators can override here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -963,12 +972,6 @@ pub struct Config {
     /// Keys are agent names, values are booleans. Omitted agents default to enabled.
     #[serde(skip)]
     pub subagent_toggle: std::collections::HashMap<String, bool>,
-    /// Whether subagent spawns may use `isolation = worktree`. From
-    /// `[subagents] allow_worktree` (default `false`). When `false`, spawn
-    /// forces shared workspace (`isolation = none`). Opt in with
-    /// `allow_worktree = true`.
-    #[serde(skip)]
-    pub subagent_allow_worktree: bool,
     /// Trust-independent roles from inline, user, and bundled sources.
     #[serde(skip)]
     pub subagent_roles:
@@ -977,6 +980,10 @@ pub struct Config {
     #[serde(skip)]
     pub subagent_personas:
         std::collections::HashMap<String, xai_grok_subagent_resolution::config::SubagentPersona>,
+    /// Whether subagents may create worktrees. Empty/false = force isolation
+    /// none. `true` opts in. Copied from `[subagents] allow_worktree`.
+    #[serde(skip)]
+    pub subagent_allow_worktree: bool,
     /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
     /// When true, the web search tool is never added to the agent toolset regardless of available credentials.
     #[serde(default)]
@@ -1254,9 +1261,9 @@ impl Default for Config {
             ),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
-            subagent_allow_worktree: false,
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
+            subagent_allow_worktree: false,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
@@ -1681,7 +1688,6 @@ impl Config {
         let remote_settings = self.remote_settings.clone();
         self.resolve_subagent_limits(&sa, remote_settings.as_ref());
         self.subagents_enabled = sa.enabled;
-        self.subagent_allow_worktree = sa.allow_worktree;
         self.subagent_model_overrides = sa.models;
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;
@@ -2893,17 +2899,6 @@ pub(crate) fn resolve_model_list(
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        // Preserve additive third-party defaults (e.g. OpenRouter) that the
-        // remote catalog does not list — prefetched replaces first-party
-        // defaults but must not erase provider options we ship client-side.
-        let preserved: Vec<(String, ModelEntry)> = resolved
-            .iter()
-            .filter(|(k, e)| {
-                !prefetched.contains_key(*k)
-                    && crate::auth::openrouter::is_openrouter_base_url(&e.info.base_url)
-            })
-            .map(|(k, e)| (k.clone(), e.clone()))
-            .collect();
         for (key, entry) in prefetched.iter_mut() {
             let donor = resolved.get(key);
             if let Some(donor) = donor {
@@ -2927,33 +2922,12 @@ pub(crate) fn resolve_model_list(
                 if entry.info.api_backend == ApiBackend::default() {
                     entry.info.api_backend.clone_from(&donor.info.api_backend);
                 }
-                // Surmount product default is 95%. Baked stock models that omit
-                // auto_compact_threshold_percent must not re-acquire a remote
-                // undercut (e.g. models_cache 80) that beats DEFAULT via the GB
-                // per-model tier. Remote-only fleet models (no donor) keep their
-                // per-model value. User session / env / [model.*] still win in
-                // resolve_auto_compact_threshold_percent.
-                if donor.info.auto_compact_threshold_percent.is_none()
-                    && entry.info.auto_compact_threshold_percent.is_some_and(|p| {
-                        p < crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
-                    })
-                {
-                    tracing::debug!(
-                        model_key = %key,
-                        remote = ?entry.info.auto_compact_threshold_percent,
-                        "dropping remote auto_compact undercut for stock model (product default 95)"
-                    );
-                    entry.info.auto_compact_threshold_percent = None;
-                }
             }
             if resolved.contains_key(key) {
                 tracing::debug!(model_key = %key, "prefetched model overriding default");
             }
         }
         resolved = prefetched;
-        for (key, entry) in preserved {
-            resolved.entry(key).or_insert(entry);
-        }
     }
     let mut explicit_api_backend_keys = std::collections::HashSet::new();
     let mut explicit_supports_effort_false_keys = std::collections::HashSet::new();
@@ -4118,10 +4092,7 @@ impl ModelEntry {
     /// the session / global key, except OpenRouter, which never falls through.
     /// Static key path does not consult auth-provider tokens.
     pub(crate) fn own_credential(&self) -> Option<String> {
-        let openrouter = crate::auth::openrouter::is_openrouter_base_url(&self.info.base_url);
-        collect_own_credentials(self.api_key.as_deref(), self.env_key.as_ref(), openrouter)
-            .into_iter()
-            .next()
+        first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
     }
     /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.
     /// The turn paths consult this, so a shadowed provider never runs.
@@ -4434,15 +4405,14 @@ impl<'de> Deserialize<'de> for FeatureEntries {
 /// Resolved credentials for a model session.
 pub(crate) struct ResolvedCredentials {
     pub api_key: Option<String>,
-    /// Extra API keys for credit-exhaustion failover (same host / auth scheme).
-    /// Never includes `api_key`; may be empty.
+    /// Extra API keys for credit-exhaustion failover. Never includes `api_key`.
     pub failover_api_keys: Vec<String>,
     pub base_url: String,
     pub auth_type: xai_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
-    /// Dual-auth: console API host when split from session `base_url` (hop-to-key).
+    /// Dual-auth: console API host when split from session `base_url`.
     pub failover_base_url: Option<String>,
-    /// Dual-auth: session host when primary is console key (hop-to-session).
+    /// Dual-auth: session host when primary is console key.
     pub session_base_url: Option<String>,
     /// Dual-auth: exact session JWT for hop detection / bearer reinstall.
     pub session_identity_key: Option<String>,
@@ -4476,8 +4446,6 @@ pub(crate) fn collect_own_credentials(
             push_unique_key(&mut keys, v);
         }
     }
-    // Also accept OPENROUTER_API_KEYS as an explicit multi-key env (in addition
-    // to comma-lists inside OPENROUTER_API_KEY).
     if openrouter && let Ok(extra) = std::env::var(crate::auth::openrouter::OPENROUTER_API_KEYS_ENV)
     {
         for part in split_api_key_list(&extra) {
@@ -4485,14 +4453,11 @@ pub(crate) fn collect_own_credentials(
         }
     }
     if openrouter {
-        // Prefer reading the Grok secret store directly so a stored key remains
-        // available as failover even when OPENROUTER_API_KEY is set in the env.
         let store = crate::auth::credentials_store::CredentialsStore::default_store();
         let url = crate::auth::openrouter::openrouter_credential_url(None);
         if let Ok(Some((_, store_key))) = store.read(&url) {
             push_unique_key(&mut keys, store_key);
         } else if keys.is_empty() {
-            // Fall back to full resolution (env already empty; may hit Zed harness).
             if let Ok(Some(k)) = crate::auth::openrouter::load_openrouter_api_key_default() {
                 push_unique_key(&mut keys, k);
             }
@@ -4516,7 +4481,6 @@ pub(crate) fn resolve_credentials(
         model.env_key.as_ref(),
         is_openrouter,
     );
-    // (api_key, failover, base_url, auth_type, failover_base_url, session_base_url, session_identity)
     let (
         api_key,
         failover_api_keys,
@@ -4595,7 +4559,6 @@ pub(crate) fn resolve_credentials(
         let console_keys = if first_party {
             collect_xai_console_api_keys()
         } else {
-            // Non-xAI hosts: only the historical env fallthrough (no session dual).
             Vec::new()
         };
         let env_only_keys = if !first_party {
@@ -4604,39 +4567,14 @@ pub(crate) fn resolve_credentials(
             Vec::new()
         };
         let session_host = info.base_url.clone();
-        // Console hop host: model.api_base_url when set. Session-auth catalog
-        // fetch historically left api_base_url unset (only ApiKey fetch filled
-        // it), so dual-auth would queue a console key while failover_base_url
-        // stayed None → hop kept cli-chat-proxy + xai-grok-cli headers → 401.
-        // When primary is the SuperGrok proxy and first-party, fall back to the
-        // public API base so hop can switch hosts.
-        let console_host = model
-            .api_base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                let base = info.base_url.as_str();
-                let on_cli_chat_proxy = {
-                    let lower = base.to_ascii_lowercase();
-                    lower.contains("cli-chat-proxy") || lower.contains("cli_chat_proxy")
-                };
-                if first_party && on_cli_chat_proxy {
-                    XAI_API_BASE_URL_DEFAULT.to_owned()
-                } else {
-                    info.base_url.clone()
-                }
-            });
+        let console_host = console_hop_host(model, first_party);
         let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
 
         match (session.as_deref(), !console_keys.is_empty(), first_party) {
-            // Dual-auth: session + console key(s) on first-party xAI.
             (Some(sess), true, true) if prefer_api_key_primary => {
                 let mut keys = console_keys;
                 keys.retain(|k| k.trim() != sess);
                 if keys.is_empty() {
-                    // preferred_method=api_key exclusive: retained-away all keys.
                     (
                         None,
                         Vec::new(),
@@ -4689,8 +4627,6 @@ pub(crate) fn resolve_credentials(
                     Some(sess.to_owned()),
                 )
             }
-            // preferred_method=api_key exclusive: no console key → do not fall
-            // through to session (parity with prepare_sampling_config).
             (Some(_), false, _) if prefer_api_key_primary => {
                 if let Some(ref env_keys) = model.env_key
                     && !env_keys.is_empty()
@@ -4813,7 +4749,6 @@ pub(crate) fn enforce_disable_api_key_auth(
             })),
         );
     }
-    // Single-identity: drop console-key failover under enterprise kill-switch.
     if !creds.failover_api_keys.is_empty()
         || creds.failover_base_url.is_some()
         || creds.session_base_url.is_some()
@@ -4843,11 +4778,8 @@ fn resolve_credentials_enforced(
 }
 
 /// Like [`resolve_credentials_enforced`] but honors `[auth] preferred_method`
-/// and `[auth] auto_use_included_limits` for dual-auth ordering (main chat +
-/// aux paths). When `auto_use_included_limits` is true (and preferred is not
-/// `api_key`), ranks SuperGrok included headroom before SuperGrok $ extras /
-/// console — same graceful failover as the main sampling path.
-pub fn resolve_credentials_enforced_preferring(
+/// and `[auth] auto_use_included_limits` for dual-auth hop order.
+pub(crate) fn resolve_credentials_enforced_preferring(
     entry: &ModelEntry,
     session_key: Option<&str>,
     disable_api_key_auth: bool,
@@ -4988,18 +4920,10 @@ pub fn resolve_aux_model_sampling_config_preferring(
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
-    preferred_method: Option<crate::auth::PreferredAuthMethod>,
-    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
-        let credentials = resolve_credentials_enforced_preferring(
-            entry,
-            session_key,
-            disable_api_key_auth,
-            preferred_method,
-            auto_use_included_limits,
-        );
+        let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
             entry,
             credentials,
@@ -5076,13 +5000,7 @@ pub fn resolve_aux_model_sampling_config_preferring(
             auth_provider: None,
             api_base_url: None,
         };
-        let credentials = resolve_credentials_enforced_preferring(
-            &entry,
-            session_key,
-            disable_api_key_auth,
-            preferred_method,
-            auto_use_included_limits,
-        );
+        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
             &entry,
             credentials,
@@ -5113,8 +5031,6 @@ pub(crate) fn stamp_session_local_sampler_fields(
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_xai_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
-        // Durable hop-to-session re-bind (no prior stash required on aux samplers).
-        cfg.session_bearer_resolver = active_session_config.session_bearer_resolver.clone();
     }
     cfg.max_retries = max_retries;
 }
@@ -5200,10 +5116,6 @@ pub(crate) fn sampling_config_for_model(
         crate::util::config::request_compression_for_url(&credentials.base_url);
     SamplerConfig {
         api_key: credentials.api_key,
-        failover_api_keys: credentials.failover_api_keys,
-        failover_base_url: credentials.failover_base_url,
-        session_base_url: credentials.session_base_url,
-        session_identity_key: credentials.session_identity_key,
         model: model_name,
         base_url: credentials.base_url,
         mtls_cert_dir: model.mtls_cert_dir.clone(),
@@ -5237,13 +5149,17 @@ pub(crate) fn sampling_config_for_model(
         origin_client: None,
         attribution_callback: None,
         bearer_resolver: None,
-        stashed_bearer_resolver: None,
-        session_bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
         header_injector: None,
+        failover_api_keys: credentials.failover_api_keys,
+        failover_base_url: credentials.failover_base_url,
+        session_base_url: credentials.session_base_url,
+        session_identity_key: credentials.session_identity_key,
+        stashed_bearer_resolver: None,
+        session_bearer_resolver: None,
     }
 }
 /// Fold URL-derived headers into `extra_headers`. The sampler crate is intentionally URL-agnostic: it does not inspect `base_url` to decide which auth or staging headers to add.
@@ -5266,22 +5182,18 @@ pub(crate) fn inject_url_derived_headers(
         .entry(crate::http::CLIENT_MODE_HEADER.to_string())
         .or_insert_with(|| crate::http::process_client_mode().to_string());
     if crate::auth::openrouter::is_openrouter_base_url(base_url) {
-        use crate::auth::openrouter::{
-            OPENROUTER_CATEGORIES, OPENROUTER_HTTP_REFERER, OPENROUTER_X_OPENROUTER_TITLE_HEADER,
-            OPENROUTER_X_TITLE, OPENROUTER_X_TITLE_HEADER,
-        };
         headers
             .entry("HTTP-Referer".to_string())
-            .or_insert_with(|| OPENROUTER_HTTP_REFERER.to_string());
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_HTTP_REFERER.to_string());
         headers
-            .entry(OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_string())
-            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+            .entry(crate::auth::openrouter::OPENROUTER_X_OPENROUTER_TITLE_HEADER.to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
         headers
-            .entry(OPENROUTER_X_TITLE_HEADER.to_string())
-            .or_insert_with(|| OPENROUTER_X_TITLE.to_string());
+            .entry(crate::auth::openrouter::OPENROUTER_X_TITLE_HEADER.to_string())
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_X_TITLE.to_string());
         headers
             .entry("X-OpenRouter-Categories".to_string())
-            .or_insert_with(|| OPENROUTER_CATEGORIES.to_string());
+            .or_insert_with(|| crate::auth::openrouter::OPENROUTER_CATEGORIES.to_string());
     }
     let _ = (alpha_test_key, base_url);
 }
@@ -5345,13 +5257,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         auth_provider: None,
         api_base_url: None,
     };
-    let credentials = resolve_credentials_enforced_preferring(
-        &entry,
-        session_key,
-        disable_api_key_auth,
-        preferred_method,
-        auto_use_included_limits,
-    );
+    let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(
         &entry,
         credentials,
@@ -5393,17 +5299,9 @@ pub fn resolve_web_search_sampling_config_preferring(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
-    preferred_method: Option<crate::auth::PreferredAuthMethod>,
-    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
-        let credentials = resolve_credentials_enforced_preferring(
-            &entry,
-            session_key,
-            disable_api_key_auth,
-            preferred_method,
-            auto_use_included_limits,
-        );
+        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
             tracing::warn!(
                 web_search_model = %model_id,
@@ -5427,8 +5325,6 @@ pub fn resolve_web_search_sampling_config_preferring(
             alpha_test_key,
             client_version,
             endpoints,
-            preferred_method,
-            auto_use_included_limits,
         ))
     } else {
         None

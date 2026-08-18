@@ -178,6 +178,10 @@ fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
                 *seq, app.coding_data_write_seq,
                 "the effect must carry the generation it was dispatched under",
             );
+            assert_eq!(
+                *seq, app.coding_data_write_seq,
+                "the effect must carry the generation it was dispatched under",
+            );
         }
         other => panic!("expected SetCodingDataSharing Effect, got {effects:?} ({other:?})"),
     }
@@ -1724,12 +1728,49 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
 
     setup_reset_confirm_open(&mut app, "compact_mode");
 
-    let effects = dispatch(
-        Action::ConfirmResetSetting {
-            choice: ResetSettingsResult::Reset,
-        },
-        &mut app,
-    );
+        // Write 1: Settings opt-out from currently in.
+        let write1 = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+        assert!(
+            write1.iter().any(|e| matches!(
+                e,
+                Effect::SetCodingDataSharing {
+                    opted_in: false,
+                    ..
+                }
+            )),
+            "write 1 must be a real opt-out: {write1:?}"
+        );
+        assert_eq!(app.coding_data_write_seq, 1);
+
+        // Write 2: the user opts in from settings, and it confirms.
+        let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert_eq!(app.coding_data_write_seq, 2);
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+                agent_id: AgentId(0),
+                opted_in: true,
+                seq: 2,
+            }),
+            &mut app,
+        );
+        assert!(!app.coding_data_retention_opt_out, "opted in");
+
+        // Write 1 finally answers, either way it can.
+        let stale_reply = if stale_failed {
+            TaskResult::CodingDataSharingFailed {
+                agent_id: AgentId(0),
+                error: "network timeout".into(),
+                rollback_to_opted_in: true,
+                seq: 1,
+            }
+        } else {
+            TaskResult::CodingDataSharingUpdated {
+                agent_id: AgentId(0),
+                opted_in: false,
+                seq: 1,
+            }
+        };
+        let effects = dispatch(Action::TaskComplete(stale_reply), &mut app);
 
     // Recursive dispatch into Action::SetCompactMode(false) emits the persist effect
     assert_eq!(effects.len(), 1);
@@ -1768,14 +1809,14 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
         let _ = dispatch(Action::SetTheme("tokyonight".to_string()), &mut app);
         assert_eq!(app.current_ui.theme.as_deref(), Some("tokyonight"));
 
-        setup_reset_confirm_open(&mut app, "theme");
+/// Settings Opt out while already out (banner eligible): acks, no ACP write.
+#[test]
+fn settings_opt_out_while_already_out_acks_without_write() {
+    let mut app = privacy_banner_ready_app();
+    assert!(app.privacy_banner_should_show());
+    assert!(app.coding_data_retention_opt_out);
 
-        let effects = dispatch(
-            Action::ConfirmResetSetting {
-                choice: ResetSettingsResult::Reset,
-            },
-            &mut app,
-        );
+    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
 
         // Reset dispatches SetTheme("groknight"), the registered default
         assert_eq!(effects.len(), 1);
@@ -1912,331 +1953,644 @@ fn session_usage_keeps_scroll_when_page_flip_off() {
 }
 
 #[test]
+fn settings_opt_out_from_in_acks_now_and_writes() {
+    let mut app = privacy_banner_ready_app();
+    app.coding_data_retention_opt_out = false;
+    assert!(!app.privacy_banner_should_show());
+
+    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "changed opt-out must ack now: {effects:?}"
+    );
+    match effects
+        .iter()
+        .find(|e| matches!(e, Effect::SetCodingDataSharing { .. }))
+    {
+        Some(Effect::SetCodingDataSharing {
+            opted_in,
+            rollback_to_opted_in,
+            seq,
+            ..
+        }) => {
+            assert!(!*opted_in);
+            assert!(*rollback_to_opted_in);
+            assert_eq!(*seq, app.coding_data_write_seq);
+        }
+        other => panic!("expected SetCodingDataSharing, got {effects:?} ({other:?})"),
+    }
+    assert!(app.privacy_banner_acked.is_some());
+    assert!(app.coding_data_retention_opt_out);
+    assert!(!app.privacy_banner_should_show());
+    assert!(!app.privacy_banner_opt_in_inflight);
+}
+
+/// Re-committing Opt in while the first write is inflight must not ack.
+/// That ack would survive a later ACP failure and hide the banner.
+#[test]
+fn settings_opt_in_recommitted_while_inflight_does_not_ack() {
+    let mut app = privacy_banner_ready_app();
+    let first = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+    assert!(
+        first
+            .iter()
+            .any(|e| matches!(e, Effect::SetCodingDataSharing { opted_in: true, .. })),
+        "first commit must write: {first:?}"
+    );
+    assert!(
+        !first
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "first commit must not ack: {first:?}"
+    );
+    assert!(app.privacy_banner_opt_in_inflight);
+    assert!(app.privacy_banner_acked.is_none());
+    let seq = app.coding_data_write_seq;
+    assert_eq!(seq, 1);
+
+    let again = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+    assert!(
+        !again
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "re-commit while inflight must not ack: {again:?}"
+    );
+    assert!(
+        !again
+            .iter()
+            .any(|e| matches!(e, Effect::SetCodingDataSharing { .. })),
+        "re-commit while inflight must not write again: {again:?}"
+    );
+    assert!(app.privacy_banner_opt_in_inflight);
+    assert_eq!(app.coding_data_write_seq, seq);
+    assert!(app.privacy_banner_acked.is_none());
+
+    let fail_effects = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingFailed {
+            agent_id: AgentId(0),
+            error: "server error".into(),
+            rollback_to_opted_in: false,
+            seq,
+        }),
+        &mut app,
+    );
+    assert!(fail_effects.is_empty());
+    assert!(!app.privacy_banner_opt_in_inflight);
+    assert!(app.privacy_banner_acked.is_none());
+    assert!(app.coding_data_retention_opt_out);
+    assert!(app.privacy_banner_should_show());
+}
+
+/// A Settings pick before the notice is rolled out must not stamp an ack
+/// that would hide the banner when the cohort turns on.
+#[test]
+fn settings_choice_does_not_ack_when_rollout_off() {
+    for opted_in in [true, false] {
+        let mut app = test_app_with_agent();
+        app.privacy_notice_rollout = false;
+        app.coding_data_retention_opt_out = true;
+        app.auth_state = AuthState::Done;
+        app.trust_state = TrustState::Done;
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in }, &mut app);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+            "rollout-off must not persist ack (opted_in={opted_in}): {effects:?}"
+        );
+        assert!(
+            app.privacy_banner_acked.is_none(),
+            "rollout-off must not stamp ack (opted_in={opted_in})"
+        );
+        if opted_in {
+            let seq = app.coding_data_write_seq;
+            let ack_effects = dispatch(
+                Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+                    agent_id: AgentId(0),
+                    opted_in: true,
+                    seq,
+                }),
+                &mut app,
+            );
+            assert!(
+                !ack_effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+                "rollout-off opt-in success must not ack: {ack_effects:?}"
+            );
+            assert!(app.privacy_banner_acked.is_none());
+        }
+    }
+}
+
+#[test]
+fn dispatch_rename_session_updates_display_name_locally() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch_rename_session(&mut app, "renamed via slash".into());
+    assert_eq!(effects.len(), 1);
+    assert_eq!(
+        app.agents[&AgentId(0)].display_name.as_deref(),
+        Some("renamed via slash"),
+        "/rename must also update local display_name cache"
+    );
+    match &effects[0] {
+        Effect::RenameSession { kind, .. } => {
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "build-lane /rename must send kind=build"
+            );
+        }
+        other => panic!("expected RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_rename_session_strips_controls_before_display_name_and_effect() {
+    let mut app = test_app_with_agent();
+    let effects =
+        dispatch_rename_session(&mut app, "  Hello\u{1b}[31mWorld\u{07}\u{9b}C1  ".into());
+    assert_eq!(
+        app.agents[&AgentId(0)].display_name.as_deref(),
+        Some("Hello[31mWorldC1"),
+        "optimistic display_name must match the shell strip (no OSC/CSI/BEL/C1)"
+    );
+    match &effects[..] {
+        [Effect::RenameSession { title, .. }] => {
+            assert_eq!(title, "Hello[31mWorldC1");
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch_rename_session(&mut app, "\u{1b}\u{07}\n\t".into());
+    assert!(
+        effects.is_empty(),
+        "control-only title must not emit RenameSession: {effects:?}"
+    );
+    assert!(
+        app.agents[&AgentId(0)].display_name.is_none(),
+        "control-only title must not paint a blank/dirty display_name"
+    );
+    assert!(
+        last_system_text(&app, AgentId(0)).contains("title must not be blank"),
+        "control-only title must surface the same failed-rename system block"
+    );
+}
+
+#[test]
+fn dispatch_rename_session_chat_kind_stamps_kind_chat() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.chat_kind = true;
+    agent.conversation_entry = true;
+    let effects = dispatch_rename_session(&mut app, "chat rename".into());
+    match &effects[..] {
+        [Effect::RenameSession { kind, title, .. }] => {
+            assert_eq!(title, "chat rename");
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Chat,
+                "chat-lane /rename must send kind=chat"
+            );
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_rename_session_sticky_chat_local_build_stays_build() {
+    let mut app = test_app_with_agent();
+    app.chat_mode = true;
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    // Sticky `--chat` UI bit, local-disk history-bypass (not a conversation).
+    agent.chat_kind = true;
+    agent.conversation_entry = false;
+    let effects = dispatch_rename_session(&mut app, "local title".into());
+    match &effects[..] {
+        [Effect::RenameSession { kind, title, .. }] => {
+            assert_eq!(title, "local title");
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "history-bypass local build under sticky --chat must send kind=build"
+            );
+        }
+        other => panic!("expected one RenameSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn rename_session_request_serializes_camel_case_kind() {
+    use crate::app::actions::RenameSessionRequest;
+    use xai_grok_shell::session::unified_list::SessionKind;
+
+    let build = serde_json::to_value(RenameSessionRequest::for_rename(
+        "sid".into(),
+        "T".into(),
+        "/repo".into(),
+        SessionKind::Build,
+    ))
+    .unwrap();
+    assert_eq!(
+        build,
+        serde_json::json!({
+            "sessionId": "sid",
+            "title": "T",
+            "cwd": "/repo",
+            "kind": "build",
+        })
+    );
+
+    let chat = serde_json::to_value(RenameSessionRequest::for_rename(
+        "cid".into(),
+        "Chat".into(),
+        "/tmp".into(),
+        SessionKind::Chat,
+    ))
+    .unwrap();
+    assert_eq!(
+        chat,
+        serde_json::json!({
+            "sessionId": "cid",
+            "title": "Chat",
+            "cwd": "/tmp",
+            "kind": "chat",
+        })
+    );
+
+    let unpin = serde_json::to_value(RenameSessionRequest::for_reset(
+        "sid".into(),
+        "/repo".into(),
+        SessionKind::Build,
+    ))
+    .unwrap();
+    assert_eq!(
+        unpin,
+        serde_json::json!({
+            "sessionId": "sid",
+            "title": "",
+            "cwd": "/repo",
+            "kind": "build",
+            "resetToAuto": true,
+        }),
+        "unpin must send empty title + resetToAuto so old shells reject blank"
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_clears_titles_and_emits_effect() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.display_name = Some("Manual".into());
+        // Post-rename both caches hold the pin (fan-out / resume).
+        agent.generated_session_title = Some("Manual".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    let agent = &app.agents[&AgentId(0)];
+    assert!(
+        agent.display_name.is_none(),
+        "optimistic unpin must clear display_name"
+    );
+    assert!(
+        agent.generated_session_title.is_none(),
+        "optimistic unpin must clear generated_session_title when it matches the pin"
+    );
+    assert_ne!(
+        crate::views::session_title::entry_title(agent),
+        "Manual",
+        "dashboard/tab entry_title must not stay the manual pin"
+    );
+    match &effects[..] {
+        [
+            Effect::ResetSessionTitle {
+                agent_id,
+                session_id,
+                cwd,
+                kind,
+                previous_display_name,
+                previous_generated_title,
+            },
+        ] => {
+            assert_eq!(*agent_id, AgentId(0));
+            assert_eq!(session_id.0.as_ref(), "test-session");
+            assert_eq!(cwd, std::path::Path::new("/tmp"));
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build
+            );
+            assert_eq!(previous_display_name.as_deref(), Some("Manual"));
+            assert_eq!(previous_generated_title.as_deref(), Some("Manual"));
+        }
+        other => panic!("expected ResetSessionTitle, got {other:?}"),
+    }
+}
+
+#[test]
+fn dispatch_reset_session_title_never_manual_keeps_generated_title() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.display_name = None;
+        agent.generated_session_title = Some("Auto".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    let agent = &app.agents[&AgentId(0)];
+    assert!(agent.display_name.is_none());
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Auto"));
+    assert_eq!(
+        crate::views::session_title::entry_title(agent),
+        "Auto",
+        "already-auto unpin must stay a UI no-op"
+    );
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::ResetSessionTitle {
+                kind: xai_grok_shell::session::unified_list::SessionKind::Build,
+                ..
+            }]
+        ),
+        "got {effects:?}"
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_sticky_chat_local_build_stays_build() {
+    let mut app = test_app_with_agent();
+    app.chat_mode = true;
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.chat_kind = true;
+        agent.conversation_entry = false;
+        agent.display_name = Some("Manual".into());
+        agent.generated_session_title = Some("Auto".into());
+    }
+    let effects = dispatch_reset_session_title(&mut app);
+    match &effects[..] {
+        [Effect::ResetSessionTitle { kind, .. }] => {
+            assert_eq!(
+                *kind,
+                xai_grok_shell::session::unified_list::SessionKind::Build,
+                "history-bypass local build under sticky --chat must unpin as build"
+            );
+        }
+        other => panic!("expected ResetSessionTitle, got {other:?}"),
+    }
+    assert!(app.agents[&AgentId(0)].display_name.is_none());
+    assert_eq!(
+        app.agents[&AgentId(0)].generated_session_title.as_deref(),
+        Some("Auto")
+    );
+}
+
+#[test]
+fn dispatch_reset_session_title_refuses_chat_kind() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.chat_kind = true;
+        agent.conversation_entry = true;
+        agent.display_name = Some("Chat title".into());
+        agent.generated_session_title = Some("Kept".into());
+    }
+    let scrollback_len_before = app.agents[&AgentId(0)].scrollback.len();
+    let effects = dispatch_reset_session_title(&mut app);
+    assert!(
+        effects.is_empty(),
+        "chat-kind unpin must not emit an effect, got {effects:?}"
+    );
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.display_name.as_deref(), Some("Chat title"));
+    assert_eq!(agent.generated_session_title.as_deref(), Some("Kept"));
+    assert_eq!(agent.scrollback.len(), scrollback_len_before + 1);
+    let last = agent
+        .scrollback
+        .entry(agent.scrollback.len() - 1)
+        .expect("last entry");
+    let text = match &last.block {
+        crate::scrollback::block::RenderBlock::System(b) => b.text.clone(),
+        other => panic!("expected System block, got {other:?}"),
+    };
+    assert!(
+        text.contains("Chat conversations have no auto-title to restore"),
+        "got: {text:?}"
+    );
+}
+
+/// `ConfirmResetSetting { choice: Reset }` on a SHARED Bool
+/// target restores the Settings modal AND fires the typed
+/// `Action::SetCompactMode(default)` via recursive dispatch —
+/// the `Effect::PersistSetting` is the externally-observable
+/// signal. Also asserts the ui_snapshot was
+/// refreshed to the new (post-reset) value (symmetric with the
+/// Cancel test's snapshot assertion).
+#[test]
+fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool() {
+    use crate::settings::SettingValue;
+    use crate::views::modal::{ActiveModal, ResetSettingsResult};
+    let mut app = test_app_with_agent();
+    // Flip compact_mode to true so we can observe the reset back
+    // to its default (false).
+    let _ = dispatch(Action::SetCompactMode(true), &mut app);
+    assert!(app.current_ui.compact_mode);
+
+    setup_reset_confirm_open(&mut app, "compact_mode");
+
+    let effects = dispatch(
+        Action::ConfirmResetSetting {
+            choice: ResetSettingsResult::Reset,
+        },
+        &mut app,
+    );
+
+    // Recursive dispatch into Action::SetCompactMode(false) emits
+    // the persist effect.
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting { key, value, .. } => {
+            assert_eq!(*key, "compact_mode");
+            assert_eq!(value, &SettingValue::Bool(false));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    // In-memory state is reset to the default.
+    assert!(!app.current_ui.compact_mode);
+    // Modal is restored AND ui_snapshot reflects the new value
+    // (symmetric with the Cancel test).
+    let agent = app.agents.get(&AgentId(0)).expect("agent must exist");
+    match &agent.active_modal {
+        Some(ActiveModal::Settings { state }) => {
+            assert!(
+                !state.ui_snapshot.compact_mode,
+                "ui_snapshot must reflect the post-reset value"
+            );
+        }
+        _ => panic!("Reset branch must restore the Settings modal"),
+    }
+}
+
+/// `ConfirmResetSetting { choice: Reset }` on a SHARED Enum
+/// target (`theme`) dispatches `Action::SetTheme(default)` via
+/// recursive dispatch — verifies the action_for_reset Enum arm.
+#[test]
+fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum() {
+    use crate::settings::SettingValue;
+    use crate::views::modal::ResetSettingsResult;
+    // SetTheme mutates the global theme cache — serialize with the
+    // other theme tests via the theme test lock.
+    with_theme_test_env(|| {
+        let mut app = test_app_with_agent();
+        // Flip theme to a non-default first.
+        let _ = dispatch(Action::SetTheme("tokyonight".to_string()), &mut app);
+        assert_eq!(app.current_ui.theme.as_deref(), Some("tokyonight"));
+
+        setup_reset_confirm_open(&mut app, "theme");
+
+        let effects = dispatch(
+            Action::ConfirmResetSetting {
+                choice: ResetSettingsResult::Reset,
+            },
+            &mut app,
+        );
+
+        // Reset → SetTheme("doge") (the registered product default).
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::PersistSetting { key, value, .. } => {
+                assert_eq!(*key, "theme");
+                assert_eq!(value, &SettingValue::Enum("doge"));
+            }
+            other => panic!("expected PersistSetting, got {other:?}"),
+        }
+        assert_eq!(app.current_ui.theme.as_deref(), Some("doge"));
+    });
+}
+
+fn seed_scrolled_up(app: &mut AppView) {
+    let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+    for i in 0..40 {
+        sb.push_block(RenderBlock::agent_message(format!("seed {i}")));
+    }
+    sb.prepare_layout(80, 8);
+    sb.goto_top();
+}
+
+fn current_usage_nonce(app: &AppView) -> u64 {
+    match app.agents[&AgentId(0)].active_modal.as_ref() {
+        Some(crate::views::modal::ActiveModal::UsageInfo { state }) => state.fetch_nonce,
+        _ => 0,
+    }
+}
+
+fn complete_session_usage(app: &mut AppView) {
+    let nonce = current_usage_nonce(app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionUsageComplete {
+            agent_id: AgentId(0),
+            session_id: "test-session".to_string().into(),
+            usage: Box::default(),
+            nonce,
+        }),
+        app,
+    );
+}
+
+fn context_info_response() -> xai_grok_shell::session::SessionInfoResponse {
+    use xai_grok_shell::session::acp_types::{ContextInfo, SessionInfoData};
+
+    xai_grok_shell::session::SessionInfoResponse {
+        session_id: "test-session".to_string(),
+        cwd: "/tmp/test".to_string(),
+        data: SessionInfoData {
+            agent_name: None,
+            model: Some("grok-build".to_string()),
+            model_display_name: None,
+            resolved_model_id: None,
+            model_fingerprint: None,
+            show_model_fingerprint: false,
+            api_backend: None,
+            conversation_id: None,
+            turns: 0,
+            turn_index: 0,
+            context: ContextInfo::default(),
+        },
+    }
+}
+
+#[test]
+fn stale_context_info_results_do_not_update_replaced_session() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = agent_scrollback_len(&app);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("replacement".into());
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: "test-session".into(),
+            info: Box::new(context_info_response()),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextInfoFailed {
+            agent_id: id,
+            session_id: "test-session".into(),
+            error: "request failed".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(agent_scrollback_len(&app), before);
+}
+
+#[test]
+fn session_usage_page_flips_info_to_top() {
+    crate::appearance::cache::set_page_flip_on_send(true);
+    let mut app = test_app_with_agent();
+    // Scrollback flow is minimal-only.
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.usage_visible = false;
+    seed_scrolled_up(&mut app);
+    complete_session_usage(&mut app);
+    let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+    sb.prepare_layout(80, 8);
+    assert!(sb.is_follow_preserve_scroll());
+    let pinned = sb.scroll_offset();
+    sb.scroll_to_entry_top(sb.len() - 1);
+    assert_eq!(sb.scroll_offset(), pinned);
+}
+
+#[test]
+fn session_usage_keeps_scroll_when_page_flip_off() {
+    let prev = crate::appearance::cache::load_page_flip_on_send();
+    crate::appearance::cache::set_page_flip_on_send(false);
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.usage_visible = false;
+    seed_scrolled_up(&mut app);
+    complete_session_usage(&mut app);
+    assert_eq!(app.agents[&AgentId(0)].scrollback.scroll_offset(), 0);
+    crate::appearance::cache::set_page_flip_on_send(prev);
+}
+
+#[test]
 fn show_usage_on_welcome_screen_is_noop() {
     let mut app = test_app();
     let effects = dispatch(Action::ShowUsage, &mut app);
     assert!(
         effects.is_empty(),
         "ShowUsage with no active agent should be a no-op"
-    );
-}
-
-#[test]
-fn show_limits_on_welcome_screen_is_noop() {
-    let mut app = test_app();
-    let effects = dispatch(Action::ShowLimits, &mut app);
-    assert!(
-        effects.is_empty(),
-        "ShowLimits with no active agent should be a no-op"
-    );
-}
-
-#[test]
-fn show_limits_opens_modal_with_cached_snapshot() {
-    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
-    use crate::views::modal::ActiveModal;
-
-    let mut app = test_app_with_agent();
-    app.credit_balance = Some(CreditBalance {
-        usage_pct: 24.0,
-        effective_usage_pct: 24.0,
-        period_end_display: Some("Jul 30, 12:00".into()),
-        period_end_at: None,
-        pay_as_you_go: false,
-        on_demand_cap_cents: None,
-        on_demand_used_cents: None,
-        prepaid_balance_cents: Some(1250),
-        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-        is_unified_billing_user: None,
-        grok_build_usage_pct: None,
-        included_usage_known: true,
-    });
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
-        // Agent cache empty → falls back to app.credit_balance.
-        agent.credit_balance = None;
-    }
-    let before = agent_scrollback_len(&app);
-    let effects = dispatch(Action::ShowLimits, &mut app);
-    // Snapshot is cache-only; optional silent FetchBilling only when Management
-    // key+team_id are configured and prepaid cents are still cold.
-    assert!(
-        effects.is_empty()
-            || matches!(
-                effects.as_slice(),
-                [Effect::FetchBilling { silent: true, .. }]
-            ),
-        "limits shows cache (+ optional silent management refresh): {effects:?}"
-    );
-    // Primary surface is a dismissible modal — not a scrollback dump.
-    assert_eq!(
-        agent_scrollback_len(&app),
-        before,
-        "limits must not pollute chat with a static block"
-    );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
-        panic!(
-            "expected Limits modal, got {:?}",
-            agent.active_modal.as_ref().map(|m| m.message(false))
-        );
-    };
-    let text = state.content_lines(chrono::Utc::now()).join("\n");
-    // Body has no second "Limits" title (modal chrome owns it).
-    assert!(
-        text.contains("Live sampling:"),
-        "live sampling line: {text}"
-    );
-    assert!(
-        !text.starts_with("Limits\n") && !text.starts_with("Limits\r"),
-        "body must not double the chrome title: {text}"
-    );
-    assert!(
-        text.contains("Included weekly allowance: 24% used · 76% remaining"),
-        "{text}"
-    );
-    assert!(text.contains("SuperGrok dollar extras: $12.50"), "{text}");
-    assert!(text.contains("Next reset: Jul 30, 12:00"), "{text}");
-    // Honest gap family (host may or may not have management config).
-    assert!(
-        text.contains("Team prepaid remaining: no management key")
-            || text.contains("Team prepaid remaining: no management team id")
-            || text.contains("Team prepaid remaining: loading team prepaid...")
-            || text.contains("Team prepaid remaining: team prepaid unavailable")
-            || text
-                .lines()
-                .any(|l| l.trim_start().starts_with("Team prepaid remaining: $")),
-        "honest console prepaid gap: {text}"
-    );
-    assert!(
-        !text.contains("no management key/team id"),
-        "mushy combined gap retired: {text}"
-    );
-    assert!(
-        !text.contains("no $ meter yet"),
-        "soft placeholder retired: {text}"
-    );
-}
-
-#[test]
-fn show_limits_console_live_keeps_meters_distinct() {
-    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
-    use crate::views::modal::ActiveModal;
-
-    let mut app = test_app_with_agent();
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
-        agent.credit_balance = Some(CreditBalance {
-            usage_pct: 100.0,
-            effective_usage_pct: 100.0,
-            period_end_display: Some("Jul 30, 12:00".into()),
-            period_end_at: None,
-            pay_as_you_go: false,
-            on_demand_cap_cents: None,
-            on_demand_used_cents: None,
-            prepaid_balance_cents: Some(500),
-            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-            is_unified_billing_user: None,
-            grok_build_usage_pct: None,
-            included_usage_known: true,
-        });
-    }
-    let _ = dispatch(Action::ShowLimits, &mut app);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
-        panic!("expected Limits modal");
-    };
-    let text = state.content_lines(chrono::Utc::now()).join("\n");
-    assert!(text.contains("Live sampling: console key"), "{text}");
-    assert!(text.contains("Requests: console"), "{text}");
-    assert!(
-        !text.contains("saved"),
-        "omit saved; presence is implicit: {text}"
-    );
-    assert!(!text.contains("Path:"), "Path: wording retired: {text}");
-    assert!(
-        text.contains("Team prepaid remaining: no management key")
-            || text.contains("Team prepaid remaining: no management team id")
-            || text.contains("Team prepaid remaining: loading team prepaid...")
-            || text.contains("Team prepaid remaining: team prepaid unavailable")
-            || text
-                .lines()
-                .any(|l| l.trim_start().starts_with("Team prepaid remaining: $")),
-        "honest console prepaid gap: {text}"
-    );
-    assert!(
-        !text.contains("no management key/team id"),
-        "mushy combined gap retired: {text}"
-    );
-    assert!(
-        !text.contains("no $ meter yet"),
-        "soft placeholder retired: {text}"
-    );
-    assert!(
-        text.contains("SuperGrok dollar extras: $5"),
-        "extras labeled SuperGrok, not console: {text}"
-    );
-}
-
-/// Named contract: `/limits --json` → conversation-visible JSON with
-/// `schemaVersion` / `liveSampling` (same shape as CLI `grok limits --json`).
-#[test]
-fn show_limits_json_prints_to_scrollback_not_modal() {
-    use crate::scrollback::block::RenderBlock;
-    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
-    use crate::views::modal::ActiveModal;
-
-    let mut app = test_app_with_agent();
-    app.credit_balance = Some(CreditBalance {
-        usage_pct: 24.0,
-        effective_usage_pct: 24.0,
-        period_end_display: Some("Jul 30, 12:00".into()),
-        period_end_at: None,
-        pay_as_you_go: false,
-        on_demand_cap_cents: None,
-        on_demand_used_cents: None,
-        prepaid_balance_cents: Some(1250),
-        period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-        is_unified_billing_user: None,
-        grok_build_usage_pct: None,
-        included_usage_known: true,
-    });
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
-        agent.credit_balance = None;
-        // Ensure a modal is not left open by a prior path.
-        agent.active_modal = Some(ActiveModal::Limits {
-            state: Box::new(crate::views::limits_modal::LimitsModalState::new(
-                crate::views::limits_snapshot::LimitsSnapshot::from_billing(
-                    None,
-                    None,
-                    SamplingIdentityKind::SuperGrokSession,
-                ),
-            )),
-        });
-    }
-    let before = agent_scrollback_len(&app);
-    let effects = dispatch(Action::ShowLimitsJson, &mut app);
-    assert!(
-        effects.is_empty()
-            || matches!(
-                effects.as_slice(),
-                [Effect::FetchBilling { silent: true, .. }]
-            ),
-        "json path is cache (+ optional silent refresh): {effects:?}"
-    );
-    assert!(
-        agent_scrollback_len(&app) > before,
-        "JSON must land in conversation scrollback"
-    );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    assert!(
-        agent.active_modal.is_none(),
-        "--json bypasses modal; modal must be cleared"
-    );
-    let last_idx = agent.scrollback.len().saturating_sub(1);
-    let last = agent
-        .scrollback
-        .get(last_idx)
-        .expect("scrollback entry after ShowLimitsJson");
-    let text = match &last.block {
-        RenderBlock::System(sys) => sys.text.clone(),
-        _ => panic!("expected system block for /limits --json"),
-    };
-    assert!(
-        text.contains("```json") || text.contains("schemaVersion"),
-        "fenced or raw JSON body: {text}"
-    );
-    // Parse JSON body (strip optional fence).
-    let json_body = text
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| text.trim().strip_prefix("```"))
-        .map(|s| s.trim_end_matches('`').trim())
-        .unwrap_or(text.trim());
-    let v: serde_json::Value = serde_json::from_str(json_body)
-        .unwrap_or_else(|e| panic!("JSON parse failed: {e}; body={json_body}"));
-    assert_eq!(v["schemaVersion"], "1", "{v}");
-    assert_eq!(v["liveSampling"], "supergrok_session", "{v}");
-    assert!(
-        v["liveSamplingLabel"]
-            .as_str()
-            .unwrap_or("")
-            .contains("SuperGrok"),
-        "liveSamplingLabel: {v}"
-    );
-    assert_eq!(
-        v["supergrok"]["principals"][0]["includedUsedPct"], 24.0,
-        "{v}"
-    );
-    // No secret-looking material in the dump.
-    let flat = text.to_ascii_lowercase();
-    assert!(!flat.contains("access_token"));
-    assert!(!flat.contains("api_key"));
-    assert!(!flat.contains("eyj"));
-}
-
-/// Named contract: fixture Management prepaid cents → `/limits` Balance dollars.
-#[test]
-fn show_limits_console_live_with_management_fixture_shows_prepaid_balance() {
-    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
-    use crate::views::modal::ActiveModal;
-
-    let mut app = test_app_with_agent();
-    app.console_team_prepaid_cents = Some(12_500);
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.sampling_identity = SamplingIdentityKind::ConsoleKey;
-        agent.console_team_prepaid_cents = Some(12_500);
-        agent.credit_balance = Some(CreditBalance {
-            usage_pct: 100.0,
-            effective_usage_pct: 100.0,
-            period_end_display: Some("Jul 30, 12:00".into()),
-            period_end_at: None,
-            pay_as_you_go: false,
-            on_demand_cap_cents: None,
-            on_demand_used_cents: None,
-            prepaid_balance_cents: Some(996),
-            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-            is_unified_billing_user: None,
-            grok_build_usage_pct: None,
-            included_usage_known: true,
-        });
-    }
-    let effects = dispatch(Action::ShowLimits, &mut app);
-    // Console prepaid cache is warm (no management cold path). Dual SuperGrok
-    // hosts may still silent-refresh when a sibling included row is empty.
-    assert!(
-        effects.is_empty()
-            || matches!(
-                effects.as_slice(),
-                [Effect::FetchBilling { silent: true, .. }]
-            ),
-        "warm prepaid: no effects or optional sibling silent refresh: {effects:?}"
-    );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    let Some(ActiveModal::Limits { state }) = agent.active_modal.as_ref() else {
-        panic!("expected Limits modal");
-    };
-    let text = state.content_lines(chrono::Utc::now()).join("\n");
-    assert!(text.contains("Live sampling: console key"), "{text}");
-    assert!(
-        text.contains("Team prepaid remaining: $125"),
-        "management prepaid on /limits (short Balance): {text}"
-    );
-    assert!(
-        !text.contains("no $ meter yet")
-            && !text.contains("no management key/team id")
-            && !text.contains("team prepaid unavailable")
-            && !text.contains("loading team prepaid"),
-        "must not claim absence when cents present: {text}"
-    );
-    assert!(
-        text.contains("SuperGrok dollar extras: $9.96"),
-        "SuperGrok extras stay SuperGrok-labeled: {text}"
     );
 }
 

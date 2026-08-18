@@ -1549,9 +1549,6 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
                 failover_api_keys: Vec::new(),
-                failover_base_url: None,
-                session_base_url: None,
-                session_identity_key: None,
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
                 context_window: 256_000,

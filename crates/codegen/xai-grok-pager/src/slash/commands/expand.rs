@@ -23,6 +23,12 @@ impl SlashCommand for ExpandCommand {
         )),
     }
 
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::MinimalOnly(Remedy::UseInstead(
+            "press Tab to focus the scrollback, then → on the block",
+        ))
+    }
+
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         if ctx.session_id.is_none() {
             return CommandResult::Error("No active session".to_string());

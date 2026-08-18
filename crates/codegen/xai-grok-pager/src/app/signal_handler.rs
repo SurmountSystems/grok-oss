@@ -170,12 +170,6 @@ define_recv_optional_windows_signal!(
 /// Request the event loop's graceful quit when it is registered and the TUI still owns the terminal.
 /// Otherwise hard-exit (agent mode, or a signal after teardown already started).
 fn request_graceful_or_exit(code: i32) {
-    // Write cancel-resume **before** notify / hard-exit. Mid-turn killall is
-    // one SIGTERM; if the event loop is wedged or a second signal force-exits
-    // before Action::Quit, the armed prompt text must already be on disk.
-    // Best-effort; idle / unarmed turns leave no marker.
-    let _ =
-        xai_grok_shell::session::canceled_turn_resume::write_armed_process_shutdown_cancel_resume();
     let notify = QUIT_NOTIFY.lock().clone();
     if TERMINAL_OWNED.load(Ordering::Acquire)
         && let Some(n) = notify
@@ -269,5 +263,21 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
             .await
             .expect("graceful branch notified the registered quit handle");
+    }
+
+    /// Contract: SIGUSR1 must set the peer-rebuild flag (not default terminate).
+    /// A failed `/rebuild` never sends the signal; this only arms the receiver.
+    #[test]
+    fn sigusr1_sets_peer_rebuild_flag_once() {
+        let _ = take_peer_rebuild_relaunch();
+        mark_peer_rebuild_relaunch_from_sigusr1();
+        assert!(
+            take_peer_rebuild_relaunch(),
+            "SIGUSR1 must set the cooperative re-exec flag"
+        );
+        assert!(
+            !take_peer_rebuild_relaunch(),
+            "flag is one-shot so a later /exit does not re-exec"
+        );
     }
 }

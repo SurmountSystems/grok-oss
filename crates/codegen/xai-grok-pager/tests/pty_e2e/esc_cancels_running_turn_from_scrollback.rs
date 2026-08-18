@@ -2,12 +2,12 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **2× Esc from the SCROLLBACK pane cancels a running turn** in the default
+/// **1× Esc from the SCROLLBACK pane cancels a running turn** in the default
 /// (non-vim) config. The policy treats Prompt and Scrollback identically while
 /// a turn runs, so a user reading the transcript can interrupt without first
 /// returning to the prompt. Tab (not Esc) is used to leave the prompt; the
 /// footer's "Space:prompt" hint confirms the scrollback owns keys before the
-/// cancel Esc presses are sent.
+/// cancel Esc is sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn esc_cancels_running_turn_from_scrollback() {
@@ -44,12 +44,8 @@ async fn esc_cancels_running_turn_from_scrollback() {
         .wait_for_text("Space:prompt", Duration::from_secs(10))
         .expect("scrollback must own keys before the cancel Esc");
 
-    // 2× Esc from scrollback cancels the running turn.
+    // 1× Esc from scrollback cancels the running turn.
     harness.inject_keys(keys::ESC).expect("press esc");
-    harness
-        .wait_for_text("press again to cancel", Duration::from_secs(5))
-        .expect("first Esc must arm cancel confirm");
-    harness.inject_keys(keys::ESC).expect("press esc again");
     harness.update(Duration::from_millis(200));
 
     harness

@@ -37,6 +37,11 @@ fn is_foreign_hook_batch(agent: &AgentView, batch_prompt_id: Option<&str>) -> bo
     )
 }
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
+    // Do not copy `context_state.total` into `session_sampling_window`.
+    // Token refresh totals come from the model-card catalog. Copying that
+    // 500k into the session field makes the chip treat windows as equal
+    // and paint unlabeled `201K / 500K`. Session sampling is set only by
+    // GetSessionInfo (`apply_full_context_info`) or AutoCompactStarted.
     let total = view.session.models.get_context_window().unwrap_or(0);
     view.apply_context_used(used, total);
 }
@@ -297,6 +302,7 @@ pub(super) fn handle_session_notification_with_origin(
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
+        | XaiSessionUpdate::AutoCompactSkippedTinySavings
         | XaiSessionUpdate::RetryState(_)
         | XaiSessionUpdate::ImageDropped { .. }
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
@@ -470,6 +476,7 @@ pub(super) fn handle_session_notification_with_origin(
             parent_prompt_id,
             parent_session_id,
             workflow_run_id,
+            depth,
             ..
         } => {
             tracing::info!(
@@ -689,6 +696,15 @@ pub(super) fn handle_session_notification_with_origin(
                     parent_session_id,
                 ));
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
+            }
+            let is_l3 = depth.is_some_and(|d| d >= 2)
+                || agent
+                    .subagent_sessions
+                    .contains_key(parent_session_id.as_str());
+            if is_l3 {
+                // L3 specialists stay in the registry for the L2 count. They
+                // do not get an L1 scrollback lifecycle row.
+                return true;
             }
             if workflow_run_id.is_none() {
                 let block = crate::scrollback::blocks::SubagentBlock::started(
@@ -1408,10 +1424,6 @@ pub(super) fn handle_session_notification_with_origin(
             tracing::warn!("PluginsChanged: agent or modal disappeared before skills re-fetch");
         }
     }
-    if try_drain_after_subagent_finish {
-        let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
-        app.pending_effects.extend(effects);
-    }
     if let Some(agent) = app.agents.get_mut(&parent_id) {
         if let Some(seq) = meta.event_seq
             && !meta.is_replay
@@ -1602,6 +1614,160 @@ pub(super) fn handle_child_session_notification(
             }
             finished
         }
+        XaiSessionUpdate::SubagentSpawned { .. }
+        | XaiSessionUpdate::SubagentProgress { .. }
+        | XaiSessionUpdate::SubagentFinished { .. } => apply_nested_subagent_update(agent, update),
+        XaiSessionUpdate::ToolCallDeltaChunk {
+            ref name,
+            tool_index,
+            ..
+        } => {
+            let Some(child_view) = agent.subagent_views.get_mut(child_sid) else {
+                return false;
+            };
+            if child_view.session.loading_replay {
+                return false;
+            }
+            let row_live = agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| !info.finished);
+            if !row_live {
+                return false;
+            }
+            if !child_view
+                .session
+                .tracker
+                .note_tool_call_arguments_delta(name.as_deref(), tool_index)
+            {
+                return false;
+            }
+            let activity_label = subagent_activity_label(child_view);
+            sync_subagent_activity(agent, child_sid, activity_label);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Register L3 spawn/progress/finish on the L1 registry without L1 scrollback.
+fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate) -> bool {
+    match update {
+        XaiSessionUpdate::SubagentSpawned {
+            subagent_id,
+            child_session_id,
+            subagent_type,
+            description,
+            persona,
+            role,
+            model,
+            effective_context_source,
+            resumed_from,
+            capability_mode,
+            context_normalized,
+            parent_prompt_id,
+            parent_session_id,
+            workflow_run_id,
+            depth,
+        } => {
+            agent.subagent_sessions.insert(
+                child_session_id.clone(),
+                SubagentInfo {
+                    subagent_id: Arc::from(subagent_id),
+                    child_session_id: Arc::from(child_session_id),
+                    description: Arc::from(description),
+                    subagent_type: Arc::from(subagent_type),
+                    persona: persona.map(Arc::from),
+                    role: role.map(Arc::from),
+                    model: model.map(Arc::from),
+                    context_source: effective_context_source.map(Arc::from),
+                    resumed_from: resumed_from.map(Arc::from),
+                    capability_mode: capability_mode.map(Arc::from),
+                    workflow_run_id: workflow_run_id.map(Arc::from),
+                    context_normalized,
+                    parent_prompt_id: parent_prompt_id.map(Arc::from),
+                    parent_session_id: Some(Arc::from(parent_session_id)),
+                    depth,
+                    started_at: std::time::Instant::now(),
+                    last_progress_at: std::time::Instant::now(),
+                    finished: false,
+                    status: None,
+                    error: None,
+                    duration_ms: None,
+                    tool_calls: None,
+                    turns: None,
+                    turn_count: None,
+                    tool_call_count: None,
+                    tokens_used: None,
+                    context_window_tokens: None,
+                    context_usage_pct: None,
+                    tools_used: Vec::new(),
+                    error_count: None,
+                    activity_label: None,
+                    is_background: false,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    prompt: None,
+                    child_cwd: None,
+                    worktree_path: None,
+                    child_updates_replayed: false,
+                },
+            );
+            true
+        }
+        XaiSessionUpdate::SubagentProgress {
+            child_session_id,
+            duration_ms,
+            turn_count,
+            tool_call_count,
+            tokens_used,
+            context_window_tokens,
+            context_usage_pct,
+            tools_used,
+            error_count,
+            ..
+        } => {
+            let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) else {
+                return false;
+            };
+            info.duration_ms = Some(duration_ms);
+            info.turn_count = Some(turn_count);
+            info.tool_call_count = Some(tool_call_count);
+            info.tokens_used = Some(tokens_used);
+            info.context_window_tokens = Some(context_window_tokens);
+            info.context_usage_pct = Some(context_usage_pct);
+            info.tools_used = tools_used.into_iter().map(Arc::from).collect();
+            info.error_count = Some(error_count);
+            info.last_progress_at = std::time::Instant::now();
+            true
+        }
+        XaiSessionUpdate::SubagentFinished {
+            child_session_id,
+            status,
+            error,
+            tool_calls,
+            turns,
+            duration_ms,
+            tokens_used,
+            ..
+        } => {
+            let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) else {
+                return false;
+            };
+            info.finished = true;
+            info.status = Some(Arc::from(status));
+            info.error = error.map(Arc::from);
+            info.tool_calls = Some(tool_calls);
+            info.turns = Some(turns);
+            info.duration_ms = Some(duration_ms);
+            info.tokens_used = Some(tokens_used);
+            info.activity_label = None;
+            info.pending_kill = false;
+            info.kill_requested_at = None;
+            info.last_progress_at = std::time::Instant::now();
+            true
+        }
         _ => false,
     }
 }
@@ -1763,6 +1929,7 @@ pub(super) fn apply_session_event(
             tokens_before,
             tokens_after,
             elapsed_ms,
+            saved_too_little,
             ..
         } => {
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
@@ -1774,11 +1941,20 @@ pub(super) fn apply_session_event(
                         tokens_before: *tokens_before,
                         tokens_after: *tokens_after,
                         elapsed_ms: *elapsed_ms,
+                        saved_too_little: *saved_too_little,
                     },
                 ));
             } else if !manual_compact_in_flight(session) {
                 session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms);
             }
+            true
+        }
+        XaiSessionUpdate::AutoCompactSkippedTinySavings => {
+            tracing::info!("Auto-compact skipped: last compact saved too little");
+            session.set_compaction_activity(None);
+            scrollback.push_block(RenderBlock::session_event(
+                SessionEvent::CompactionSkippedTinySavings,
+            ));
             true
         }
         XaiSessionUpdate::AutoCompactFailed { error } => {
@@ -1877,6 +2053,24 @@ pub(super) fn apply_image_compressed(
     tracing::info!("Image compressed: {message}");
     false
 }
+/// Flip tracked sampling identity when a retry toast names a dual-auth hop.
+///
+/// Compact status and `/limits` Active read `AgentView.sampling_identity`.
+/// Hop copy is the destination identity; unknown reasons leave the field
+/// unchanged.
+pub(super) fn apply_sampling_identity_from_retry(
+    retry: &xai_grok_shell::extensions::notification::RetryState,
+    sampling_identity: &mut crate::views::credit_bar::SamplingIdentityKind,
+) {
+    use xai_grok_shell::extensions::notification::RetryState;
+    let RetryState::Retrying { reason, .. } = retry else {
+        return;
+    };
+    if let Some(next) = crate::views::credit_bar::sampling_identity_from_hop_reason(reason) {
+        *sampling_identity = next;
+    }
+}
+
 pub(super) fn apply_retry_state(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
@@ -1902,7 +2096,7 @@ pub(super) fn apply_retry_state(
         }
         // Live stream after a retry: soft-reconnect chrome, not a hard clear.
         // Hard clear made the footer fall through to zombie "Waiting for
-        // response…" for the entire headers/TTFB window (up to ~120s) when the
+        // response..." for the entire headers/TTFB window (up to ~120s) when the
         // network was still bad after a timeout retry. Keep the retry family
         // with reason "reconnecting" until real stream content arrives
         // (`handle_update` clears `retry_activity`) or the next Retrying/

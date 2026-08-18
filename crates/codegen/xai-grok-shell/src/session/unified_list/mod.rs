@@ -1003,7 +1003,7 @@ mod tests {
         {
             let _chat = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             assert!(
-                !conversations_lane_active(),
+                conversations_lane_active(),
                 "process chat mode must enable the lane (chat feature only)"
             );
         }
@@ -1316,9 +1316,9 @@ mod tests {
     #[test]
     fn list_req_deserializes_allow_relax_key() {
         let req: ListReq = serde_json::from_str(r#"{"allowRelax": true}"#).expect("parse");
-        assert!(req.allow_relax);
+        assert_eq!(req.cwd_scope, CwdScope::RelaxIfEmpty);
         let req: ListReq = serde_json::from_str("{}").expect("parse");
-        assert!(!req.allow_relax);
+        assert_eq!(req.cwd_scope, CwdScope::WithSiblings);
     }
     /// relax_rows scopes to the cwd's repo and relaxes only on a messaged session.
     #[test]

@@ -1,4 +1,4 @@
-//! Feedback, remember-note, session-note, btw, and recap dispatchers.
+//! Feedback, remember-note, btw, and recap dispatchers.
 
 use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use agent_client_protocol as acp;
@@ -9,6 +9,7 @@ use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
+use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use xai_grok_feedback::{
     FeedbackDraftStore, FeedbackSource, FeedbackTaxonomy, derive_title, structured_feedback,
@@ -767,22 +768,18 @@ fn extract_session_context(agent: &AgentView) -> String {
                     user_prompts.push(text);
                 }
             }
-            RenderBlock::ToolCall(tc) => {
-                if file_paths.len() < 20 {
-                    match tc {
-                        ToolCallBlock::Read(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::Edit(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        ToolCallBlock::ListDir(b) => {
-                            file_paths.push(b.path.clone());
-                        }
-                        _ => {}
-                    }
+            RenderBlock::ToolCall(tc) if file_paths.len() < 20 => match tc {
+                ToolCallBlock::Read(b) => {
+                    file_paths.push(b.path.clone());
                 }
-            }
+                ToolCallBlock::Edit(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                ToolCallBlock::ListDir(b) => {
+                    file_paths.push(b.path.clone());
+                }
+                _ => {}
+            },
             _ => {}
         }
         if user_prompts.len() >= 5 && file_paths.len() >= 20 {
@@ -860,11 +857,9 @@ pub(super) fn dispatch_send_btw(
         // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it when `consume_input` is set
         // Draft-preserving callers (the palette, an edited queue row) keep theirs
         let minimal_request_id = if minimal {
-            Some(crate::minimal_api::start_minimal_btw_with_context(
+            Some(crate::minimal_api::start_minimal_btw(
                 agent,
                 question.clone(),
-                prior_btw,
-                btw_session_id.clone(),
             ))
         } else {
             agent.clear_btw_owned_selection();
@@ -1158,7 +1153,6 @@ pub(super) fn handle_btw_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<String, String>,
-    btw_session_id: Option<String>,
     minimal_request_id: Option<uuid::Uuid>,
     image_notice: Option<String>,
     skipped_image_numbers: &[usize],
@@ -1188,57 +1182,76 @@ pub(super) fn handle_btw_response(
                 agent.btw_state = Some(BtwOverlayState::done(question, response));
                 agent.btw_focused = true;
             }
-            (Some(state @ BtwOverlayState::Loading { .. }), Err(error)) => {
+            Err(error) => {
                 // Error stays until Esc; nothing to scroll, keep prompt focus.
-                agent.btw_state = Some(state.finish_loading_error(error));
-                agent.btw_focused = false;
-            }
-            (prior, Ok(response)) => {
-                // Late response after dismiss / unexpected state: still show
-                // a single-turn Done so the answer is not lost (legacy path).
-                let question = prior
-                    .as_ref()
-                    .map(|s| s.question().to_string())
-                    .unwrap_or_default();
-                agent.btw_state = Some(BtwOverlayState::done_with_session(
-                    question,
-                    response,
-                    btw_session_id,
-                ));
-                agent.btw_focused = true;
-            }
-            (prior, Err(error)) => {
-                let question = prior
-                    .as_ref()
-                    .map(|s| s.question().to_string())
-                    .unwrap_or_default();
-                let (prior_turns, sid) = match prior {
-                    Some(BtwOverlayState::Loading {
-                        prior_turns,
-                        btw_session_id: sid,
-                        ..
-                    })
-                    | Some(BtwOverlayState::Error {
-                        prior_turns,
-                        btw_session_id: sid,
-                        ..
-                    }) => (prior_turns, sid.or(btw_session_id)),
-                    Some(BtwOverlayState::Done {
-                        turns,
-                        btw_session_id: sid,
-                        ..
-                    }) => (turns, sid.or(btw_session_id)),
-                    None => (Vec::new(), btw_session_id),
-                };
-                agent.btw_state = Some(BtwOverlayState::Error {
-                    question,
-                    error,
-                    prior_turns,
-                    btw_session_id: sid,
-                });
+                agent.btw_state = Some(BtwOverlayState::Error { question, error });
                 agent.btw_focused = false;
             }
         }
+    }
+    vec![]
+}
+
+/// `/note <text>` — store an operator mid-session note (not a turn).
+pub(super) fn dispatch_add_session_note(
+    app: &mut AppView,
+    text: String,
+    tags: Vec<String>,
+) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    agent.prompt.set_text("");
+    let Some(note) = agent.session.session_notes.add(text, tags) else {
+        agent.show_toast("Note text required. Try /note <text>");
+        return vec![];
+    };
+    let note_text = note.text.clone();
+    let note_tags = note.tags.clone();
+    let n = agent.session.session_notes.len();
+    let preview: String = note_text
+        .chars()
+        .take(48)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let ellipsis = if note_text.chars().count() > 48 {
+        "..."
+    } else {
+        ""
+    };
+    let tag_suffix = if note_tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " [{}]",
+            note_tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    let msg = format!("Note saved ({n}): {preview}{ellipsis}{tag_suffix}");
+    if app.screen_mode.is_minimal() {
+        agent.scrollback.push_block(RenderBlock::system(msg));
+    } else {
+        agent.show_toast(&msg);
+    }
+    vec![]
+}
+
+/// `/note` (no args) / `/notes` — list session notes as a system block.
+pub(super) fn dispatch_show_notes(app: &mut AppView) -> Vec<Effect> {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.prompt.set_text("");
+        let text = crate::app::status_blocks::notes_block_text(agent);
+        agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]
 }

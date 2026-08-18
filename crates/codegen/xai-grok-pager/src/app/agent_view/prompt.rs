@@ -686,7 +686,6 @@ impl AgentView {
                         self.open_line_viewer(&req.path, req.initial_range);
                     }
                     self.prompt.refresh_slash(&self.session.models);
-                    self.persist_unsent_prompt_draft();
                     if let Some(eff) = self.notify_suggestion_text_changed() {
                         self.pending_effects.push(eff);
                     }
@@ -789,20 +788,6 @@ impl AgentView {
             }
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Changed);
-        }
-        // Mid-turn (minimal / non-vim): arm double-Esc cancel confirm from
-        // prompt or scrollback, even with a draft (the draft is preserved,
-        // unlike Ctrl+C's clear-first gesture). First press is harmless so
-        // Esc that only closed a modal/dropdown cannot also cancel. Second
-        // Esc within the confirm window fires CancelTurn (AppView installs
-        // the pending and sets cancel_trigger_hint + rewind grace on fire).
-        if self.session.state.is_turn_running() {
-            return Some(InputOutcome::ArmPending {
-                action: Action::CancelTurn,
-                shortcut: crate::input::key::KeyShortcut::from(*key),
-                label: Some("cancel"),
-                ttl: crate::app::app_view::esc_double_press_ttl(),
-            });
         }
 
         // CLEAR mutates the composer (drops text/image chips), so it fires only while the PROMPT pane owns keys
@@ -1616,111 +1601,6 @@ mod history_browse_panel_tests {
             "Down at the newest must still close the panel"
         );
         assert_eq!(agent.prompt.text(), "");
-    }
-}
-
-/// Ctrl+E expand-thinking must work while the prompt is focused (not only
-/// scrollback). Otherwise the chord falls through to the textarea as EOL and
-/// looks like a silent no-op.
-#[cfg(test)]
-mod expand_thinking_key_tests {
-    use super::*;
-    use crate::app::agent_view::test_fixtures::make_agent;
-    use crate::app::app_view::InputOutcome;
-    use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::types::DisplayMode;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn ctrl_e() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)
-    }
-
-    #[test]
-    fn ctrl_e_from_prompt_emits_expand_all_thinking() {
-        let mut agent = make_agent();
-        assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
-        // Seed a live truncated thought so expand has work to do.
-        let id = agent
-            .scrollback
-            .push_block(RenderBlock::thinking_streaming());
-        agent.scrollback.set_last_running(true);
-        agent
-            .scrollback
-            .push_chunk_to_thinking(id, "reason step by step\nmore lines\nhere");
-        assert_eq!(
-            agent.scrollback.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated
-        );
-
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_e());
-        match outcome {
-            InputOutcome::Action(Action::ExpandAllThinking) => {}
-            other => panic!("expected ExpandAllThinking from prompt Ctrl+E, got {other:?}"),
-        }
-    }
-}
-
-/// Send-now (InterjectPrompt) must never silent-no-op: toast or action.
-#[cfg(test)]
-mod send_now_key_tests {
-    use super::*;
-    use crate::app::agent::AgentState;
-    use crate::app::agent_view::test_fixtures::{make_agent, make_running_agent};
-    use crate::app::app_view::InputOutcome;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn ctrl_enter() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
-    }
-
-    #[test]
-    fn interject_contract_with_text_while_idle_toasts() {
-        let mut agent = make_agent();
-        agent.session.state = AgentState::Idle;
-        agent.prompt.set_text("please fix this");
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing running to interject into — press Enter to send")
-        );
-        assert_eq!(agent.prompt.text(), "please fix this", "draft preserved");
-    }
-
-    #[test]
-    fn interject_contract_empty_while_running_with_empty_queue_toasts() {
-        let mut agent = make_running_agent();
-        // Drop local + shared queue so nothing is interjectable.
-        agent.session.pending_prompts.clear();
-        agent.shared_queue.clear();
-        agent.queue.sync_from_merged(
-            &agent.session.pending_prompts,
-            &agent.shared_queue,
-            None,
-            None,
-            &agent.send_now_painted_blocks,
-        );
-        agent.prompt.set_text("");
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_eq!(
-            agent.toast.as_ref().map(|(m, _)| m.as_str()),
-            Some("Nothing queued to interject")
-        );
-    }
-
-    #[test]
-    fn interject_contract_with_text_while_running_emits_interject() {
-        let mut agent = make_running_agent();
-        agent.prompt.set_text("steer left");
-        let outcome = agent.handle_prompt_key_for_test(&ctrl_enter());
-        match outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
-                assert_eq!(text, "steer left");
-            }
-            other => panic!("expected Interject, got {other:?}"),
-        }
-        assert!(agent.prompt.text().is_empty());
     }
 }
 

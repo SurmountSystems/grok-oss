@@ -39,10 +39,9 @@ fn contextual_hints_group_sub_sheet_flow() {
         .expect("group row present");
     assert!(
         !s.rows.iter().any(|r| matches!(
-                    r,
-                    RowEntry::Setting { key, .. }
-        if key.starts_with("contextual_hints.")
-                )),
+            r,
+            RowEntry::Setting { key, .. } if key.starts_with("contextual_hints.")
+        )),
         "child rows must be hidden from the top-level list",
     );
 
@@ -675,16 +674,13 @@ fn rows_contain_categories_and_settings_through_pr_14() {
         vec![
             // Booleans.
             "compact_mode",
-            // SHARED hide_header (Appearance; default off).
-            "hide_header",
             "screen_mode",
+            "hide_header",
             "show_timestamps",
             "show_timeline",
             "dashboard_preview",
             // PAGER-owned page_flip_on_send (Appearance).
             "page_flip_on_send",
-            // SHARED scrub_ascii_punct (Appearance; default ON).
-            "scrub_ascii_punct",
             "simple_mode",
             // PAGER-owned vim_mode (Appearance, paired with simple_mode)
             "vim_mode",
@@ -700,14 +696,13 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "show_thinking_blocks",
             // PAGER-owned respect_manual_folds (Appearance, persisted to pager.toml)
             "respect_manual_folds",
-            // PAGER-owned bubble_copy_buttons (Appearance; always-on ⧉
-            // on user/assistant bubbles; default ON; pager.toml
-            // `[scrollback.display].bubble_copy_buttons`).
-            "bubble_copy_buttons",
             // SHELL-owned group_tool_verbs (Appearance; live cache).
             "group_tool_verbs",
             // SHELL-owned collapsed_edit_blocks (Appearance; live cache, default OFF rollout flag)
             "collapsed_edit_blocks",
+            "always_expand_thinking",
+            "scrub_ascii_punct",
+            "bubble_copy_buttons",
             // SHELL-owned display_refresh_auto_cadence (Appearance).
             "display_refresh_auto_cadence",
             // Mouse: scroll and drag selection. The scroll classification/lines/direction knobs follow scroll_speed.
@@ -738,9 +733,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "plan_mode",
             // SHELL-owned auto_run_implement (Agent category; live cache).
             "auto_run_implement",
-            // SHELL-owned economic_mode (Agent; after auto_run_implement).
             "economic_mode",
-            // Token Economy ([token_economy]) — implement-effort policy + pacing.
             "token_economy.cap_implement_effort_when_economic",
             "token_economy.max_implement_effort",
             "token_economy.min_implement_effort",
@@ -749,6 +742,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "token_economy.show_period_pacing",
             "token_economy.local_spend_ledger",
             "token_economy.reconcile_management_usage",
+            // SHELL-owned default_selected_permission (Agent category).
+            "default_selected_permission",
+            // SHELL-owned ask_user_question timeout (Agent category).
+            "toolset.ask_user_question.timeout_enabled",
+            // PAGER-owned plan_mode (Agent category).
+            "plan_mode",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
             // SHELL-owned default_model (Models category).
@@ -2288,8 +2287,8 @@ fn int_editing_value_click_on_value_text_is_noop() {
 #[test]
 fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
     let cases: &[(&str, &str)] = &[
-        ("theme", "doge"),
-        ("auto_dark_theme", "doge"),
+        ("theme", "groknight"),
+        ("auto_dark_theme", "groknight"),
         ("auto_light_theme", "grokday"),
     ];
     for &(key, original) in cases {
@@ -2326,16 +2325,16 @@ fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
 #[test]
 fn picking_enum_esc_returns_to_browse() {
     let mut s = make_state();
-    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("doge"), true);
+    s.transition_to_picking_enum("theme", 0, SettingValue::Enum("groknight"), true);
     let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     match outcome {
         SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
             assert_eq!(
-                name, "doge",
+                name, "groknight",
                 "Esc revert must dispatch the original canonical"
             );
         }
-        other => panic!("expected Action::PreviewTheme(\"doge\") on Esc, got {other:?}"),
+        other => panic!("expected Action::PreviewTheme(\"groknight\") on Esc, got {other:?}"),
     }
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
@@ -4542,7 +4541,7 @@ fn section_headers_have_blank_line_above_except_first() {
         x: 0,
         y: 0,
         width: 80,
-        height: 120,
+        height: 60,
     };
     let mut buf = Buffer::empty(area);
     let theme = Theme::current();
@@ -6741,11 +6740,9 @@ fn max_thoughts_width_preview_content_is_italic() {
 /// only GrokDay renders the title darker.
 #[test]
 fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
-    // Hermetic: ambient ~/.grok theme may be monochrome (DOGE has
-    // bg_visual == bg_highlight == black). Pin GrokNight so the two-tone
-    // preview contract is exercised against a palette that has distinct
-    // tokens. DOGE relies on UNDERLINED (asserted below) instead of bg.
-    let _theme = crate::theme::cache::pin_theme();
+    // Pin GrokNight + TrueColor so this is not the process Doge default
+    // (all-black bg slots) or NO_COLOR Reset collapse.
+    let _pin = crate::theme::cache::pin_theme();
     let area = Rect {
         x: 0,
         y: 0,

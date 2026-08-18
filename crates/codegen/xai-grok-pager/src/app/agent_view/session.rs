@@ -135,7 +135,6 @@ impl AgentView {
             self.prompt.set_cursor(text.len());
         }
     }
-
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
@@ -266,9 +265,6 @@ impl AgentView {
             workspace_mode_cli_locked: false,
             credit_balance: None,
             auto_topup: None,
-            openrouter_credit_balance: None,
-            console_team_prepaid_cents: None,
-            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
             goal_state: None,
             workflow_blocks: std::collections::HashMap::new(),
             workflow_runs: Vec::new(),
@@ -318,7 +314,7 @@ impl AgentView {
             scrollback_visible_link_count: 0,
             highlighted_link_idx: None,
             hovered_link_idx: None,
-            last_pointer_cursor: false,
+            last_pointer_on_link: false,
             last_btw_selection_model: ResolvedSelectionModel::default(),
             last_btw_area: Rect::default(),
             pending_scrollback_click: None,
@@ -346,7 +342,6 @@ impl AgentView {
             hit_queue_close: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
-            hit_soft_park_ctas: Default::default(),
             hit_follow_indicator: Default::default(),
             hit_response_top_indicator: Default::default(),
             hit_cwd: Default::default(),
@@ -355,8 +350,8 @@ impl AgentView {
             hit_overlay_next: Default::default(),
             hit_cancel_button: Default::default(),
             hit_pause_button: Default::default(),
-            hit_watching_cue: Default::default(),
             global_work_paused: false,
+            hit_watching_cue: Default::default(),
             watching_cue_toast_shown: false,
             hit_announcement_hide: Default::default(),
             hit_announcement_cta: Default::default(),
@@ -402,7 +397,6 @@ impl AgentView {
             btw_focused: false,
             hit_btw_close: Default::default(),
             toast: None,
-            rebuild_progress: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
             last_word_select_probe: None,
@@ -415,9 +409,9 @@ impl AgentView {
             block_viewer_resume: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
+            hit_bubble_copy: Vec::new(),
+            hovered_bubble_copy: false,
             hit_sb_view: Default::default(),
-            bubble_copy_hits: Vec::new(),
-            hovered_bubble_copy: None,
             question_view: None,
             elicitation_view: None,
             pending_elicitation: None,
@@ -818,6 +812,7 @@ impl AgentView {
         self.prompt_ack = None;
         self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
+        crate::app::active_session_heartbeat::write_from_agent(self);
     }
     /// Locally originated prompt or ExecutePlan turn. `note_self` is idempotent.
     pub(crate) fn begin_local_turn(&mut self, prompt_id: &str) {
@@ -1294,6 +1289,9 @@ impl AgentView {
             self.context_state = None;
             return;
         }
+        if next.total > 0 {
+            self.session_sampling_window = Some(next.total);
+        }
         self.context_state = Some(next);
     }
     /// Update context state from a streaming notification carrying only `used` and `total` fields.
@@ -1335,20 +1333,14 @@ impl AgentView {
     }
     /// Apply Build coding-credit balance only for non-chat agents.
     /// Gateway/chat-kind sessions keep credits unset so bars/warnings stay off.
-    ///
-    /// `openrouter` is the app-level OR account balance (copied onto the agent
-    /// so the prompt footer can render without reading `AppView`).
     pub fn apply_credit_balance(
         &mut self,
         balance: Option<crate::views::credit_bar::CreditBalance>,
         auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-        openrouter: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
     ) {
         if self.chat_kind {
             self.credit_balance = None;
             self.auto_topup = None;
-            self.openrouter_credit_balance = None;
-            self.console_team_prepaid_cents = None;
             return;
         }
         self.credit_balance = balance;
@@ -2248,8 +2240,7 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             old_request,
-            Ok("old answer".into()),
-            None,
+            Ok("old answer".into())
         ));
         assert!(agent.btw_state.is_none());
         let replay_request =
@@ -2260,8 +2251,7 @@ mod status_window_tests {
         assert!(!crate::minimal_api::finish_minimal_btw(
             &mut agent,
             replay_request,
-            Ok("pre-replay answer".into()),
-            None,
+            Ok("pre-replay answer".into())
         ));
         assert!(agent.btw_state.is_none());
     }

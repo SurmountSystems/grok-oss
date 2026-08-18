@@ -729,8 +729,6 @@ pub async fn run_leader(
             debug!("Acquired leader lock, proceeding as leader");
         }
         Ok(false) => {
-            // Fast path: a fully-running leader (flock held AND socket bound) →
-            // exit so the client adopts it.
             if crate::leader::listener_is_ready(&socket_path) {
                 info!(
                     "Another process holds the leader lock with a bound socket ({}). \
@@ -2076,7 +2074,7 @@ mod tests {
         actor.await.expect("actor should exit cleanly");
         assert!(
             got_shutdown.load(Ordering::Relaxed),
-            "session actor must receive SessionCommand::Shutdown before leader cancel"
+            "session actor must receive SessionCommand::Shutdown(crate::session::commands::ShutdownKind::Graceful) before leader cancel"
         );
     }
     /// When an update is installed and the agent is idle, the checker sends `ShutdownReason::AutoUpdate` via `shutdown_tx` BEFORE cancelling.

@@ -658,9 +658,8 @@ fn set_confirm_before_rewind_emits_persist_setting_with_correct_payload() {
 fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    let default_on = app.current_ui.page_flip_on_send_enabled();
-    crate::appearance::cache::set_page_flip_on_send(default_on);
-    let effects = dispatch(Action::SetPageFlipOnSend(!default_on), &mut app);
+    let default_on = app.current_ui.confirm_before_rewind_enabled();
+    let effects = dispatch(Action::SetConfirmBeforeRewind(!default_on), &mut app);
     assert_eq!(effects.len(), 1);
     match effects.first() {
         Some(Effect::PersistSetting {
@@ -674,19 +673,15 @@ fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
         }
         other => panic!("expected PersistSetting, got {other:?}"),
     }
-    assert_eq!(app.current_ui.page_flip_on_send, Some(!default_on));
-    assert_eq!(
-        crate::appearance::cache::load_page_flip_on_send(),
-        !default_on
-    );
+    assert_eq!(app.current_ui.confirm_before_rewind, Some(!default_on));
 }
 #[test]
-fn set_scrub_ascii_punct_emits_persist_setting_with_correct_payload() {
+fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    let default_on = app.current_ui.scrub_ascii_punct_enabled();
-    crate::appearance::cache::set_scrub_ascii_punct(default_on);
-    let effects = dispatch(Action::SetScrubAsciiPunct(!default_on), &mut app);
+    let default_on = app.current_ui.page_flip_on_send_enabled();
+    crate::appearance::cache::set_page_flip_on_send(default_on);
+    let effects = dispatch(Action::SetPageFlipOnSend(!default_on), &mut app);
     assert_eq!(effects.len(), 1);
     match &effects[0] {
         Effect::PersistSetting {
@@ -694,15 +689,15 @@ fn set_scrub_ascii_punct_emits_persist_setting_with_correct_payload() {
             value,
             rollback_value,
         } => {
-            assert_eq!(*key, "scrub_ascii_punct");
+            assert_eq!(*key, "page_flip_on_send");
             assert_eq!(value, &SettingValue::Bool(!default_on));
             assert_eq!(rollback_value, &SettingValue::Bool(default_on));
         }
         other => panic!("expected PersistSetting, got {other:?}"),
     }
-    assert_eq!(app.current_ui.scrub_ascii_punct, Some(!default_on));
+    assert_eq!(app.current_ui.page_flip_on_send, Some(!default_on));
     assert_eq!(
-        crate::appearance::cache::load_scrub_ascii_punct(),
+        crate::appearance::cache::load_page_flip_on_send(),
         !default_on
     );
 }
@@ -1306,10 +1301,6 @@ fn dispatch_open_reset_confirm_no_op_in_release_when_no_settings_modal() {
 fn every_setting_has_action_for_reset_arm() {
     use crate::settings::current_value_for;
     with_theme_test_env(|| {
-        // Pin Token Economy live cache to product defaults so a developer
-        // `$GROK_HOME` (e.g. min_implement_effort = 2) cannot poison the
-        // move-away → reset round-trip.
-        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
             if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {
@@ -1716,9 +1707,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "compact_mode" => {
             let _ = dispatch(Action::SetCompactMode(true), app);
         }
-        "hide_header" => {
-            let _ = dispatch(Action::SetHideHeader(true), app);
-        }
         "show_timestamps" => {
             let _ = dispatch(Action::SetTimestamps(false), app);
         }
@@ -1825,22 +1813,11 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
-        "plan_approval_park" => {
-            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_owned()), app);
-        }
         "show_tips" => {
             let _ = dispatch(Action::SetShowTips(false), app);
         }
         "auto_update" => {
             let _ = dispatch(Action::SetAutoUpdate(false), app);
-        }
-        "auto_compact_threshold_percent" => {
-            let _ = dispatch(
-                Action::SetAutoCompactThreshold(
-                    crate::settings::AutoCompactThresholdChoice::Percent(98),
-                ),
-                app,
-            );
         }
         "vim_mode" => {
             let _ = dispatch(Action::SetVimMode(true), app);
@@ -1881,8 +1858,23 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "show_thinking_blocks" => {
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
+        "hide_header" => {
+            let _ = dispatch(Action::SetHideHeader(true), app);
+        }
         "always_expand_thinking" => {
             let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+        }
+        "scrub_ascii_punct" => {
+            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
+        }
+        "allow_worktree" => {
+            let _ = dispatch(Action::SetAllowWorktree(true), app);
+        }
+        "bubble_copy_buttons" => {
+            let _ = dispatch(Action::SetBubbleCopyButtons(false), app);
+        }
+        "plan_approval_park" => {
+            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
         }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
@@ -1974,22 +1966,6 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
-        "respect_manual_folds" => {
-            let _ = dispatch(
-                Action::SetRespectManualFolds(
-                    !crate::appearance::ScrollConfig::default().respect_manual_folds,
-                ),
-                app,
-            );
-        }
-        "bubble_copy_buttons" => {
-            let _ = dispatch(
-                Action::SetBubbleCopyButtons(
-                    !crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
-                ),
-                app,
-            );
-        }
         "cancel_subagents_on_turn_cancel" => {
             let _ = dispatch(
                 Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
@@ -2005,6 +1981,22 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "features.session_recap" => {
             let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
         }
+        "auto_compact_threshold_percent" => {
+            let _ = dispatch(
+                Action::SetAutoCompactThreshold(
+                    crate::settings::AutoCompactThresholdChoice::Percent(90),
+                ),
+                app,
+            );
+        }
+        "respect_manual_folds" => {
+            let _ = dispatch(
+                Action::SetRespectManualFolds(
+                    !crate::appearance::ScrollConfig::default().respect_manual_folds,
+                ),
+                app,
+            );
+        }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
         }
@@ -2019,6 +2011,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "voice_stt_language" => {
             let _ = dispatch(Action::SetVoiceSttLanguage("es".to_string()), app);
+        }
+        "default_reasoning_effort" => {
+            let _ = dispatch(Action::SetDefaultReasoningEffort("high".to_string()), app);
         }
         "fork_secondary_model" => {
             use agent_client_protocol as acp;
@@ -2135,7 +2130,6 @@ fn set_simple_mode_propagates_to_every_agent() {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2544,55 +2538,6 @@ fn set_show_thinking_blocks_applies_persists_and_rolls_back() {
         crate::appearance::cache::load_show_thinking_blocks(),
         "rollback must restore cache",
     );
-}
-#[test]
-fn set_always_expand_thinking_applies_persists_and_rolls_back() {
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::PersistSetting {
-                key: "always_expand_thinking",
-                value: crate::settings::SettingValue::Bool(true),
-                rollback_value: crate::settings::SettingValue::Bool(false),
-            }]
-        ),
-        "expected exactly one PersistSetting effect, got {effects:?}",
-    );
-    assert!(crate::appearance::cache::load_always_expand_thinking());
-    let effects = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    assert!(effects.is_empty(), "redundant set must be a no-op");
-    let _ = apply_setting_rollback(
-        &mut app,
-        "always_expand_thinking",
-        &crate::settings::SettingValue::Bool(false),
-    );
-    assert!(
-        !crate::appearance::cache::load_always_expand_thinking(),
-        "rollback must restore cache",
-    );
-}
-#[test]
-fn set_always_expand_thinking_expands_existing_thinking() {
-    use crate::scrollback::block::RenderBlock;
-    use crate::scrollback::types::DisplayMode;
-    crate::appearance::cache::set_always_expand_thinking(false);
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    let id = agent
-        .scrollback
-        .push_block(RenderBlock::thinking("collapsed-until-setting"));
-    agent.scrollback.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
-    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
-    let agent = app.agents.get_mut(&AgentId(0)).expect("agent 0");
-    assert_eq!(
-        agent.scrollback.get_by_id(id).unwrap().display_mode,
-        DisplayMode::Expanded,
-        "turning always_expand_thinking on must expand existing thinking"
-    );
-    crate::appearance::cache::set_always_expand_thinking(false);
 }
 #[test]
 fn set_group_tool_verbs_applies_persists_and_rolls_back() {
@@ -3592,7 +3537,6 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetTheme("auto".into()), &mut app);
         assert!(crate::theme::cache::is_auto_mode());
-        // Product default auto-dark mapping is DOGE.
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::Doge,

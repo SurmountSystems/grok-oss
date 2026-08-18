@@ -671,6 +671,7 @@ mod link_click_tests {
                 tip: None,
             },
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -2040,7 +2041,7 @@ mod link_click_tests {
             }
         }
         agent.scrollback.prepare_layout(80, 40);
-        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false); // select only
+        let _ = agent.handle_scrollback_click(std::time::Instant::now(), 0, false);
         assert!(agent.scrollback.is_selected_group_header());
         assert!(
             agent.toast.is_none(),
@@ -2230,9 +2231,9 @@ mod link_click_tests {
     #[test]
     fn router_slash_blocked_while_btw_panel_open() {
         let (mut agent, reg) = make_search_agent();
-        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::loading(
-            "q".into(),
-        ));
+        agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
+            question: "q".into(),
+        });
         route_slash(&mut agent, &reg);
         assert!(agent.scrollback_search.is_none());
     }
@@ -2433,6 +2434,7 @@ mod link_click_tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -2540,6 +2542,7 @@ mod link_click_tests {
                 ..crate::app::agent_view::BannerSlotParams::none()
             },
             false,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -2612,6 +2615,7 @@ mod link_click_tests {
                 mouse_pos: None,
                 tip: Some(long_tip.as_str()),
             },
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

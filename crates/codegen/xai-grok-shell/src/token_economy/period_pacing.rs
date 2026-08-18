@@ -1,15 +1,15 @@
-//! Free SuperGrok **billing period** linear-burn pacing.
+//! Included SuperGrok **billing period** linear-burn pacing.
 //!
-//! Compares free SuperGrok period **used percent** to time elapsed through the
+//! Compares included SuperGrok period **used percent** to time elapsed through the
 //! billing period. Never dollar-izes SuperGrok period %. Missing bounds → omit
 //! (never invent).
 
 use chrono::{DateTime, Duration, Utc};
 
-/// Ahead / behind relative to linear burn through the free SuperGrok period.
+/// Ahead / behind relative to linear burn through the included SuperGrok period.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PeriodPacing {
-    /// Free SuperGrok period used percent (0–100+).
+    /// Included SuperGrok period used percent (0–100+).
     pub usage_pct: f64,
     /// Expected used percent if burn were linear in time (0–100).
     pub expected_pct: f64,
@@ -40,16 +40,16 @@ impl PeriodPacing {
     pub fn full_sentence(self) -> String {
         let d = self.abs_delta_rounded();
         if d == 0 {
-            "Free SuperGrok period burn is on linear pace for this billing period.".to_string()
+            "Included SuperGrok period burn is on linear pace for this billing period.".to_string()
         } else if self.delta_pct > 0.0 {
             format!(
-                "Free SuperGrok period burn is {d}% ahead of linear burn for this billing period \
-(using free SuperGrok period allowance faster than time share)."
+                "Included SuperGrok period burn is {d}% ahead of linear burn for this billing period \
+(using included SuperGrok period limits faster than time share)."
             )
         } else {
             format!(
-                "Free SuperGrok period burn is {d}% behind linear burn for this billing period \
-(using free SuperGrok period allowance slower than time share; more left than time share)."
+                "Included SuperGrok period burn is {d}% behind linear burn for this billing period \
+(using included SuperGrok period limits slower than time share; more left than time share)."
             )
         }
     }

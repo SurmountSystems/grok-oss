@@ -52,6 +52,25 @@ fn polled_fields(settings: &crate::util::config::RemoteSettings) -> PolledFields
     (settings.announcements.clone(), settings.accept_request_encodings.clone())
 }
 impl MvpAgent {
+    /// Announce a session's new title over ACP. ACP scopes `session/update` to
+    /// sessions the client established, and a rename can name a history row it
+    /// never loaded, so the liveness check belongs here rather than at each
+    /// call site.
+    pub(crate) fn notify_session_info_update(
+        &self,
+        session_id: &agent_client_protocol::SessionId,
+        title: &str,
+    ) {
+        if self.is_resident(session_id) {
+            self.gateway
+                .forward_fire_and_forget(
+                    crate::session::summary::session_info_update_manual(
+                        session_id.clone(),
+                        title,
+                    ),
+                );
+        }
+    }
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids = self.resident_ids();
         for sid in &session_ids {
@@ -98,23 +117,15 @@ impl MvpAgent {
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
-        let (
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-            preferred_method,
-            auto_use_included_limits,
-        ) = {
+        let (disable_api_key_auth, alpha_test_key, client_version) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.grok_com_config.api_key_auth_disabled(),
                 cfg.endpoints.alpha_test_key.clone(),
                 cfg.client_version.clone(),
-                cfg.grok_com_config.preferred_method,
-                cfg.grok_com_config.auto_use_included_limits,
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_sampling_config_preferring(
+        let config = match crate::agent::config::resolve_aux_model_sampling_config(
             &slug,
             &models,
             &endpoints,
@@ -122,8 +133,6 @@ impl MvpAgent {
             disable_api_key_auth,
             alpha_test_key,
             client_version,
-            preferred_method,
-            auto_use_included_limits,
         ) {
             Some(mut cfg) => {
                 crate::agent::config::stamp_session_local_sampler_fields(
@@ -264,7 +273,7 @@ impl MvpAgent {
         let auth_manager = self.auth_manager.clone();
         tokio::task::spawn_local(async move {
             let auth_key = auth_manager
-                .get_valid_token()
+                .get_valid_token_background()
                 .await
                 .ok()
                 .or_else(|| auth_manager.current_or_expired().map(|a| a.key));
@@ -2168,10 +2177,6 @@ impl MvpAgent {
             user_id,
         );
         config.origin_client = origin_client;
-        // Sticky dual-auth: if SuperGrok session is memoized credit-exhausted,
-        // start on console key (same as reconstruct_full_config). Covers model
-        // switch / initial session config that never hits reconstruct yet.
-        let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut config);
         config
     }
     /// Resolve sampling config for a model by ID, falling back to the global default on resolution failure.
@@ -2184,9 +2189,9 @@ impl MvpAgent {
         if let Ok(model) = self.resolve_model_id(model_id) {
             self.prepare_sampling_config_for_model(&model, origin_client.clone())
         } else {
-            let mut c = self.sampling_config.borrow().clone();
-            c.origin_client = origin_client;
-            c
+            let endpoints = self.cfg.borrow().endpoints.clone();
+            let fallback = ModelEntry::fallback(model_id.0.as_ref(), &endpoints);
+            self.prepare_sampling_config_for_model(&fallback, origin_client)
         }
     }
     /// Apply a profile's pinned-model override to the session's sampling config.
@@ -2276,34 +2281,16 @@ impl MvpAgent {
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
-        let (
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-            preferred_method,
-            auto_use_included_limits,
-            endpoints,
-        ) = {
-            let cfg = self.cfg.borrow();
-            (
-                cfg.grok_com_config.api_key_auth_disabled(),
-                cfg.endpoints.alpha_test_key.clone(),
-                cfg.client_version.clone(),
-                cfg.grok_com_config.preferred_method,
-                cfg.grok_com_config.auto_use_included_limits,
-                cfg.endpoints.clone(),
-            )
-        };
-        let mut cfg = config::resolve_web_search_sampling_config_preferring(
+        let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
+        let client_version = self.cfg.borrow().client_version.clone();
+        let mut cfg = config::resolve_web_search_sampling_config(
             &model_id,
             &models,
             session.as_ref().map(|a| a.key.as_str()),
-            disable_api_key_auth,
+            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
             alpha_test_key.clone(),
             client_version,
-            &endpoints,
-            preferred_method,
-            auto_use_included_limits,
+            &self.cfg.borrow().endpoints,
         )?;
         crate::agent::proxy_headers::inject_proxy_headers(
             &mut cfg.extra_headers,
@@ -4457,20 +4444,11 @@ impl MvpAgent {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
             let model = config::find_model_by_id(&models, &session_model_id.0);
-            let resolved = crate::util::config::resolve_auto_compact_threshold(
+            crate::util::config::resolve_auto_compact_threshold_percent(
                 &cfg,
                 &session_model_id.0,
                 model.map(|e| &e.info),
-            );
-            let cw = model
-                .map(|e| e.info.context_window.get())
-                .unwrap_or(200_000);
-            match resolved {
-                crate::util::config::AutoCompactThreshold::Percent(p) => (p, None),
-                crate::util::config::AutoCompactThreshold::Tokens(t) => {
-                    (resolved.as_percent_of(cw), Some(t))
-                }
-            }
+            )
         };
         let system_prompt_label = {
             let cfg = self.cfg.borrow();
@@ -4830,7 +4808,6 @@ impl MvpAgent {
             let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
             let credentials = xai_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
-                failover_api_keys: sampling_config.failover_api_keys.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
                     sampling_config.model.as_str(),
                     session_key.as_deref(),
@@ -4838,6 +4815,7 @@ impl MvpAgent {
                 ),
                 alpha_test_key: self.alpha_test_key(),
                 client_version: sampling_config.client_version.clone(),
+                failover_api_keys: sampling_config.failover_api_keys.clone(),
                 failover_base_url: sampling_config.failover_base_url.clone(),
                 session_base_url: sampling_config.session_base_url.clone(),
                 session_identity_key: sampling_config.session_identity_key.clone(),
@@ -4959,7 +4937,6 @@ impl MvpAgent {
                     startup_hints,
                     client_type,
                     auto_compact_threshold_percent,
-                    auto_compact_threshold_tokens,
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,

@@ -1378,11 +1378,14 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 };
 /// Child sessions get a concise description that discourages recursive delegation.
 const CHILD_TASK_DESCRIPTION: &str = "\
-Launch a sub-agent to handle a specific sub-task. Use this only when \n\
-the sub-task is clearly independent and would benefit from a separate \n\
-context (e.g., a parallel search while you continue working).\n\
+Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Prefer doing the work yourself unless delegation is clearly necessary.\n\
+Whenever work is to be done and tools are to be called, agents are \
+three layers deep. Always. Including implement loops. \
+You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
+Do not compact-and-continue a product restore on L2. \
+Give each L3 a distinct description. One reviewer unless the operator asked for more. \
+Token Economy effort is not reviewer count.\n\
 \n\
 Usage: specify a short ${{ params.task.description }} and a detailed ${{ params.task.prompt }}.\n\
 ${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
@@ -1742,6 +1745,73 @@ mod tests {
         assert!(!rendered.contains("params.task.model"));
     }
     #[test]
+    fn implement_loop_effort_two_spawns_one_review_row_unless_operator_asked() {
+        let rows = implement_loop_review_rows(2, false);
+        assert_eq!(
+            rows.len(),
+            1,
+            "implement-loop effort 2 without an operator ask must spawn one Review row, got {}",
+            rows.len()
+        );
+        assert!(
+            rows[0].contains("Review"),
+            "the one default row must be a Review spawn, got {:?}",
+            rows[0]
+        );
+
+        let asked = implement_loop_review_rows(2, true);
+        assert_eq!(
+            asked.len(),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two Review rows"
+        );
+
+        let subagents = vec![entry(
+            "general-purpose",
+            "General-purpose agent.",
+            SubagentSource::Builtin(BuiltinAgentName::GeneralPurpose),
+        )];
+        let desc = build_task_description(&subagents, &[]);
+        assert!(
+            desc.contains(&rows[0]),
+            "parent Task tool description is the implement-loop spawn path and must list the one default Review row, got {desc}"
+        );
+        for extra in asked.iter().skip(1) {
+            assert!(
+                !desc.contains(extra.as_str()),
+                "default parent Task description must not list extra Review rows unless the operator asked, found {extra} in {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn implement_effort_two_does_not_spawn_two_review_rows_unless_operator_asked() {
+        assert_eq!(
+            review_row_count_for_implement_effort(2, false),
+            1,
+            "Token Economy effort 2 is thoroughness, not two Review rows"
+        );
+        assert_eq!(
+            review_row_count_for_implement_effort(3, false),
+            1,
+            "effort 3 must not spawn three Review rows unless the operator asked"
+        );
+        assert_eq!(review_row_count_for_implement_effort(1, false), 1);
+        assert_eq!(
+            review_row_count_for_implement_effort(2, true),
+            2,
+            "operator asked for more reviewers: effort 2 may spawn two"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("One reviewer unless"),
+            "child task description must teach one reviewer unless the operator asked"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("distinct"),
+            "child task description must require distinct L3 descriptions"
+        );
+    }
+    #[test]
     fn child_task_description_is_concise() {
         assert!(!CHILD_TASK_DESCRIPTION.contains("subagent_type"));
         assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.description }}"));
@@ -1791,6 +1861,64 @@ mod tests {
         )
         .from_definition(definition)
         .with_project_trusted(true)
+        .build()
+        .await
+        .expect("agent should build with local skill fixtures");
+        let snapshot = agent.tool_bridge().skill_discovery_snapshot_names().await;
+        assert!(
+            snapshot.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill missing from snapshot: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill missing from snapshot: {snapshot:?}"
+        );
+        let listed: Vec<String> = agent
+            .tool_bridge()
+            .slash_skills()
+            .await
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !listed.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill must stay out of the listing baseline: {listed:?}"
+        );
+        assert!(
+            !listed.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill must stay out of the listing baseline: {listed:?}"
+        );
+    }
+    /// The bridge's full-discovery snapshot must record every discovered
+    /// skill name — including `paths:`-gated and preloaded skills that the
+    /// listing baseline (`slash_skills`) holds back — so session-start
+    /// telemetry can reuse it instead of re-walking the disk.
+    #[tokio::test]
+    async fn discovery_snapshot_records_gated_and_preloaded_skills() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let write_skill = |dir: &str, content: &str| {
+            let d = tmp.path().join(".grok/skills").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), content).unwrap();
+        };
+        write_skill(
+            "snapshot-plain-skill",
+            "---\nname: snapshot-plain-skill\ndescription: plain\n---\nbody\n",
+        );
+        write_skill(
+            "snapshot-gated-skill",
+            "---\nname: snapshot-gated-skill\ndescription: gated\npaths: \"src/**\"\n---\nbody\n",
+        );
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        definition.skills = vec!["snapshot-plain-skill".to_string()];
+        let agent = AgentBuilder::new(
+            tmp.path().to_path_buf(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
         .build()
         .await
         .expect("agent should build with local skill fixtures");

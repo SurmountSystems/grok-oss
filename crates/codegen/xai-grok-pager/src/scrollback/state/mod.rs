@@ -1120,13 +1120,7 @@ impl ScrollbackState {
         if self.entries.contains_key(&id) && !self.flashing.contains(&id) {
             self.flashing.push(id);
         }
-        // Prefer the always-expand setting over sticky Ctrl+E mode so new
-        // finishes stay open while the preference is on.
-        let thinking_mode = if crate::appearance::cache::load_always_expand_thinking() {
-            DisplayMode::Expanded
-        } else {
-            self.thinking_display_mode
-        };
+        let thinking_mode = self.thinking_display_mode;
         let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
         if let Some(entry) = self.get_by_id_mut(id) {
             entry.is_running = false;
@@ -3306,125 +3300,6 @@ mod tests {
 
         assert_eq!(
             state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-    }
-
-    /// Contract: `[ui].always_expand_thinking` keeps streaming + finished
-    /// thinking fully expanded without pressing Ctrl+E.
-    #[test]
-    fn always_expand_thinking_opens_streaming_and_keeps_finish_expanded() {
-        crate::appearance::cache::set_always_expand_thinking(true);
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        state.push_chunk_to_thinking(id, "deep thoughts");
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "streaming thinking must open fully when always_expand_thinking is on"
-        );
-
-        state.finish_running(id);
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "finished thinking must stay expanded when always_expand_thinking is on"
-        );
-        crate::appearance::cache::set_always_expand_thinking(false);
-    }
-
-    #[test]
-    fn apply_always_expand_thinking_opens_existing_collapsed() {
-        crate::appearance::cache::set_always_expand_thinking(false);
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking("earlier thoughts"));
-        state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
-
-        state.apply_always_expand_thinking(true);
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        // New streaming thought also opens fully via sticky Expanded.
-        let live = state.push_block(RenderBlock::thinking_streaming());
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        state.apply_always_expand_thinking(false);
-    }
-
-    /// Contract: Ctrl+E / `expand_all_thinking` must expand the *current*
-    /// turn's streaming thinking immediately. Running thoughts use
-    /// `DisplayMode::Truncated` (last-N body), not `Collapsed`. Treating only
-    /// `Collapsed` as "needs expand" made the toggle choose collapse and left
-    /// the sticky mode as the only lasting effect (felt deferred to next turn).
-    #[test]
-    fn expand_all_thinking_expands_truncated_running_immediately() {
-        let mut state = ScrollbackState::new();
-        let id = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        // Enough lines that Truncated and Expanded differ (truncated keeps last N).
-        let body = (0..40)
-            .map(|i| format!("reasoning line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.push_chunk_to_thinking(id, &body);
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated,
-            "streaming thinking starts Truncated"
-        );
-        assert_eq!(
-            state.thinking_fold_label(),
-            "expand thinking",
-            "label must offer expand while any thinking is not fully open"
-        );
-
-        state.expand_all_thinking();
-
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Expanded,
-            "Ctrl+E must open the live thinking block on this press, not only sticky for later"
-        );
-        assert_eq!(state.thinking_fold_label(), "collapse thinking");
-
-        // Second press collapses running thoughts back to the streaming default.
-        state.expand_all_thinking();
-        assert_eq!(
-            state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated,
-            "collapse of a running thought returns to Truncated, not finished Collapsed"
-        );
-    }
-
-    /// Finished collapsed + live Truncated: one Ctrl+E expands both now.
-    #[test]
-    fn expand_all_thinking_expands_collapsed_and_truncated_together() {
-        let mut state = ScrollbackState::new();
-        let done = state.push_block(RenderBlock::thinking("earlier thoughts"));
-        state.get_by_id_mut(done).unwrap().display_mode = DisplayMode::Collapsed;
-
-        let live = state.push_block(RenderBlock::thinking_streaming());
-        state.set_last_running(true);
-        state.push_chunk_to_thinking(live, "line0\nline1\nline2\nline3\nline4\nline5");
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
-            DisplayMode::Truncated
-        );
-
-        state.expand_all_thinking();
-
-        assert_eq!(
-            state.get_by_id(done).unwrap().display_mode,
-            DisplayMode::Expanded
-        );
-        assert_eq!(
-            state.get_by_id(live).unwrap().display_mode,
             DisplayMode::Expanded
         );
     }

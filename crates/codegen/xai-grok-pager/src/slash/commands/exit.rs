@@ -41,3 +41,20 @@ mod alias_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod alias_tests {
+    use super::is_exit_alias;
+
+    #[test]
+    fn recognizes_shell_and_vim_exit_aliases() {
+        for text in [
+            "exit", "quit", "EXIT", "Quit", " exit ", ":q", ":Q", ":q!", ":wq", ":WQ", ":wq!",
+        ] {
+            assert!(is_exit_alias(text), "{text:?} should be an exit alias");
+        }
+        for text in ["exiting", "quite", ":w", ":x", "q", "wq", "/quit"] {
+            assert!(!is_exit_alias(text), "{text:?} must not be an exit alias");
+        }
+    }
+}

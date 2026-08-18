@@ -184,7 +184,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 );
                 agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
                     active_idx: 0,
-                    running_count: running_subagent_count,
+                    running_count,
                 });
                 // Default focus to the picker so keyboard up/down navigates options immediately
                 // With the scrollback pane focused (e.g. browsing history) the modal would open but keys would still go to scrollback.
@@ -205,28 +205,6 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     )
 }
 
-/// Kill every running standalone (non-workflow) subagent on this agent.
-/// Used by idle stop chrome and cancel-panel choices when no parent turn runs.
-fn kill_running_standalone_subagents(agent: &mut crate::app::agent_view::AgentView) -> Vec<Effect> {
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
-    };
-    let mut effects = Vec::new();
-    for info in agent.subagent_sessions.values_mut() {
-        if info.is_running() && info.workflow_run_id.is_none() {
-            info.pending_kill = true;
-            info.kill_requested_at = Some(Instant::now());
-            effects.push(Effect::KillSubagent {
-                session_id: session_id.clone(),
-                subagent_id: info.subagent_id.to_string(),
-            });
-        }
-    }
-    agent.cancel_turn_view = None;
-    agent.cancel_turn_buttons.clear();
-    effects
-}
-
 pub(super) fn dispatch_cancel_turn_choice(
     app: &mut AppView,
     choice: crate::views::modal::CancelTurnChoice,
@@ -236,15 +214,6 @@ pub(super) fn dispatch_cancel_turn_choice(
         choice,
         CancelTurnChoice::StopRunning | CancelTurnChoice::AlwaysStop
     );
-
-    // Capture whether a parent turn is still running before closing the panel.
-    let turn_running = if let ActiveView::Agent(id) = app.active_view {
-        app.agents
-            .get(&id)
-            .is_some_and(|a| a.session.state.is_turn_running())
-    } else {
-        false
-    };
 
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
@@ -775,10 +744,6 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
-        if let Some(toast) = soft_stop_toast {
-            // Prefer agent toast so we do not reborrow AppView while agent is live.
-            agent.show_toast(&toast);
-        }
     }
     for (id, page_flip_entry) in drained_ids {
         note_peek_page_flip(app, id, page_flip_entry);

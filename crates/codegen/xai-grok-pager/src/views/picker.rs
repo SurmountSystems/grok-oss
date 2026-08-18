@@ -493,7 +493,7 @@ fn render_search_bar_with_label_viewport(
 
         let cursor_display_w = (cursor_col as u16).min(cursor_limit as u16);
 
-        if active || always_active {
+        if active {
             let cursor_x = input_x + cursor_display_w;
             if cursor_x < x + width {
                 // Inverse-video the cell at the cursor position so the character underneath remains visible

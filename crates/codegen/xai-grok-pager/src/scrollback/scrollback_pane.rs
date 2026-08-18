@@ -818,20 +818,17 @@ impl ScrollbackPane {
         // Hover expansion works for pinned (absolute coords); pushed headers always get the short format
         if ctx.appearance.show_timestamps
             && !output.lines.is_empty()
-            && crate::scrollback::wrappers::block_shows_timestamp(&entry.block)
+            && matches!(
+                &entry.block,
+                RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+            )
             && let Some(ts) = entry.created_at
         {
             let first_content_y = content_area.y + if use_vpad { 1 } else { 0 };
-            let copy_inset = crate::scrollback::wrappers::bubble_copy_trailing_inset(
-                &entry.block,
-                &ctx.appearance,
-            );
-            let content_right = content_area.x + content_area.width;
-            let ts_zone_right = content_right.saturating_sub(copy_inset);
-            let ts_zone_left =
-                ts_zone_right.saturating_sub(crate::scrollback::wrappers::TIMESTAMP_SHORT_RESERVE);
             let ts_hovered = mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
+                my == first_content_y
+                    && mx >= content_area.x + content_area.width.saturating_sub(10)
+                    && mx < content_area.x + content_area.width
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -839,10 +836,10 @@ impl ScrollbackPane {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 + copy_inset
+            if content_area.width > ts_width + 1
                 && first_content_y < content_area.y + content_area.height
             {
-                let ts_x = ts_zone_right.saturating_sub(ts_width);
+                let ts_x = content_area.x + content_area.width - ts_width;
                 let ts_style = Style::default().fg(theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
@@ -955,6 +952,7 @@ impl ScrollbackPane {
                 link_overlay: result.link_overlay,
                 inline_media: result.inline_media,
                 diagram_affordances: result.diagram_affordances,
+                bubble_copy_hits: result.bubble_copy_hits,
                 ..Default::default()
             },
             selection_boundaries,

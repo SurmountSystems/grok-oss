@@ -1,6 +1,8 @@
-//! Implement-loop effort (1–5 reviewer fan-out) under Token Economy.
+//! Implement-loop effort (1–5 thoroughness) under Token Economy.
 //!
 //! This is **not** model reasoning effort (`low` / `high`).
+//! Token Economy and implement `--effort` are thoroughness, not reviewer
+//! count. The integer is not how many Review rows to launch.
 //!
 //! Application order (documented in user-guide Token Economy):
 //! 1. If `lock_implement_effort` is set → start from that value (ignore prompt

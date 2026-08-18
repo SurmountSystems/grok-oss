@@ -684,10 +684,7 @@ pub fn chat_mode_refuses_local_build_load(
 #[derive(Debug, Clone)]
 pub enum MaterializedStartup {
     /// Create a new session with an agent-chosen ID (or defer to welcome).
-    NewAuto {
-        /// Soft yellow welcome notice: this workspace has no prior conversations.
-        new_folder_notice: bool,
-    },
+    NewAuto,
     /// Create a new session with this ID (`session/new` meta.sessionId).
     NewWithId { session_id: String },
     /// Strict load of an existing session.
@@ -711,107 +708,6 @@ pub enum MaterializedStartup {
         /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the follow-up child `LoadSession` must not inherit agent restore-code.
         suppress_code_restore: bool,
     },
-}
-
-/// Lightweight session row for default startup pick (newest first).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartupSessionRef {
-    pub id: String,
-    pub title: Option<String>,
-    pub last_active: chrono::DateTime<chrono::Utc>,
-}
-
-/// Pure result of picking the default conversation for a workspace open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefaultStartupPick {
-    /// No prior conversations for this workspace.
-    NewFolder,
-    /// Resume the most recent only (no sibling toast).
-    ResumeLatest { session: StartupSessionRef },
-    /// Resume most recent; toast mentions the next-oldest.
-    ResumeLatestWithOther {
-        session: StartupSessionRef,
-        other: StartupSessionRef,
-    },
-}
-
-/// Pick default startup session from chronological rows (newest first).
-///
-/// Empty → new folder. One row → resume only. Two or more → resume newest and
-/// surface the second-most-recent for the sibling toast.
-pub fn pick_default_startup_session(sessions: &[StartupSessionRef]) -> DefaultStartupPick {
-    match sessions {
-        [] => DefaultStartupPick::NewFolder,
-        [first] => DefaultStartupPick::ResumeLatest {
-            session: first.clone(),
-        },
-        [first, second, ..] => DefaultStartupPick::ResumeLatestWithOther {
-            session: first.clone(),
-            other: second.clone(),
-        },
-    }
-}
-
-/// Plain relative age for startup toasts (`"2 hours ago"`, not `"2h ago"`).
-pub fn format_plain_relative_ago(elapsed: std::time::Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        return "less than a minute ago".to_string();
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return if mins == 1 {
-            "1 minute ago".to_string()
-        } else {
-            format!("{mins} minutes ago")
-        };
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return if hours == 1 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{hours} hours ago")
-        };
-    }
-    let days = hours / 24;
-    if days == 1 {
-        "1 day ago".to_string()
-    } else {
-        format!("{days} days ago")
-    }
-}
-
-/// Toast when the default open resumes the latest conversation and others exist.
-pub fn format_other_conversations_toast(other_relative: &str) -> String {
-    format!("Other conversations exist in this folder. Next most recent was {other_relative}.")
-}
-
-/// Soft yellow welcome copy for a workspace with no prior conversations.
-pub fn new_folder_startup_message() -> &'static str {
-    "This is a new folder with no prior conversations yet."
-}
-
-/// Map sorted session summaries (newest first) into startup refs for pure pick.
-pub fn startup_session_refs_from_summaries(
-    summaries: &[xai_grok_shell::session::persistence::Summary],
-) -> Vec<StartupSessionRef> {
-    summaries
-        .iter()
-        .map(|s| StartupSessionRef {
-            id: s.info.id.to_string(),
-            title: s.display_title_opt(),
-            last_active: s.last_active_at.unwrap_or(s.updated_at),
-        })
-        .collect()
-}
-
-fn plain_relative_from_utc(dt: chrono::DateTime<chrono::Utc>) -> String {
-    let elapsed = chrono::Utc::now()
-        .signed_duration_since(dt)
-        .to_std()
-        .unwrap_or_default();
-    format_plain_relative_ago(elapsed)
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,60 +863,22 @@ pub async fn materialize_startup_for_cwd(
     }
     match intent {
         SessionStartupIntent::NewAuto => {
-            if !ctx.auto_resume_last_for_cwd {
-                return Ok(MaterializedStartup::NewAuto {
-                    new_folder_notice: false,
-                });
-            }
-            let summaries = match xai_grok_shell::session::persistence::list_summaries(Some(cwd))
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "startup default: list sessions failed; welcome without new-folder notice"
+            if ctx.open_last_session_on_start && !ctx.has_worktree && !ctx.chat_mode {
+                if let Some((id, title)) = try_most_recent_session_id(cwd).await {
+                    tracing::info!(
+                        session_id = %id,
+                        "startup.open_last_session"
                     );
-                    return Ok(MaterializedStartup::NewAuto {
-                        new_folder_notice: false,
+                    return Ok(MaterializedStartup::Resume {
+                        session_id: id,
+                        original_cwd: None,
+                        title,
+                        deferred_local_miss: false,
+                        suppress_code_restore: false,
                     });
                 }
-            };
-            let refs = startup_session_refs_from_summaries(&summaries);
-            match pick_default_startup_session(&refs) {
-                DefaultStartupPick::NewFolder => Ok(MaterializedStartup::NewAuto {
-                    new_folder_notice: true,
-                }),
-                DefaultStartupPick::ResumeLatest { session } => {
-                    tracing::info!(
-                        session_id = %session.id,
-                        "startup.default.resume_latest"
-                    );
-                    Ok(MaterializedStartup::Resume {
-                        session_id: session.id,
-                        original_cwd: None,
-                        title: session.title,
-                        deferred_local_miss: false,
-                        other_conversation_relative: None,
-                    })
-                }
-                DefaultStartupPick::ResumeLatestWithOther { session, other } => {
-                    tracing::info!(
-                        session_id = %session.id,
-                        other_id = %other.id,
-                        "startup.default.resume_latest_with_other"
-                    );
-                    Ok(MaterializedStartup::Resume {
-                        session_id: session.id,
-                        original_cwd: None,
-                        title: session.title,
-                        deferred_local_miss: false,
-                        other_conversation_relative: Some(plain_relative_from_utc(
-                            other.last_active,
-                        )),
-                    })
-                }
             }
+            Ok(MaterializedStartup::NewAuto)
         }
         SessionStartupIntent::NewWithId { session_id } => {
             if !ctx.has_worktree {
@@ -1660,105 +1518,6 @@ mod tests {
             SessionStartupIntent::NewAuto
         );
     }
-
-    #[test]
-    fn pick_default_startup_empty_is_new_folder() {
-        assert_eq!(
-            pick_default_startup_session(&[]),
-            DefaultStartupPick::NewFolder
-        );
-    }
-
-    #[test]
-    fn pick_default_startup_one_is_resume_only() {
-        let a = StartupSessionRef {
-            id: "a".into(),
-            title: Some("First".into()),
-            last_active: chrono::Utc::now(),
-        };
-        match pick_default_startup_session(std::slice::from_ref(&a)) {
-            DefaultStartupPick::ResumeLatest { session } => {
-                assert_eq!(session.id, "a");
-                assert_eq!(session.title.as_deref(), Some("First"));
-            }
-            other => panic!("expected ResumeLatest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_default_startup_two_surfaces_second_most_recent() {
-        let now = chrono::Utc::now();
-        let newer = StartupSessionRef {
-            id: "new".into(),
-            title: Some("Latest".into()),
-            last_active: now,
-        };
-        let older = StartupSessionRef {
-            id: "old".into(),
-            title: Some("Previous".into()),
-            last_active: now - chrono::Duration::hours(3),
-        };
-        match pick_default_startup_session(&[newer, older]) {
-            DefaultStartupPick::ResumeLatestWithOther { session, other } => {
-                assert_eq!(session.id, "new");
-                assert_eq!(other.id, "old");
-            }
-            other => panic!("expected ResumeLatestWithOther, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn other_conversations_toast_names_relative_age() {
-        let msg = format_other_conversations_toast("3 hours ago");
-        assert!(msg.contains("Other conversations"));
-        assert!(msg.contains("3 hours ago"));
-        assert!(!msg.contains("error"));
-    }
-
-    #[test]
-    fn new_folder_message_is_informational_not_error() {
-        let msg = new_folder_startup_message();
-        assert!(msg.to_ascii_lowercase().contains("new folder"));
-        assert!(msg.to_ascii_lowercase().contains("no prior"));
-        assert!(!msg.to_ascii_lowercase().contains("error"));
-        assert!(!msg.to_ascii_lowercase().contains("failed"));
-    }
-
-    #[test]
-    fn plain_relative_ago_uses_full_words() {
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(30)),
-            "less than a minute ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(120)),
-            "2 minutes ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(3600)),
-            "1 hour ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(3 * 3600)),
-            "3 hours ago"
-        );
-        assert_eq!(
-            format_plain_relative_ago(std::time::Duration::from_secs(2 * 86400)),
-            "2 days ago"
-        );
-    }
-
-    #[test]
-    fn pager_args_default_enables_auto_resume_last() {
-        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok"]));
-        assert!(ctx.auto_resume_last_for_cwd);
-    }
-
-    #[test]
-    fn pager_args_worktree_disables_auto_resume_last() {
-        let ctx = MaterializeCtx::from_pager_args(&parse(&["grok", "--worktree"]));
-        assert!(!ctx.auto_resume_last_for_cwd);
-    }
     #[test]
     fn intent_resume_id() {
         assert_eq!(
@@ -2154,9 +1913,221 @@ mod tests {
     }
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
+    }
+    #[test]
+    fn from_pager_args_does_not_probe_tty_for_progress() {
+        assert!(
+            !MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_progress_on_stdout,
+            "stdout vs stderr is decided at the composition root, not from_pager_args"
+        );
+    }
+    #[test]
+    fn from_pager_args_opens_last_session_on_start() {
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok"])).open_last_session_on_start,
+            "interactive grok-oss start must open the last session"
+        );
+    }
+    #[test]
+    fn materialize_ctx_restore_code_follows_cli_flag() {
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_code);
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc"])).restore_code);
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc", "--restore-code"]))
+                .restore_code
+        );
+        let wt = MaterializeCtx::from_pager_args(&parse(&[
+            "grok",
+            "-r",
+            "abc",
+            "--restore-code",
+            "--worktree",
+        ]));
+        assert!(wt.restore_code);
+        assert!(wt.has_worktree);
+    }
+    fn remote_miss_ctx(restore_code: bool, has_worktree: bool) -> MaterializeCtx {
+        MaterializeCtx {
+            has_worktree,
+            allow_remote_restore: true,
+            chat_mode: false,
+            title_resolution: TitleResolution::Allowed,
+            restore_code,
+            restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
+        }
+    }
+    #[test]
+    fn in_place_restore_code_allowed_blocks_restored_remote_child() {
+        assert!(in_place_restore_code_allowed(
+            true, false, "local-id", "local-id"
+        ));
+        assert!(!in_place_restore_code_allowed(
+            true,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            true,
+            true,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            false,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_false_restores_conversation_only() {
         assert_eq!(
-            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
-            false
+            plan_remote_miss(remote_miss_ctx(false, false), true),
+            RemoteMissPlan::RestoreConversation
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_without_worktree_is_rejected() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), true),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), false),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_worktree_defers_without_restore_code() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_with_worktree_defers() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_prefers_returned_local_id() {
+        assert_eq!(
+            classify_remote_restore(false, Some("child"), Some("boom"), Some("other")),
+            RemoteRestoreOutcome::Restored {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_recovers_disk_child_on_timeout_or_error() {
+        assert_eq!(
+            classify_remote_restore(true, None, None, Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+        assert_eq!(
+            classify_remote_restore(false, Some(""), Some("network"), Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_errors_when_conversation_missing() {
+        match classify_remote_restore(true, None, None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Timed out"), "{msg}");
+                assert!(msg.contains("cannot be recovered"), "{msg}");
+                assert!(
+                    msg.contains("1m30s"),
+                    "90s remote restore budget must print as minutes, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("90s") && !msg.contains("90 seconds"),
+                    "raw second budget must not leak: {msg}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, None, Some("registry 404"), None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Failed to restore"), "{msg}");
+                assert!(msg.contains("registry 404"), "{msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, Some(""), None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(
+                    msg.contains("conversation history was unavailable"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+    #[test]
+    fn worktree_no_restore_code_notice_mentions_flag() {
+        assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
+    }
+    /// `--restore-code` without `--worktree` must fail before any in-place checkout.
+    #[tokio::test]
+    async fn remote_miss_restore_code_without_worktree_errors() {
+        let err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("99999999-9999-4999-8999-999999999999".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("--worktree"),
+            "unexpected error: {err}"
+        );
+        let title_err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("no such title".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt-title",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(title_err.contains("--worktree"), "{title_err}");
+        assert!(
+            title_err.contains("no session id or title matched"),
+            "{title_err}"
         );
     }
     #[test]
@@ -2582,6 +2553,102 @@ mod tests {
                 );
             }
             other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+    /// Cold start of grok-oss: open the last session for this directory.
+    /// Not continue-interrupted-turn. Not the /resume picker.
+    mod open_last_session_on_start {
+        use super::*;
+        use crate::test_util::GrokHomeFixture;
+        fn tui_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                has_worktree: false,
+                allow_remote_restore: false,
+                chat_mode: false,
+                title_resolution: TitleResolution::Allowed,
+                restore_code: false,
+                restore_progress_on_stdout: false,
+                open_last_session_on_start: true,
+            }
+        }
+        fn headless_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                open_last_session_on_start: false,
+                ..tui_ctx()
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_opens_last_session_when_one_exists() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            let older = "aaaaaaaa-1111-2222-3333-444444444444";
+            let last = "bbbbbbbb-1111-2222-3333-555555555555";
+            fx.write_summary(
+                &cwd_str,
+                older,
+                serde_json::json!({
+                    "generated_title": "Older",
+                    "updated_at": "2026-07-01T00:00:00Z",
+                    "last_active_at": "2026-07-01T00:00:00Z",
+                }),
+            );
+            fx.write_summary(
+                &cwd_str,
+                last,
+                serde_json::json!({
+                    "generated_title": "Last session",
+                    "updated_at": "2026-08-13T12:00:00Z",
+                    "last_active_at": "2026-08-13T12:00:00Z",
+                }),
+            );
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::Resume {
+                    session_id, title, ..
+                } => {
+                    assert_eq!(session_id, last);
+                    assert_eq!(title.as_deref(), Some("Last session"));
+                }
+                other => panic!("expected last session to open, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_stays_welcome_when_no_last_session() {
+            let fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            match materialize_startup_for_cwd(tui_ctx(), SessionStartupIntent::NewAuto, &cwd_str)
+                .await
+                .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("first-ever use must stay welcome, got {other:?}"),
+            }
+        }
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn materialize_new_auto_does_not_open_last_when_headless() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(
+                &cwd_str,
+                "cccccccc-1111-2222-3333-666666666666",
+                serde_json::json!({ "generated_title": "Headless must not steal" }),
+            );
+            match materialize_startup_for_cwd(
+                headless_ctx(),
+                SessionStartupIntent::NewAuto,
+                &cwd_str,
+            )
+            .await
+            .unwrap()
+            {
+                MaterializedStartup::NewAuto => {}
+                other => panic!("headless -p stays a fresh session, got {other:?}"),
+            }
         }
     }
     mod resume_by_title {

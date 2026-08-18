@@ -59,6 +59,10 @@ impl SlashCommand for UsageCommand {
         ctx.usage_command_visible
     }
 
+    fn visible(&self, ctx: &AppCtx) -> bool {
+        ctx.usage_command_visible
+    }
+
     fn takes_args_now(&self, ctx: &AppCtx) -> bool {
         // Non-consumer accounts get bare `/usage` only; Enter should send, not chain for args
         ctx.usage_command_visible && ctx.billing_surface_visible

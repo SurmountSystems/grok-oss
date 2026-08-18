@@ -620,25 +620,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         &grok_home,
                     )
                 }
-                _ => xai_grok_shell::auth::AllowanceExhaustAction::None,
-            };
-            let marked = matches!(
-                exhaust_action,
-                xai_grok_shell::auth::AllowanceExhaustAction::Marked
-            );
-            let cleared = matches!(
-                exhaust_action,
-                xai_grok_shell::auth::AllowanceExhaustAction::Cleared
-            );
-            if let Some(kind) = crate::views::credit_bar::sampling_identity_after_allowance_sync(
-                marked,
-                cleared,
-                app.is_api_key_auth,
-            ) {
-                for agent in app.agents.values_mut() {
-                    agent.sampling_identity = kind;
+                if !silent {
+                    agent.scrollback.push_block(RenderBlock::System(
+                        crate::scrollback::blocks::SystemMessageBlock::new(format!(
+                            "Billing error: {error}"
+                        )),
+                    ));
                 }
             }
+            vec![]
+        }
+        TaskResult::AppBillingFetched { balance, autotopup } => {
+            app.credit_balance = balance;
             apply_auto_topup(&mut app.auto_topup, &autotopup);
             if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
                 && state.fetch_nonce == nonce
@@ -670,6 +663,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
+            scheduler_background_loops,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -680,6 +674,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
+            scheduler_background_loops,
         ),
         TaskResult::SessionMetaFromDisk {
             agent_id,
@@ -887,28 +882,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && !defer_to_open_reload_window(agent, agent_id, "SessionRestoreProgress")
             {
                 agent.scrollback.push_block(RenderBlock::system(message));
-            }
-            vec![]
-        }
-        // Mid-rebuild: progress bar + sticky stage text. Never scrollback-spam
-        // every Compiling line; raw cargo already captured off the TTY.
-        TaskResult::RebuildProgress {
-            agent_id,
-            message,
-            fraction,
-        } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                let fraction = xai_grok_update::clamp_rebuild_fraction(fraction);
-                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
-                    fraction,
-                    detail: message.clone(),
-                });
-                // Keep a long-lived toast so status chrome still shows the stage
-                // if the bar row is tight; ticks high enough for multi-minute builds.
-                agent.show_toast_ticks(
-                    &format!("Rebuild {:3.0}%  {message}", fraction * 100.0),
-                    255,
-                );
             }
             vec![]
         }
@@ -1177,9 +1150,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
         }
-        TaskResult::RebuildDone { agent_id, result } => {
-            super::rebuild::handle_rebuild_done(app, agent_id, result)
-        }
         TaskResult::AnnouncementsHiddenPersisted { result } => {
             if let Err(e) = result {
                 tracing::warn!("Failed to persist announcements hidden state: {}", e);
@@ -1425,6 +1395,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && agent.session.session_id.as_ref() == Some(&session_id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
+                modal.seed_workflows_group_once();
                 modal.workflows_data = match result {
                     Ok(workflows) => TabDataState::Loaded(workflows),
                     Err(e) => TabDataState::Error(e),
@@ -2115,7 +2086,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::BtwResponse {
             agent_id,
             result,
-            btw_session_id,
             minimal_request_id,
             image_notice,
             skipped_image_numbers,

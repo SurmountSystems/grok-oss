@@ -1866,6 +1866,272 @@ async fn live_reconcile_persists_failed_and_cancelled_inspection() {
     }
 }
 #[tokio::test]
+async fn live_reconcile_reemitted_finish_has_will_wake_false() {
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-raced";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    live_reconcile_with_inspections(
+            HashMap::from([
+                (
+                    id.to_string(),
+                    Some(
+                        inspection(
+                            id,
+                            SubagentSnapshotStatus::Completed {
+                                output: "done".to_string(),
+                                tool_calls: 3,
+                                turns: 1,
+                                worktree_path: None,
+                            },
+                        ),
+                    ),
+                ),
+            ]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    let finish = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+        .find_map(|command| {
+            let SessionCommand::XaiSessionNotification { notification } = command else {
+                return None;
+            };
+            let SessionUpdate::SubagentFinished { status, will_wake, .. } = notification
+                .update else {
+                return None;
+            };
+            Some((status, will_wake))
+        });
+    assert_eq!(finish, Some(("completed".to_string(), false)));
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(3));
+    assert_eq!(reread.turns, Some(1));
+}
+#[tokio::test]
+async fn live_reconcile_persists_terminal_meta_so_second_tick_is_noop() {
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-once";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let completed = inspection(
+        id,
+        SubagentSnapshotStatus::Completed {
+            output: "done".to_string(),
+            tool_calls: 4,
+            turns: 2,
+            worktree_path: None,
+        },
+    );
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), Some(completed.clone()))]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    assert_eq!(
+            std::iter::from_fn(|| cmd_rx.try_recv().ok())
+                .filter(|command| matches!(
+                    command,
+                    SessionCommand::XaiSessionNotification {
+                        notification: SessionNotification {
+                            update: SessionUpdate::SubagentFinished { .. },
+                            ..
+                        }
+                    }
+                ))
+                .count(),
+            1
+        );
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), Some(completed))]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    assert!(cmd_rx.try_recv().is_err(), "second tick must not re-emit");
+    live_reconcile_with_inspections(
+            HashMap::from([(id.to_string(), None)]),
+            session_dir.path(),
+            &test_gateway(),
+            Some(&cmd_tx),
+        )
+        .await;
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+    assert!(cmd_rx.try_recv().is_err());
+}
+#[tokio::test]
+async fn live_reconcile_overlapping_ticks_emit_once() {
+    use crate::test_support::lsp_runtime::test_gateway_with_receiver;
+    let session_dir = tempfile::TempDir::new().unwrap();
+    let id = "sa-live-race";
+    let sub_dir = session_dir.path().join("subagents").join(id);
+    write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let completed = inspection(
+        id,
+        SubagentSnapshotStatus::Completed {
+            output: "done".to_string(),
+            tool_calls: 4,
+            turns: 2,
+            worktree_path: None,
+        },
+    );
+    let inspections = HashMap::from([(id.to_string(), Some(completed))]);
+    let heal_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    tokio::join!(
+            live_reconcile_with_heal_lock(
+                inspections.clone(),
+                session_dir.path(),
+                &gateway,
+                Some(&cmd_tx),
+                heal_lock.clone(),
+            ),
+            live_reconcile_with_heal_lock(
+                inspections,
+                session_dir.path(),
+                &gateway,
+                Some(&cmd_tx),
+                heal_lock,
+            ),
+        );
+    let cmd_finishes = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+        .filter(|command| {
+            matches!(
+                    command,
+                    SessionCommand::XaiSessionNotification {
+                        notification: SessionNotification {
+                            update: SessionUpdate::SubagentFinished { .. },
+                            ..
+                        }
+                    }
+                )
+        })
+        .count();
+    assert_eq!(cmd_finishes, 1);
+    let mut gateway_finishes = 0;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+            continue;
+        };
+        let notification: SessionNotification = serde_json::from_str(
+                args.request.params.get(),
+            )
+            .unwrap();
+        if matches!(
+                notification.update,
+                SessionUpdate::SubagentFinished { ref subagent_id, .. } if subagent_id == id
+            ) {
+            gateway_finishes += 1;
+        }
+    }
+    assert_eq!(gateway_finishes, 1);
+    let reread: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(reread.status, "completed");
+    assert_eq!(reread.tool_calls, Some(4));
+}
+#[tokio::test]
+async fn live_reconcile_ignores_terminal_on_disk_meta() {
+    for status in ["completed", "failed", "cancelled"] {
+        let session_dir = tempfile::TempDir::new().unwrap();
+        let id = format!("sa-term-{status}");
+        let sub_dir = session_dir.path().join("subagents").join(&id);
+        let mut meta = running_test_meta(&id, "parent-x");
+        meta.status = status.to_string();
+        write_subagent_meta(&sub_dir, &meta);
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        live_reconcile_with_inspections(
+                HashMap::from([(id.clone(), None)]),
+                session_dir.path(),
+                &test_gateway(),
+                Some(&cmd_tx),
+            )
+            .await;
+        let reread: SubagentMeta = serde_json::from_str(
+                &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(reread.status, status);
+        assert!(
+                cmd_rx.try_recv().is_err(),
+                "terminal on-disk meta must not emit on a live tick ({status})"
+            );
+    }
+}
+#[tokio::test]
+async fn live_reconcile_persists_failed_and_cancelled_inspection() {
+    let cases = [
+        (
+            SubagentSnapshotStatus::Failed {
+                error: "boom".to_string(),
+            },
+            "failed",
+        ),
+        (
+            SubagentSnapshotStatus::Cancelled {
+                reason: Some("stop".to_string()),
+            },
+            "cancelled",
+        ),
+    ];
+    for (status, expected) in cases {
+        let session_dir = tempfile::TempDir::new().unwrap();
+        let id = format!("sa-insp-{expected}");
+        let sub_dir = session_dir.path().join("subagents").join(&id);
+        write_subagent_meta(&sub_dir, &running_test_meta(&id, "parent-x"));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        live_reconcile_with_inspections(
+                HashMap::from([(id.clone(), Some(inspection(&id, status)))]),
+                session_dir.path(),
+                &test_gateway(),
+                Some(&cmd_tx),
+            )
+            .await;
+        let finish = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find_map(|command| {
+                let SessionCommand::XaiSessionNotification { notification } = command
+                else {
+                    return None;
+                };
+                let SessionUpdate::SubagentFinished { status, will_wake, .. } = notification
+                    .update else {
+                    return None;
+                };
+                Some((status, will_wake))
+            });
+        assert_eq!(finish, Some((expected.to_string(), false)));
+        let reread: SubagentMeta = serde_json::from_str(
+                &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(reread.status, expected);
+    }
+}
+#[tokio::test]
 async fn reconcile_dedups_replay_and_running_meta_sources() {
     let session_dir = tempfile::TempDir::new().unwrap();
     let id = "sa-crash";

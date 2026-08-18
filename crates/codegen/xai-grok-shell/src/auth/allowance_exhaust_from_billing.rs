@@ -8,8 +8,12 @@
 //! waiting for HTTP 402.
 //!
 //! With `[auth] auto_use_included_limits` and known **positive** SuperGrok $
-//! extras, do **not** mark (after-burner / SuperGrok $ extras before console):
+//! extras, do **not** mark **when every distinct included SuperGrok period
+//! pool is exhausted** (after-burner / SuperGrok $ extras before console):
 //! ranking keeps SuperGrok session primary and console only as failover.
+//! If a sibling SuperGrok login still has included remaining, mark the full
+//! identity so prefer_live / rank can hop. Next plan's included beats this
+//! plan's never-expiring extras.
 //!
 //! Also holds a process-local map of **included** headroom + `reset_at` + extras
 //! per SuperGrok identity (from billing polls). `load_supergrok_session_candidates`
@@ -709,7 +713,7 @@ pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
             );
             Some((auth.key.clone(), auth.user_id.clone()))
         }
-        super::oidc::OidcRefreshResult::Failed => {
+        super::oidc::OidcRefreshResult::Failed { .. } => {
             tracing::debug!(
                 identity_id = %identity_id,
                 "sibling SuperGrok billing: OIDC refresh failed; polling with stored token"
@@ -1000,12 +1004,43 @@ pub fn afterburner_skips_allowance_mark(
     dual_auth_ready: bool,
     prepaid_balance_cents: Option<i64>,
 ) -> bool {
+    afterburner_skips_allowance_mark_with_sibling(
+        usage_pct,
+        auto_use_included_limits,
+        dual_auth_ready,
+        prepaid_balance_cents,
+        false,
+    )
+}
+
+/// After-burner skip with sibling included SuperGrok period limits.
+///
+/// SuperGrok dollar credits skip the out-of-allowance mark only when every
+/// distinct included pool is exhausted. A sibling with included remaining
+/// must not skip: mark the full identity so prefer_live / rank can hop.
+pub fn afterburner_skips_allowance_mark_with_sibling(
+    usage_pct: f64,
+    auto_use_included_limits: bool,
+    dual_auth_ready: bool,
+    prepaid_balance_cents: Option<i64>,
+    sibling_has_distinct_included_remaining: bool,
+) -> bool {
     usage_pct >= xai_grok_sampler::INCLUDED_ALLOWANCE_EXHAUST_PCT
         && auto_use_included_limits
         && dual_auth_ready
         && super::supergrok_identity_rank::has_positive_supergrok_dollar_extras(
             prepaid_balance_cents,
         )
+        && !sibling_has_distinct_included_remaining
+}
+
+/// True when another stored SuperGrok login still has included SuperGrok
+/// period limits remaining. Used so after-burner extras do not skip the
+/// out-of-allowance mark while a sibling pool can still be spent.
+pub fn any_sibling_has_included_remaining(grok_home: &Path, active_identity_id: &str) -> bool {
+    load_supergrok_session_candidates(grok_home)
+        .iter()
+        .any(|c| c.headroom.identity_id != active_identity_id && c.headroom.has_included_headroom())
 }
 
 /// Read `[auth] auto_use_included_limits` (or aliases) from `$home/config.toml`.
@@ -1046,11 +1081,18 @@ fn apply_billing_usage_to_session_exhaust_inner(
             let extras = included_billing_fields_snapshot()
                 .get(&identity_id)
                 .and_then(|f| f.prepaid_balance_cents);
-            if afterburner_skips_allowance_mark(
+            // Sibling included remaining only gates the 100% after-burner skip.
+            // `load_supergrok_session_candidates` also clears exhaust memos when
+            // live used percent is below 100. Calling that before sync would
+            // swallow period-reset `Cleared` (sync would then see no memo).
+            let sibling_included = usage_pct >= xai_grok_sampler::INCLUDED_ALLOWANCE_EXHAUST_PCT
+                && any_sibling_has_included_remaining(grok_home, &identity_id);
+            if afterburner_skips_allowance_mark_with_sibling(
                 usage_pct,
                 auto_use_included_limits,
                 dual_auth_ready,
                 extras,
+                sibling_included,
             ) {
                 let Some(token) = load_session_access_token(grok_home) else {
                     return xai_grok_sampler::AllowanceExhaustAction::None;
@@ -1722,6 +1764,89 @@ mod tests {
             if enabled { "true" } else { "false" }
         );
         std::fs::write(home.join("config.toml"), body).expect("write config.toml");
+    }
+
+    /// Named contract: personal included SuperGrok period limits full + SuperGrok
+    /// dollar credits on that login must still mark the full identity when a
+    /// distinct sibling still has included remaining, so prefer_live / rank can
+    /// hop. After-burner skip is only for every distinct included pool exhausted.
+    #[test]
+    fn afterburner_does_not_skip_mark_when_sibling_has_included_remaining() {
+        assert!(
+            !afterburner_skips_allowance_mark_with_sibling(100.0, true, true, Some(10_029), true,),
+            "sibling included remaining must not skip the out-of-allowance mark"
+        );
+        assert!(
+            afterburner_skips_allowance_mark_with_sibling(100.0, true, true, Some(10_029), false,),
+            "single-identity extras after-burner still skips when no sibling included remains"
+        );
+    }
+
+    /// Apply path: sticky personal at 100% with extras + Business included
+    /// remaining must Mark the personal JWT (not after-burner skip).
+    #[test]
+    #[serial_test::serial]
+    fn apply_billing_marks_personal_full_when_business_sibling_has_included() {
+        use crate::auth::model::upsert_supergrok_session;
+
+        with_isolated_home(|home| {
+            clear_included_billing_cache();
+            let personal = "tok-personal-full-extras";
+            let business = "tok-business-included-remaining";
+            let base = "https://auth.x.ai::test-client";
+            let mut map = AuthStore::default();
+            upsert_supergrok_session(
+                &mut map,
+                base,
+                GrokAuth {
+                    key: business.into(),
+                    auth_mode: AuthMode::Oidc,
+                    user_id: "user-b".into(),
+                    principal_type: Some("Team".into()),
+                    team_id: Some("team-biz".into()),
+                    ..Default::default()
+                },
+            );
+            // Last upsert is the sticky base (personal).
+            upsert_supergrok_session(
+                &mut map,
+                base,
+                GrokAuth {
+                    key: personal.into(),
+                    auth_mode: AuthMode::Oidc,
+                    user_id: "user-p".into(),
+                    ..Default::default()
+                },
+            );
+            write_auth_json(&home.join("auth.json"), &map).unwrap();
+            write_auto_use_config(home, true);
+            let store = CredentialsStore::at_grok_home(home);
+            assert!(add_console_api_key(&store, "console-failover-key").unwrap());
+
+            remember_supergrok_dollar_extras("user-p", 10_029);
+            remember_supergrok_included_billing(
+                "team-biz",
+                40.0,
+                Some("2026-08-20T00:00:00Z"),
+                Some("USAGE_PERIOD_TYPE_WEEKLY"),
+            );
+
+            let action = apply_billing_usage_to_session_exhaust(100.0, home);
+            assert_eq!(
+                action,
+                AllowanceExhaustAction::Marked,
+                "personal full + extras must still mark when Business included remains; got {action:?}"
+            );
+            assert!(
+                xai_grok_sampler::is_credential_exhausted(personal),
+                "personal JWT must be marked so prefer_live can hop to Business included"
+            );
+            assert!(
+                !xai_grok_sampler::is_credential_exhausted(business),
+                "Business sibling must stay live"
+            );
+            clear_included_billing_cache();
+        });
     }
 
     /// Pure gate: after-burner skips mark only when auto_use + dual-auth + extras > 0.

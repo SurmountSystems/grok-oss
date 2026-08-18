@@ -305,6 +305,79 @@ impl WorktreeDb {
         }
     }
 
+    fn journal_mode_and_base_path(grok_home: &Path) -> (JournalMode, PathBuf) {
+        let base_path = grok_home.join(WORKTREES_DB_FILE);
+        let mode = JournalMode::for_db_path(&base_path);
+        (mode, base_path)
+    }
+
+    /// The path a read-write open would use (per-host on network mounts).
+    /// Runs statfs and a hostname lookup, so resolve once and carry it.
+    pub fn resolve_db_path(grok_home: &Path) -> PathBuf {
+        let (mode, base_path) = Self::journal_mode_and_base_path(grok_home);
+        mode.effective_db_path(&base_path)
+    }
+
+    /// Read-only open: creates no directory, database file, or schema. Not
+    /// side-effect free, though: reading a WAL database leaves `-shm` and
+    /// `-wal` sidecars, and a network-mount open still converts the journal.
+    pub fn open_read_only(grok_home: &Path) -> RegistryOpen {
+        let (mode, base_path) = Self::journal_mode_and_base_path(grok_home);
+        let path = mode.effective_db_path(&base_path);
+        match Self::open_read_only_at(mode, &path) {
+            Ok(Some(db)) => RegistryOpen::Opened { path, db },
+            Ok(None) => RegistryOpen::Absent { path },
+            Err(OpenFailure::Busy(error)) => RegistryOpen::Busy { path, error },
+            Err(OpenFailure::Other(error)) => RegistryOpen::Failed { path, error },
+        }
+    }
+
+    fn open_read_only_at(mode: JournalMode, effective: &Path) -> Result<Option<Self>, OpenFailure> {
+        let present = effective.try_exists().map_err(|e| {
+            OpenFailure::Other(
+                anyhow::Error::new(e)
+                    .context(format!("cannot stat worktree DB: {}", effective.display())),
+            )
+        })?;
+        if !present {
+            return Ok(None);
+        }
+        let deadline = std::time::Instant::now() + BUSY_RETRY_BUDGET;
+        let conn = Self::open_readonly_with_busy_retry(mode, effective, deadline)?;
+        Ok(Some(Self { conn }))
+    }
+
+    /// Retry busy failures until `deadline`, which also bounds the network
+    /// arm's journal conversion, so the wait cannot come to twice what the
+    /// caller allowed.
+    fn open_readonly_with_busy_retry(
+        mode: JournalMode,
+        path: &Path,
+        deadline: std::time::Instant,
+    ) -> Result<Connection, OpenFailure> {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let context = || format!("failed to open worktree DB read-only: {}", path.display());
+        loop {
+            match mode.open_readonly_until(path, deadline) {
+                Ok(conn) => return Ok(conn),
+                Err(e) if !is_sqlite_busy(&e) => {
+                    return Err(OpenFailure::Other(anyhow::Error::new(e).context(context())));
+                }
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        let elapsed = start.elapsed();
+                        return Err(OpenFailure::Busy(anyhow::Error::new(e).context(format!(
+                            "{} (database busy after {elapsed:?})",
+                            context()
+                        ))));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
     /// Open an in-memory DB (for tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory DB")?;

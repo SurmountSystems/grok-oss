@@ -440,6 +440,18 @@ impl SessionActor {
                 ),
             )
             .await;
+        let implement_loop_effort = crate::token_economy::parse_implement_effort(
+            &SessionActor::queue_text_from_blocks(&prompt_blocks),
+        );
+        self.agent
+            .borrow()
+            .tool_bridge()
+            .update_resource(
+                xai_grok_tools::implementations::grok_build::task::types::ImplementLoopEffortResource(
+                    implement_loop_effort,
+                ),
+            )
+            .await;
 
         tracing::debug!(
             target: "qtrace",
@@ -648,6 +660,7 @@ impl SessionActor {
         if self.startup_hints.is_subagent {
             return;
         }
+        self.reconcile_live_orphaned_subagents().await;
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
                 .on_session_idle(&xai_agent_lifecycle::SessionIdleInput)

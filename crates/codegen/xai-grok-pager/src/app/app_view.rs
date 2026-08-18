@@ -509,6 +509,12 @@ pub struct AppView {
     pub global_work_pause: crate::app::global_work_pause::GlobalWorkPause,
     /// Soft stop: finish current turn then hold queue drain (not mid-turn cancel).
     pub soft_stop: crate::app::soft_stop::SoftStop,
+    /// Pending `/rebuild` re-exec (self or peer SIGUSR1).
+    pub rebuild_relaunch: Option<RebuildRelaunch>,
+    /// `/screenshot` requested; event loop captures after present.
+    pub pending_tui_screenshot: bool,
+    /// Console team prepaid remaining (USD cents) from last billing fetch.
+    pub console_team_prepaid_cents: Option<i64>,
     /// Monotonically increasing counter for agent ID allocation.
     /// IDs are never reused after `shift_remove`, to avoid collisions.
     pub next_agent_id: usize,
@@ -617,12 +623,6 @@ pub struct AppView {
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// App-level auto top-up rule paired with `credit_balance` for the warning.
     pub auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-    /// OpenRouter account credits (when an OR key is configured). Shown in the
-    /// prompt footer when the active model is OpenRouter-backed.
-    pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
-    /// Console team prepaid remaining USD cents (Management API). Distinct from
-    /// SuperGrok session extras. `None` = honest absence.
-    pub console_team_prepaid_cents: Option<i64>,
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard).
@@ -701,10 +701,6 @@ pub struct AppView {
     /// When true the event loop ensures the pager renders raw control codes (`less -R`) so the colors show instead of literal escapes.
     /// Plain-text transcripts (`/export` markdown) leave this false.
     pub pending_pager_ansi: bool,
-    /// When true, the event loop captures the last presented TUI frame to a
-    /// PNG under `$GROK_HOME/screenshots/` after the next present and toasts
-    /// the path. Set by `/screenshot` / [`Action::CaptureTuiScreenshot`].
-    pub pending_tui_screenshot: bool,
     /// Minimal mode only: the Ctrl+T **force-show** pin for the todo panel.
     /// Minimal-mode-only per-session state, consolidated into a single field so the central `AppView` isn't peppered with loose minimal flags.
     /// Default-empty and inert outside `--minimal`; the `xai-grok-pager-minimal` crate reads/mutates it through the `crate::minimal_api` accessors.
@@ -1002,12 +998,15 @@ pub struct AppView {
     pub show_tips: Option<bool>,
 
     /// Persisted `[session].auto_compact_threshold_percent` mirror.
-    /// `None` = no override (default 95). Restart-required for open sessions.
+    /// `None` = no override (default 95). Live-applied via PersistSetting then ACP.
     /// Cleared when [`Self::auto_compact_threshold_tokens`] is set.
     pub auto_compact_threshold_percent: Option<u8>,
     /// Persisted `[session].auto_compact_threshold_tokens` mirror.
-    /// When set, absolute-token mode wins over percent. Restart-required.
+    /// When set, absolute-token mode wins over percent. Live-applied.
     pub auto_compact_threshold_tokens: Option<u64>,
+    /// Persisted `[models].default_reasoning_effort` mirror.
+    /// `None` = no TOML override (baked Grok 4.6 default is medium).
+    pub default_reasoning_effort: Option<String>,
     /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded from the effective TOML merge like `show_tips`.
@@ -1206,6 +1205,17 @@ impl AppView {
     pub fn coding_data_pending_opted_in(&self) -> Option<bool> {
         self.coding_data_pending_write.map(|w| w.opted_in)
     }
+    /// Why `coding_data_sharing` is locked for this user (`None` = editable).
+    /// Mirrors the dispatch guards in `set_coding_data_sharing`.
+    pub fn coding_data_sharing_lock(&self) -> Option<crate::settings::CodingDataSharingLock> {
+        if self.is_zdr {
+            Some(crate::settings::CodingDataSharingLock::Zdr)
+        } else if self.is_team_non_admin() {
+            Some(crate::settings::CodingDataSharingLock::TeamManaged)
+        } else {
+            None
+        }
+    }
     /// Welcome privacy banner visibility gates.
     pub fn privacy_banner_should_show(&self) -> bool {
         if self.screen_mode.is_minimal() {
@@ -1257,6 +1267,19 @@ impl AppView {
             && matches!(self.trust_state, TrustState::Done)
             && matches!(self.consent_state, ConsentState::Done)
     }
+    /// Whether startup type-ahead captured while the app was loading may be
+    /// replayed into the input channel: every startup screen that consumes raw
+    /// keystrokes must be resolved so the composer is the active consumer.
+    /// Mirrors the folder-trust interceptor's gate (auth Done, has access, not
+    /// ZDR-blocked) plus trust Done. When this is false at launch the captured
+    /// prompt is dropped rather than replayed (see `event_loop::run`), so e.g. a
+    /// prompt starting with "n" cannot answer the folder-trust question and quit.
+    pub fn ready_for_startup_typeahead(&self) -> bool {
+        matches!(self.auth_state, AuthState::Done)
+            && self.has_access()
+            && !self.is_zdr_blocked()
+            && matches!(self.trust_state, TrustState::Done)
+    }
     /// Extract `GateInfo` from `RemoteSettings`.
     pub fn gate_from_settings(
         rs: &xai_grok_shell::util::config::RemoteSettings,
@@ -1307,14 +1330,6 @@ impl AppView {
                 .is_some_and(is_api_key_label);
         self.usage_visible = self.team_name.is_none() && self.consumer_account();
         self.sync_billing_surface_to_agents();
-        // Console API key primary: meter identity matches live spend pool from
-        // the start (not SuperGrokSession default until a hop toast).
-        if self.is_api_key_auth {
-            for agent in self.agents.values_mut() {
-                agent.sampling_identity =
-                    crate::views::credit_bar::SamplingIdentityKind::ConsoleKey;
-            }
-        }
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
@@ -1357,23 +1372,34 @@ impl AppView {
                 .set_usage_command_visible(usage_cmd);
         }
     }
-    /// Mirror [`Self::usage_visible`] onto every slash surface that can run
-    /// `/usage` (agents, welcome, dashboard dispatch / peek-reply).
+    /// Mirror billing + `/usage` gates onto every slash surface (agents,
+    /// welcome, dashboard dispatch / peek-reply).
     pub(crate) fn sync_billing_surface_to_agents(&mut self) {
-        let visible = self.usage_visible;
+        let billing = self.usage_visible;
+        let usage_cmd = !self.has_external_auth_provider;
         for agent in self.agents.values_mut() {
-            agent.set_billing_surface_visible(visible);
+            agent.set_billing_surface_visible(billing);
+            agent.set_usage_command_visible(usage_cmd);
         }
         self.welcome_prompt
             .slash_controller
-            .set_billing_surface_visible(visible);
+            .set_billing_surface_visible(billing);
+        self.welcome_prompt
+            .slash_controller
+            .set_usage_command_visible(usage_cmd);
         if let Some(dash) = self.dashboard.as_mut() {
             dash.dispatch
                 .slash_controller
-                .set_billing_surface_visible(visible);
+                .set_billing_surface_visible(billing);
+            dash.dispatch
+                .slash_controller
+                .set_usage_command_visible(usage_cmd);
             dash.peek_reply
                 .slash_controller
-                .set_billing_surface_visible(visible);
+                .set_billing_surface_visible(billing);
+            dash.peek_reply
+                .slash_controller
+                .set_usage_command_visible(usage_cmd);
         }
     }
     /// Force voice on for API-key sessions when only a remote rule left it off.
@@ -1407,6 +1433,9 @@ impl AppView {
             agents: IndexMap::new(),
             global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
             soft_stop: crate::app::soft_stop::SoftStop::new(),
+            rebuild_relaunch: None,
+            pending_tui_screenshot: false,
+            console_team_prepaid_cents: None,
             next_agent_id: 0,
             models,
             registry: ActionRegistry::defaults(),
@@ -1455,7 +1484,6 @@ impl AppView {
             pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
-            pending_tui_screenshot: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
@@ -1587,6 +1615,7 @@ impl AppView {
             show_tips: None,
             auto_compact_threshold_percent: None,
             auto_compact_threshold_tokens: None,
+            default_reasoning_effort: None,
             auto_update: None,
             ask_user_question_timeout_enabled: None,
             subagent_model_inheritance: crate::settings::FeatureOverrideState::new(
@@ -1629,8 +1658,6 @@ impl AppView {
             leader_mode: false,
             credit_balance: None,
             auto_topup: None,
-            openrouter_credit_balance: None,
-            console_team_prepaid_cents: None,
             billing_poll_wanted: false,
             leader_roster: Vec::new(),
             dashboard_local_sessions: Vec::new(),
@@ -1640,6 +1667,7 @@ impl AppView {
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
+            scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
             shell_feedback_trace_offer: false,
@@ -2318,17 +2346,6 @@ impl AppView {
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
                 let action = self.pending_action.take().unwrap().action;
-                // Second Esc that confirms cancel: set Esc trigger + post-cancel
-                // rewind grace here (first Esc only armed; policy never saw the
-                // confirm press). Other double-press arms (clear/rewind/quit)
-                // need no agent-side side effects.
-                if matches!(action, Action::CancelTurn)
-                    && let ActiveView::Agent(id) = self.active_view
-                    && let Some(agent) = self.agents.get_mut(&id)
-                {
-                    agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
-                    agent.suppress_rewind_arm(std::time::Instant::now());
-                }
                 return InputOutcome::Action(action);
             }
             self.pending_action = None;
@@ -2975,8 +2992,6 @@ impl AppView {
                 }
                 Action::VoiceToggle
             }
-            ActionId::ToggleGlobalPause => Action::ToggleGlobalPause,
-            ActionId::ToggleSoftStop => Action::ToggleSoftStop,
             _ => return InputOutcome::Unchanged,
         };
         if def.requires_confirmation
@@ -4293,13 +4308,6 @@ impl AppView {
     }
     /// Render the current view to the terminal.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
-        // Refresh title/progress OSC on every present when nothing is pending.
-        // Covers deferred ACP draws and other present paths that never called
-        // update_notifications; avoids double-ticking when tick/ACP already
-        // filled pending_notification_escapes this cycle.
-        if self.pending_notification_escapes.is_none() {
-            self.update_notifications();
-        }
         self.draw_inner(terminal);
         xai_grok_telemetry::startup::record_first_draw();
         crate::memory_release::run_deferred_release();
@@ -5278,20 +5286,6 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.minimal_state.needs_frames();
         needs_redraw |= self.poll_clipboard_focus_tip();
-        // Keep global-pause duration/count visible while held.
-        if self.global_work_pause.is_active() {
-            if let Some(label) = self
-                .global_work_pause
-                .status_label(std::time::Instant::now())
-            {
-                self.show_toast(&label);
-                needs_redraw = true;
-            }
-        } else if let Some(label) = self.soft_stop.status_label() {
-            // Soft-stop chrome (armed vs queue held) when pause is not active.
-            self.show_toast(label);
-            needs_redraw = true;
-        }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
@@ -5343,7 +5337,6 @@ impl AppView {
                 needs_redraw |= child.edit_hl_tick();
             }
         }
-        let mut limits_zero_refresh_for: Option<crate::app::agent::AgentId> = None;
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
@@ -5493,20 +5486,6 @@ impl AppView {
                     needs_redraw = true;
                 }
             }
-            // Software Human-green box caret samples wall-clock phase on every paint.
-            // Slow ticks keep the clock armed (`tick_demand`); this forces the
-            // present so filled↔hollow actually advances while idle/focused.
-            if agent_wants_composer_cursor_blink(agent) {
-                needs_redraw = true;
-            }
-        }
-        // Countdown hit zero while /limits modal open → silent billing re-fetch.
-        if let Some(agent_id) = limits_zero_refresh_for {
-            self.pending_effects
-                .push(crate::app::actions::Effect::FetchBilling {
-                    agent_id,
-                    silent: true,
-                });
         }
         if let Some(commands) = bootstrap_commands_update {
             self.welcome_prompt
@@ -5517,13 +5496,6 @@ impl AppView {
             self.bootstrap_acp_commands = commands;
         }
         self.update_notifications();
-        // Title/progress OSC lives in pending_notification_escapes and only
-        // flushes on draw. Force a present when escapes are queued even if the
-        // cell buffer is visually unchanged (idle session title, progress
-        // keepalive) so DE window titles stay live.
-        if self.pending_notification_escapes.is_some() {
-            needs_redraw = true;
-        }
         if let Some((_, remaining)) = self.deferred_notification.as_mut() {
             if *remaining == 0 {
                 if let Some((event, _)) = self.deferred_notification.take() {
@@ -5792,19 +5764,6 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
-                // Composer Human-green box caret blinks filled↔hollow on a slow
-                // wall-clock phase; Slow ticks keep it alive without a 30fps spin
-                // while the agent is idle and the prompt is focused.
-                if agent_wants_composer_cursor_blink(agent) {
-                    return TickDemand::Slow;
-                }
-                // /limits live countdown (d/h/m/s) needs Slow ticks while open.
-                if matches!(
-                    agent.active_modal.as_ref(),
-                    Some(crate::views::modal::ActiveModal::Limits { .. })
-                ) {
-                    return TickDemand::Slow;
-                }
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
@@ -5833,121 +5792,41 @@ impl AppView {
     /// Stores any resulting escape sequences in `pending_notification_escapes`.
     /// Also clears the permission notification flag when no permissions remain queued, so the next batch fires a fresh bell/popup.
     pub fn update_notifications(&mut self) {
-        // Top-level busy (unparked) agents, plus any agent that still has live
-        // L2 subagents — parked TaskOutput chrome must not hide multi-agent
-        // discoverability while children run.
-        let busy_agent_count = self
-            .agents
-            .values()
-            .filter(|a| {
-                (a.session.state.is_busy() && !a.renders_parked())
-                    || agent_has_running_title_subagents(a)
-            })
-            .count();
+        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
+            if let ActiveView::Agent(id) = self.active_view
+                && let Some(agent) = self.agents.get(&id)
+            {
+                let name = agent
+                    .display_name
+                    .as_deref()
+                    .or(agent.generated_session_title.as_deref());
+                let model = agent.session.models.current_model_name();
+                let parked = agent.renders_parked();
+                let activity = if parked {
+                    None
+                } else {
+                    agent.resolve_turn_activity()
+                };
+                let has_perms = !agent.permission_queue.is_empty();
+                let elapsed = if parked { None } else { agent.turn_elapsed() };
+                let is_busy = agent.session.state.is_busy() && !parked;
+                (name, model, activity, has_perms, elapsed, is_busy)
+            } else {
+                (None, None, None, false, None, false)
+            };
         let any_agent_has_perms = self.agents.values().any(|a| !a.permission_queue.is_empty());
         if !any_agent_has_perms {
             self.notification_service.clear_permission_notification();
         }
-
-        // Own the session label so later agent-map scans do not conflict
-        // with a borrow into TitleState.
-        let (session_name, model, activity, has_perms, turn_elapsed, is_busy) =
-            match self.active_view {
-                ActiveView::Agent(id) => {
-                    if let Some(agent) = self.agents.get(&id) {
-                        let name = crate::notifications::title::resolve_session_title_name(
-                            agent.display_name.as_deref(),
-                            agent.generated_session_title.as_deref(),
-                        )
-                        .map(str::to_owned);
-                        let model = agent.session.models.current_model_name();
-                        let parked = agent.renders_parked();
-                        let has_running_subagents = agent_has_running_title_subagents(agent);
-                        // Parked chrome blanks activity for pure bg-command
-                        // waits (progress bar off). Keep activity when L2
-                        // subagents are still running so the DE title does
-                        // not look idle during long waits. Idle parent + live
-                        // children: inject Subagent wait (resolve returns None
-                        // once parent is no longer TurnRunning).
-                        let activity = if parked && !has_running_subagents {
-                            None
-                        } else {
-                            agent.resolve_turn_activity().or_else(|| {
-                                has_running_subagents.then_some(
-                                    crate::acp::tracker::TurnActivity::Waiting(
-                                        crate::acp::tracker::WaitingReason::Subagent,
-                                    ),
-                                )
-                            })
-                        };
-                        let has_perms = !agent.permission_queue.is_empty();
-                        let elapsed = if parked && !has_running_subagents {
-                            None
-                        } else {
-                            agent.turn_elapsed()
-                        };
-                        // Progress + title spinner: unparked parent busy, or
-                        // any live subagent (idle parent / parked wait).
-                        let is_busy =
-                            (agent.session.state.is_busy() && !parked) || has_running_subagents;
-                        (name, model, activity, has_perms, elapsed, is_busy)
-                    } else {
-                        (None, None, None, false, None, false)
-                    }
-                }
-                ActiveView::AgentDashboard => {
-                    // Selected / primary agent session name when available.
-                    let selected_id = self.dashboard.as_ref().and_then(|d| {
-                        d.selected.as_ref().and_then(|row| match row {
-                            crate::views::dashboard::DashboardRowId::TopLevel(id) => Some(*id),
-                            crate::views::dashboard::DashboardRowId::Subagent {
-                                parent, ..
-                            } => Some(*parent),
-                            crate::views::dashboard::DashboardRowId::Roster { .. } => None,
-                        })
-                    });
-                    let agent = selected_id
-                        .and_then(|id| self.agents.get(&id))
-                        .or_else(|| self.agents.values().next());
-                    let name = agent
-                        .and_then(|a| {
-                            crate::notifications::title::resolve_session_title_name(
-                                a.display_name.as_deref(),
-                                a.generated_session_title.as_deref(),
-                            )
-                        })
-                        .map(str::to_owned);
-                    let model = agent.and_then(|a| a.session.models.current_model_name());
-                    let is_busy = busy_agent_count > 0;
-                    (name, model, None, any_agent_has_perms, None, is_busy)
-                }
-                ActiveView::Welcome => {
-                    // Prefer a live agent's session name when one exists so
-                    // Welcome still brands the DE title with the session
-                    // (resume/fork flows, multi-agent return to welcome).
-                    let agent = self.agents.values().next();
-                    let name = agent
-                        .and_then(|a| {
-                            crate::notifications::title::resolve_session_title_name(
-                                a.display_name.as_deref(),
-                                a.generated_session_title.as_deref(),
-                            )
-                        })
-                        .map(str::to_owned);
-                    let model = agent.and_then(|a| a.session.models.current_model_name());
-                    (name, model, None, false, None, busy_agent_count > 0)
-                }
-            };
         let cwd_str = self.cwd.to_string_lossy();
         let title_state = crate::notifications::TitleState {
-            session_name: session_name.as_deref(),
+            session_name,
             model: model.as_deref(),
             activity: activity.as_ref(),
             has_pending_permissions: has_perms,
             cwd: Some(&cwd_str),
             turn_elapsed,
             is_busy,
-            busy_agent_count,
             focused: self.notification_service.focus_tracker.is_focused(),
         };
         if let Some(esc) = self.notification_service.on_tick(&title_state) {

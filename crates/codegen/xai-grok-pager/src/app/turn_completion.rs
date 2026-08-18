@@ -470,6 +470,24 @@ fn arm_driver_turn_end_reconcile(
     true
 }
 
+/// Formatted `TurnFailed` marker for an errored turn, or `None` when a
+/// dedicated banner (re-auth, overflow, disk-full, request-failed) already
+/// covers the failure.
+pub(in crate::app) fn turn_failed_event(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+    agent_result: Option<&str>,
+    elapsed: std::time::Duration,
+) -> Option<SessionEvent> {
+    if super::dispatch::scrollback_has_recent_error_banner(scrollback) {
+        return None;
+    }
+    let raw = agent_result.unwrap_or("unknown error");
+    Some(SessionEvent::TurnFailed {
+        error: crate::app::error_display::format_request_failure(None, None, raw).message(),
+        elapsed: Some(elapsed),
+    })
+}
+
 fn driver_mid_active_work(agent: &AgentView) -> bool {
     use crate::acp::tracker::TurnActivity;
     // A stale tool-call write means the delta stream died

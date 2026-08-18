@@ -676,19 +676,11 @@ impl BlockContent for ExecuteToolCallBlock {
         if self.error.is_some() {
             Some(AccentStyle::static_color(theme.accent_error))
         } else if ctx.is_running {
-            // Agent tool-run left stripe: live `accent_running` (magenta under
-            // DOGE). Same agent chrome as active agent rails / activity. Never
-            // Human green (`accent_user` / `accent_success`) — dogfood saw a
-            // green rail next to "Run …" agent lines.
-            Some(AccentStyle::animated(theme.accent_running))
-        } else if self.bash_mode {
-            // User `!` bash finished: success green (Human-adjacent).
-            Some(AccentStyle::static_color(theme.accent_success))
+            Some(AccentStyle::animated(
+                ctx.appearance.scrollback.blocks.execute.running_accent,
+            ))
         } else {
-            // Agent execute finished: neutral tool chrome (white under DOGE),
-            // not Human/success green. Permanent green rails next to every
-            // finished "Run …" read as Human gutters in dogfood.
-            Some(AccentStyle::static_color(theme.accent_tool))
+            Some(AccentStyle::static_color(theme.accent_success))
         }
     }
 

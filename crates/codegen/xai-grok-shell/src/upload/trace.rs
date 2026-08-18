@@ -1068,8 +1068,8 @@ impl TraceExportSource for DynamicResolver {
                 ref mut user_token, ..
             } = config.upload_method
             {
-                match self.auth_manager.get_valid_token().await {
-                    Ok(key) => *user_token = key,
+                match self.auth_manager.auth_background().await {
+                    Ok(auth) => *user_token = auth.key,
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -2494,6 +2494,86 @@ pub(crate) mod tests {
         assert_eq!(e1.1, b"hist");
         assert_eq!(e2.1, b"ev");
         assert_eq!(e3.1, b"call");
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn session_state_archive_empty_files_is_valid_tar_gz() {
+        let archive = build_session_state_archive(session_copy_with(vec![]), "test-sid").unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        assert!(entries.is_empty());
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn chat_history_compress_round_trips_owned_jsonl() {
+        let jsonl = b"{\"role\":\"user\",\"content\":\"hi\"}\n";
+        let archive = compress_chat_history_archive(jsonl.to_vec()).unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "chat_history.jsonl");
+        assert_eq!(entries[0].1, jsonl);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_spawn_blocking_panic_is_archive_failed() {
+        let _fault = set_archive_build_fault(ArchiveBuildFault::Panic);
+        let err = build_chat_history_session_state(&[])
+            .await
+            .expect_err("compress panic must surface as archive_failed");
+        assert_eq!(err.reason, "archive_failed");
+        let msg = format!("{:#}", err.error);
+        assert!(
+            msg.contains("spawn_blocking join failed"),
+            "join error must keep cancel vs panic distinguishable: {msg}"
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(archive_build_fault)]
+    async fn chat_history_spawn_blocking_io_error_is_archive_failed() {
+        let _fault = set_archive_build_fault(ArchiveBuildFault::Io);
+        let err = build_chat_history_session_state(&[])
+            .await
+            .expect_err("compress io error must surface as archive_failed");
+        assert_eq!(err.reason, "archive_failed");
+        assert!(format!("{:#}", err.error).contains("test-forced archive io failure"));
+    }
+    fn session_copy_with(
+        files: Vec<(&str, &[u8])>,
+    ) -> crate::session::persistence::SessionStateCopy {
+        crate::session::persistence::SessionStateCopy {
+            files: files
+                .into_iter()
+                .map(|(name, data)| CopiedSessionFile {
+                    name: name.to_string(),
+                    data: data.to_vec(),
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    #[serial_test::serial(archive_build_fault)]
+    fn session_state_archive_contains_sorted_files() {
+        let session_copy = session_copy_with(vec![
+            ("call_001.jsonl", b"call"),
+            ("summary.json", b"sum"),
+            ("chat_history.jsonl", b"hist"),
+            ("events.jsonl", b"ev"),
+        ]);
+        let archive = build_session_state_archive(session_copy, "test-sid").unwrap();
+        let entries = read_tar_gz_entries(&archive);
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "summary.json",
+                "chat_history.jsonl",
+                "events.jsonl",
+                "call_001.jsonl"
+            ]
+        );
+        assert_eq!(entries[0].1, b"sum");
+        assert_eq!(entries[1].1, b"hist");
+        assert_eq!(entries[2].1, b"ev");
+        assert_eq!(entries[3].1, b"call");
     }
     #[test]
     #[serial_test::serial(archive_build_fault)]

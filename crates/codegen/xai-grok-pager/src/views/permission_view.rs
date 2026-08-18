@@ -992,6 +992,7 @@ fn display_width_end(s: &str, start: usize, limit: usize, width: usize) -> usize
         if used >= width {
             break;
         }
+        pos = end;
     }
     end
 }
@@ -2942,6 +2943,35 @@ mod tests {
             !state.has_adjustable_scope(),
             "generic always-allow id must not enable arrows"
         );
+
+        // The exact scoped ids restore both affordances.
+        state.options.push(acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("allow-always-command")),
+            "Always allow: git status".to_owned(),
+            acp::PermissionOptionKind::AllowAlways,
+        ));
+        assert!(state.has_adjustable_scope());
+        assert!(state.has_editable_bash_pattern());
+    }
+
+    #[test]
+    fn reject_always_command_alone_enables_arrows_but_not_editor() {
+        // The pattern editor persists through `allow-always-command`
+        // specifically; the arrows adjust either scoped row.
+        let mut state = empty_view_state(None);
+        state.bash_command_raw = Some("cargo test --workspace".to_owned());
+        state.bash_highlights = Some(BashCommandHighlights {
+            prefix: vec![],
+            highlighted_words: vec!["cargo".into(), "test".into()],
+            suffix: vec![],
+        });
+        state.bash_selection_count = 2;
+        state.options = vec![acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from("reject-always-command")),
+            "Never allow: cargo test".to_owned(),
+            acp::PermissionOptionKind::RejectAlways,
+        )];
+        assert!(state.has_adjustable_scope());
         assert!(
             !state.has_editable_bash_pattern(),
             "generic always-allow id must not enable the editor"
@@ -2980,6 +3010,29 @@ mod tests {
 
     #[test]
     fn body_never_dims_any_span() {
+        for raw in [
+            "git status --short && cargo test --workspace",
+            "# comment first\ncargo test",
+            "ps aux | grep pattern",
+        ] {
+            for width in [20usize, 200] {
+                for line in build_permission_bash_lines(Some(raw), width, usize::MAX) {
+                    for span in &line.spans {
+                        assert!(
+                            !span.style.add_modifier.contains(Modifier::DIM),
+                            "body span {:?} must not be DIM ({raw:?} @ {width})",
+                            span.content
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn body_never_dims_any_span() {
+        // The body carries no selection state: no span may be DIM, whatever
+        // the script shape (single command, list, pipeline, comments).
         for raw in [
             "git status --short && cargo test --workspace",
             "# comment first\ncargo test",

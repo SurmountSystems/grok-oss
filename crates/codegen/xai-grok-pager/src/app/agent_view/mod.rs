@@ -137,7 +137,7 @@ use crate::views::feedback_modal::FeedbackModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::{PermissionViewState, SubagentInfo};
-use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
+use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment, PlanFeedbackInFlight};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
 use crate::views::queue_pane::QueuePane;
@@ -350,49 +350,6 @@ impl HitArea {
         self.hovered = false;
     }
 }
-
-/// Soft-park plan-approval footer CTAs (mouse primary; keys remain accelerators).
-///
-/// Painted on the shortcuts row when plan approval is soft-parked (no side
-/// panel). Hit-tested independently of the empty-prompt keyboard gate.
-#[derive(Debug, Default)]
-pub struct SoftParkCtaHits {
-    pub approve: HitArea,
-    pub notes: HitArea,
-    pub clarify: HitArea,
-    pub revise: HitArea,
-    pub quit: HitArea,
-}
-
-impl SoftParkCtaHits {
-    pub fn clear(&mut self) {
-        self.approve.clear();
-        self.notes.clear();
-        self.clarify.clear();
-        self.revise.clear();
-        self.quit.clear();
-    }
-
-    /// Update hover for all five buttons. Returns true if any hover flipped.
-    pub fn update_hover(&mut self, col: u16, row: u16) -> bool {
-        let mut changed = false;
-        changed |= self.approve.update_hover(col, row);
-        changed |= self.notes.update_hover(col, row);
-        changed |= self.clarify.update_hover(col, row);
-        changed |= self.revise.update_hover(col, row);
-        changed |= self.quit.update_hover(col, row);
-        changed
-    }
-
-    pub fn apply_areas(&mut self, areas: crate::views::plan_approval_view::SoftParkCtaAreas) {
-        self.approve.set(areas.approve);
-        self.notes.set(areas.notes);
-        self.clarify.set(areas.clarify);
-        self.revise.set(areas.revise);
-        self.quit.set(areas.quit);
-    }
-}
-
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 /// These modes are **mutually exclusive**: only one can be active at a time.
@@ -491,11 +448,6 @@ const MODE_BANNER_TOTAL_TICKS: u8 = 69;
 const MODE_BANNER_FADE_TICKS: u8 = 9;
 /// Whether `Event::Paste(text)` should probe the clipboard for image
 /// bytes / a file reference. See [`crate::clipboard::paste_payload_needs_clipboard_attachment_probe`].
-///
-/// Runs on every OS: terminals often deliver Ctrl+V as bracketed paste rather
-/// than a key event (especially Linux Wayland). Otty IME origin gating lives
-/// in the off-thread probe (`ProbeClipboardAttachment`), not here — so short
-/// IME commits still do not attach an unrelated clipboard image.
 pub(super) fn bracketed_paste_should_probe(text: &str) -> bool {
     crate::clipboard::paste_payload_needs_clipboard_attachment_probe(text)
 }
@@ -540,143 +492,6 @@ fn supports_osc22() -> bool {
         .hyperlink_capabilities()
         .osc22_cursor
 }
-
-/// Whether the mouse is over a hit target that should request OSC 22 pointer
-/// (hand) cursor. Links already did; one-click copy chrome (selection-box ⧉,
-/// always-on bubble ⧉, prompt draft ⧉, plan/line-viewer ⧉) must match so hover
-/// reads as clickable like other CTAs.
-///
-/// Pure flags so unit tests do not need a live terminal OSC 22 capability bit.
-pub(crate) fn wants_pointer_cursor(
-    on_link: bool,
-    selection_copy_hovered: bool,
-    bubble_copy_hovered: bool,
-    prompt_copy_hovered: bool,
-    line_viewer_copy_hovered: bool,
-) -> bool {
-    on_link
-        || selection_copy_hovered
-        || bubble_copy_hovered
-        || prompt_copy_hovered
-        || line_viewer_copy_hovered
-}
-
-impl AgentView {
-    /// Live hover state → OSC 22 pointer request (links + one-click copy chrome
-    /// + status/todo CTAs: Clear finished, limits meter).
-    pub(crate) fn mouse_wants_pointer_cursor(&self) -> bool {
-        wants_pointer_cursor(
-            self.hovered_link_idx.is_some(),
-            self.hit_sb_copy.hovered,
-            self.hovered_bubble_copy.is_some(),
-            self.prompt.copy_hovered(),
-            self.line_viewer.as_ref().is_some_and(|v| v.copy_hovered),
-        ) || self.hit_todo_clear_done.hovered
-            || self.hit_credits.hovered
-    }
-}
-
-#[cfg(test)]
-mod pointer_cursor_tests {
-    use super::{test_agent_view, wants_pointer_cursor};
-
-    #[test]
-    fn link_hover_wants_pointer() {
-        assert!(wants_pointer_cursor(true, false, false, false, false));
-    }
-
-    #[test]
-    fn idle_pointer_is_default() {
-        assert!(!wants_pointer_cursor(false, false, false, false, false));
-    }
-
-    /// Named contract: mouse over any one-click copy chrome hit requests pointer.
-    #[test]
-    fn selection_box_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, true, false, false, false),
-            "selection-box ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn bubble_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, true, false, false),
-            "always-on bubble ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn prompt_draft_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, false, true, false),
-            "prompt top-bar ⧉ hover must request pointer cursor"
-        );
-    }
-
-    #[test]
-    fn line_viewer_plan_copy_hover_wants_pointer() {
-        assert!(
-            wants_pointer_cursor(false, false, false, false, true),
-            "plan/line-viewer ⧉ hover must request pointer cursor"
-        );
-    }
-
-    /// Field wiring: agent hover flags feed the same contract as the pure helper.
-    #[test]
-    fn agent_view_copy_hover_fields_request_pointer() {
-        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        assert!(
-            !agent.mouse_wants_pointer_cursor(),
-            "idle agent must not request pointer"
-        );
-
-        agent.hit_sb_copy.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "selection-box ⧉ hover field must request pointer"
-        );
-        agent.hit_sb_copy.hovered = false;
-
-        agent.hovered_bubble_copy = Some(0);
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "bubble ⧉ hover field must request pointer"
-        );
-        agent.hovered_bubble_copy = None;
-
-        // Prompt draft ⧉: set hit rect then move mouse onto it.
-        agent
-            .prompt
-            .force_copy_button_area_for_test(ratatui::layout::Rect::new(10, 5, 3, 1));
-        assert!(agent.prompt.update_copy_hover(11, 5));
-        assert!(
-            agent.prompt.copy_hovered(),
-            "update_copy_hover must mark prompt ⧉ hovered"
-        );
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "prompt ⧉ hover field must request pointer"
-        );
-        assert!(agent.prompt.update_copy_hover(0, 0));
-        assert!(!agent.mouse_wants_pointer_cursor());
-
-        // Clear finished + limits meter CTAs also request pointer.
-        agent.hit_todo_clear_done.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "Clear finished hover must request pointer"
-        );
-        agent.hit_todo_clear_done.hovered = false;
-        agent.hit_credits.hovered = true;
-        assert!(
-            agent.mouse_wants_pointer_cursor(),
-            "limits meter hover must request pointer"
-        );
-    }
-}
-
 pub(super) fn has_native_link_hover() -> bool {
     crate::terminal::terminal_context()
         .hyperlink_capabilities()
@@ -1099,16 +914,6 @@ pub struct AgentView {
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the prompt warning.
     pub auto_topup: Option<crate::views::credit_bar::AutoTopupInfo>,
-    /// OpenRouter account credits for the prompt footer when the active model
-    /// is OpenRouter-backed.
-    pub openrouter_credit_balance: Option<crate::views::credit_bar::OpenRouterCreditBalance>,
-    /// Console team prepaid remaining USD cents (Management API). Distinct from
-    /// SuperGrok session extras and OpenRouter. `None` = honest absence.
-    pub console_team_prepaid_cents: Option<i64>,
-    /// Live sampling identity for meter honesty (SuperGrok session vs console
-    /// key). Updated on dual-auth hop toasts and when billing marks SuperGrok
-    /// out of allowance so the next sample stays on the console key.
-    pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,
@@ -1225,8 +1030,7 @@ pub struct AgentView {
     /// Link index under the mouse cursor (for hover highlight).
     pub hovered_link_idx: Option<usize>,
     /// Last emitted OSC 22 pointer state (avoids re-emitting every frame).
-    /// True when the previous frame requested the hand/pointer shape.
-    pub last_pointer_cursor: bool,
+    pub last_pointer_on_link: bool,
     /// Selection model for the /btw overlay panel (populated each frame).
     pub last_btw_selection_model: ResolvedSelectionModel,
     /// Cached screen rect of the /btw overlay panel from the last render.
@@ -1264,7 +1068,8 @@ pub struct AgentView {
     pub hit_context: HitArea,
     pub hit_credits: HitArea,
     pub hit_todo_close: HitArea,
-    /// Todo pane chrome **Clear finished** (archives completed/cancelled).
+    /// Compact `[−]` Clear finished control in the todo header (open board +
+    /// finished rows). Empty when the board is hidden or nothing is finished.
     pub hit_todo_clear_done: HitArea,
     pub hit_bg_close: HitArea,
     pub hit_subagent_close: HitArea,
@@ -1276,8 +1081,6 @@ pub struct AgentView {
     pub hit_queue_close: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
-    /// Soft-park footer CTA buttons (Approve / Notes / Clarify / Revise / Quit).
-    pub hit_soft_park_ctas: SoftParkCtaHits,
     pub hit_follow_indicator: HitArea,
     /// ▲ jump-to-response-top indicator in the sticky header's gap row
     /// (click snaps the answer's first line to the top, same as `K`).
@@ -1298,6 +1101,9 @@ pub struct AgentView {
     /// Snapshot of process-level global work pause for this frame (set by
     /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
     pub(crate) global_work_paused: bool,
+    /// Still-running watcher cue on the turn-status row (click opens the
+    /// tasks pane, same as `Ctrl+G`).
+    pub hit_watching_cue: HitArea,
     /// One-time Ctrl+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click runs `/announcements hide`).
@@ -1421,11 +1227,6 @@ pub struct AgentView {
     /// Tuple of (message, remaining_ticks). Decremented each tick, removed at 0.
     /// Does **not** carry sticky status banners; see [`Self::sticky_toast`].
     pub(crate) toast: Option<(String, u8)>,
-    /// Live `/rebuild` progress strip (bar + percent + stage). Set by
-    /// [`crate::app::actions::TaskResult::RebuildProgress`]; cleared on
-    /// rebuild done/fail. When present, render paints a full-width bar at the
-    /// bottom of the scrollback instead of a short-lived toast only.
-    pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Single-slot ephemeral tip shown in the banner rect above the prompt.
     /// Unlike `toast`, survives typing; cleared by TTL, any prompt-box submit (prompt/interject/bash/feedback/remember), or explicit clear.
     /// Show via `show_ephemeral_tip` (renderability-gated), never `.show()`.
@@ -1455,6 +1256,10 @@ pub struct AgentView {
     pub(crate) scrollback_search: Option<ScrollbackSearchState>,
     /// Hit area for scrollback selection box copy button.
     pub(crate) hit_sb_copy: HitArea,
+    /// Always-on bubble copy ⧉ hit rects from the last frame: `(rect, entry_idx)`.
+    pub(crate) hit_bubble_copy: Vec<(Rect, usize)>,
+    /// True when the pointer is over a bubble copy ⧉ (hover style + pointer cursor).
+    pub(crate) hovered_bubble_copy: bool,
     /// Hit area for scrollback selection box view button.
     pub(crate) hit_sb_view: HitArea,
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the prompt area shows a structured question UI and input is modal.
@@ -2161,8 +1966,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::NextModel => Action::NextModel,
         ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
-        | ActionId::ToggleGlobalPause
-        | ActionId::ToggleSoftStop
         | ActionId::Quit
         | ActionId::ExitSession
         | ActionId::NewSession
@@ -2181,10 +1984,9 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
             }
             Action::VoiceToggle
         }
-        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ShortcutsHelp => return None,
         ActionId::OpenSettings => return None,
-        ActionId::ClearCompletedTodos => Action::ClearCompletedTodos,
+        ActionId::CaptureTuiScreenshot => Action::CaptureTuiScreenshot,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
         | ActionId::EditPromptExternal
@@ -2273,14 +2075,12 @@ fn collect_citation_links(
                     });
                 }
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
-                if !wf.url.is_empty() {
-                    links.push(VisibleLink {
-                        rects: vec![block_geom.content_area],
-                        target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
-                        id: None,
-                    });
-                }
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) if !wf.url.is_empty() => {
+                links.push(VisibleLink {
+                    rects: vec![block_geom.content_area],
+                    target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
+                    id: None,
+                });
             }
             _ => {}
         }
@@ -2654,7 +2454,6 @@ pub(crate) mod test_fixtures {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -2721,7 +2520,6 @@ pub(crate) mod test_fixtures {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
-                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -3558,7 +3356,6 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,

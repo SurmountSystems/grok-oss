@@ -57,8 +57,6 @@ pub enum Action {
     Quit,
     /// Restart the binary to pick up a downloaded update.
     QuitForUpdate,
-    /// Rebuild grok-oss from source and soft-relaunch live instances (`/rebuild`).
-    RebuildAndRelaunch,
     /// Resume the recent foreign session offered on the launch welcome screen.
     ResumeForeignSession,
     /// Re-exec into the other screen mode (`true` means minimal).
@@ -422,10 +420,6 @@ pub enum Action {
     SwitchModel(ModelChoice),
     /// Cancel the currently running turn.
     CancelTurn,
-    /// Pause or resume all in-process agent work (Ctrl+Shift+Space).
-    ToggleGlobalPause,
-    /// Soft stop: finish current turn then hold the queue (Ctrl+Shift+S).
-    ToggleSoftStop,
     /// User confirmed a cancel-turn choice from the panel.
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
@@ -520,7 +514,7 @@ pub enum Action {
         field: &'static str,
         value: bool,
     },
-    /// Token Economy integer under `[token_economy]` (effort 0–5; lock 0 = unlocked).
+    /// Token Economy integer under `[token_economy]` (effort 0-5; lock 0 = unlocked).
     SetTokenEconomyInt {
         field: &'static str,
         value: i64,
@@ -545,14 +539,16 @@ pub enum Action {
     /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted to `[ui].voice_stt_language`.
     /// Takes effect for the next voice capture.
     SetVoiceSttLanguage(String),
+    /// Set `[models].default_reasoning_effort` (`low` | `medium` | `high`).
+    /// SHELL-owned; persists via `Effect::PersistSetting`. Live-applied on
+    /// `AppView` so the Settings row reads the override immediately.
+    SetDefaultReasoningEffort(String),
     /// Toggle timestamp display on messages.
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).
     ToggleCompactMode,
     /// Set compact mode (reduce user message padding).
     SetCompactMode(bool),
-    /// Hide the top agent status bar (`[ui].hide_header`).
-    SetHideHeader(bool),
     /// Set timestamp display on messages.
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
@@ -721,17 +717,35 @@ pub enum Action {
     /// Commit a read-only list of background tasks, subagents, and scheduled tasks as a system block (`/tasks`).
     /// This is what minimal mode uses in place of the `TasksPane`.
     ShowTasks,
-    /// Archive completed/cancelled todos (shell `x.ai/todo/clear_completed`).
+    /// Commit a read-only list of live grok-oss TUI windows (`/running`).
+    ShowRunningSessions,
+    /// `/limits` — included SuperGrok period limits, extras, and console meters.
+    ShowLimits,
+    /// `/spend` — local vs Management spend books.
+    ShowSpend,
+    /// `/limits --json` — same meters as JSON in scrollback.
+    ShowLimitsJson,
+    /// Clear completed/cancelled todos from the live board.
     ClearCompletedTodos,
-    /// Store an operator mid-session note (`/note <text>`). Does **not**
-    /// enqueue a user turn or touch the pending-prompt queue.
+    /// Store an operator mid-session note (`/note <text>`).
     AddSessionNote {
         text: String,
         tags: Vec<String>,
     },
-    /// Commit a read-only list of session notes as a system block (`/note`
-    /// with no args, or `/notes`).
+    /// List session notes as a system block.
     ShowNotes,
+    /// `/rebuild` then re-exec this TUI onto the new binary.
+    RebuildAndRelaunch,
+    /// Capture a TUI screenshot (`/screenshot`).
+    CaptureTuiScreenshot,
+    /// Interrupt every in-process session and hold queues.
+    ToggleGlobalPause,
+    /// Start paused or interrupted work in this process / current session.
+    ///
+    /// `/start` only. Not `/resume` (session picker) and not a pause toggle.
+    StartPausedOrInterruptedWork,
+    /// Finish current turn then hold the queue (Ctrl+Shift+S).
+    ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
     ShowPlan,
     /// Enter plan mode. If a description is provided, also start a turn with that text as the prompt.
@@ -1556,6 +1570,10 @@ pub enum Effect {
         generation: u64,
         query: String,
         seq: u64,
+        /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
+        /// When set, stamped as `_meta["x.ai/facetFilters"].kind` so the shell
+        /// honors multi-source history under `--chat` instead of forcing chat-only.
+        kind_filter: Option<Vec<String>>,
     },
     /// Fetch the leader session roster (FleetView dashboard) via `x.ai/sessions/list`.
     /// Only issued in leader mode while the dashboard is open.
@@ -1641,8 +1659,6 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Operator clear of completed/cancelled todos via shell ext method.
-    ClearCompletedTodos { session_id: acp::SessionId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2156,6 +2172,8 @@ pub enum Effect {
     RegisterActiveSession {
         session_id: acp::SessionId,
         cwd: String,
+        activity: xai_grok_active_sessions::SessionActivity,
+        activity_line: Option<String>,
     },
     /// Unregister a session from the active-sessions registry (clean exit).
     UnregisterActiveSession { session_id: acp::SessionId },
@@ -2327,11 +2345,11 @@ pub enum Effect {
         target: DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
-    /// `/rebuild`: install from source, signal leaders, report (async).
+    /// Clear completed/cancelled todos on the live board (shell archives + Plan).
+    ClearCompletedTodos { session_id: acp::SessionId },
+    /// Run `/rebuild` in a background task.
     RunRebuild {
-        /// Directory to walk up for the source tree (usually process cwd).
         start_dir: std::path::PathBuf,
-        /// Agent that invoked `/rebuild` (scrollback + toast target).
         agent_id: AgentId,
     },
 }
@@ -2521,6 +2539,10 @@ pub enum TaskResult {
         /// Present only when the session was loaded MID-turn (another client is driving).
         /// The loader adopts it to pass the live `session/update` gate without re-rendering the user block (replay already rendered it).
         running_prompt_id: Option<String>,
+        /// See [`TaskResult::SessionCreated::scheduler_background_loops`]. A
+        /// resumed session re-spawns its actor, so the load response carries
+        /// the value that spawn just pinned.
+        scheduler_background_loops: Option<bool>,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {
@@ -2668,14 +2690,6 @@ pub enum TaskResult {
     SessionRestoreProgress {
         agent_id: AgentId,
         message: String,
-    },
-    /// Mid-`/rebuild` weighted progress for the progress bar (never raw cargo
-    /// on the PTY).
-    RebuildProgress {
-        agent_id: AgentId,
-        message: String,
-        /// Overall rebuild fraction `0.0..=1.0`.
-        fraction: f32,
     },
     /// Prompt response received (turn ended).
     PromptResponse {
@@ -3033,12 +3047,14 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         usage: Box<xai_grok_shell::extensions::notification::PromptUsage>,
+        nonce: u64,
     },
     /// `/usage` session ledger fetch failed. Drop if `session_id` no longer matches.
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+        nonce: u64,
     },
     /// Feedback submitted successfully (fire-and-forget).
     /// A modal-origin completion only takes the consent parked for its exact submission; anything else is stale and a no-op.
@@ -3121,8 +3137,6 @@ pub enum TaskResult {
     BtwResponse {
         agent_id: AgentId,
         result: Result<String, String>,
-        /// Shell-issued (or reused) btw thread id for follow-ups + history.
-        btw_session_id: Option<String>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
         /// Set when attached images were left out of the side question.
@@ -3236,9 +3250,7 @@ pub enum TaskResult {
     /// Billing data fetched from the agent.
     BillingFetched {
         agent_id: AgentId,
-        /// SuperGrok three-state: `Resolved(None)` clears SuperGrok cache;
-        /// `Unchanged` keeps last-known SuperGrok when that path failed.
-        balance: crate::views::credit_bar::CreditBalanceFetch,
+        balance: Option<crate::views::credit_bar::CreditBalance>,
         /// When true, update `credit_balance` silently (no scrollback message).
         silent: bool,
         /// Subscription tier piggybacked from remote settings.
@@ -3250,8 +3262,7 @@ pub enum TaskResult {
     },
     /// App-level billing data (welcome screen, dashboard usage modal).
     AppBillingFetched {
-        /// SuperGrok three-state (same policy as [`Self::BillingFetched`]).
-        balance: crate::views::credit_bar::CreditBalanceFetch,
+        balance: Option<crate::views::credit_bar::CreditBalance>,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
@@ -3348,10 +3359,21 @@ pub enum TaskResult {
         target: DoctorFixTarget,
         result: Result<crate::diagnostics::FixOutcome, String>,
     },
-    /// `/rebuild` finished (success or install/signal failure message).
+    /// Completed `/rebuild` cargo build.
     RebuildDone {
         agent_id: AgentId,
         result: Result<Box<xai_grok_update::RebuildReport>, String>,
+    },
+    /// Incremental `/rebuild` progress for the status bar.
+    RebuildProgress {
+        agent_id: AgentId,
+        message: String,
+        fraction: f32,
+    },
+    /// Cleared completed todos (or failed).
+    ClearCompletedTodosComplete {
+        cleared: usize,
+        error: Option<String>,
     },
 }
 #[cfg(test)]

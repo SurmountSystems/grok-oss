@@ -34,6 +34,11 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Follow system dark/light appearance.",
     },
     EnumChoice {
+        canonical: "doge",
+        display: "DOGE",
+        description: "Pure black/white plus classic 8 ANSI primaries.",
+    },
+    EnumChoice {
         canonical: "groknight",
         display: "Grok Night",
         description: "Neutral dark with magenta accent.",
@@ -422,6 +427,11 @@ const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
 /// There is no dark/light filtering: the user can pair any theme with any system-appearance bucket.
 const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
     EnumChoice {
+        canonical: "doge",
+        display: "DOGE",
+        description: "Pure black/white plus classic 8 ANSI primaries.",
+    },
+    EnumChoice {
         canonical: "groknight",
         display: "Grok Night",
         description: "Neutral dark with magenta accent.",
@@ -529,31 +539,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         SettingMeta {
-            key: "hide_header",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shared,
-            label: "Hide header",
-            description: "Hide chrome headers for more content space: agent status bar, \
-                          welcome location top bar, and dashboard location header. \
-                          Fullscreen UI only; ignored in minimal mode.",
-            keywords: &[
-                "header",
-                "status",
-                "bar",
-                "hide",
-                "chrome",
-                "status bar",
-                "context",
-                "welcome",
-                "dashboard",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.hide_header,
-            },
-            restart_required: false,
-            hidden_in_minimal: true,
-        },
-        SettingMeta {
             key: "screen_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
@@ -579,6 +564,19 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 supports_preview: false,
             },
             restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "hide_header",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Hide in-app header",
+            description: "Hide the status bar, welcome top bar, and dashboard header.",
+            keywords: &["header", "hide", "status", "welcome", "dashboard", "chrome"],
+            kind: SettingKind::Bool {
+                default: ui_default.hide_header,
+            },
+            restart_required: false,
             hidden_in_minimal: false,
         },
         SettingMeta {
@@ -641,33 +639,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             hidden_in_minimal: true,
-        },
-        SettingMeta {
-            key: "scrub_ascii_punct",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shared,
-            label: "ASCII-safe assistant punctuation",
-            description: "Replace em/en dashes, smart quotes, and invisible Unicode spaces in \
-                          assistant text with ASCII-safe forms (default on). Turn off to keep \
-                          curly quotes and fancy dashes. Ops kill-switch: GROK_SCRUB_ASCII_PUNCT=0. \
-                          Agent requests to disable still need your approval.",
-            keywords: &[
-                "ascii",
-                "scrub",
-                "punctuation",
-                "dash",
-                "quote",
-                "emdash",
-                "curly",
-                "unicode",
-                "zwsp",
-                "nbsp",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.scrub_ascii_punct_enabled(),
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
         },
         SettingMeta {
             key: "combine_queued_prompts",
@@ -921,32 +892,32 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
-        // PAGER-owned; default pinned by `defaults_match_pager_state`.
         SettingMeta {
-            key: "multiline_mode",
-            category: SettingCategory::Editor,
-            owner: SettingOwner::Pager,
-            label: "Multiline",
-            description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
-            keywords: &["multiline", "newline", "input", "editor", "enter"],
-            kind: SettingKind::Bool { default: false },
+            key: "plan_approval_park",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Plan approval park",
+            description: "How plan approval opens: side panel (soft, default) or fullscreen (modal).",
+            keywords: &["plan", "approval", "park", "modal", "fullscreen", "panel"],
+            kind: SettingKind::Enum {
+                default: "soft",
+                choices: PLAN_APPROVAL_PARK_CHOICES,
+                supports_preview: false,
+            },
             restart_required: false,
             hidden_in_minimal: false,
         },
         // SHELL-owned. It reads from `pager.current_model_name` (not `cfg.models.default`) so the modal reflects `/model` switches.
         // The empty-string default means "no opinion": the shell's resolution applies
         SettingMeta {
-            key: "default_model",
-            category: SettingCategory::Models,
+            key: "allow_worktree",
+            category: SettingCategory::Agent,
             owner: SettingOwner::Shell,
-            label: "Default model",
-            description: "Model used for new sessions. Changing this also switches the active session. Pick `(no override)` to clear.",
-            keywords: &["model", "default", "agent", "llm", "grok", "switch"],
-            kind: SettingKind::DynamicEnum {
-                default: "",
-                source: DynamicEnumSource::ActiveModelCatalog,
-                supports_preview: false,
-            },
+            label: "Allow subagent worktrees",
+            description: "Let subagents create isolated worktrees. Off by default. Empty or \
+                          false forces no worktree isolation.",
+            keywords: &["subagent", "worktree", "isolation", "spawn"],
+            kind: SettingKind::Bool { default: false },
             restart_required: false,
             hidden_in_minimal: false,
         },
@@ -988,6 +959,305 @@ pub fn default_settings() -> Vec<SettingMeta> {
         // SHARED. `u16` in UiConfig, widened to `i64` for registry.
         // Width changes apply on the next render frame.
         SettingMeta {
+            key: "cancel_subagents_on_turn_cancel",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Cancel subagents with turn",
+            description: "When you cancel a parent turn that still has running subagents: \
+                          ask each time (default), always stop them, or always leave them running.",
+            keywords: &[
+                "cancel",
+                "subagent",
+                "subagents",
+                "stop",
+                "turn",
+                "ctrl+c",
+                "always",
+                "ask",
+                "continue",
+                "leave",
+            ],
+            kind: SettingKind::Enum {
+                default: "ask",
+                choices: CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned: `[ui].show_thinking_blocks` with a process-wide cache. Default ON.
+        SettingMeta {
+            key: "auto_run_implement",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Auto-run /implement",
+            description: "After a successful turn, automatically run a full multi-line \
+                          /implement block (from the /implement token through end of message) \
+                          from a user-prompt follow-up or a trailing residual in the assistant \
+                          reply. Prefer leaving \"Next implement prompt\" near the end of the \
+                          reply. Explicit --effort N on the block is honored as written.",
+            keywords: &[
+                "implement",
+                "auto",
+                "autorun",
+                "auto-run",
+                "follow-up",
+                "followup",
+                "slash",
+                "loop",
+                "skill",
+                "next",
+                "task",
+                "residual",
+                "multi-line",
+                "multiline",
+                "effort",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.auto_run_implement.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned: `[ui].economic_mode` + process-wide cache. Default ON.
+        // soft-caps effective context at the Grok 4.5 long-context price cliff
+        // (200K). Also gates Token Economy implement-loop effort caps when
+        // `[token_economy] cap_implement_effort_when_economic` is true (defaults:
+        // max 3, desired 2). Override per conversation with `/economic-mode`.
+        SettingMeta {
+            key: "economic_mode",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Economic mode",
+            description: "Cap effective context at 200K tokens so Grok 4.5 requests stay on the \
+                          lower pricing tier (prices double above 200K for the entire request). \
+                          Catalog context remains larger (e.g. 500K); compaction, the context \
+                          bar, and auto-compact % thresholds use the capped size. When on, also \
+                          enables Token Economy implement-loop effort policy (default ceiling 3, \
+                          desired 2 when missing; over-ceiling clamps with a toast) unless \
+                          [token_economy] turns the cap off. Default on. Override for one \
+                          conversation with /economic-mode. Pair with Auto-compact at 200k \
+                          tokens to summarise before the cliff on uncapped sessions. Full knobs: \
+                          config.toml [token_economy]; /spend for double-entry books.",
+            keywords: &[
+                "economic",
+                "economy",
+                "pricing",
+                "price",
+                "cost",
+                "tokens",
+                "context",
+                "window",
+                "200k",
+                "cap",
+                "budget",
+                "implement",
+                "effort",
+                "compact",
+                "token_economy",
+                "pacing",
+                "spend",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.economic_mode.unwrap_or(true),
+            },
+            // New sessions pick up the global default; active sessions use
+            // `/economic-mode` for an immediate override.
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Token Economy: implement-effort policy when economic mode is on.
+        SettingMeta {
+            key: "token_economy.cap_implement_effort_when_economic",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Cap implement effort when economic mode is on",
+            description: "When Economic mode is on, apply the implement-loop effort ceiling and \
+                          desired inject for missing --effort. Min floor and lock always apply. \
+                          Default on. See config.toml [token_economy].",
+            keywords: &["token", "economy", "implement", "effort", "cap", "economic"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.max_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Maximum implement-loop effort",
+            description: "Hard ceiling (1-5) for implement-loop effort when economic caps are \
+                          active. Default 3. Does not change model reasoning effort (/effort).",
+            keywords: &["token", "economy", "implement", "effort", "max", "ceiling"],
+            kind: SettingKind::Int {
+                default: 3,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.min_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Minimum implement-loop effort",
+            description: "Floor (1-5) for implement-loop effort. Default 1 (no extra floor). \
+                          Always applied, not only when economic mode is on. Set 2 to always \
+                          include a reviewer.",
+            keywords: &["token", "economy", "implement", "effort", "min", "floor"],
+            kind: SettingKind::Int {
+                default: 1,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.desired_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Desired implement-loop effort",
+            description: "Injected when --effort is missing under economic caps (1-5). Default 2. \
+                          Must be less than or equal to the maximum.",
+            keywords: &[
+                "token",
+                "economy",
+                "implement",
+                "effort",
+                "desired",
+                "default",
+            ],
+            kind: SettingKind::Int {
+                default: 2,
+                min: 1,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.lock_implement_effort",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Lock implement-loop effort",
+            description: "When non-zero (1-5), always force this implement-loop effort (ignores \
+                          prompt and desired). 0 means unlocked (default). Must sit between min \
+                          and max.",
+            keywords: &["token", "economy", "implement", "effort", "lock", "force"],
+            kind: SettingKind::Int {
+                default: 0,
+                min: 0,
+                max: 5,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.show_period_pacing",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Show included SuperGrok period pacing",
+            description: "Show ahead or behind linear pacing for the included SuperGrok period \
+                          limits for the current billing period in credit chrome and /limits. \
+                          Default on. Omitted when period bounds are missing. Never dollar-izes \
+                          period percent.",
+            keywords: &[
+                "token",
+                "economy",
+                "pacing",
+                "period",
+                "supergrok",
+                "limits",
+                "credits",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.local_spend_ledger",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Local spend ledger",
+            description: "Write local spend ledger rows into the durable grok_oss.db store under \
+                          your Grok home. Default on. Used by /spend double-entry books.",
+            keywords: &["token", "economy", "ledger", "spend", "local", "book"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "token_economy.reconcile_management_usage",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Reconcile Management usage",
+            description: "Store Management API samples and show the remote book on /spend and \
+                          /limits reconcile. Default on when Management credentials exist.",
+            keywords: &[
+                "token",
+                "economy",
+                "reconcile",
+                "management",
+                "remote",
+                "spend",
+            ],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // PAGER-owned; default pinned by `defaults_match_pager_state`.
+        SettingMeta {
+            key: "multiline_mode",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Pager,
+            label: "Multiline",
+            description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
+            keywords: &["multiline", "newline", "input", "editor", "enter"],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned. Reads from `pager.current_model_name` (not
+        // `cfg.models.default`) so the modal reflects `/model` switches.
+        // Empty-string default = "no opinion" / use shell's resolution.
+        SettingMeta {
+            key: "default_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Default model",
+            description: "Model used for new sessions. Changing this also switches the active session. Pick `(no override)` to clear.",
+            keywords: &["model", "default", "agent", "llm", "grok", "switch"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::ActiveModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned `[models].default_reasoning_effort`. Fork contract:
+        // baked Grok 4.6 defaults to medium. Unset in TOML uses the baked
+        // card; this row is the operator override.
+        SettingMeta {
+            key: "default_reasoning_effort",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Default reasoning effort",
+            description: "Reasoning effort for the default model. Baked default is \
+                          medium on Grok 4.6. Persisted as [models].default_reasoning_effort.",
+            keywords: &["effort", "reasoning", "default", "model", "medium", "think"],
+            kind: SettingKind::Enum {
+                default: "medium",
+                choices: DEFAULT_REASONING_EFFORT_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED. `u16` in UiConfig, widened to `i64` for registry.
+        // Width changes apply on the next render frame.
+        SettingMeta {
             key: MAX_THOUGHTS_WIDTH_KEY,
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
@@ -1010,7 +1280,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // SHELL-owned: `[ui].show_thinking_blocks` with a process-wide cache. Default ON.
+        // SHELL-owned: `[ui].show_thinking_blocks` + process-wide cache. Default ON.
         SettingMeta {
             key: "show_thinking_blocks",
             category: SettingCategory::Appearance,
@@ -1027,31 +1297,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.show_thinking_blocks.unwrap_or(true),
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned: `[ui].always_expand_thinking` + process-wide cache. Default OFF.
-        // When on, thinking stays fully expanded and the footer hides Ctrl+E.
-        SettingMeta {
-            key: "always_expand_thinking",
-            category: SettingCategory::Appearance,
-            owner: SettingOwner::Shell,
-            label: "Always expand thinking",
-            description: "Keep agent thinking blocks fully expanded instead of collapsing to a \
-                          one-liner when they finish. Hides the Ctrl+E expand-thinking footer \
-                          hint while on.",
-            keywords: &[
-                "thinking",
-                "reasoning",
-                "thoughts",
-                "expand",
-                "always",
-                "collapse",
-                "ctrl+e",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.always_expand_thinking.unwrap_or(false),
             },
             restart_required: false,
             hidden_in_minimal: false,
@@ -1144,6 +1389,62 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.collapsed_edit_blocks.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "always_expand_thinking",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Always expand thinking",
+            description: "Keep thinking blocks fully expanded and hide the Ctrl+E expand hint. \
+                          Distinct from showing thinking blocks at all.",
+            keywords: &[
+                "thinking",
+                "expand",
+                "always",
+                "ctrl+e",
+                "reasoning",
+                "collapse",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.always_expand_thinking.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "scrub_ascii_punct",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shell,
+            label: "Scrub assistant punctuation",
+            description: "Replace fancy punctuation in assistant text with plain marks. \
+                          Default on. An env kill-switch also turns it off.",
+            keywords: &[
+                "scrub",
+                "punctuation",
+                "emdash",
+                "ellipsis",
+                "quotes",
+                "dash",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.scrub_ascii_punct_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "bubble_copy_buttons",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Pager,
+            label: "Bubble copy buttons",
+            description: "Show a copy button on user and agent message bubbles. When on, \
+                          the selection box omits its copy icon.",
+            keywords: &["copy", "bubble", "button", "clipboard"],
+            kind: SettingKind::Bool {
+                default: crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
             },
             restart_required: false,
             hidden_in_minimal: false,
@@ -1393,285 +1694,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // SHARED: `[ui].plan_approval_park` — soft toast (default) vs force modal
-        // when exit_plan_mode parks (option D).
-        SettingMeta {
-            key: "plan_approval_park",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shared,
-            label: "Plan approval park",
-            description: "When the agent finishes planning: soft parks with a side panel \
-                          + toast (default), or opens the fullscreen approval modal immediately.",
-            keywords: &[
-                "plan",
-                "approval",
-                "park",
-                "modal",
-                "soft",
-                "toast",
-                "exit_plan_mode",
-                "view-plan",
-            ],
-            kind: SettingKind::Enum {
-                default: UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
-                choices: PLAN_APPROVAL_PARK_CHOICES,
-                supports_preview: false,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHARED: `[ui].cancel_subagents_on_turn_cancel` — sticky cancel picker.
-        // Written by the cancel-turn "Always…" choices; also searchable here.
-        SettingMeta {
-            key: "cancel_subagents_on_turn_cancel",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shared,
-            label: "Cancel subagents with turn",
-            description: "When you cancel a parent turn that still has running subagents: \
-                          ask each time (default), always stop them, or always leave them running.",
-            keywords: &[
-                "cancel",
-                "subagent",
-                "subagents",
-                "stop",
-                "turn",
-                "ctrl+c",
-                "always",
-                "ask",
-                "continue",
-                "leave",
-            ],
-            kind: SettingKind::Enum {
-                default: "ask",
-                choices: CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES,
-                supports_preview: false,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned: `[ui].auto_run_implement` + process-wide cache. Default ON
-        // for discoverability — auto-queues a sentence-leading `/implement`
-        // follow-up from the prior user prompt after a successful turn.
-        SettingMeta {
-            key: "auto_run_implement",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Auto-run /implement",
-            description: "After a successful turn, automatically run a full multi-line \
-                          /implement block (from the /implement token through end of message) \
-                          from a user-prompt follow-up or a trailing residual in the assistant \
-                          reply. Prefer leaving “Next implement prompt” near the end of the \
-                          reply. Explicit --effort N on the block is honored as written.",
-            keywords: &[
-                "implement",
-                "auto",
-                "autorun",
-                "auto-run",
-                "follow-up",
-                "followup",
-                "slash",
-                "loop",
-                "skill",
-                "next",
-                "task",
-                "residual",
-                "multi-line",
-                "multiline",
-                "effort",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.auto_run_implement.unwrap_or(true),
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // SHELL-owned: `[ui].economic_mode` + process-wide cache. Default ON —
-        // soft-caps effective context at the Grok 4.5 long-context price cliff
-        // (200K). Also gates Token Economy implement-loop effort caps when
-        // `[token_economy] cap_implement_effort_when_economic` is true (defaults:
-        // max 3, desired 2). Override per conversation with `/economic-mode`.
-        SettingMeta {
-            key: "economic_mode",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Economic mode",
-            description: "Cap effective context at 200K tokens so Grok 4.5 requests stay on the \
-                          lower pricing tier (prices double above 200K for the entire request). \
-                          Catalog context remains larger (e.g. 500K); compaction, the context \
-                          bar, and auto-compact % thresholds use the capped size. When on, also \
-                          enables Token Economy implement-loop effort policy (default ceiling 3, \
-                          desired 2 when missing; over-ceiling clamps with a toast) unless \
-                          [token_economy] turns the cap off. Default on. Override for one \
-                          conversation with /economic-mode. Pair with Auto-compact at → 200k \
-                          tokens to summarise before the cliff on uncapped sessions. Full knobs: \
-                          config.toml [token_economy]; /spend for double-entry books.",
-            keywords: &[
-                "economic",
-                "economy",
-                "pricing",
-                "price",
-                "cost",
-                "tokens",
-                "context",
-                "window",
-                "200k",
-                "cap",
-                "budget",
-                "cheap",
-                "implement",
-                "effort",
-                "compact",
-                "token_economy",
-                "pacing",
-                "spend",
-            ],
-            kind: SettingKind::Bool {
-                default: ui_default.economic_mode.unwrap_or(true),
-            },
-            // New sessions pick up the global default; active sessions use
-            // `/economic-mode` for an immediate override.
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        // Token Economy: implement-effort policy when economic mode is on.
-        SettingMeta {
-            key: "token_economy.cap_implement_effort_when_economic",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Cap implement effort when economic mode is on",
-            description: "When Economic mode is on, apply the implement-loop effort ceiling and \
-                          desired inject for missing --effort. Min floor and lock always apply. \
-                          Default on. See config.toml [token_economy].",
-            keywords: &["token", "economy", "implement", "effort", "cap", "economic"],
-            kind: SettingKind::Bool { default: true },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.max_implement_effort",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Maximum implement-loop effort",
-            description: "Hard ceiling (1–5) for implement-loop effort when economic caps are \
-                          active. Default 3. Does not change model reasoning effort (/effort).",
-            keywords: &["token", "economy", "implement", "effort", "max", "ceiling"],
-            kind: SettingKind::Int {
-                default: 3,
-                min: 1,
-                max: 5,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.min_implement_effort",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Minimum implement-loop effort",
-            description: "Floor (1–5) for implement-loop effort. Default 1 (no extra floor). \
-                          Always applied, not only when economic mode is on. Set 2 to always \
-                          include a reviewer.",
-            keywords: &["token", "economy", "implement", "effort", "min", "floor"],
-            kind: SettingKind::Int {
-                default: 1,
-                min: 1,
-                max: 5,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.desired_implement_effort",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Desired implement-loop effort",
-            description: "Injected when --effort is missing under economic caps (1–5). Default 2. \
-                          Must be less than or equal to the maximum.",
-            keywords: &[
-                "token",
-                "economy",
-                "implement",
-                "effort",
-                "desired",
-                "default",
-            ],
-            kind: SettingKind::Int {
-                default: 2,
-                min: 1,
-                max: 5,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.lock_implement_effort",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Lock implement-loop effort",
-            description: "When non-zero (1–5), always force this implement-loop effort (ignores \
-                          prompt and desired). 0 means unlocked (default). Must sit between min \
-                          and max.",
-            keywords: &["token", "economy", "implement", "effort", "lock", "force"],
-            kind: SettingKind::Int {
-                default: 0,
-                min: 0,
-                max: 5,
-            },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.show_period_pacing",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Show free SuperGrok period pacing",
-            description: "Show ahead/behind linear-burn pacing for the free SuperGrok allowance \
-                          for the current billing period in credit chrome and /limits. Default on. \
-                          Omitted when period bounds are missing. Never dollar-izes period percent.",
-            keywords: &[
-                "token",
-                "economy",
-                "pacing",
-                "period",
-                "supergrok",
-                "allowance",
-                "burn",
-            ],
-            kind: SettingKind::Bool { default: true },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.local_spend_ledger",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Local spend ledger",
-            description: "Write local spend ledger rows into the durable grok_oss.db store under \
-                          your Grok home. Default on. Used by /spend double-entry books.",
-            keywords: &["token", "economy", "ledger", "spend", "local", "book"],
-            kind: SettingKind::Bool { default: true },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
-        SettingMeta {
-            key: "token_economy.reconcile_management_usage",
-            category: SettingCategory::Agent,
-            owner: SettingOwner::Shell,
-            label: "Reconcile Management usage",
-            description: "Store Management API samples and show the remote book on /spend and \
-                          /limits reconcile. Default on when Management credentials exist.",
-            keywords: &[
-                "token",
-                "economy",
-                "reconcile",
-                "management",
-                "remote",
-                "spend",
-            ],
-            kind: SettingKind::Bool { default: true },
-            restart_required: false,
-            hidden_in_minimal: false,
-        },
         // Continue interrupted turn on session restart (default on).
         // Wire key stays resume_canceled_turn_on_restart for config stability.
         SettingMeta {
@@ -1804,8 +1826,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           turns to free space. Choose a % of the effective model context window \
                           (with Economic mode on, the window is soft-capped at 200k), or a \
                           fixed token count (Grok 4.5 card: 200k = long-context price cliff \
-                          where costs double for the entire request; 475k = 95% of 500k — \
-                          useful when Economic mode is off). Applies to open sessions live.",
+                          where costs double for the entire request; 475k = 95% of 500k. \
+                          Useful when Economic mode is off). Applies to open sessions live.",
             keywords: &[
                 "auto",
                 "compact",
@@ -2060,9 +2082,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             key: "contextual_hints.send_now",
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
-            label: "Interject tip",
+            label: "Send now",
             description: "After you queue a follow-up mid-turn, remind you that Enter \
-                          on an empty prompt soft-interjects the top queued item.",
+                          on an empty prompt sends the top queued item now.",
             keywords: &[
                 "send",
                 "now",

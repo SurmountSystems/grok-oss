@@ -361,6 +361,13 @@ pub struct PagerLocalSnapshot {
     /// `[session].auto_compact_threshold_tokens` mirror.
     /// When `Some`, absolute-token mode wins over percent for the session tier.
     pub auto_compact_threshold_tokens: Option<u64>,
+    /// Live auto session-recap preference (`[ui.notifications] session_recap`).
+    pub notifications_session_recap: bool,
+    /// Live auto recap debounce seconds.
+    pub notifications_session_recap_threshold_secs: u64,
+    /// Effective/user `[features] session_recap` preference (default true).
+    /// Restart-required for shell ACP re-advertise; modal shows this mirror.
+    pub features_session_recap: bool,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
     pub vim_mode: bool,
@@ -397,6 +404,9 @@ impl Default for PagerLocalSnapshot {
             auto_update: None,
             auto_compact_threshold_percent: None,
             auto_compact_threshold_tokens: None,
+            notifications_session_recap: true,
+            notifications_session_recap_threshold_secs: 30,
+            features_session_recap: true,
             vim_mode: false,
             // Matches the registry default and `appearance::cache::SCROLL_SPEED_DEFAULT`
             // Bare `u8::default()` would be `0` (out of range) so we override
@@ -529,6 +539,17 @@ pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static st
     canonical_auto_compact_threshold_percent(percent)
 }
 
+/// Canonicalize a raw voice-capture mode to a registry choice. Case-insensitive
+/// and trimmed; unknown/blank/`None` → `hold` (the default).
+pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
+    let raw = value.unwrap_or_default().trim();
+    if raw.eq_ignore_ascii_case("toggle") {
+        "toggle"
+    } else {
+        "hold"
+    }
+}
+
 /// Canonicalize a raw voice STT language to a settings choice.
 ///
 /// Delegates to [`xai_grok_voice::canonicalize_stt_language`] so the pager and
@@ -620,7 +641,9 @@ impl SettingsRegistry {
         self.entries.iter().filter(move |m| m.category == cat)
     }
 
-    /// Multi-word AND match against label, description, key, and keywords.
+    /// Multi-word AND match against label, description, keywords, and
+    /// a leading key prefix. Interior key segments are not substring
+    /// matches (`ascii` must not hit `scrub_ascii_punct`).
     pub fn search(&self, query: &str) -> Vec<&SettingMeta> {
         let q = query.to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
@@ -629,10 +652,7 @@ impl SettingsRegistry {
         }
         self.entries
             .iter()
-            .filter(|m| {
-                let haystack = build_search_haystack(m);
-                words.iter().all(|w| haystack.contains(w))
-            })
+            .filter(|m| words.iter().all(|w| setting_matches_search_word(m, w)))
             .collect()
     }
 }
@@ -656,13 +676,27 @@ fn assert_unique_keys(entries: &[SettingMeta]) {
     );
 }
 
+fn setting_matches_search_word(m: &SettingMeta, word: &str) -> bool {
+    if build_search_haystack(m).contains(word) {
+        return true;
+    }
+    key_matches_search_word(m.key, word)
+}
+
+/// Whole key, or a leading dotted / underscored prefix. Interior
+/// segments stay unmatched so `ascii` does not hit `scrub_ascii_punct`.
+fn key_matches_search_word(key: &str, word: &str) -> bool {
+    let key_lc = key.to_ascii_lowercase();
+    key_lc == word
+        || key_lc.starts_with(&format!("{word}."))
+        || key_lc.starts_with(&format!("{word}_"))
+}
+
 fn build_search_haystack(m: &SettingMeta) -> String {
     let mut s = String::new();
     s.push_str(&m.label.to_lowercase());
     s.push(' ');
     s.push_str(&m.description.to_lowercase());
-    s.push(' ');
-    s.push_str(m.key);
     for kw in m.keywords {
         s.push(' ');
         s.push_str(kw);
@@ -683,7 +717,6 @@ pub fn current_value_for(
     match key {
         // SHARED: UiConfig is the source of truth, the pager keeps a cache
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
-        "hide_header" => Some(SettingValue::Bool(ui.hide_header)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
         "dashboard_preview" => Some(SettingValue::Bool(ui.dashboard_preview_enabled())),
@@ -707,7 +740,6 @@ pub fn current_value_for(
         "contextual_hints.plan_mode" => Some(SettingValue::Bool(
             ui.contextual_hints.plan_mode.unwrap_or(true),
         )),
-        "plan_approval_park" => Some(SettingValue::Enum(ui.plan_approval_park_mode())),
         "contextual_hints.image_input" => Some(SettingValue::Bool(
             ui.contextual_hints.image_input.unwrap_or(true),
         )),
@@ -756,9 +788,27 @@ pub fn current_value_for(
         "show_thinking_blocks" => Some(SettingValue::Bool(
             crate::appearance::cache::load_show_thinking_blocks(),
         )),
-        // Live cache (like `show_thinking_blocks`).
         "always_expand_thinking" => Some(SettingValue::Bool(
             crate::appearance::cache::load_always_expand_thinking(),
+        )),
+        "hide_header" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_hide_header(),
+        )),
+        "scrub_ascii_punct" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_scrub_ascii_punct(),
+        )),
+        "plan_approval_park" => Some(SettingValue::Enum(
+            if crate::appearance::cache::load_plan_approval_force_modal() {
+                "modal"
+            } else {
+                "soft"
+            },
+        )),
+        "allow_worktree" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_allow_worktree(),
+        )),
+        "bubble_copy_buttons" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_bubble_copy_buttons(),
         )),
         // Live cache (like `show_thinking_blocks`).
         "group_tool_verbs" => Some(SettingValue::Bool(
@@ -772,7 +822,6 @@ pub fn current_value_for(
         "prompt_suggestions" => Some(SettingValue::Bool(
             crate::appearance::cache::load_prompt_suggestions(),
         )),
-        // Live cache (like `prompt_suggestions`).
         "auto_run_implement" => Some(SettingValue::Bool(
             crate::appearance::cache::load_auto_run_implement(),
         )),
@@ -816,6 +865,26 @@ pub fn current_value_for(
                 cfg.lock_implement_effort.unwrap_or(0),
             )))
         }
+        "auto_compact_threshold_percent" => {
+            Some(SettingValue::Enum(canonical_auto_compact_threshold(
+                pager.auto_compact_threshold_percent,
+                pager.auto_compact_threshold_tokens,
+            )))
+        }
+        "notifications.session_recap" => {
+            Some(SettingValue::Bool(pager.notifications_session_recap))
+        }
+        "notifications.session_recap_threshold_secs" => Some(SettingValue::Int(
+            pager.notifications_session_recap_threshold_secs as i64,
+        )),
+        "features.session_recap" => Some(SettingValue::Bool(pager.features_session_recap)),
+        "cancel_subagents_on_turn_cancel" => Some(SettingValue::Enum(
+            match ui.cancel_subagents_on_turn_cancel.as_deref() {
+                Some("always_stop") => "always_stop",
+                Some("always_continue") => "always_continue",
+                _ => "ask",
+            },
+        )),
         "respect_manual_folds" => Some(SettingValue::Bool(pager.respect_manual_folds)),
         // SHELL: canonicalized from `[ui].hunk_tracker_mode`
         "hunk_tracker_mode" => Some(SettingValue::Enum(canonical_hunk_tracker_mode(
@@ -913,6 +982,11 @@ pub fn current_value_for(
         "default_model" => Some(SettingValue::String(
             pager.current_model_name.clone().unwrap_or_default(),
         )),
+        // Baked Grok 4.6 default is medium. Live TOML override is
+        // `[models].default_reasoning_effort`, mirrored on the snapshot.
+        "default_reasoning_effort" => Some(SettingValue::Enum(canonical_default_reasoning_effort(
+            pager.default_reasoning_effort.as_deref(),
+        ))),
         // max_thoughts_width: `u16` widened to `i64`.
         "max_thoughts_width" => Some(SettingValue::Int(ui.max_thoughts_width as i64)),
         // coding_data_sharing: inverts the `_opt_out` bool.
@@ -950,27 +1024,6 @@ pub fn current_value_for(
                     .unwrap_or_else(|| ui.fork_secondary_model.clone())
             }
         })),
-        // Auto away-recap: live notification service / snapshot wins; disk
-        // `ui.notifications.session_recap` is the seed when the modal opens.
-        "notifications.session_recap" => {
-            Some(SettingValue::Bool(pager.notifications_session_recap))
-        }
-        "notifications.session_recap_threshold_secs" => Some(SettingValue::Int(
-            pager.notifications_session_recap_threshold_secs as i64,
-        )),
-        // Master recap feature flag (restart-required). Snapshot mirrors
-        // user config; default true.
-        "features.session_recap" => Some(SettingValue::Bool(pager.features_session_recap)),
-        // Sticky cancel-subagents preference.
-        "cancel_subagents_on_turn_cancel" => Some(SettingValue::Enum(
-            match ui.cancel_subagents_on_turn_cancel.as_deref() {
-                Some("always_stop") => "always_stop",
-                Some("always_continue") => "always_continue",
-                _ => "ask",
-            },
-        )),
-        // Always-on bubble copy chrome (pager.toml).
-        "bubble_copy_buttons" => Some(SettingValue::Bool(pager.bubble_copy_buttons)),
 
         _ => None,
     }
@@ -998,6 +1051,53 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_choices_include_doge_and_default_is_doge() {
+        let reg = SettingsRegistry::defaults();
+        let theme = reg
+            .find("theme")
+            .expect("theme must be registered in /settings");
+        match &theme.kind {
+            SettingKind::Enum {
+                default, choices, ..
+            } => {
+                assert_eq!(
+                    *default, "doge",
+                    "Settings theme default must be doge so committing Theme does not write groknight over the product default"
+                );
+                assert!(
+                    choices.iter().any(|c| c.canonical == "doge"),
+                    "THEME_CHOICES must include doge so /settings can pick DOGE"
+                );
+                assert!(
+                    choices
+                        .iter()
+                        .any(|c| c.canonical == "doge" && c.display == "DOGE"),
+                    "doge display name in /settings must be DOGE"
+                );
+            }
+            other => panic!("theme must be an Enum, got {other:?}"),
+        }
+        let auto_dark = reg
+            .find("auto_dark_theme")
+            .expect("auto_dark_theme must be registered");
+        match &auto_dark.kind {
+            SettingKind::Enum {
+                default, choices, ..
+            } => {
+                assert_eq!(
+                    *default, "doge",
+                    "auto dark theme default must be doge, not groknight"
+                );
+                assert!(
+                    choices.iter().any(|c| c.canonical == "doge"),
+                    "concrete theme choices must include doge"
+                );
+            }
+            other => panic!("auto_dark_theme must be an Enum, got {other:?}"),
+        }
+    }
 
     /// Every SHELL/SHARED setting's default must match `UiConfig::default()`.
     /// PAGER-owned settings are covered by `defaults_match_pager_state`.
@@ -1190,18 +1290,6 @@ mod tests {
                          None → 'ask' fallback (load_permission_mode contract)",
                     );
                 }
-                ("plan_approval_park", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        *default,
-                        UiConfig::PLAN_APPROVAL_PARK_DEFAULT,
-                        "plan_approval_park default drifts from UiConfig::PLAN_APPROVAL_PARK_DEFAULT"
-                    );
-                    assert_eq!(
-                        *default,
-                        ui.plan_approval_park_mode(),
-                        "plan_approval_park default drifts from UiConfig::default()"
-                    );
-                }
                 // default_model: no UiConfig mirror, resolved dynamically.
                 // The registry default is the empty string ("no opinion")
                 ("default_model", SettingKind::DynamicEnum { default, .. }) => {
@@ -1210,6 +1298,13 @@ mod tests {
                         "default_model registry default must be empty string — \
                          the live default is resolved dynamically from \
                          cfg.models.default at session start",
+                    );
+                }
+                ("default_reasoning_effort", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "medium",
+                        "default_reasoning_effort registry default must be medium \
+                         (baked Grok 4.6 fork contract)"
                     );
                 }
                 // max_thoughts_width: `u16` widened to `i64`.
@@ -1332,67 +1427,6 @@ mod tests {
                         ui.prompt_suggestions.unwrap_or(true),
                         "prompt_suggestions default drifts from UiConfig::default()"
                     );
-                }
-                // auto_run_implement: Option<bool>; None → true (client default).
-                ("auto_run_implement", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.auto_run_implement.unwrap_or(true),
-                        "auto_run_implement default drifts from UiConfig::default()"
-                    );
-                    assert!(*default, "auto_run_implement must default ON");
-                }
-                // economic_mode: Option<bool>; None → true (client default).
-                ("economic_mode", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.economic_mode.unwrap_or(true),
-                        "economic_mode default drifts from UiConfig::default()"
-                    );
-                    assert!(*default, "economic_mode must default ON");
-                }
-                ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
-                    assert_eq!(
-                        *default,
-                        ui.resume_canceled_turn_on_restart.unwrap_or(true),
-                        "resume_canceled_turn_on_restart default drifts from UiConfig"
-                    );
-                    assert!(*default, "resume_canceled_turn_on_restart must default ON");
-                }
-                // Token Economy: defaults anchored on TokenEconomyConfig::default().
-                (
-                    "token_economy.cap_implement_effort_when_economic",
-                    SettingKind::Bool { default },
-                ) => {
-                    assert!(*default);
-                }
-                ("token_economy.show_period_pacing", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.local_spend_ledger", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.reconcile_management_usage", SettingKind::Bool { default }) => {
-                    assert!(*default);
-                }
-                ("token_economy.max_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 3);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                ("token_economy.min_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 1);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                (
-                    "token_economy.desired_implement_effort",
-                    SettingKind::Int { default, min, max },
-                ) => {
-                    assert_eq!(*default, 2);
-                    assert_eq!((*min, *max), (1, 5));
-                }
-                ("token_economy.lock_implement_effort", SettingKind::Int { default, min, max }) => {
-                    assert_eq!(*default, 0);
-                    assert_eq!((*min, *max), (0, 5));
                 }
                 ("keep_text_selection", SettingKind::Enum { default, .. }) => {
                     // The compile-time default is flash
@@ -1556,6 +1590,76 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
+                ("auto_run_implement", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.auto_run_implement.unwrap_or(true),
+                        "auto_run_implement default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "auto_run_implement must default ON");
+                }
+                ("economic_mode", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.economic_mode.unwrap_or(true),
+                        "economic_mode default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "economic_mode must default ON");
+                }
+                ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.resume_canceled_turn_on_restart.unwrap_or(true),
+                        "resume_canceled_turn_on_restart default drifts from UiConfig"
+                    );
+                    assert!(*default, "resume_canceled_turn_on_restart must default ON");
+                }
+                (
+                    "token_economy.cap_implement_effort_when_economic",
+                    SettingKind::Bool { default },
+                ) => {
+                    assert!(*default);
+                }
+                ("token_economy.show_period_pacing", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.local_spend_ledger", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.reconcile_management_usage", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("token_economy.max_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 3);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.min_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 1);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                (
+                    "token_economy.desired_implement_effort",
+                    SettingKind::Int { default, min, max },
+                ) => {
+                    assert_eq!(*default, 2);
+                    assert_eq!((*min, *max), (1, 5));
+                }
+                ("token_economy.lock_implement_effort", SettingKind::Int { default, min, max }) => {
+                    assert_eq!(*default, 0);
+                    assert_eq!((*min, *max), (0, 5));
+                }
+                ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
+                        "auto_compact_threshold_percent registry default must be \"95\""
+                    );
+                    assert_eq!(
+                        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+                        95,
+                        "shell DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT drifted from 95"
+                    );
+                }
                 ("notifications.session_recap", SettingKind::Bool { default }) => {
                     assert!(
                         *default,
@@ -1625,15 +1729,10 @@ mod tests {
                 }
                 ("bubble_copy_buttons", SettingKind::Bool { default }) => {
                     assert_eq!(
-                        *default, pager.bubble_copy_buttons,
-                        "bubble_copy_buttons default drifts from PagerLocalSnapshot::default()"
-                    );
-                    assert_eq!(
                         *default,
                         crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
                         "bubble_copy_buttons default drifts from ScrollbackDisplayConfig"
                     );
-                    assert!(*default, "bubble_copy_buttons must default ON");
                 }
                 // plan_mode: per-session, not persisted.
                 ("plan_mode", SettingKind::Enum { default, .. }) => {
@@ -2111,25 +2210,6 @@ mod tests {
     }
 
     /// Search is a literal substring multi-word AND match.
-    #[test]
-    fn search_recap_finds_session_recap_rows() {
-        let reg = SettingsRegistry::defaults();
-        let hits = reg.search("recap");
-        let keys: std::collections::HashSet<&str> = hits.iter().map(|m| m.key).collect();
-        assert!(
-            keys.contains("notifications.session_recap"),
-            "search(recap) missing auto recap: {keys:?}"
-        );
-        assert!(
-            keys.contains("features.session_recap"),
-            "search(recap) missing master: {keys:?}"
-        );
-        assert!(
-            keys.contains("notifications.session_recap_threshold_secs"),
-            "search(recap) missing threshold: {keys:?}"
-        );
-    }
-
     #[test]
     fn search_multi_word_and() {
         let reg = SettingsRegistry::defaults();

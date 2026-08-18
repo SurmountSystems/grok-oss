@@ -411,8 +411,8 @@ fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> 
 
 /// Result of rendering the prompt.
 pub struct PromptRenderResult {
-    /// Cursor position if the prompt wants a visible cursor.
-    /// `None` when unfocused.
+    /// Hardware terminal cursor. `None` when unfocused, or when the
+    /// software box caret is painted so the two do not stack.
     pub cursor_pos: Option<(u16, u16)>,
     /// Terminal escape sequences to write after the ratatui cell flush (e.g. Kitty/iTerm2 inline image rendering for the image preview).
     pub post_flush_escapes: Option<crate::terminal::overlay::Escapes>,
@@ -629,10 +629,6 @@ pub struct PromptWidget {
     textarea_state: TextAreaState,
     /// Cached textarea render area from last draw (for mouse coordinate mapping).
     textarea_area: Rect,
-    /// Cached top-bar ⧉ copy button rect from last draw (None when chrome off).
-    copy_button_area: Option<Rect>,
-    /// Whether the draft-copy button is hovered.
-    copy_hovered: bool,
     /// @-completion file search state.
     pub file_search: FileSearchState,
     /// Whether typing `@` may activate file-reference completion on this surface.
@@ -722,8 +718,6 @@ impl PromptWidget {
             textarea,
             textarea_state: TextAreaState::default(),
             textarea_area: Rect::default(),
-            copy_button_area: None,
-            copy_hovered: false,
             file_search: FileSearchState::new(cwd),
             file_search_enabled: true,
             pending_viewer_request: None,
@@ -979,13 +973,7 @@ impl PromptWidget {
 
     /// Set the hovered completion dropdown item. Returns `true` if changed.
     pub fn set_completion_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.suggestions.dropdown.items.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.suggestions.dropdown.items.len());
         let changed = clamped != self.suggestions.dropdown.hovered;
         self.suggestions.dropdown.hovered = clamped;
         changed
@@ -1429,13 +1417,7 @@ impl PromptWidget {
     /// Set the hovered slash dropdown item index. Returns `true` if changed.
     pub fn set_slash_hovered(&mut self, index: Option<usize>) -> bool {
         let snap = self.slash_state.snapshot();
-        let clamped = index.and_then(|i| {
-            if i < snap.matches.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < snap.matches.len());
         let changed = clamped != self.slash_hovered;
         self.slash_hovered = clamped;
         changed
@@ -2992,10 +2974,9 @@ impl PromptWidget {
         voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
-            // Drop stale hit targets from a wider prior frame.
-            self.copy_button_area = None;
             return PromptRenderResult {
                 cursor_pos: None,
+                caret_cell: None,
                 post_flush_escapes: None,
             };
         }
@@ -3053,9 +3034,33 @@ impl PromptWidget {
             };
         };
 
-        // Top divider: ╭──────────╮  (optional session title + ⧉ draft copy)
-        self.copy_button_area = None;
+        // Top divider: ╭──────────╮
         if vpad_top > 0 && style.chrome && style.show_borders {
+            // Session title uses chrome-caption (0.6 blend). On DOGE that
+            // solid-step stays `text_secondary` (white), same as the focused
+            // rule. Keep the frame on `prompt_border` (white on DOGE). Paint
+            // the session name as context chrome (`theme.gray` / yellow) so
+            // the title still contrasts. Do not yellow the whole box.
+            let caption_style = Self::chrome_caption_style(bg, &theme, style.focused);
+            let caption_fg = caption_style.fg;
+            let title_will_paint = style
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .is_some()
+                && area.width.saturating_sub(6) >= 6;
+            let title_style = if title_will_paint && caption_fg == Some(border_color) {
+                if theme.gray != border_color {
+                    Style::default().fg(theme.gray).bg(bg)
+                } else if theme.gray_dim != border_color {
+                    Style::default().fg(theme.gray_dim).bg(bg)
+                } else {
+                    caption_style
+                }
+            } else {
+                caption_style
+            };
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks.first().map(|c| c.y).unwrap_or(area.y);
             let left_x = area.x;
@@ -3480,21 +3485,6 @@ impl PromptWidget {
             }
         }
 
-        // Software Human-green caret: slow solid↔empty block blink
-        // (`accent_user`, not agent `accent_running` magenta). Terminal hardware
-        // cursor stays hidden so we do not stack two carets; phase is wall-clock
-        // so Slow redraw ticks are enough. Solid `█` only at true buffer end
-        // (insertion blank); mid-draft spaces reverse-plate so Left never
-        // paints a green block glyph into the line.
-        let cursor_pos = if let Some((cx, cy)) = layout_cursor_pos {
-            let allow_block_glyph = self.textarea.cursor() == self.textarea.text().len();
-            paint_composer_box_cursor(buf, cx, cy, &theme, bg, allow_block_glyph);
-            // Hide the terminal caret — the painted box *is* the cursor.
-            None
-        } else {
-            None
-        };
-
         // Paste preview overlay: show when cursor is on or right after a paste element
         if style.focused
             && let Some(overlay) = overlay_area
@@ -3519,6 +3509,7 @@ impl PromptWidget {
             let Some(overlay) = overlay_area else {
                 return PromptRenderResult {
                     cursor_pos,
+                    caret_cell: layout_cursor_pos,
                     post_flush_escapes: None,
                 };
             };
@@ -3539,6 +3530,7 @@ impl PromptWidget {
 
         PromptRenderResult {
             cursor_pos,
+            caret_cell: layout_cursor_pos,
             post_flush_escapes,
         }
     }

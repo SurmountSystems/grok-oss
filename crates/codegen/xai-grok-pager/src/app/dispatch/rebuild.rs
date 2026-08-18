@@ -1,7 +1,9 @@
 //! `/rebuild` TaskResult handling: report, cancel mid-turn, arm self re-exec.
 //!
-//! Peer TUIs (other live product windows) receive `SIGUSR1` after a rebuild
-//! and arm re-exec via [`try_arm_peer_rebuild_relaunch_from_request`].
+//! Peer TUIs (other live product windows) receive `SIGUSR1` **after** a
+//! successful install and arm re-exec via
+//! [`try_arm_peer_rebuild_relaunch_from_request`]. A failed `just install` /
+//! verify must not signal peers.
 //!
 //! **Exit-path contract:** every event-loop exit that can race with peer
 //! rebuild (SIGUSR1 quit notify, leader IPC disconnect) must call
@@ -70,6 +72,70 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
     })
 }
 
+/// Prompt text for continue-interrupted-turn on rebuild relaunch.
+///
+/// Prefer the in-flight rewind stash. After first server activity that stash
+/// is cleared, so fall back to the last real user prompt in scrollback.
+/// Skip bash/cron bubbles so a `!` or scheduled line is not re-queued as
+/// the interrupted turn.
+fn rebuild_cancel_resume_prompt(agent: &crate::app::agent_view::AgentView) -> Option<String> {
+    if let Some(stashed) = agent.session.in_flight_prompt.as_ref() {
+        let text = stashed.text.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    last_user_prompt_full_text(&agent.scrollback)
+}
+
+fn last_user_prompt_full_text(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> Option<String> {
+    let len = scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(block) = &entry.block {
+            if block.is_bash || block.is_cron {
+                continue;
+            }
+            let text = block.text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Write `canceled_turn_resume.json` for every mid-turn agent before re-exec.
+///
+/// Session load already applies that marker. Rebuild must persist it: cancel
+/// and peer SIGUSR1 quit do not write the file.
+fn persist_running_turns_for_rebuild(app: &AppView) {
+    use xai_grok_shell::session::canceled_turn_resume::{
+        ProcessShutdownResumeArm, arm_and_persist_process_shutdown_cancel_resume,
+    };
+    for agent in app.agents.values() {
+        if !agent.session.state.is_turn_running() {
+            continue;
+        }
+        let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            continue;
+        };
+        let Some(prompt_text) = rebuild_cancel_resume_prompt(agent) else {
+            continue;
+        };
+        arm_and_persist_process_shutdown_cancel_resume(ProcessShutdownResumeArm {
+            cwd: agent.session.cwd.to_string_lossy().into_owned(),
+            session_id,
+            prompt_text,
+            prompt_id: agent.session.current_prompt_id.clone(),
+        });
+    }
+}
+
 /// Resolve session id for peer re-exec (active agent first, then any agent).
 fn peer_rebuild_session_id(app: &AppView) -> Option<String> {
     app.active_session_id()
@@ -88,7 +154,8 @@ fn peer_rebuild_session_id(app: &AppView) -> Option<String> {
 ///
 /// `signaled`: true when this process received cooperative rebuild `SIGUSR1`
 /// (force path: fresh request + exe + session is enough). Mid-turn
-/// cancel-resume is still handled by the graceful quit path that follows.
+/// continue-interrupted-turn is persisted here before quit. The quit path
+/// does not write `canceled_turn_resume.json`.
 /// Returns `true` when `app.rebuild_relaunch` was set.
 pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
     app: &mut AppView,
@@ -136,6 +203,7 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
     {
         agent.show_toast("Rebuild on another window: relaunching on the new binary…");
     }
+    persist_running_turns_for_rebuild(app);
     app.rebuild_relaunch = Some(relaunch);
     true
 }
@@ -188,7 +256,7 @@ pub(super) fn handle_rebuild_done(
                 agent.rebuild_progress = None;
                 agent.show_toast("Rebuild failed");
                 agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Rebuild failed (no leaders were signaled):\n{error}"
+                    "Rebuild failed (no other sessions were asked to quit or re-exec):\n{error}"
                 )));
             }
             vec![]
@@ -209,7 +277,11 @@ pub(super) fn handle_rebuild_done(
 
             let mut effects = Vec::new();
 
-            // Mid-turn: cancel with canceled_turn_resume so reopen re-queues once.
+            // Persist continue-interrupted-turn before cancel. Cancel does not
+            // write the marker; first-activity also clears the in-flight stash.
+            persist_running_turns_for_rebuild(app);
+
+            // Mid-turn: cancel so the old process does not keep driving the turn.
             if let Some(agent) = app.agents.get(&agent_id)
                 && agent.session.state.is_turn_running()
             {
@@ -261,6 +333,43 @@ fn unregister_and_quit(app: &mut AppView) -> Vec<Effect> {
 /// with a resume hint instead of `exec`.
 pub(crate) fn may_exec_relaunch_after_restore(restore_succeeded: bool) -> bool {
     restore_succeeded
+}
+
+/// What the quit tail should do after `restore_terminal`.
+///
+/// Rebuild re-exec (new binary, same session) wins over screen-mode re-exec
+/// when both are set. A failed `/rebuild` never arms rebuild, so this stays
+/// `None` and the session remains invokable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostRestoreRelaunch {
+    None,
+    ExecRebuild,
+    ExecScreenMode,
+    BlockedRebuild,
+    BlockedScreenMode,
+}
+
+/// Pure quit-tail decision used by `app::run` after restore.
+pub(crate) fn post_restore_relaunch_action(
+    restore_succeeded: bool,
+    has_rebuild: bool,
+    has_screen_mode: bool,
+) -> PostRestoreRelaunch {
+    if has_rebuild {
+        if may_exec_relaunch_after_restore(restore_succeeded) {
+            PostRestoreRelaunch::ExecRebuild
+        } else {
+            PostRestoreRelaunch::BlockedRebuild
+        }
+    } else if has_screen_mode {
+        if may_exec_relaunch_after_restore(restore_succeeded) {
+            PostRestoreRelaunch::ExecScreenMode
+        } else {
+            PostRestoreRelaunch::BlockedScreenMode
+        }
+    } else {
+        PostRestoreRelaunch::None
+    }
 }
 
 /// User-visible stderr line after restore, before rebuild `exec`.
@@ -679,6 +788,494 @@ mod tests {
         assert!(
             !out.contains("Resume with: grok-oss --resume"),
             "must use full screen-mode resume hint:\n{out}"
+        );
+    }
+
+    /// Contract: failed `just install` / verify reports in this session and
+    /// does not arm self re-exec (peers were not asked to quit).
+    #[test]
+    fn handle_rebuild_done_failure_reports_and_does_not_relaunch() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                fraction: 0.97,
+                detail: "Verifying installed binary".into(),
+            });
+        }
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Err("`just install` failed with status exit 1\nError: os error 6".into()),
+        );
+        assert!(
+            effects.is_empty(),
+            "failed rebuild must not quit: {effects:?}"
+        );
+        assert!(
+            app.rebuild_relaunch.is_none(),
+            "failed install must not arm self re-exec"
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        assert!(
+            agent.rebuild_progress.is_none(),
+            "failed rebuild must clear the in-progress bar so /rebuild is invokable"
+        );
+        let scroll: Vec<&str> = agent
+            .scrollback
+            .iter_entries()
+            .filter_map(|(_, e)| match &e.block {
+                crate::scrollback::block::RenderBlock::System(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let joined = scroll.join("\n");
+        assert!(
+            joined.contains("Rebuild failed"),
+            "failure must land in scrollback: {joined}"
+        );
+        assert!(
+            joined.contains("asked to quit"),
+            "failure copy must say the fleet was not signaled: {joined}"
+        );
+    }
+
+    /// Contract: after a failed rebuild, `/rebuild` still starts a new run.
+    #[test]
+    fn rebuild_still_invokable_after_failed_rebuild_done() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        let _ = handle_rebuild_done(&mut app, agent_id, Err("just install failed".into()));
+        let effects = super::super::dispatch(Action::RebuildAndRelaunch, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RunRebuild { .. })),
+            "after a failed rebuild, /rebuild must still spawn RunRebuild: {effects:?}"
+        );
+    }
+
+    fn sample_success_report(installed: &std::path::Path) -> xai_grok_update::RebuildReport {
+        xai_grok_update::RebuildReport {
+            source_root: PathBuf::from("/src"),
+            installed_path: installed.to_path_buf(),
+            installed_identity: "0.2.120 (newsha)".into(),
+            install_backend: xai_grok_update::InstallBackend::JustInstall,
+            leader_outcomes: vec![],
+            peer_outcomes: vec![],
+            live_sessions: vec![],
+            summary_lines: vec!["Rebuild complete.".into()],
+        }
+    }
+
+    /// Named contract: after a successful `/rebuild` while a turn is running
+    /// (in-flight stash already cleared, last user prompt still in scrollback),
+    /// the invoker must write continue-interrupted-turn
+    /// (`canceled_turn_resume.json`), arm self re-exec for the same session,
+    /// and the re-exec SessionLoaded path must auto-continue that prompt.
+    /// Silent idle or a lost session is a miss.
+    #[test]
+    fn handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use agent_client_protocol as acp;
+
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-resume-mid-turn";
+        let prompt = "finish the rebuild resume contract after first activity";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-rebuild-resume".into());
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            // First server activity cleared the rewind stash. Live mid-turn
+            // after tools start looks like this.
+            agent.session.in_flight_prompt = None;
+        }
+
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let relaunch = app
+            .rebuild_relaunch
+            .as_ref()
+            .expect("successful rebuild must arm self re-exec so the session is not lost");
+        assert_eq!(relaunch.session_id, sid);
+        assert_eq!(relaunch.installed_exe, installed);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "successful rebuild must quit into re-exec, got {effects:?}"
+        );
+
+        let marker =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker")
+                .expect(
+                    "successful /rebuild while mid-turn must write canceled_turn_resume.json \
+             so reopen continues the turn",
+                );
+        assert_eq!(marker.prompt_text, prompt);
+        assert!(
+            xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
+                true,
+                Some(&marker)
+            )
+        );
+
+        // Re-exec equivalent: cold SessionLoaded of the same session.
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+        }
+        let load_effects = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        let agent = reopened.agents.get(&agent_id).unwrap();
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            toast.contains("Continuing interrupted turn"),
+            "re-exec session load must toast continue-interrupted-turn; got {toast:?}"
+        );
+        let continued = load_effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == prompt
+            ) || matches!(
+                e,
+                Effect::SendPromptBlocks { .. } | Effect::SetModeThenPrompt { .. }
+            )
+        });
+        assert!(
+            continued,
+            "re-exec session load must auto-continue the interrupted prompt, got {load_effects:?}"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "continued turn must be running; state={:?}",
+            agent.session.state
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Named contract: `/rebuild` while the pane is idle after a completed
+    /// user turn must not write `canceled_turn_resume.json` and must not
+    /// auto re-fire that last prompt on re-exec session load. Mid-turn
+    /// continue is a different contract.
+    #[test]
+    fn handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt()
+    {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::scrollback::blocks::SessionEvent;
+        use agent_client_protocol as acp;
+
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-idle-no-refire";
+        let prompt = "already finished turn must not be sent again after rebuild";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::Idle;
+            agent.session.current_prompt_id = None;
+            agent.session.in_flight_prompt = None;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    "done; nothing left to continue",
+                ));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::TurnCompleted { elapsed: None },
+                ));
+        }
+
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let relaunch = app
+            .rebuild_relaunch
+            .as_ref()
+            .expect("idle /rebuild still arms self re-exec onto the new binary");
+        assert_eq!(relaunch.session_id, sid);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "successful idle rebuild must quit into re-exec, got {effects:?}"
+        );
+        assert!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker")
+                .is_none(),
+            "idle completed turn must not write canceled_turn_resume.json"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    "done; nothing left to continue",
+                ));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::TurnCompleted { elapsed: None },
+                ));
+        }
+        let load_effects = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        let agent = reopened.agents.get(&agent_id).unwrap();
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            !toast.contains("Continuing interrupted turn"),
+            "idle completed reopen must not toast continue-interrupted-turn; got {toast:?}"
+        );
+        let refired = load_effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == prompt
+            ) || matches!(
+                e,
+                Effect::SendPromptBlocks { .. } | Effect::SetModeThenPrompt { .. }
+            )
+        });
+        assert!(
+            !refired,
+            "idle completed reopen must not auto re-fire the last prompt, got {load_effects:?}"
+        );
+        assert!(
+            agent.session.state.is_idle(),
+            "idle completed reopen must stay idle; state={:?}",
+            agent.session.state
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Named contract: a leftover `canceled_turn_resume.json` from an earlier
+    /// interrupt must be dropped on session load when the primary user turn
+    /// already finished successfully. Do not re-fire a completed prompt.
+    #[test]
+    fn session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::scrollback::blocks::SessionEvent;
+        use agent_client_protocol as acp;
+
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-stale-marker-drop";
+        let prompt = "stale leftover marker must not re-send this finished prompt";
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+            prompt,
+            Some("pid-stale-drop"),
+            "2026-08-17T00:00:00Z",
+        )
+        .expect("marker");
+        xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+            &cwd_str, sid, &marker,
+        )
+        .expect("write leftover marker");
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    "turn already finished after the earlier interrupt",
+                ));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::TurnCompleted { elapsed: None },
+                ));
+        }
+
+        let load_effects = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            !toast.contains("Continuing interrupted turn"),
+            "stale leftover marker must not toast continue; got {toast:?}"
+        );
+        let refired = load_effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == prompt
+            ) || matches!(
+                e,
+                Effect::SendPromptBlocks { .. } | Effect::SetModeThenPrompt { .. }
+            )
+        });
+        assert!(
+            !refired,
+            "stale leftover marker must not auto re-fire a finished turn, got {load_effects:?}"
+        );
+        assert!(
+            agent.session.state.is_idle(),
+            "stale leftover must stay idle; state={:?}",
+            agent.session.state
+        );
+        assert!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker")
+                .is_none(),
+            "stale leftover canceled_turn_resume.json must be dropped on load"
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Contract: restore + rebuild_relaunch execs the new binary; a failed
+    /// install never sets rebuild_relaunch so this stays None.
+    #[test]
+    fn post_restore_prefers_rebuild_relaunch_only_when_armed() {
+        assert_eq!(
+            post_restore_relaunch_action(true, false, false),
+            PostRestoreRelaunch::None
+        );
+        assert_eq!(
+            post_restore_relaunch_action(true, true, true),
+            PostRestoreRelaunch::ExecRebuild
+        );
+        assert_eq!(
+            post_restore_relaunch_action(false, true, false),
+            PostRestoreRelaunch::BlockedRebuild
+        );
+        assert_eq!(
+            post_restore_relaunch_action(true, false, true),
+            PostRestoreRelaunch::ExecScreenMode
+        );
+        assert_eq!(
+            post_restore_relaunch_action(false, false, true),
+            PostRestoreRelaunch::BlockedScreenMode
         );
     }
 }

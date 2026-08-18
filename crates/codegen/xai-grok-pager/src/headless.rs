@@ -198,6 +198,11 @@ impl HeadlessEmitter {
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
         }
+        Some(
+            self.structured_output
+                .clone()
+                .unwrap_or_else(|| Err("model did not produce structured output".to_string())),
+        )
     }
     /// Fold one event through the reducer and emit its lines; a no-op for `plain`/`json`.
     fn reduce_and_emit(&mut self, event: StreamEvent) {
@@ -786,7 +791,7 @@ fn headless_materialize_ctx(
     has_worktree: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
-        has_worktree,
+        has_worktree: false,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
@@ -1372,6 +1377,7 @@ pub async fn run_single_turn(
             let stop_reason = stop_reason_wire(resp.stop_reason);
             emitter.set_structured_output_from_meta(resp.meta.as_ref());
             emitter.set_usage_from_meta(resp.meta.as_ref());
+            // Prefer the response `_meta` ids, falling back to the typed session id rather than "".
             let sid = resp
                 .meta
                 .as_ref()

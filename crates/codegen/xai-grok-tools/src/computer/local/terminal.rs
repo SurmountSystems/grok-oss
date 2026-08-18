@@ -244,9 +244,8 @@ enum TerminalCommand {
         reply: oneshot::Sender<Option<PathBuf>>,
     },
 
-    WarmShell {
-        cwd: PathBuf,
-    },
+    /// Warm static login-shell / login-env capture for the non-persistent path.
+    WarmShell { cwd: PathBuf },
 
     KillForegroundCommandsByOwner {
         owner_session_id: String,
@@ -1895,6 +1894,14 @@ impl LocalTerminalActor {
                 Ok(None) if process.is_complete() => {
                     // Already abandoned; keep the kill fresh and keep trying to collect.
                     send_sigkill_to_group(process);
+                    let gave_up = waiting_since.is_some_and(|since| since.elapsed() >= REAP_GRACE);
+                    if gave_up {
+                        // It is not dying. Take the output there is so the task
+                        // can report completion instead of waiting forever.
+                        take_available_output(process).await;
+                        process.flush_and_truncate_output_file().await;
+                        process.finish_output(Collection::ABANDONED);
+                    }
                 }
                 Ok(None) => {
                     send_sigkill_to_group(process);

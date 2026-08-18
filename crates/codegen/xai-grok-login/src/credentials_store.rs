@@ -36,12 +36,14 @@
 //! interactive multi-add login can recover when Secret Service is healthy again.
 //!
 //! **Write-after-timeout race:** on timeout the parent returns
-//! [`CredentialsStoreError::KeyringTimeout`] and abandons the worker. If Secret
-//! Service was only slow, the worker may still `set_password` later — login
-//! reported failure and skipped the file mirror, but the secret can land in
-//! keyring asynchronously (“failed but stored”). Inherent to abandon-on-timeout
-//! without D-Bus cancellation. The abandoned worker also retains the secret in
-//! thread memory until the blocking call finishes or the process exits.
+//! [`CredentialsStoreError::KeyringTimeout`] and stops waiting. The same
+//! helper thread stays in flight (one per backend). If Secret Service was only
+//! slow, that helper may still `set_password` later — login reported failure
+//! and skipped the file mirror, but the secret can land in keyring
+//! asynchronously (“failed but stored”). Inherent to abandon-the-wait without
+//! D-Bus cancellation. The in-flight helper retains the secret in thread
+//! memory until the blocking call finishes. A later op does **not** spawn
+//! another sleeper while that helper is still blocked.
 //!
 //! Environment variables for specific providers (e.g. `OPENROUTER_API_KEY`) are
 //! checked by the provider helpers, not this store. When an env key is set,
@@ -77,6 +79,11 @@ pub const FORCE_FILE_ENV: &str = "GROK_CREDENTIALS_FORCE_FILE";
 /// stuck; interactive login must fail loudly instead of hanging after paste.
 pub const KEYRING_OP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Hard cap on live `grok-keyring-op` helper threads: one for the platform
+/// Secret Service (primary) and one for the secure fallback (Linux keyutils).
+/// A timeout must not spawn another sleeper.
+const MAX_KEYRING_HELPERS: usize = 2;
+
 /// After a keyring timeout/error, skip further **resolve** keyring probes for
 /// this long (fail-open file fallthrough). Does **not** apply to RMW
 /// [`CredentialsStore::read_for_update`] or writes — those always probe.
@@ -96,7 +103,7 @@ pub enum CredentialsStoreError {
     Keyring(String),
     /// D-Bus / keyring op exceeded [`KEYRING_OP_TIMEOUT`].
     ///
-    /// Note: an abandoned worker may still complete a slow `set_password` after
+    /// Note: the in-flight helper may still complete a slow `set_password` after
     /// this error is returned (see module docs). Login does not claim the secret
     /// was discarded from the OS store — only that the timed wait failed.
     #[error(
@@ -253,10 +260,9 @@ impl CredentialsStore {
     /// file store as recovery (avoids silent disk dump). After a successful
     /// secure write, the file is best-effort mirrored.
     ///
-    /// On primary timeout the worker is abandoned; a slow Secret Service may
-    /// still complete `set_password` later (module docs). The secret remains in
-    /// the abandoned worker's memory until that call finishes or the process
-    /// exits.
+    /// On primary timeout the wait is abandoned; a slow Secret Service may
+    /// still complete `set_password` later on the same helper (module docs).
+    /// The secret remains in that helper's memory until the call finishes.
     pub fn write(
         &self,
         url: &str,
@@ -411,16 +417,68 @@ enum KeyringBackend {
     Fallback,
 }
 
-/// Run a blocking keyring call on a helper thread with a wall-clock budget.
+/// One queued closure for a backend helper. Capacity on the helper channel is
+/// 1 so a blocked Secret Service cannot pile up secrets in RAM.
+struct KeyringJob {
+    run: Box<dyn FnOnce() + Send>,
+}
+
+/// Long-lived `grok-keyring-op` helper for one backend.
+struct KeyringHelper {
+    tx: mpsc::SyncSender<KeyringJob>,
+}
+
+static PRIMARY_HELPER: Mutex<Option<KeyringHelper>> = Mutex::new(None);
+static FALLBACK_HELPER: Mutex<Option<KeyringHelper>> = Mutex::new(None);
+
+const _: () = assert!(
+    MAX_KEYRING_HELPERS == 2,
+    "primary + fallback slots must match MAX_KEYRING_HELPERS"
+);
+
+fn helper_slot(backend: KeyringBackend) -> &'static Mutex<Option<KeyringHelper>> {
+    match backend {
+        KeyringBackend::Primary => &PRIMARY_HELPER,
+        KeyringBackend::Fallback => &FALLBACK_HELPER,
+    }
+}
+
+/// Sender for the single helper thread of `backend`. Spawns at most once.
+fn helper_sender(
+    backend: KeyringBackend,
+) -> Result<mpsc::SyncSender<KeyringJob>, CredentialsStoreError> {
+    let slot = helper_slot(backend);
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = guard.as_ref() {
+        return Ok(existing.tx.clone());
+    }
+    let (tx, rx) = mpsc::sync_channel::<KeyringJob>(1);
+    std::thread::Builder::new()
+        .name("grok-keyring-op".into())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                (job.run)();
+            }
+        })
+        .map_err(|e| {
+            CredentialsStoreError::Keyring(format!("failed to spawn keyring worker: {e}"))
+        })?;
+    *guard = Some(KeyringHelper { tx: tx.clone() });
+    Ok(tx)
+}
+
+/// Run a blocking keyring call on the reused helper for `backend`.
 ///
 /// Does **not** update the resolve circuit breaker — callers note composite
 /// multi-backend outcomes so a healthy fallback can clear the circuit even when
 /// primary timed out.
 ///
-/// On timeout the helper may still be blocked in D-Bus; we abandon waiting so
-/// interactive login can fail loudly instead of hanging forever. The abandoned
-/// worker may still complete a slow write later (module docs) and retains any
-/// secret cloned into the op until then.
+/// On timeout the helper may still be blocked in D-Bus; we abandon **waiting**
+/// so interactive login can fail loudly instead of hanging forever. The same
+/// helper stays in flight. A later op is queued on that helper or times out
+/// without spawning another sleeper. The in-flight helper may still complete
+/// a slow write later (module docs) and retains any secret cloned into the op
+/// until then.
 fn run_keyring_op<T, F>(backend: KeyringBackend, op: F) -> Result<T, CredentialsStoreError>
 where
     T: Send + 'static,
@@ -430,74 +488,60 @@ where
     test_hooks::maybe_inject_before_op(backend)?;
 
     let timeout = keyring_op_timeout();
+    let helper = helper_sender(backend)?;
+    let (reply_tx, reply_rx) = mpsc::channel();
 
-    // Test-only: simulate a blocked backend **without** calling the real
-    // keyring. Spawns a worker that never completes (same abandon path as
-    // production `recv_timeout`) so policy tests exercise spawn + timeout.
+    // Capture hang at enqueue so a leftover queued job cannot call the real
+    // keyring after the test hook is cleared.
     #[cfg(test)]
-    if test_hooks::hang_backend(backend) {
-        let (tx, rx) = mpsc::channel::<Result<T, CredentialsStoreError>>();
-        let handle = std::thread::Builder::new()
-            .name("grok-keyring-op".into())
-            .spawn(move || {
-                // Hold sender open so parent sees Timeout (not Disconnected).
-                // Never call real keyring; never send a result.
-                let _tx = tx;
-                loop {
-                    std::thread::sleep(Duration::from_secs(3600));
+    let hang = test_hooks::hang_backend(backend);
+
+    let job = KeyringJob {
+        run: Box::new(move || {
+            #[cfg(test)]
+            if hang {
+                while test_hooks::hang_backend(backend) {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-            })
-            .map_err(|e| {
-                CredentialsStoreError::Keyring(format!("failed to spawn keyring worker: {e}"))
-            })?;
-        // `op` is dropped without running — intentional for hang simulation.
-        drop(op);
-        return match rx.recv_timeout(timeout) {
-            Ok(result) => {
-                let _ = handle.join();
-                result
+                drop(op);
+                return;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(CredentialsStoreError::KeyringTimeout {
-                secs: timeout_secs_for_display(timeout),
-            }),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = handle.join();
-                Err(CredentialsStoreError::Keyring(
-                    "keyring worker disconnected before completing".into(),
-                ))
+            let _ = reply_tx.send(op());
+        }),
+    };
+
+    // `SyncSender::send_timeout` is unstable; poll `try_send` until the
+    // helper accepts the job or the same wall-clock budget expires.
+    let enqueue_deadline = Instant::now() + timeout;
+    let mut pending = job;
+    loop {
+        match helper.try_send(pending) {
+            Ok(()) => break,
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err(CredentialsStoreError::Keyring(
+                    "keyring worker disconnected before accepting work".into(),
+                ));
             }
-        };
+            Err(mpsc::TrySendError::Full(back)) => {
+                if Instant::now() >= enqueue_deadline {
+                    return Err(CredentialsStoreError::KeyringTimeout {
+                        secs: timeout_secs_for_display(timeout),
+                    });
+                }
+                pending = back;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
 
-    let (tx, rx) = mpsc::channel();
-    let handle = std::thread::Builder::new()
-        .name("grok-keyring-op".into())
-        .spawn(move || {
-            let _ = tx.send(op());
-        })
-        .map_err(|e| {
-            CredentialsStoreError::Keyring(format!("failed to spawn keyring worker: {e}"))
-        })?;
-
-    match rx.recv_timeout(timeout) {
-        Ok(result) => {
-            // Worker finished; join to avoid leaking threads on the happy path.
-            let _ = handle.join();
-            result
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            // Leave the worker running; joining would re-introduce the hang.
-            // Secret may still land in keyring if the op was a slow write.
-            Err(CredentialsStoreError::KeyringTimeout {
-                secs: timeout_secs_for_display(timeout),
-            })
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = handle.join();
-            Err(CredentialsStoreError::Keyring(
-                "keyring worker disconnected before completing".into(),
-            ))
-        }
+    match reply_rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(CredentialsStoreError::KeyringTimeout {
+            secs: timeout_secs_for_display(timeout),
+        }),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CredentialsStoreError::Keyring(
+            "keyring worker disconnected before completing".into(),
+        )),
     }
 }
 
@@ -1236,4 +1280,50 @@ mod tests {
             "expected real KeyringTimeout from probe, got {err:?}"
         );
     }
+
+    /// Named contract: a locked or timed-out Secret Service call must not leave
+    /// an extra sleeping `grok-keyring-op` worker. At most one helper per
+    /// backend (primary + fallback = 2) may stay in flight. Repeated resolve,
+    /// RMW, and write timeouts must reuse those helpers, not abandon a new
+    /// sleeper on every attempt (that is the overnight 3,200-thread leak).
+    #[test]
+    #[serial]
+    fn timed_out_secret_service_does_not_leave_unbounded_sleeping_workers() {
+        let _hooks = test_hooks::simulate_blocked_keyring(Duration::from_millis(40));
+        let dir = TempDir::new().unwrap();
+        let store = CredentialsStore::at_path_prefer_keyring(dir.path().join(FILE_NAME));
+        let url = "https://api.x.ai/v1";
+
+        let before = count_threads_named("grok-keyring-op");
+        for i in 0..10 {
+            let _ = store.read(url);
+            let _ = store
+                .read_for_update(url)
+                .expect_err("blocked keyring RMW must fail closed");
+            let _ = store
+                .write_bearer(url, &format!("secret-must-not-dump-{i}"))
+                .expect_err("blocked keyring write must fail loud");
+        }
+        let after = count_threads_named("grok-keyring-op");
+        let grown = after.saturating_sub(before);
+        assert!(
+            grown <= MAX_KEYRING_HELPERS,
+            "timed-out Secret Service calls must reuse at most {MAX_KEYRING_HELPERS} \
+             grok-keyring-op helpers (one per backend); this burst grew {grown} \
+             (before={before} after={after})"
+        );
+    }
+}
+
+/// Linux `/proc` thread-name count. Used by the leak contract test.
+#[cfg(test)]
+fn count_threads_named(name: &str) -> usize {
+    let dir = std::fs::read_dir("/proc/self/task")
+        .expect("need /proc/self/task to count grok-keyring-op workers");
+    dir.filter_map(|entry| {
+        let entry = entry.ok()?;
+        let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+        (comm.trim() == name).then_some(())
+    })
+    .count()
 }

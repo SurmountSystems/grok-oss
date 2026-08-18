@@ -50,6 +50,17 @@ pub(super) fn open_usage_info_modal(
     if matches!(app.active_view, ActiveView::AgentDashboard) {
         return open_dashboard_usage_modal(app, tab);
     }
+}
+
+/// Open (or re-tab) the usage/session-info modal and fire the fetch effects
+/// that populate it. Full-TUI only — minimal mode keeps scrollback blocks.
+pub(super) fn open_usage_info_modal(
+    app: &mut AppView,
+    tab: crate::views::usage_modal::UsageInfoTab,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
+
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -604,8 +615,8 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed",
     );
-    // Accept failure: no ack; clear inflight so the banner stays.
-    app.privacy_banner_accept_inflight = false;
+    // Opt-in failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_opt_in_inflight = false;
     vec![]
 }
 

@@ -74,7 +74,7 @@ pub(crate) fn print_welcome_card(
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(
-            "Grok Build",
+            WELCOME_CARD_PRODUCT_NAME,
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
@@ -137,4 +137,14 @@ pub(crate) fn print_welcome_card(
     // A trailing gap, matching every committed block, separates the first conversation block from the card
     super::commit::insert_gap(terminal);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Named contract: pager-minimal welcome card brands **Grok OSS**.
+    #[test]
+    fn pager_minimal_welcome_brands_grok_oss() {
+        assert_eq!(super::WELCOME_CARD_PRODUCT_NAME, "Grok OSS");
+        assert_ne!(super::WELCOME_CARD_PRODUCT_NAME, "Grok Build");
+    }
 }

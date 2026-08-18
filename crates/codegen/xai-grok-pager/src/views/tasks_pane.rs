@@ -79,15 +79,8 @@ pub fn highlight_bash_command(command: &str) -> Vec<Span<'static>> {
     }
 }
 /// Dim highlighted spans by blending each color toward background.
-///
-/// Under DOGE, skip alpha blend (solid-step at the usual 0.45 recede factor
-/// would snap to black and hide the command). Keep pure span colours; the
-/// finished-vs-running distinction still comes from the spinner/status chrome.
 fn dim_spans(spans: &[Span<'static>], blend_factor: f32) -> Vec<Span<'static>> {
     let theme = Theme::current();
-    if Theme::current_kind() == ThemeKind::Doge {
-        return spans.to_vec();
-    }
     spans
         .iter()
         .map(|span| {
@@ -289,6 +282,10 @@ impl TaskEntry {
         }
     }
     fn from_subagent(info: &SubagentInfo) -> Self {
+        Self::from_subagent_with_l3_count(info, 0)
+    }
+
+    fn from_subagent_with_l3_count(info: &SubagentInfo, live_l3: usize) -> Self {
         let theme = Theme::current();
         let (type_label, description) = format_subagent_label(info);
         let model_suffix = info
@@ -310,7 +307,8 @@ impl TaskEntry {
         let type_color = if info.is_running() || info.attempt.pending_kill {
             raw_type_color
         } else {
-            finished_type_color(&theme, raw_type_color)
+            crate::render::color::blend_color(theme.bg_base, raw_type_color, 0.45)
+                .unwrap_or(raw_type_color)
         };
         let type_style = Style::default().fg(type_color);
         let desc_style = if info.is_running() {
@@ -336,6 +334,12 @@ impl TaskEntry {
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
         ];
+        if let Some(count) = format_live_l3_count(live_l3) {
+            spans.push(Span::styled(
+                format!(" · {count}"),
+                Style::default().fg(theme.gray),
+            ));
+        }
         if let Some(activity) = activity {
             spans.push(Span::styled(
                 format!(" \u{00b7} {activity}"),
@@ -343,10 +347,10 @@ impl TaskEntry {
             ));
         }
         let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => type_label.clone(),
-            (true, false) => format!("{type_label} {model_suffix}"),
-            (false, true) => format!("{type_label} {description}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}"),
+            (true, true) => format!("{type_label}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
+            (false, true) => format!("{type_label} {description}{l3_suffix}"),
+            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
         };
         let styled = Line::from(spans);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -379,7 +383,8 @@ impl TaskEntry {
         let tag_color = if running {
             raw_tag_color
         } else {
-            finished_type_color(&theme, raw_tag_color)
+            crate::render::color::blend_color(theme.bg_base, raw_tag_color, 0.45)
+                .unwrap_or(raw_tag_color)
         };
         let name_style = if running {
             Style::default().fg(theme.text_primary)
@@ -443,7 +448,7 @@ impl TaskEntry {
         };
         let label = format!(
             "{} {} \u{b7} {}{}",
-            tag_display, info.human_schedule, &prompt_preview, &suffix
+            tag_display, info.human_schedule, prompt_preview, suffix
         );
         let schedule_style = format!("{} \u{b7} ", info.human_schedule);
         let neutral = Style::default().fg(theme.text_secondary);
@@ -1463,7 +1468,6 @@ impl TasksPane {
             ));
         }
         rx = rx.saturating_sub(3);
-        let view_x = rx;
         let is_view_hovered = matches!(
             &self.hovered_view,
             Some(TaskEntryId::Agent(sid)) if sid == subagent_id
@@ -2131,6 +2135,70 @@ mod tests {
         );
     }
     #[test]
+    fn tasks_pane_sync_does_not_paint_two_live_same_description_rows() {
+        let mut pane = TasksPane::new();
+        let t0 = Instant::now();
+        let mut a = make_info();
+        a.subagent_id = Arc::from("sa-a");
+        a.child_session_id = Arc::from("cs-a");
+        a.description = Arc::from("[reviewer] Review implementation");
+        a.subagent_type = Arc::from("general-purpose");
+        a.finished = false;
+        a.started_at = t0;
+        let mut b = make_info();
+        b.subagent_id = Arc::from("sa-b");
+        b.child_session_id = Arc::from("cs-b");
+        b.description = Arc::from("[reviewer] Review implementation");
+        b.subagent_type = Arc::from("general-purpose");
+        b.finished = false;
+        b.started_at = t0 + std::time::Duration::from_millis(10);
+        let mut other = make_info();
+        other.subagent_id = Arc::from("sa-other");
+        other.child_session_id = Arc::from("cs-other");
+        other.description = Arc::from("[implementer] Land the slice");
+        other.subagent_type = Arc::from("general-purpose");
+        other.finished = false;
+        other.started_at = t0 + std::time::Duration::from_millis(20);
+
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-a".into(), a);
+        subagents.insert("cs-b".into(), b);
+        subagents.insert("cs-other".into(), other);
+
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+
+        let same: Vec<_> = pane
+            .items
+            .iter()
+            .filter(|entry| match entry {
+                TaskEntry::Agent { label, .. } => label.contains("Review implementation"),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            same.len(),
+            1,
+            "Tasks pane sync must not paint two live same-description rows, got {}",
+            same.len()
+        );
+        let distinct = pane.items.iter().any(|entry| match entry {
+            TaskEntry::Agent { label, .. } => label.contains("Land the slice"),
+            _ => false,
+        });
+        assert!(
+            distinct,
+            "distinct live description must still appear after same-description collapse"
+        );
+    }
+
+    #[test]
     fn sync_sorts_running_before_done() {
         let mut pane = TasksPane::new();
         pane.show_done = true;
@@ -2395,9 +2463,18 @@ mod tests {
         let mut plan = make_info();
         plan.child_session_id = "cs-plan".into();
         plan.subagent_type = "plan".into();
+        plan.description = "Write the implementation plan".into();
         let mut explore = make_info();
         explore.child_session_id = "cs-explore".into();
         explore.subagent_type = "explore".into();
+        explore.description = "Find API endpoints".into();
+        // L3 under the plan L2 must not appear as its own list row.
+        let mut specialist = make_info();
+        specialist.child_session_id = "cs-l3".into();
+        specialist.subagent_type = "general-purpose".into();
+        specialist.description = "Read the tasks pane sort".into();
+        specialist.parent_session_id = Some(Arc::from("cs-plan"));
+        specialist.depth = Some(2);
         subagents.insert("cs-plan".into(), plan);
         subagents.insert("cs-explore".into(), explore);
         pane.sync(
@@ -2488,6 +2565,27 @@ mod tests {
         };
         assert_eq!(label, "Subagent Find API endpoints");
     }
+    #[test]
+    fn l2_row_shows_live_l3_count_not_specialist_names() {
+        let info = make_info();
+        let entry = TaskEntry::from_subagent_with_l3_count(&info, 2);
+        let (label, styled) = match &entry {
+            TaskEntry::Agent { label, styled, .. } => (label, styled),
+            _ => panic!("expected Agent variant"),
+        };
+        assert!(
+            label.contains(" · 2 specialists"),
+            "L2 row must show a specialist count: {label}"
+        );
+        assert!(
+            styled
+                .spans
+                .iter()
+                .any(|s| s.content.contains("2 specialists")),
+            "styled L2 row must show the count, not L3 names: {styled:?}"
+        );
+    }
+
     #[test]
     fn subagent_activity_suffix_renders_while_running_only() {
         let mut info = make_info();

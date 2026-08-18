@@ -5,7 +5,7 @@ use crate::error::RefreshTokenFailedReason;
 use crate::manager::RefreshReason;
 use crate::oidc::OidcRefreshResult;
 
-use super::{AuthSnapshot, DiagnosticUploader, RefreshOutcome, TokenRefresher};
+use super::{AuthSnapshot, DiagnosticUploader, RefreshOutcome, SuspectConsumedRt, TokenRefresher};
 
 #[cfg(test)]
 use crate::manager::AuthManager;
@@ -146,6 +146,18 @@ impl OidcRefresher {
             OidcRefreshResult::Failed { .. } => {
                 Some(RefreshOutcome::transient("OIDC disk-retry refresh failed"))
             }
+            OidcRefreshResult::Failed {
+                suspected_consumed_rt,
+                ..
+            } => Some(match suspected_consumed_rt {
+                // The disk RT was on the wire across a straddle too — it must
+                // reach the sentinel like the primary exchange's RT would.
+                Some(suspect) => RefreshOutcome::transient_suspect_consumed(
+                    "OIDC disk-retry refresh failed",
+                    suspect,
+                ),
+                None => RefreshOutcome::transient("OIDC disk-retry refresh failed"),
+            }),
         }
     }
 }

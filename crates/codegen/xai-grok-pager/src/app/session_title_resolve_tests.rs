@@ -100,6 +100,14 @@ fn two_manual_renames_stay_ambiguous() {
         msg.contains("man1") && msg.contains("man2"),
         "both manual ids must be listed: {msg}"
     );
+    assert!(
+        msg.contains("grok-oss --resume <session-id>"),
+        "ambiguous title hint must use grok-oss --resume: {msg}"
+    );
+    assert!(
+        !msg.contains("grok --resume"),
+        "must not tell operators to run upstream grok --resume: {msg}"
+    );
 }
 
 #[test]

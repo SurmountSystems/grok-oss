@@ -203,9 +203,8 @@ pub(super) fn plan_mode_edit_gate(
 pub(super) enum PlanApprovalOutcome {
     Approved,
     Cancelled,
-    Abandoned,
-    /// Clarifying question only — stay in plan mode; answer read-only; re-park.
     Questions,
+    Abandoned,
 }
 impl PlanApprovalOutcome {
     fn from_response(
@@ -270,20 +269,11 @@ const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
 fn revise_plan_message(feedback: &str) -> String {
     let feedback = feedback.trim();
     if feedback.is_empty() {
-        // Bare Revise CTA (no freeform): unpark is already done. Do not stall
-        // only on "what should change?" — rewrite from conversation context
-        // when possible, then re-present with exit_plan_mode.
-        "The user clicked Revise without written notes. Stay in plan mode. \
-         Rewrite plan.md based on the conversation and any earlier feedback. \
-         If the needed change is genuinely unclear, ask one short question, \
-         then revise. When the plan is ready, call exit_plan_mode again."
+        "The user wants to revise the plan. \
+         Ask the user what changes they would like to make."
             .to_string()
     } else {
-        format!(
-            "The user wants to revise the plan. Stay in plan mode, rewrite \
-             plan.md from their notes, then call exit_plan_mode again.\n\n\
-             The user said:\n{feedback}"
-        )
+        format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
 /// What the resume re-park does with the user's decision.
@@ -1772,95 +1762,7 @@ impl SessionActor {
                 wait_ms = 0_i64,
             );
         }
-        // S3: agent scrub-disable must use scrub-specific permission options
-        // (AllowOnce / AllowAlways / Reject), never YOLO / Read auto-allow.
-        // Reject keeps scrub on; AllowAlways also persists settings off.
-        if crate::session::helpers::is_disable_ascii_scrub_tool(&call.function.name) {
-            // Already off (session or durable) — confirm without re-prompt.
-            if !crate::session::helpers::scrub_active() {
-                tracing::info_span!(
-                    "tool.decision",
-                    tool_name = %call.function.name,
-                    tool_use_id = %call.id,
-                    decision = "allow",
-                    source = "config",
-                    wait_ms = 0_i64,
-                )
-                .in_scope(|| {});
-            } else {
-                let _pending_guard =
-                    crate::session::pending_interaction::PendingInteractionGuard::new(
-                        self.pending_interactions.clone(),
-                        self.notifications.gateway.clone(),
-                        self.session_info.id.clone(),
-                        tool_call_id.to_string(),
-                        crate::session::pending_interaction::PendingKind::Permission,
-                    );
-                let perm_start = self.events.permission_requested(&call.function.name);
-                if !self.permissions.is_yolo_mode() {
-                    self.dispatch_notification_hook(
-                        "permission_prompt",
-                        Some("ASCII scrub disable requested".into()),
-                        None,
-                        Some("info".into()),
-                    )
-                    .await;
-                }
-                let flow = crate::session::helpers::request_agent_scrub_disable(
-                    &self.notifications.gateway,
-                    self.session_info.id.clone(),
-                    tool_call_id.to_string(),
-                )
-                .await;
-                let wait_ms = perm_start.elapsed().as_millis() as u64;
-                match flow {
-                    crate::session::helpers::ScrubDisableFlowResult::KeptOn => {
-                        self.events.permission_resolved(
-                            &call.function.name,
-                            xai_file_utils::events::types::PermissionDecision::Deny,
-                            perm_start,
-                        );
-                        tracing::info_span!(
-                            "tool.decision",
-                            tool_name = %call.function.name,
-                            tool_use_id = %call.id,
-                            decision = "deny",
-                            source = "user",
-                            wait_ms = wait_ms as i64,
-                        )
-                        .in_scope(|| {});
-                        let message = format!(
-                            "User rejected disabling ASCII scrub for tool `{}`. \
-                             Fancy punctuation will continue to be scrubbed.",
-                            call.function.name
-                        );
-                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                            .await?;
-                        return Ok(Err(ToolLoop::PermissionReject {
-                            tool_name: call.function.name.clone(),
-                            reason: "User rejected disabling ASCII scrub".to_owned(),
-                        }));
-                    }
-                    crate::session::helpers::ScrubDisableFlowResult::Disabled { always } => {
-                        self.events.permission_resolved(
-                            &call.function.name,
-                            xai_file_utils::events::types::PermissionDecision::Allow,
-                            perm_start,
-                        );
-                        tracing::info_span!(
-                            "tool.decision",
-                            tool_name = %call.function.name,
-                            tool_use_id = %call.id,
-                            decision = "allow",
-                            source = if always { "user_always" } else { "user" },
-                            wait_ms = wait_ms as i64,
-                        )
-                        .in_scope(|| {});
-                        // Fall through to tool body for model-facing confirmation.
-                    }
-                }
-            }
-        } else if !plan_file_auto_approve {
+        if !plan_file_auto_approve {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
                 .as_ref()
                 .map(|(t, k, r)| (Some(t.clone()), Some(*k), Some(r.clone())))
@@ -2196,63 +2098,31 @@ impl SessionActor {
                             .await;
                         let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
                         self.chat_state_handle.push_tool_result(tool_chat);
-                        // Do not run exit_plan_mode tool body; plan mode stays Active.
                         return Ok(Err(ToolLoop::Continue));
                     }
                     PlanApprovalOutcome::Approved => {
-                        // Real panel CTA only. Do not run exit_plan_mode tool body
-                        // (its result is present-only and must not claim approval).
-                        tracing::info!(
-                            "[exit_plan_mode] user approved via plan panel — leaving plan mode"
-                        );
-                        self.leave_plan_mode_to_default();
-                        // Re-read disk at decision time so soft-park rewrites win.
-                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
-                            Ok(s) if !s.trim().is_empty() => Some(s),
-                            _ => None,
-                        };
-                        let path_display = plan_path.display().to_string();
-                        let message =
-                            approved_exit_plan_tool_message(fresh.as_deref(), &path_display);
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .title(Some("Plan mode exited".to_string()))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
+                        tracing::info!("[exit_plan_mode] user approved — executing tool");
                     }
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        // Headless / no UI: exit plan mode with honest no-panel
-                        // copy. Never claim plan-panel Approve or always-approve.
                         tracing::debug!(
                             %err,
-                            "exit_plan_mode: no client wired; leaving plan mode without panel approve"
+                            "exit_plan_mode: no client wired; honest no-panel leave"
                         );
                         self.leave_plan_mode_to_default();
-                        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-                        let fresh = match tokio::fs::read_to_string(&plan_path).await {
-                            Ok(s) if !s.trim().is_empty() => Some(s),
-                            _ => plan_content.clone(),
-                        };
-                        let path_display = plan_path.display().to_string();
-                        let message =
-                            no_client_exit_plan_tool_message(fresh.as_deref(), &path_display);
+                        let plan_body = plan_content.clone().unwrap_or_default();
+                        let message = format!(
+                            "No interactive plan panel is available (headless / no UI client). \
+                             This is NOT a plan-panel Approve. Plan mode has been left so the \
+                             session is not stuck. The present-only exit_plan_mode tool body \
+                             was not run and must not be treated as operator approval.\n\n\
+                             {plan_body}"
+                        );
                         let tool_update = acp::ToolCallUpdate::new(
                             tool_call_id.clone(),
                             acp::ToolCallUpdateFields::new()
                                 .status(Some(acp::ToolCallStatus::Completed))
-                                .title(Some("Plan mode exited".to_string()))
                                 .content(Some(vec![acp::ToolCallContent::from(
                                     acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
                                 )])),
@@ -2460,9 +2330,6 @@ impl SessionActor {
             ResumeAction::LeaveOnly => {
                 tracing::info!("[exit_plan_mode] resume: user abandoned plan");
                 self.leave_plan_mode_to_default();
-                // Approval gate is clear — promote any prompts that were held
-                // while plan approval was open (see maybe_start_running_task).
-                SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
             }
             ResumeAction::StayAndRevise(text) => {
                 tracing::info!("[exit_plan_mode] resume: user requested changes");
@@ -3654,19 +3521,61 @@ mod exit_plan_tail_predicate_tests {
 #[cfg(test)]
 mod exit_plan_intercept_tests {
     use super::{
-        PlanFileRead, classify_plan_file_read, is_exit_plan_mode_tool_name,
-        should_intercept_exit_plan_approval, split_tool_batch_before_exit_plan_mode,
+        is_file_backed_exit_plan_input, is_file_backed_exit_plan_kind, split_exit_plan_tail,
     };
-    use crate::sampling::types::{ToolCallFunction, ToolCallResponse};
-
-    fn call(id: &str, name: &str) -> ToolCallResponse {
-        ToolCallResponse {
-            id: id.to_string(),
-            kind: "function".to_string(),
-            function: ToolCallFunction::new(name, "{}"),
+    use xai_grok_tools::types::ToolInput;
+    use xai_grok_tools::types::tool::ToolKind;
+    fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
+        crate::sampling::types::ToolCallResponse {
+            id: format!("call_{name}"),
+            kind: "function".into(),
+            function: crate::sampling::types::ToolCallFunction::new(name, args),
         }
     }
-
+    /// Wire name does not matter — only [`ToolKind::ExitPlan`].
+    fn kind_of(name: &str) -> Option<ToolKind> {
+        match name {
+            "exit_plan_mode" | "FinishPlan" => Some(ToolKind::ExitPlan),
+            _ => None,
+        }
+    }
+    #[test]
+    fn exit_plan_kind_is_file_backed_exit() {
+        assert!(is_file_backed_exit_plan_kind(Some(ToolKind::ExitPlan)));
+        assert!(!is_file_backed_exit_plan_kind(Some(ToolKind::Edit)));
+        assert!(!is_file_backed_exit_plan_kind(None));
+        assert!(is_file_backed_exit_plan_input(&ToolInput::ExitPlanMode(
+            xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeInput {}
+        )));
+    }
+    fn mixed(calls: Vec<crate::sampling::types::ToolCallResponse>) -> bool {
+        let (body, tail) = split_exit_plan_tail(calls, kind_of);
+        !body.is_empty() && !tail.is_empty()
+    }
+    #[test]
+    fn split_puts_exit_plan_in_tail() {
+        let write = call(
+            "search_replace",
+            r#"{"file_path":"/tmp/plan.md","old_string":"a","new_string":"b"}"#,
+        );
+        let exit = call("exit_plan_mode", "{}");
+        let renamed_exit = call("FinishPlan", "{}");
+        let create = call(
+            "CreatePlan",
+            r#"{"name":"p","overview":"o","plan":"plan body","todos":[]}"#,
+        );
+        assert!(mixed(vec![write.clone(), exit.clone()]));
+        assert!(mixed(vec![exit.clone(), write.clone()]));
+        assert!(mixed(vec![write.clone(), renamed_exit.clone()]));
+        assert!(!mixed(vec![exit.clone()]));
+        assert!(!mixed(vec![write.clone()]));
+        assert!(!mixed(vec![write.clone(), create.clone()]));
+        assert!(mixed(vec![write, exit, create]));
+    }
+}
+#[cfg(test)]
+mod exit_plan_intercept_tests {
+    use super::{PlanFileRead, classify_plan_file_read, should_intercept_exit_plan_approval};
     #[test]
     fn exit_plan_mode_empty_plan_still_intercepts() {
         assert!(should_intercept_exit_plan_approval(
@@ -3684,52 +3593,6 @@ mod exit_plan_intercept_tests {
             false,
             &PlanFileRead::Present("plan body".into()),
         ));
-    }
-
-    #[test]
-    fn is_exit_plan_mode_tool_name_matches_wire_and_client_ids() {
-        assert!(is_exit_plan_mode_tool_name("exit_plan_mode"));
-        assert!(is_exit_plan_mode_tool_name("ExitPlanMode"));
-        assert!(!is_exit_plan_mode_tool_name("write"));
-        assert!(!is_exit_plan_mode_tool_name("enter_plan_mode"));
-    }
-
-    /// Named contract: same-batch write + exit_plan_mode must run the write
-    /// pass first so park/re-read sees the rewritten plan.md, not a freeze of
-    /// the pre-write body.
-    #[test]
-    fn split_tool_batch_runs_non_exit_before_exit_plan_mode() {
-        let batch = vec![
-            call("w1", "write"),
-            call("t1", "todo_write"),
-            call("e1", "exit_plan_mode"),
-            call("e2", "ExitPlanMode"),
-        ];
-        let (others, exits) =
-            split_tool_batch_before_exit_plan_mode(batch).expect("mixed batch must split");
-        assert_eq!(
-            others
-                .iter()
-                .map(|c| c.function.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["write", "todo_write"]
-        );
-        assert_eq!(
-            exits
-                .iter()
-                .map(|c| c.function.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["exit_plan_mode", "ExitPlanMode"]
-        );
-        assert_eq!(others[0].id, "w1");
-        assert_eq!(exits[0].id, "e1");
-    }
-
-    #[test]
-    fn split_tool_batch_skips_when_exit_only_or_no_exit() {
-        assert!(split_tool_batch_before_exit_plan_mode(vec![call("e", "exit_plan_mode")]).is_err());
-        assert!(split_tool_batch_before_exit_plan_mode(vec![call("w", "write")]).is_err());
-        assert!(split_tool_batch_before_exit_plan_mode(vec![]).is_err());
     }
     #[test]
     fn create_plan_empty_still_intercepts() {
@@ -3801,10 +3664,7 @@ mod exit_plan_intercept_tests {
 }
 #[cfg(test)]
 mod plan_mode_edit_gate_tests {
-    use super::{
-        PLAN_MODE_ASK_USER_REJECTED_MESSAGE, PlanAskUserGate, PlanEditGate,
-        plan_mode_ask_user_gate, plan_mode_edit_gate,
-    };
+    use super::{PlanEditGate, plan_mode_edit_gate};
     use crate::session::plan_mode::PlanModeTracker;
     use xai_grok_tools::types::ToolInput;
     use xai_grok_workspace::permission::AccessKind;
@@ -3817,25 +3677,6 @@ mod plan_mode_edit_gate_tests {
     }
     fn gate(tracker: &PlanModeTracker, input: &ToolInput) -> PlanEditGate {
         plan_mode_edit_gate(tracker, input, &AccessKind::from(input))
-    }
-    fn ask_user_input() -> ToolInput {
-        use xai_grok_tools::implementations::grok_build::ask_user_question::{
-            AskUserQuestionInput, Question, QuestionOption,
-        };
-        ToolInput::AskUserQuestion(AskUserQuestionInput {
-            questions: vec![Question {
-                question: "Which follow-ups?".into(),
-                options: vec![QuestionOption {
-                    label: "A".into(),
-                    description: "option a".into(),
-                    preview: None,
-                    id: None,
-                }],
-                multi_select: None,
-                id: None,
-            }],
-            use_id_keyed_format: false,
-        })
     }
     fn search_replace(path: &str) -> ToolInput {
         use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceInput;
@@ -3957,57 +3798,12 @@ mod plan_mode_edit_gate_tests {
             "Pending means the model has no plan-mode instructions yet — don't gate"
         );
     }
-    /// Active plan mode hard-rejects ask_user_question (fail-closed even if
-    /// the tool somehow remains in the model tool list).
-    #[test]
-    fn active_plan_mode_rejects_ask_user_question() {
-        let t = active_tracker();
-        assert_eq!(
-            plan_mode_ask_user_gate(&t, &ask_user_input()),
-            PlanAskUserGate::RejectQuestionnaire
-        );
-        assert!(
-            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("ask_user_question"),
-            "rejection must name the blocked tool"
-        );
-        assert!(
-            PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("plan file")
-                || PLAN_MODE_ASK_USER_REJECTED_MESSAGE.contains("exit_plan_mode"),
-            "rejection must steer to plan.md / exit_plan_mode"
-        );
-    }
-    /// Outside Active plan mode, ask_user_question stays available (non-plan
-    /// sessions and general interactive Q&A).
-    #[test]
-    fn inactive_or_pending_allows_ask_user_question() {
-        let inactive = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert_eq!(
-            plan_mode_ask_user_gate(&inactive, &ask_user_input()),
-            PlanAskUserGate::Allow
-        );
-        let mut pending = PlanModeTracker::new(std::path::PathBuf::from("/tmp/gate-session"));
-        assert!(pending.enter_pending());
-        assert_eq!(
-            plan_mode_ask_user_gate(&pending, &ask_user_input()),
-            PlanAskUserGate::Allow
-        );
-    }
-    /// Non-questionnaire tools are not blocked by the ask-user gate.
-    #[test]
-    fn ask_user_gate_does_not_block_other_tools() {
-        let t = active_tracker();
-        assert_eq!(
-            plan_mode_ask_user_gate(&t, &search_replace("/tmp/src/main.rs")),
-            PlanAskUserGate::Allow
-        );
-    }
 }
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, approved_exit_plan_tool_message, ext_method_no_client,
-        no_client_exit_plan_tool_message, questions_plan_message, resume_action_for,
-        revise_plan_message,
+        PlanApprovalOutcome, ResumeAction, ext_method_no_client, questions_plan_message,
+        resume_action_for, revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
     fn resp(outcome: &str) -> ExitPlanModeExtResponse {
@@ -4054,34 +3850,6 @@ mod plan_approval_helper_tests {
         let with = revise_plan_message("use async");
         assert!(with.contains("The user said:"));
         assert!(with.contains("use async"));
-        assert!(
-            with.contains("exit_plan_mode again"),
-            "feedback revise must still re-present: {with}"
-        );
-    }
-    #[test]
-    fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
-        let empty = questions_plan_message("");
-        assert!(
-            empty.contains("clarifying question"),
-            "empty questions message must name clarifying intent: {empty}"
-        );
-        assert!(
-            !empty.contains("wants to revise"),
-            "questions must not use the revise framing: {empty}"
-        );
-        assert!(
-            empty.contains("Do not rewrite plan.md"),
-            "questions must forbid plan rewrite: {empty}"
-        );
-        assert!(
-            empty.contains("exit_plan_mode again"),
-            "questions must re-park via exit_plan_mode: {empty}"
-        );
-        let with = questions_plan_message("why Redis?");
-        assert!(with.contains("why Redis?"));
-        assert!(with.contains("The user asked:"));
-        assert!(!with.contains("wants to revise"));
     }
     #[test]
     fn resume_action_maps_each_outcome() {
@@ -4100,66 +3868,29 @@ mod plan_approval_helper_tests {
         match resume_action_for(PlanApprovalOutcome::Questions, Some("why Redis?".into())) {
             ResumeAction::StayAndAnswer(text) => {
                 assert!(text.contains("why Redis?"));
-                assert!(text.contains("clarifying question"));
-                assert!(!text.contains("wants to revise"));
+                assert!(text.contains("not requesting a rewrite"));
             }
             other => panic!("expected StayAndAnswer, got {other:?}"),
         }
     }
 
-    /// Named contract: only a real plan-panel Approve may tell the model to
-    /// implement. Bare soft-park / tool present language must not appear here.
     #[test]
-    fn approved_exit_plan_message_names_panel_cta_and_embeds_body() {
-        let msg = approved_exit_plan_tool_message(Some("# Plan\nstep A\n"), "/tmp/s/plan.md");
+    fn questions_plan_message_is_not_revise_and_forbids_rewrite() {
+        let empty = questions_plan_message("");
         assert!(
-            msg.contains("via the plan panel CTAs"),
-            "must name real panel Approve: {msg}"
+            empty.contains("clarifying question"),
+            "empty questions message must name clarifying intent: {empty}"
         );
         assert!(
-            msg.contains("You can now implement") || msg.contains("implement"),
-            "must allow implement after real approve: {msg}"
-        );
-        assert!(msg.contains("step A"), "must embed re-read body: {msg}");
-        assert!(
-            msg.contains("re-read from disk at approval time"),
-            "must name post-approve disk re-read: {msg}"
+            !empty.contains("revise the plan"),
+            "questions must not use the revise framing: {empty}"
         );
         assert!(
-            !msg.contains("NOT operator approval"),
-            "approved path must not use present-only copy: {msg}"
+            empty.contains("Do not rewrite plan.md"),
+            "questions must forbid plan rewrite: {empty}"
         );
-    }
-
-    #[test]
-    fn approved_exit_plan_message_empty_plan_still_names_panel() {
-        let msg = approved_exit_plan_tool_message(None, "/tmp/s/plan.md");
-        assert!(msg.contains("via the plan panel CTAs"), "{msg}");
-        assert!(
-            msg.contains("No plan content") || msg.contains("no plan content"),
-            "{msg}"
-        );
-    }
-
-    /// Named contract: no-client / headless must not claim plan-panel Approve
-    /// or always-approve auto-approve.
-    #[test]
-    fn no_client_exit_plan_message_does_not_claim_panel_approve() {
-        let msg = no_client_exit_plan_tool_message(Some("# P\nok\n"), "/tmp/s/plan.md");
-        let lower = msg.to_lowercase();
-        assert!(
-            lower.contains("not a plan-panel approve") || lower.contains("not a plan panel"),
-            "must deny panel approve: {msg}"
-        );
-        assert!(
-            !lower.contains("has been approved") && !lower.contains("you can now start coding"),
-            "must not use false-approve tool copy: {msg}"
-        );
-        assert!(
-            lower.contains("always-approve") || lower.contains("permission mode"),
-            "must clarify always-approve is not plan approve: {msg}"
-        );
-        assert!(msg.contains("ok"), "must still embed plan: {msg}");
+        let with = questions_plan_message("why Redis?");
+        assert!(with.contains("why Redis?"));
     }
 }
 #[cfg(test)]

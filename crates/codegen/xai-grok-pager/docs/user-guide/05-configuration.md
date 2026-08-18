@@ -68,8 +68,8 @@ subagent_rate_limit_max_attempts = 8
 stream_tool_calls = true
 
 [ui]
-theme = "doge"                         # default theme when unset is also DOGE; "groknight" for
-                                       # the previous neutral dark default (see 06-theming.md)
+theme = "doge"                         # default when unset is also DOGE; "groknight" for the
+                                       # previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
 max_thoughts_width = 120               # max column width for reasoning display
@@ -77,10 +77,9 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
-always_expand_thinking = false         # keep thinking fully expanded (default: false); when
-                                       # true, also hides the Ctrl+E expand-thinking footer hint
+always_expand_thinking = false         # keep thinking fully expanded; when true, hides Ctrl+E hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
-                                       # — and finished thoughts among them — into one row (default: true)
+                                       # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
                                        # back-to-back same-file edits into one row, expand for the
                                        # diffs (default: false)
@@ -92,38 +91,26 @@ follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for 
                                        # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
-auto_run_implement = true              # after a successful turn, auto-queue a full multi-line
-                                       # /implement block (token through EOF) from a follow-up or
-                                       # trailing residual (default: true)
+auto_run_implement = true              # after a successful turn, auto-queue a trailing /implement
 economic_mode = true                   # soft-cap effective context at 200k (Grok 4.5 price cliff)
-                                       # for compaction / context bar (default: true).
-                                       # When on, also enables Token Economy implement-effort
-                                       # caps unless [token_economy] turns them off (see below).
-                                       # Override one conversation with /economic-mode
-resume_canceled_turn_on_restart = true # continue interrupted turn: when reopening a session that has
-                                       # a cancel-resume marker (Esc/stop, graceful SIGTERM/Quit
-                                       # mid-turn, /rebuild mid-turn), re-queue that work once with a
-                                       # toast ("Continuing interrupted turn..."). Default on. Not the
-                                       # /resume session picker. Finished work is never invented.
-                                       # SIGKILL cannot write a marker. Settings → Session. Distinct
-                                       # from soft stop and pause.
+resume_canceled_turn_on_restart = true # continue interrupted turn (canceled_turn_resume.json)
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
-                                       # (default: false). Not the desktop/terminal window title.
-                                       # Window titles: [ui.notifications.title] enabled (default true).
+                                       # Not the desktop/terminal window title (see Notifications).
+cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
 
-# Token Economy (implement effort, period pacing, double-entry spend books).
-# Durable books live in $GROK_HOME/grok_oss.db (uniquely grok-oss; not session trees).
-# All of these knobs are also in Settings → Agent & Approval (alongside Economic mode).
+# Token Economy. All of these except grok_oss_database_path are also in /settings.
+# Durable books live in $GROK_HOME/grok_oss.db (not session trees).
 [token_economy]
 cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
-max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active (default 3)
-min_implement_effort = 1                   # floor always applied (default 1). Set 2 for always-a-reviewer.
-# lock_implement_effort = 0                # 0 / omit = unlocked; 1–5 forces that effort always
-desired_implement_effort = 2               # inject when missing under economic caps; must be ≤ max
-show_period_pacing = true                  # free SuperGrok period linear-burn chrome
+max_implement_effort = 3                   # hard ceiling 1–5 when economic caps are active
+min_implement_effort = 1                   # floor always applied. Set 2 to raise thoroughness.
+# lock_implement_effort = 0                # 0 / omit = unlocked; 1–5 forces that effort
+desired_implement_effort = 2               # inject when missing under economic caps
+show_period_pacing = true                  # included SuperGrok period linear-burn chrome
 local_spend_ledger = true                  # ingest usage.jsonl into grok_oss.db
 reconcile_management_usage = true          # remote Management book + /spend reconcile
-# grok_oss_database_path = ""              # override; empty → $GROK_HOME/grok_oss.db
+# grok_oss_database_path = ""              # toml-only override; empty → $GROK_HOME/grok_oss.db
+                                           # There is no /settings row for this path.
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -232,7 +219,7 @@ Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback 
 
 #### Screen mode
 
-`[ui] screen_mode` is the **default render mode** for plain `grok` launches. Set it from `/settings` → **Default screen mode** (restart required) or edit `config.toml` by hand — both write the file. CLI flags (`--minimal` / `--fullscreen`) and slash commands (`/minimal` / `/fullscreen`) are session-scoped and do **not** write this key; after a slash switch, the reverse command returns you for that session only.
+`[ui] screen_mode` is the **default render mode** for plain `grok-oss` launches. Set it from `/settings` → **Default screen mode** (restart required) or edit `config.toml` by hand — both write the file. CLI flags (`--minimal` / `--fullscreen`) and slash commands (`/minimal` / `/fullscreen`) are session-scoped and do **not** write this key; after a slash switch, the reverse command returns you for that session only.
 
 | Value | Behavior |
 |-------|----------|
@@ -245,33 +232,6 @@ A CLI flag always wins over the config value for that invocation.
 #### Snap prompt to top on send
 
 By default, sending a prompt scrolls it to the top of the viewport so the response starts on a fresh page. Set `[ui] page_flip_on_send = false` (or toggle **Snap prompt to top on send** in `/settings` → Appearance) to leave the scroll position alone when you send. It takes effect on the next send — no restart.
-
-#### ASCII-safe assistant punctuation
-
-By default, assistant AI text is scrubbed so fancy punctuation is terminal-safe:
-
-| Input | Output |
-|-------|--------|
-| Em dash (—) | `--` |
-| En dash (–) | `-` |
-| Smart double quotes | `"` |
-| Smart apostrophes / single quotes | `'` |
-| Zero-width / invisible format chars | stripped |
-| Non-breaking / exotic spaces | ASCII space |
-
-User messages, tool I/O, and reasoning blocks are **not** scrubbed.
-
-**Turn it off (durable):**
-
-| Layer | How |
-|-------|-----|
-| Settings | `/settings` → Appearance → **ASCII-safe assistant punctuation** |
-| Config | `[ui] scrub_ascii_punct = false` in `~/.grok/config.toml` |
-| Env (ops kill-switch) | `GROK_SCRUB_ASCII_PUNCT=0` (also `false` / `off` / `no` / `n`) |
-
-Either config or env off disables scrub. Env is the process-level kill-switch.
-
-**Agent override:** the agent cannot silently disable scrub. To leave curly quotes alone, the agent calls the `disable_ascii_scrub` tool, which always goes through the session permission prompt (Allow once / Allow always / Reject) — never a silent flip. Reject keeps scrub on; Allow once turns it off for the rest of the session; Allow always also writes the durable setting `[ui] scrub_ascii_punct = false` (same path as the Appearance setting).
 
 #### Scrolling
 
@@ -446,14 +406,9 @@ plan = false
 explore = "grok-4.6"               # route to different models
 ```
 
-| Key | Default | Effect |
-|-----|---------|--------|
-| `enabled` | `true` | Master switch for subagent spawning (`GROK_SUBAGENTS=0` also disables). |
-| `allow_worktree` | `false` | When `false` (default), spawn forces `isolation = none` even if the tool or a role/persona asked for `worktree`. Set `true` to restore opt-in worktree isolation. |
-
-**Migration:** earlier releases defaulted `allow_worktree` to `true`. Empty config now means force-none. If you rely on worktree isolation, set `allow_worktree = true` under `[subagents]` in `~/.grok/config.toml`.
-
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
+
+`[subagents] allow_worktree` defaults to **false**. Empty config means force-none: spawn uses `isolation = none` even if the tool or a role asked for a worktree. Set `true` to opt in. This row is also in `/settings` → Agent. See [Subagents](16-subagents.md#worktree-isolation-is-off-by-default).
 
 ### Goal mode and background workflows
 
@@ -510,7 +465,7 @@ For Claude and Cursor, `rules` and `agents` are independent: turning off named i
 
 Each cell can be set via environment variable or `config.toml`; see the environment-variables reference for the names. Resolution: env var > config.toml > default (on).
 
-`grok inspect` reports cells that still need session-start resolution as `?` until a value is available; cells with an explicit env or TOML value use that value. Affected discovery entries report `compatibilityStatus: "unresolved"` in JSON and `[compat unresolved]` in human output.
+`grok-oss inspect` reports cells that still need session-start resolution as `?` until a value is available; cells with an explicit env or TOML value use that value. Affected discovery entries report `compatibilityStatus: "unresolved"` in JSON and `[compat unresolved]` in human output.
 
 ### Plugins
 
@@ -551,20 +506,15 @@ idle_threshold_secs = 3   # seconds unfocused before a notification fires
 events = ["turn_complete", "approval_required"]
 sleep_prevention = true   # prevent display sleep during agent turns
 progress_bar = true       # show tab progress bar (OSC 9;4)
-session_recap = true      # auto "where was I" recap on return-from-away (default: true)
-session_recap_threshold_secs = 30  # min unfocused seconds before auto recap is offered
+session_recap = true      # auto return-from-away recap (Settings → Session)
+session_recap_threshold_secs = 30
 
 [ui.notifications.title]
-enabled = true
+enabled = true            # window titles on by default
 items = ["action-required", "spinner", "activity", "session-name", "agents", "grok"]
 ```
 
-The `grok` entry in `title.items` is the **product brand** slot (config name kept
-for compatibility). In Grok OSS it renders as **`grok-oss`** in the terminal/tab
-title (for example `Thinking - my-session - 2 agents - grok-oss`), matching the
-install binary. Session titles set outside the notifications path use the same
-suffix. The `agents` item shows `N agents` when more than one top-level agent is
-busy.
+Window titles are **on by default**. Opt out only with `[ui.notifications.title] enabled = false`. There is no `hide_title_bar` key (stale config is ignored). That is **not** `[ui] hide_header`, which only zeros in-app status / welcome / dashboard headers. The `grok` title slot renders as **`grok-oss`**. See [Theming → Window title](06-theming.md#window-title).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -574,41 +524,8 @@ busy.
 | `events` | array | `["turn_complete", "approval_required"]` | Events that trigger notifications. Options: `turn_complete`, `approval_required`, `session_ready`, `task_complete`, `agent_error`. |
 | `sleep_prevention` | bool | `true` | Keep the display awake while the agent works (macOS/Linux). |
 | `progress_bar` | bool | `true` | Show a progress indicator in the terminal tab (OSC 9;4). |
-| `session_recap` | bool | `true` | Auto session recap when you return after being away. **Does not** disable manual `/recap` (see [Session recap](#session-recap)). Also in Settings search as **Auto session recap**. |
-| `session_recap_threshold_secs` | integer | `30` | Minimum seconds unfocused before an automatic recap may be requested (debounce against quick tab switches). Also in Settings as **Auto recap after (seconds)**. |
-| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state (session, activity, agents, brand). Sole opt-out for dynamic titles; never emits empty SetTitle. Not the in-app header (`hide_header`). |
+| `title.enabled` | bool | `true` | Set the terminal/tab **window title** to reflect agent state (session, activity, agents, `grok-oss` brand). Sole opt-out for dynamic titles. Never emits an empty title. Not the in-app header (`hide_header`). |
 | `title.items` | array | (see above) | Items shown in the title bar. Options: `action-required`, `spinner`, `activity`, `session-name`, `agents`, `cwd`, `model`, `turn-timer`, `grok` (displays as `grok-oss`). |
-
-#### Session recap
-
-Session recap is the short "where was I" summary: on demand via **`/recap`**
-(alias **`/summarize`**), and optionally automatic when you return to the
-terminal after being away. **Default on.** Search Settings (`/settings` /
-`/options`) for `recap` to toggle these live (master feature still needs a
-restart so the shell re-advertises the ACP gate).
-
-| Layer | Key / control | Default | What it gates |
-|-------|---------------|---------|----------------|
-| Shell feature (master) | Settings **Master session recap**, or `[features] session_recap` / `GROK_SESSION_RECAP` | `true` | Both manual `/recap` and auto away-recap |
-| Client preference | Settings **Auto session recap**, or `[ui.notifications] session_recap` | `true` | Auto away-recap only |
-| Auto debounce | Settings **Auto recap after (seconds)**, or `[ui.notifications] session_recap_threshold_secs` | `30` | Min unfocused seconds before auto recap |
-
-To disable **everything** (including `/recap`):
-
-```toml
-[features]
-session_recap = false
-```
-
-Or for one process: `GROK_SESSION_RECAP=0`. Restart / new session so the shell
-re-advertises the gate on ACP initialize (`sessionRecap`).
-
-To keep manual `/recap` but stop automatic return-from-away recaps:
-
-```toml
-[ui.notifications]
-session_recap = false
-```
 
 #### Terminal support matrix
 
@@ -756,13 +673,13 @@ required_maximum_version = "0.2.200" # refuse to start above this
 - `required_minimum_version` (`GROK_REQUIRED_MINIMUM_VERSION`) and
   `required_maximum_version` (`GROK_REQUIRED_MAXIMUM_VERSION`) are hard bounds. If
   the running version is outside the range, the CLI exits at startup and instructs
-  the user to install an approved version. `grok update` and `grok --version` keep
+  the user to install an approved version. `grok-oss update` and `grok-oss --version` keep
   working so an out-of-range install can recover.
 - Bounds resolve across config layers by tightening only: a floor takes the
   highest value and a ceiling the lowest, so a managed bound can't be loosened,
   and a user or environment bound can't cancel a managed hard bound. An invalid
   value is ignored so a bad policy can't block startup.
-- An explicit `grok update --version X` is allowed above the ceiling, to recover
+- An explicit `grok-oss update --version X` is allowed above the ceiling, to recover
   from a too-new install, and rejected below the hard floor.
 
 ### Enterprise deployment
@@ -857,8 +774,7 @@ tab_width = 4                         # spaces per tab character
 expandable_indicator = true           # show expand indicator on foldable entries
 expandable_indicator_running = true   # show indicator on running entries
 expandable_indicator_char = "›"       # character for the expand indicator (default: "›")
-selection_buttons = true              # show ⧉/↗ on selection box (default on)
-bubble_copy_buttons = true            # always-on ⧉ on user/assistant bubbles (default on; no select-first)
+selection_buttons = false             # show copy/view buttons on selection
 line_under_last_entry = false         # horizontal line below last entry
 group_selection_split = true          # split selection box for expanded blocks
 highlight_overlays_border = false     # highlight extends over selection box border
@@ -945,13 +861,6 @@ The key ones. See the README for the complete list.
 |----------|-------------|
 | `GROK_HOME` | Override config directory (default: `~/.grok`) |
 | `GROK_RESPECT_GITIGNORE` | Force gitignore filtering on (`1`) or off (`0`); overrides `[tools] respect_gitignore` |
-
-### UI / hygiene
-
-| Variable | Description |
-|----------|-------------|
-| `GROK_SCRUB_ASCII_PUNCT` | Assistant-text ASCII scrub (default on when unset). Disable with `0` / `false` / `off` / `no` / `n`. See [ASCII-safe assistant punctuation](#ascii-safe-assistant-punctuation). |
-| `GROK_STRIP_TRAILING_WHITESPACE` | Strip trailing spaces/tabs after product file edits (default on). Disable with `0` / `false` / `off` / `no` / `n`. |
 
 ### Telemetry
 

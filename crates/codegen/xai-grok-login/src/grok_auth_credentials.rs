@@ -81,7 +81,7 @@ impl GrokAuthCredentials {
         let Some(ref am) = self.auth_manager else {
             return self.clone();
         };
-        match am.get_valid_token().await {
+        match am.get_valid_token_background().await {
             Ok(key) => {
                 let mut creds = self.clone();
                 creds.user_token = Some(key);

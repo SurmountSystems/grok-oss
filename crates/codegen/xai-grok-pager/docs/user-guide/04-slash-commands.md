@@ -27,25 +27,13 @@ Not `/config-agents` (alias `/agents`), which manages agent *definitions* and pe
 ### `/compact`
 
 
-When the context window fills up, Grok auto-compacts at 95% usage by default
-(configurable via `/settings` → **Auto-compact at**, or
-`[session] auto_compact_threshold_percent` / `auto_compact_threshold_tokens` in
-config.toml; UI choices 85 / 90 / 95 / 98% or Grok 4.5 card presets 200k / 475k tokens).
-Percent thresholds apply to the *effective* window — with **Economic mode** on
-(default), that window is soft-capped at 200k tokens (Grok 4.5 price cliff).
+Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* sampling window AUTO uses. With **Economic mode** on (default), that sampling window is soft-capped at 200k tokens even when the model catalog is larger (for example 500k). The footer context chip then names both windows (`used / 200K sampling · 500K catalog`) so catalog 500k is not implied as the AUTO gate.
 
 ### `/economic-mode`
 
-Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing.
-Default **on** for new sessions (`[ui] economic_mode`). Soft-caps the context
-window for compaction and the context bar.
+Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing. Default **on** for new sessions (`[ui] economic_mode` in `/settings`). Soft-caps the sampling window AUTO compact uses. When that sampling window is smaller than the catalog window, the footer context chip names both.
 
-Token Economy may rewrite **implement-loop effort** (skill reviewer fan-out
-1–5, not model reasoning effort) on `/implement`: optional **lock** and
-**min floor** always apply when set; economic mode + cap master still own the
-hard ceiling (default **3**) and desired inject when missing (default **2**).
-Toasts fire when the product rewrites effort. See
-[Configuration → Token Economy](05-configuration.md#token-economy).
+Token Economy may rewrite **implement-loop effort** (thoroughness 1–5, not model reasoning effort `/effort`, and not how many Review rows to launch) on `/implement`. One reviewer unless you explicitly asked for more. Optional lock and min floor always apply when set. Economic mode plus the cap master still own the hard ceiling (default 3) and desired inject when missing (default 2). See [Configuration → Token Economy](05-configuration.md#token-economy).
 
 ```
 /economic-mode              # toggle this conversation
@@ -65,21 +53,9 @@ Rows for Tool definitions, Skills, and MCP servers are already counted in those 
 
 ### `/recap`
 
-Generate a short "where was I" summary of the session so far. Alias: `/summarize`.
-The summary is display-only (not added to the model conversation). Grok may also
-request the same kind of recap automatically when you return after being away.
+Generate a short "where was I" summary of the session so far. Alias: `/summarize`. The summary is display-only (not added to the model conversation). Grok OSS may also request the same kind of recap automatically when you return after being away.
 
-**Default on.** Search **Settings** (`/settings` / `/options`) for `recap` to
-toggle auto return-from-away, the debounce threshold, and the master feature
-kill. You can also set config or env:
-
-| Goal | How |
-|------|-----|
-| Turn off **all** recaps (`/recap` + auto) | Settings → **Master session recap** off; or `[features] session_recap = false` / `GROK_SESSION_RECAP=0` |
-| Turn off **auto** return-from-away only | Settings → **Auto session recap** off; or `[ui.notifications] session_recap = false` (manual `/recap` still works) |
-
-Restart the session (or start a new one) after changing the master feature flag
-so the shell re-advertises the gate. See [Configuration](05-configuration.md#session-recap).
+**Default on.** Search `/settings` for `recap` to toggle auto return-from-away (`[ui.notifications] session_recap`), the debounce (`session_recap_threshold_secs`, default 30), and the master feature (`[features] session_recap`, restart required). `GROK_SESSION_RECAP=0` kills both `/recap` and auto recap.
 
 ### `/session-info`
 
@@ -107,8 +83,6 @@ Copy the most recent response's source markdown to the clipboard. Pass a number 
 ```
 
 Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set. Confirmed copies toast briefly (e.g. `Copied!`). Unverified OSC 52 deliveries and clipboard-unreachable fallbacks name the backup path so you can recover the text.
-
-One-click **`⧉`** chrome uses the same stack: always-on per-bubble copy on user and assistant messages (`bubble_copy_buttons`, default on; no select-first), selection-box copy when a block is selected (`selection_buttons`, default on; selection-box omits ⧉ when bubble chrome is on so you never see two icons), plan panel top bar (whole plan body, same as **`Y`**), and the prompt top border (full draft plain text, including multimodal chip labels). `/copy` still targets the Nth assistant message only.
 
 ### `/export`
 
@@ -182,8 +156,6 @@ Both are real toggles for the permission mode: they stay in the menu, and runnin
 
 Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to Auto-review. `/auto` only appears when the Auto-review permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto-review (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
 
-**Not plan approval:** `/always-approve` does not auto-approve a soft-parked plan. Plan decisions stay on the plan panel CTAs ([Plan mode](19-plan-mode.md#present-is-not-approval)).
-
 ### `/multiline`
 
 Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. With multiline off, the composer footer shows the newline chord once the draft is non-empty.
@@ -227,14 +199,6 @@ Enter plan mode.
 ### `/view-plan`
 
 Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
-
-### `/clear-completed-todos`
-
-Remove **completed** and **cancelled** items from the live session todo board and archive them (toast reports how many). Pending and in-progress stay. Same as the todo pane **clear-finished icon** (`[−]` next to close when the todo board is open and finished rows exist, focused or not; quiet idle paint; does not cover tasks model/timer or subagent open chrome) and optional focused `X`. Action hints still say “Clear finished.” Not the same as pane `h` (hide done in the view only) and not an agent `merge: false` wipe.
-
-```
-/clear-completed-todos
-```
 
 ---
 
@@ -407,13 +371,13 @@ Report an issue or send feedback. Bare `/feedback` opens the feedback form in ev
 
 ### `/btw`
 
-Send an aside to the agent without interrupting the current task. The side question and its answer aren't part of the main turn.
+Send an aside to the agent without interrupting the current task. The side question and its answer are not part of the main turn.
 
 In the full TUI, a finished answer opens a **Done** panel:
 
-- **`y`** (when the panel is focused) — copy the **full thread** to the clipboard (`/btw <question>` plus the complete rendered answer, not just what is on screen). The chrome also shows a `[y]` control.
-- **`a`** — open a follow-up composer in the **same** btw session (prior Q/A is included for the model). You can keep asking without starting a new main turn.
-- **`Esc`** — dismiss the panel.
+- **`y`** (when the panel is focused) copies the full thread (`/btw <question>` plus the complete rendered answer, not only what is on screen).
+- **`a`** opens a follow-up composer in the same btw session.
+- **`Esc`** dismisses the panel.
 
 In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped.
 
@@ -426,20 +390,24 @@ fix the retry loop first. /btw what does WBC stand for?
 
 ### `/note`
 
-Leave a **mid-session operator note** that is **not** a pending main-turn prompt. Use this while a turn, plan approval, or background subagents are running when you want a personal annotation without enqueueing text that will hijack the agent when the parent becomes idle.
+Leave a mid-session operator note that is **not** a pending main-turn prompt.
 
 ```
 /note check queue hold when subagents finish
-/note follow up on flake PATH #ci #hermetic
 /note                  # list notes for this session
 ```
 
-- Stores the note on the **current session only** (id, time, text, optional trailing `#tags`).
-- Does **not** call the model, does **not** touch the prompt queue, and is not a substitute for short on-disk reports that agents write for other agents.
-- Bare `/note` (or alias `/notes`) lists notes as a system block. `/tasks` also shows a count when notes exist.
-- Full TUI confirms a save with a toast; minimal mode writes a short system line.
+Bare `/note` (or `/notes`) lists notes. This does not call the model and does not touch the prompt queue.
 
-Promote-to-queue / promote-to-todo is intentionally deferred.
+### `/screenshot`
+
+Capture the current Grok OSS TUI frame as a PNG under `$GROK_HOME/screenshots/tui-*.png`. Toast shows the path. This is not an OS screenshot of other windows.
+
+**F9** is the same action. When plan approval is open, the capture **auto-attaches** to the plan composer so Approve / Revise / Clarify can send it. See [Plan Mode](19-plan-mode.md).
+
+```
+/screenshot
+```
 
 ### `/mcps`
 
@@ -449,38 +417,19 @@ Open the MCP servers management modal.
 
 Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
 
-The dual-auth block also lists SuperGrok principal(s) (role + fingerprint only
-when two logins are stored) and console key fingerprints. See
-[Authentication → Two SuperGrok logins](02-authentication.md#two-supergrok-logins-personal--business).
+The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint only) and console key fingerprints. See [Authentication](02-authentication.md).
 
 ### `/rebuild`
 
-Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
-on this machine (same user and `GROK_HOME`). Distinct from worktree database
-rebuild and from the SpaceXAI auto-updater channel.
+Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
 
-1. Walks up from the process working directory to find a Grok OSS source tree
-   (`justfile` + `crates/codegen/xai-grok-pager-bin`).
-2. Runs `just install` (or fixed `cargo build` + install when `just` is missing)
-   into `${CARGO_HOME:-~/.cargo}/bin/grok-oss`.
-3. Verifies the installed binary's package version + git SHA.
-4. Soft-signals reachable leaders to drain and exit for upgrade (same grace path
-   as update relaunch; clients reconnect and reload the session).
-5. Writes a cooperative relaunch request under `$GROK_HOME` and signals **every
-   other live product TUI** registered in `active_sessions` (`SIGUSR1`) so those
-   windows re-exec onto the new binary with the same session (not only the window
-   that typed `/rebuild`). Mid-turn work uses canceled-turn-on-restart resume.
-6. Re-execs **this** TUI onto the new binary with the same session id when
-   possible. Mid-turn work is canceled with the normal canceled-turn-on-restart
-   resume (re-queue once), not invent success.
+1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
+2. Runs `just install` (or a fixed cargo install when `just` is missing).
+3. Verifies package version plus git SHA.
+4. Signals other live product TUIs so they re-exec onto the new binary with the same session. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
+5. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success.
 
-CLI equivalent for agents and scripts: `grok-oss rebuild` (and optional
-`--source <dir>`). After a successful rebuild, all active product windows on this
-host should pick up the new binary; the rebuild report lists leaders and peer
-TUI signal outcomes.
-
-See also [Getting Started](01-getting-started.md) install notes and
-`grok-oss update --check` (freshness vs Surmount `main` only; no auto-install).
+CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 
 ### `/release-notes`
 
@@ -536,20 +485,17 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 Log in or re-authenticate without leaving the session.
 
+A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product. The second login does not wipe the first stored SuperGrok login. See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
+
 ### `/logout`
 
 Log out and return to the login screen.
 
 ### `/usage`
 
-View **session** token/cost totals, then SuperGrok billing when the consumer
-surface is visible. Alias: `/cost`.
+View **session** token and cost totals, then SuperGrok billing when the consumer surface is visible. Alias: `/cost`.
 
-When free SuperGrok **billing period** bounds are known, also shows **linear-burn
-pacing**: whether free SuperGrok period used % is ahead of or behind linear burn
-for the period (never as dollars). When live sampling is a console key, SuperGrok
-pacing is labeled as not the live principal. Full double-entry books are on
-`/spend` and a section of `/limits`.
+When included SuperGrok period bounds are known, also shows **linear-burn pacing** (ahead of or behind linear burn for the billing period; never as dollars). Full double-entry books are on `/spend` and a section of `/limits`.
 
 ```
 /usage
@@ -567,8 +513,6 @@ Open Settings on **Coding data, retention, and training**, where you choose
 
 ```
 /privacy
-/privacy opt-in
-/privacy opt-out
 ```
 
 This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser. ZDR locks coding-data sharing; it does not mute external OTEL or `user.email` — see [ZDR and this stream](24-monitoring-usage.md#zdr-and-this-stream).
@@ -579,29 +523,11 @@ This setting doesn't touch `[features] telemetry`, `trace_upload`, or your exter
 
 ### `/settings`
 
-Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`, `/options`.
+Open the settings modal to view and change configuration interactively. Aliases: `/config`, `/preferences`, `/prefs`.
 
 ### `/timestamps`
 
 Toggle message timestamps on or off.
-
-### `/screenshot`
-
-Capture the **current rendered TUI frame** as a PNG (not an OS screenshot of
-other apps). Same action is bound to **F9**. Writes under
-`$GROK_HOME/screenshots/tui-*.png` (default `~/.grok/screenshots/…`) and toasts
-the path. When plan approval is open, the capture also auto-attaches into the
-plan multimodal path; you can still open the toast path and paste manually.
-
-```
-/screenshot
-```
-
-Window title vs in-app chrome: **`[ui.notifications.title] enabled`** (default
-true) controls dynamic terminal/tab **window titles**; **`[ui] hide_header`**
-hides in-app status / welcome / dashboard headers. They are separate. See
-[Theming → Hide header](06-theming.md#hide-header) and
-[Window title](06-theming.md#window-title).
 
 ---
 

@@ -20,20 +20,12 @@ pub struct TodoPaneStyle {
     pub in_progress: TodoStatusStyle,
     pub completed: TodoStatusStyle,
     pub cancelled: TodoStatusStyle,
-    /// Style for `meta.kind` tags (`[work]`, `[phase]`, …).
-    ///
-    /// Muted chrome: pure blue. Not cyan (`gray_dim` / `accent_system` system
-    /// info), not human green, not agent magenta. Blue can be hard to see on
-    /// black; that is intentional for secondary kind chrome.
-    pub kind_badge: Style,
 }
 
 impl Default for TodoPaneStyle {
     fn default() -> Self {
         // The theme quantizes colors for terminal compatibility
         let theme = crate::theme::Theme::current();
-        // Kind tags: pure DOGE blue (not theme cyan meta slots). See `kind_badge`.
-        let kind_badge_fg = Color::Rgb(0, 0, 255);
 
         Self {
             pending: TodoStatusStyle {
@@ -56,7 +48,6 @@ impl Default for TodoPaneStyle {
                     .fg(theme.gray_bright)
                     .add_modifier(Modifier::CROSSED_OUT),
             },
-            kind_badge: Style::default().fg(kind_badge_fg),
         }
     }
 }
@@ -81,22 +72,7 @@ impl TodoListEntry {
             TodoStatus::Completed => style.completed,
             TodoStatus::Cancelled => style.cancelled,
         };
-        // Light level badge from `meta.kind` when present (residual|phase|work|child).
-        // Colour: pure blue muted chrome (`style.kind_badge`), not cyan system/info.
-        let kind = item
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("kind"))
-            .and_then(|v| v.as_str())
-            .filter(|k| !k.is_empty());
-        let styled = if let Some(kind) = kind {
-            Line::from(vec![
-                Span::styled(format!("[{kind}] "), style.kind_badge),
-                Span::styled(item.content.clone(), status_style.text_style),
-            ])
-        } else {
-            Line::from(Span::styled(item.content.clone(), status_style.text_style))
-        };
+        let styled = Line::from(Span::styled(item.content.clone(), status_style.text_style));
         Self {
             id,
             item,
@@ -156,12 +132,6 @@ pub struct TodoCounts {
     pub pending: usize,
     pub completed: usize,
     pub cancelled: usize,
-    /// Sum of leaf sizes for completed leaves (points mode only).
-    pub completed_points: usize,
-    /// Sum of leaf sizes for non-cancelled sized leaves (points mode only).
-    pub total_points: usize,
-    /// True when at least one non-cancelled leaf has an explicit size.
-    pub points_mode: bool,
 }
 
 impl TodoCounts {
@@ -253,19 +223,6 @@ impl TodoPane {
     }
 
     fn compute_counts(items: &[TodoItem]) -> TodoCounts {
-        use std::collections::HashSet;
-
-        // Same rule as the tool: any id used as someone's parentId is a parent.
-        let parent_ids: HashSet<&str> = items
-            .iter()
-            .filter_map(|item| {
-                item.meta
-                    .as_ref()
-                    .and_then(|m| m.get("parentId"))
-                    .and_then(|v| v.as_str())
-            })
-            .collect();
-
         let mut c = TodoCounts::default();
         for item in items {
             match item.status {
@@ -273,25 +230,6 @@ impl TodoPane {
                 TodoStatus::Pending => c.pending += 1,
                 TodoStatus::Completed => c.completed += 1,
                 TodoStatus::Cancelled => c.cancelled += 1,
-            }
-            if matches!(item.status, TodoStatus::Cancelled) {
-                continue;
-            }
-            // Parents never count toward points (even if size is still set).
-            let item_id = item
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("id"))
-                .and_then(|v| v.as_str());
-            if item_id.is_some_and(|id| parent_ids.contains(id)) {
-                continue;
-            }
-            if let Some(sz) = item.size {
-                c.points_mode = true;
-                c.total_points += usize::from(sz);
-                if matches!(item.status, TodoStatus::Completed) {
-                    c.completed_points += usize::from(sz);
-                }
             }
         }
         c
@@ -471,82 +409,13 @@ impl TodoPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_shell::tools::TodoPriority;
 
     fn counts(completed: usize, cancelled: usize) -> TodoCounts {
         TodoCounts {
             completed,
             cancelled,
-            ..Default::default()
+            ..TodoCounts::default()
         }
-    }
-
-    #[test]
-    fn compute_counts_points_mode_from_sizes() {
-        let items = vec![
-            TodoItem {
-                content: "a".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::Completed,
-                meta: None,
-                size: Some(2),
-            },
-            TodoItem {
-                content: "b".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::Pending,
-                meta: None,
-                size: Some(1),
-            },
-            TodoItem {
-                content: "phase".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::Pending,
-                meta: Some(serde_json::json!({"kind": "phase"})),
-                size: None,
-            },
-        ];
-        let c = TodoPane::compute_counts(&items);
-        assert!(c.points_mode);
-        assert_eq!(c.completed_points, 2);
-        assert_eq!(c.total_points, 3);
-        assert_eq!(c.completed, 1);
-        assert_eq!(c.pending, 2);
-    }
-
-    /// Sized item that later gains a child (zombie parent size) must not
-    /// contribute badge points — only leaf sizes count (mirrors tool).
-    #[test]
-    fn compute_counts_excludes_parent_size_when_child_references_parent_id() {
-        let items = vec![
-            // Was a sized leaf; then gained a child. Size may still be set
-            // (ACP / pre-clear state). Parent id is in meta.id for the graph.
-            TodoItem {
-                content: "Parent phase".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::Completed,
-                meta: Some(serde_json::json!({"id": "parent", "kind": "phase"})),
-                size: Some(2),
-            },
-            TodoItem {
-                content: "Child leaf".into(),
-                priority: TodoPriority::default(),
-                status: TodoStatus::Completed,
-                meta: Some(serde_json::json!({"parentId": "parent", "id": "child"})),
-                size: Some(1),
-            },
-        ];
-        let c = TodoPane::compute_counts(&items);
-        assert!(c.points_mode);
-        // Parent size=2 ignored; only child size=1.
-        assert_eq!(c.total_points, 1);
-        assert_eq!(c.completed_points, 1);
-        // Status counts still include both items.
-        assert_eq!(c.completed, 2);
-    }
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     #[test]
@@ -555,93 +424,6 @@ mod tests {
             empty_placeholder_message(true, TodoCounts::default()),
             "No todo items."
         );
-    }
-
-    #[test]
-    fn list_entry_shows_meta_kind_badge() {
-        let style = TodoPaneStyle::default();
-        let item = TodoItem {
-            content: "Wire the API".into(),
-            priority: TodoPriority::default(),
-            status: TodoStatus::Pending,
-            meta: Some(serde_json::json!({"kind": "phase", "namespace": "impl"})),
-            size: None,
-        };
-        let entry = TodoListEntry::new(0, item, &style);
-        let text = line_text(entry.content());
-        assert!(
-            text.starts_with("[phase] "),
-            "expected kind badge prefix, got {text:?}"
-        );
-        assert!(text.contains("Wire the API"));
-    }
-
-    /// Kind tags (`[work]`, …) are muted chrome: pure blue, not cyan system/info
-    /// (`gray_dim` / `accent_system`), not human green, not agent magenta.
-    #[test]
-    fn list_entry_kind_badge_is_blue_muted_not_cyan() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let theme = crate::theme::Theme::current();
-        let style = TodoPaneStyle::default();
-        let item = TodoItem {
-            content: "Implement the fix".into(),
-            priority: TodoPriority::default(),
-            status: TodoStatus::Pending,
-            meta: Some(serde_json::json!({"kind": "work"})),
-            size: None,
-        };
-        let entry = TodoListEntry::new(0, item, &style);
-        let spans = &entry.content().spans;
-        assert!(
-            !spans.is_empty() && spans[0].content.as_ref().starts_with("[work]"),
-            "expected [work] kind span, got {:?}",
-            spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
-        );
-        let fg = spans[0].style.fg;
-        let pure_blue = Color::Rgb(0, 0, 255);
-        let cyan = Color::Rgb(0, 255, 255);
-        let green = Color::Rgb(0, 255, 0);
-        let magenta = Color::Rgb(255, 0, 255);
-        assert_eq!(
-            fg,
-            Some(pure_blue),
-            "kind badge must be pure blue muted chrome, got {fg:?}"
-        );
-        // Explicit non-goals: cyan system/info, human green, agent magenta.
-        assert_ne!(fg, Some(cyan), "kind badge must not be cyan system/info");
-        assert_ne!(
-            fg,
-            Some(theme.gray_dim),
-            "must not use gray_dim (cyan on DOGE)"
-        );
-        assert_ne!(
-            fg,
-            Some(theme.accent_system),
-            "must not use accent_system (cyan on DOGE)"
-        );
-        assert_ne!(fg, Some(green), "kind badge must not be human green");
-        assert_ne!(fg, Some(magenta), "kind badge must not be agent magenta");
-        // Title text stays on the status text style (not the kind blue).
-        assert_eq!(
-            spans.get(1).and_then(|s| s.style.fg),
-            Some(theme.text_primary),
-            "content span must keep status text colour"
-        );
-    }
-
-    #[test]
-    fn list_entry_without_meta_kind_is_plain_content() {
-        let style = TodoPaneStyle::default();
-        let item = TodoItem {
-            content: "Plain task".into(),
-            priority: TodoPriority::default(),
-            status: TodoStatus::Pending,
-            meta: None,
-            size: None,
-        };
-        let entry = TodoListEntry::new(0, item, &style);
-        assert_eq!(line_text(entry.content()), "Plain task");
     }
 
     #[test]
@@ -663,50 +445,5 @@ mod tests {
             empty_placeholder_message(false, counts(0, 2)),
             "2 cancelled."
         );
-    }
-
-    fn sample_item(content: &str) -> TodoItem {
-        TodoItem {
-            content: content.into(),
-            priority: TodoPriority::default(),
-            status: TodoStatus::Pending,
-            meta: None,
-            size: None,
-        }
-    }
-
-    #[test]
-    fn first_plan_with_items_auto_opens_pane_once() {
-        let mut pane = TodoPane::new();
-        assert!(!pane.is_visible(), "starts hidden");
-        assert_eq!(pane.counts().total(), 0);
-
-        pane.update_todos(vec![sample_item("First ask")]);
-        assert!(
-            pane.is_visible(),
-            "first 0→N Plan should auto-open the pane"
-        );
-        assert!(
-            pane.badge_flash_active(),
-            "badge should flash on first paint"
-        );
-        assert_eq!(pane.counts().total(), 1);
-
-        // User closes; later Plan must not force-reopen.
-        pane.overlay.hide();
-        pane.update_todos(vec![sample_item("First ask"), sample_item("Second")]);
-        assert!(
-            !pane.is_visible(),
-            "subsequent updates must respect user hide after first auto-open"
-        );
-        assert_eq!(pane.counts().total(), 2);
-    }
-
-    #[test]
-    fn empty_plan_does_not_auto_open() {
-        let mut pane = TodoPane::new();
-        pane.update_todos(vec![]);
-        assert!(!pane.is_visible());
-        assert_eq!(pane.counts().total(), 0);
     }
 }

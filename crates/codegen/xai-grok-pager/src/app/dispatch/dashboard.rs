@@ -450,10 +450,7 @@ pub(super) fn dispatch_dashboard_attach(
                 focus_if_session_already_open(app, session_id.as_str(), conversation_entry)
             {
                 log_dashboard_attached(&DashboardRowId::TopLevel(existing_id));
-                return super::session::load::try_auto_resume_error_idle_on_reopen(
-                    app,
-                    existing_id,
-                );
+                return vec![];
             }
             let effects = dispatch_load_session(app, session_id, session_cwd, conversation_entry);
             if let Some(new_id) = effects.iter().find_map(|e| match e {

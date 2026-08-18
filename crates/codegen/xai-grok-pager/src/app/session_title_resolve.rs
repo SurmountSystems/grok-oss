@@ -68,8 +68,9 @@ pub(crate) fn select_by_title<'a>(
                 .join("\n");
             anyhow::bail!(
                 "Multiple sessions match title {:?}:\n{listing}\n\
-                 Resume by session id instead: grok --resume <session-id>",
-                arg.trim()
+                 Resume by session id instead: {} --resume <session-id>",
+                arg.trim(),
+                crate::client_identity::PRODUCT_CLI_NAME
             );
         }
     }

@@ -20,56 +20,6 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
-/// Columns reserved for the short timestamp overlay (`  12:30 PM` max).
-pub const TIMESTAMP_SHORT_RESERVE: u16 = 10;
-
-/// Extra right-edge columns when always-on bubble ⧉ shares a message row
-/// with the timestamp: one gap cell + one ⧉ cell. Keeps short and expanded
-/// timestamps fully readable (⧉ stays at the content right edge).
-pub const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
-
-/// Whether this block type shows a right-edge timestamp overlay.
-pub fn block_shows_timestamp(block: &RenderBlock) -> bool {
-    matches!(
-        block,
-        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-    )
-}
-
-/// Whether this block type gets always-on bubble ⧉ chrome.
-pub fn block_shows_bubble_copy(block: &RenderBlock) -> bool {
-    matches!(
-        block,
-        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_)
-    )
-}
-
-/// Columns from the content right edge reserved for bubble ⧉ (+ gap) when
-/// both timestamp and bubble copy paint on the same row. Zero otherwise.
-///
-/// Layout when non-zero (right edge of content):
-/// `[timestamp zone (TIMESTAMP_SHORT_RESERVE)][gap][⧉]`
-pub fn bubble_copy_trailing_inset(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if appearance.show_timestamps
-        && appearance.scrollback.display.bubble_copy_buttons
-        && block_shows_timestamp(block)
-        && block_shows_bubble_copy(block)
-    {
-        BUBBLE_COPY_TRAILING_INSET
-    } else {
-        0
-    }
-}
-
-/// Right-side content columns reserved so message text does not wrap under
-/// the timestamp overlay (and, when bubble ⧉ is also on, under that chrome).
-pub fn message_right_chrome_reserve(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if !appearance.show_timestamps || !block_shows_timestamp(block) {
-        return 0;
-    }
-    TIMESTAMP_SHORT_RESERVE + bubble_copy_trailing_inset(block, appearance)
-}
-
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -279,6 +229,8 @@ impl<'a> EntryRenderer<'a> {
         // Verb-group header: an aggregated "Verb N noun" label whose diamond takes the run-state color
         // An active group's glyph animates with the same wave as a running tool row's bullet
         if let Some(GroupHeaderLabel::VerbRun(vg)) = self.group_header_label {
+            use unicode_width::UnicodeWidthStr;
+
             let glyph_color = if vg.failed {
                 self.theme.accent_error
             } else if vg.running {
@@ -302,7 +254,25 @@ impl<'a> EntryRenderer<'a> {
                 prefix,
                 Style::default().fg(glyph_color),
             )];
-            spans.extend(vg.line.spans.iter().cloned());
+            let hook_start = vg
+                .line
+                .spans
+                .iter()
+                .position(|span| span.content.starts_with("  [hooks: "));
+            if let Some(hook_start) = hook_start {
+                let suffix_width: usize = vg.line.spans[hook_start..]
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum();
+                let label_budget = usize::from(content_area.width)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                    .saturating_sub(suffix_width);
+                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
+                spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
+                spans.extend(vg.line.spans[hook_start..].iter().cloned());
+            } else {
+                spans.extend(vg.line.spans.iter().cloned());
+            }
             let line = ratatui::text::Line::from(spans);
             // Group-header content is registered selectable (GROUP_HEADER_RANGE_ID)
             // Its selection maps visual columns, so it must paint visual too
@@ -359,7 +329,10 @@ impl<'a> EntryRenderer<'a> {
     /// Timestamps are shown for user and agent messages (including /btw responses and mid-turn interjections).
     /// Thinking traces, tool calls, and system messages get none.
     fn should_show_timestamp(&self) -> bool {
-        block_shows_timestamp(&self.entry.block)
+        matches!(
+            self.entry.block,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+        )
     }
 
     /// Width reserved for the timestamp on the right side of content lines.
@@ -837,7 +810,14 @@ impl Renderable for EntryRenderer<'_> {
             };
             if let Some(line_bg) = line_bg {
                 let bg_x = content_area.x + line.bg_start_col;
-                let bg_width = content_area.width.saturating_sub(line.bg_start_col);
+                // Background blocks already own the timestamp gutter via the
+                // full-area fill. A per-line band (UserPrompt reads
+                // `Theme::current()`, which may not be the renderer theme)
+                // must not punch a different color into that gutter.
+                let bg_width = content_area
+                    .width
+                    .saturating_sub(line.bg_start_col)
+                    .saturating_sub(if bg_color.is_some() { ts_reserved } else { 0 });
                 if bg_width > 0 {
                     let line_rect = Rect::new(bg_x, row, bg_width, 1);
                     buf.set_style(line_rect, Style::default().bg(line_bg));
@@ -866,7 +846,9 @@ impl Renderable for EntryRenderer<'_> {
             let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
             // Check if mouse is hovering the timestamp zone (rightmost 10 cols of the first content row)
             let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y && mx >= ts_zone_left && mx < ts_zone_right
+                my == first_content_y
+                    && mx >= content_area.x + content_area.width.saturating_sub(10)
+                    && mx < content_area.x + content_area.width
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -874,9 +856,8 @@ impl Renderable for EntryRenderer<'_> {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 + copy_inset && first_content_y < max_row {
-                // Right-align to the end of the timestamp zone (left of ⧉).
-                let ts_x = ts_zone_right.saturating_sub(ts_width);
+            if content_area.width > ts_width + 1 && first_content_y < max_row {
+                let ts_x = content_area.x + content_area.width - ts_width;
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
@@ -1146,24 +1127,6 @@ mod tests {
         text.contains("AM") || text.contains("PM")
     }
 
-    /// Content exclusive right edge for default layout (pad_right=2 → last
-    /// content cell at width-3; exclusive end width-2).
-    fn content_right_exclusive(width: u16) -> u16 {
-        width - 2
-    }
-
-    /// Expected left x of a right-aligned timestamp string under default
-    /// appearance (timestamps + bubble_copy both on → trailing inset).
-    fn expected_ts_x(
-        width: u16,
-        ts_width: u16,
-        appearance: &AppearanceConfig,
-        block: &RenderBlock,
-    ) -> u16 {
-        let copy_inset = bubble_copy_trailing_inset(block, appearance);
-        content_right_exclusive(width).saturating_sub(copy_inset + ts_width)
-    }
-
     #[test]
     fn test_timestamp_short_format_for_user_prompt() {
         let theme = Theme::current();
@@ -1180,7 +1143,7 @@ mod tests {
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
         let content_row = 1u16;
 
         let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
@@ -1205,7 +1168,7 @@ mod tests {
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1238,7 +1201,7 @@ mod tests {
             .format("%H:%M:%S | %b %d")
             .to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1459,7 +1422,7 @@ mod tests {
         // AgentMessage has no vpad, so the first content row is y=0
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = expected_ts_x(width, ts_width, &renderer.appearance, &entry.block);
+        let ts_x = width - 2 - ts_width;
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,

@@ -3343,6 +3343,8 @@ fn execute_plan_refuses_while_cancelling() {
     assert!(agent_ref(&app, id).plan_approval_view.is_some());
 }
 
+/// A prompt submitted before the session binds is held in the agent's queue rather than dropped.
+/// `maybe_drain_queue` emits nothing until `SessionCreated` arrives.
 #[test]
 fn cancelled_create_plan_turn_opens_post_turn_review() {
     let mut app = test_app_with_agent();

@@ -1004,34 +1004,6 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         session_state_fut
     );
 
-    // Post-enrollment / explicit refresh: sync fresh state into live sessions.
-    // The two broadcasts are INDEPENDENT concerns, gated separately (and in
-    // practice mutually exclusive — legacy managed fetch runs only when gateway
-    // tools are OFF, gateway fetch only when ON):
-    if !cache {
-        // 1. Legacy managed connectors -> per-session `McpServers`. Only when
-        //    the managed fetch actually succeeded (cache `Ready`). A failed
-        //    proxy fetch returns an empty vec AND rolls the cache back to
-        //    `NotFetched`; syncing that would tear down working servers. A
-        //    genuinely-empty `Ready(vec![])` still syncs so disconnect-all works.
-        let managed_ready = matches!(
-            agent.managed_mcp_cache().lock().await.cache,
-            crate::session::managed_mcp::ManagedMcpCache::Ready(_)
-        );
-        if managed_ready {
-            agent.sync_fresh_managed_mcp_to_sessions(&managed_configs);
-        }
-        // 2. Agent-level gateway catalog -> session `search_tool` index. Only
-        //    when a fresh gateway catalog committed (`Some`); a failed refetch is
-        //    `None` and must not wipe the last-good index. This must fire even
-        //    when `managed_ready` is false: in gateway mode the legacy managed
-        //    cache stays `NotFetched`, yet the fresh gateway catalog still needs
-        //    a session-side rebuild.
-        if gateway_catalog.is_some() {
-            agent.refresh_mcp_search_index_in_sessions();
-        }
-    }
-
     let compat = agent.cfg.borrow().compat_resolved;
     let plugin_registry_snapshot = agent.plugin_registry_snapshot();
     let local_servers = crate::util::config::load_mcp_servers(&cwd, &compat);

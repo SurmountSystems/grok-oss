@@ -70,9 +70,6 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
     SamplerConfig {
         api_key: Some("test-key".into()),
         failover_api_keys: Vec::new(),
-        failover_base_url: None,
-        session_base_url: None,
-        session_identity_key: None,
         base_url,
         model: model.into(),
         max_completion_tokens: Some(1024),

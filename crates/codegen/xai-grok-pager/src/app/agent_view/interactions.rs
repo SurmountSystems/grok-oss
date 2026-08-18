@@ -348,6 +348,9 @@ impl AgentView {
                     return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
+                    if qv.is_feedback() {
+                        return self.clear_feedback_then_dismiss();
+                    }
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
@@ -576,6 +579,15 @@ impl AgentView {
                 InputOutcome::Changed
             }
         }
+    }
+    /// The feedback pane has no navigation to return to, so it follows the composer: clear the report, then dismiss once it is empty.
+    fn clear_feedback_then_dismiss(&mut self) -> InputOutcome {
+        if self.prompt.text().trim().is_empty() {
+            return self.submit_question_answers(true);
+        }
+        self.prompt.set_text("");
+        self.commit_question_freeform();
+        InputOutcome::Changed
     }
     /// Handle mouse events when the question view is active.
     /// Scroll wheel scrolls the options list. Clicks on option rows move the cursor and toggle or select.
@@ -1326,7 +1338,6 @@ mod cancel_turn_mouse_tests {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
-                cancel_resume_prompt_text: None,
                 compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
@@ -2038,6 +2049,7 @@ mod question_no_freeform_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),

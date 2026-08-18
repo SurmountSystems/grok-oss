@@ -671,6 +671,37 @@ mod tests {
     }
 
     #[test]
+    fn stale_remote_turn_counter_does_not_demote_local_sessions_to_empty() {
+        // The registry's last_turn_number is updated fire-and-forget and can
+        // stay at 0 for sessions with real local turns. The merged row must
+        // keep the local num_messages, or dedup_empty_sessions collapses every
+        // such same-cwd session into a single "empty draft" row — hiding real
+        // sessions (and their unread indicators) from every list surface.
+        let local = vec![
+            make_summary("s1", "first real session", "2026-03-01T00:00:00Z"),
+            make_summary("s2", "second real session", "2026-03-01T01:00:00Z"),
+        ];
+        let remote = vec![
+            SessionRecord {
+                last_turn_number: 0,
+                ..make_remote("s1", "first real session", "2026-03-01T00:00:00Z")
+            },
+            SessionRecord {
+                last_turn_number: 0,
+                ..make_remote("s2", "second real session", "2026-03-01T01:00:00Z")
+            },
+        ];
+        let merged = merge(remote, local, None, &[], 20);
+        assert_eq!(merged.len(), 2, "both real sessions must survive the merge");
+        for row in &merged {
+            assert_eq!(
+                row.num_messages, 10,
+                "local num_messages wins over a stale 0"
+            );
+        }
+    }
+
+    #[test]
     fn remote_overwrite_preserves_local_metadata() {
         let local = vec![Summary {
             git_remotes: vec!["git@github.com:example/repo.git".into()],
@@ -759,6 +790,30 @@ mod tests {
         assert_eq!(
             first(&merged).last_recap.as_deref(),
             Some("Where we left off: auth refactor")
+        );
+    }
+
+    /// `last_turn_summary` rides the session-list wire from local
+    /// `summary.json`, both for local-only rows and inherited onto a merged
+    /// "both" row (the registry has no copy of it).
+    #[test]
+    fn last_turn_summary_carried_from_local_summary() {
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_turn_summary = Some("Fixed the parser".into());
+        let merged = merge(Vec::new(), vec![s], None, &[], 20);
+        assert_eq!(
+            merged[0].last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
+
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_turn_summary = Some("Fixed the parser".into());
+        let remote = vec![make_remote("s1", "remote title", "2026-03-01T00:00:00Z")];
+        let merged = merge(remote, vec![s], None, &[], 20);
+        assert_eq!(merged[0].source, "both");
+        assert_eq!(
+            merged[0].last_turn_summary.as_deref(),
+            Some("Fixed the parser")
         );
     }
 

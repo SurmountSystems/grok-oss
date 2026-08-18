@@ -556,17 +556,12 @@ fn render_minimal_status(
     let watchers = minimal_api::watchers(agent);
     let drain_blocked = minimal_api::drain_blocked(agent);
     let parked = minimal_api::renders_parked(agent);
-    // Minimal is keyboard-only and does not own process-level global pause
-    // chrome; AgentView::global_work_paused is crate-private. Pass false so
-    // status visibility matches idle-without-pause semantics.
-    let global_paused = false;
     if !turn_status::should_show(
         &agent.session.state,
         drain_blocked,
         minimal_api::session_starting_since(agent),
         watchers,
         parked,
-        global_paused,
     ) {
         render_idle_hint(buf, area, theme);
         return;
@@ -598,7 +593,7 @@ fn render_minimal_status(
             flat_background: true,
             held_queue: minimal_api::held_queue_count(agent),
             held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
-            global_paused,
+            global_paused: false,
         },
     );
 }
@@ -658,7 +653,6 @@ fn render_prompt_info(
     transcript_hint: &str,
     theme: &Theme,
 ) {
-    use xai_grok_pager::views::context_bar::fmt_tokens;
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
@@ -687,19 +681,26 @@ fn render_prompt_info(
             segs.push((label.to_string(), base.fg(color)));
         }
         let used = agent.context_state.as_ref().map(|c| c.used);
-        let total = agent
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or_else(|| agent.session.models.get_context_window());
-        if let (Some(used), Some(total)) = (used, total)
-            && total > 0
+        let catalog = agent.session.models.get_context_window().or_else(|| {
+            agent
+                .context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling = catalog.map(|window| {
+            xai_grok_shell::util::config::apply_economic_context_cap(
+                window,
+                xai_grok_pager::appearance::cache::load_economic_mode(),
+            )
+        });
+        if let Some(used) = used
+            && let Some(chip) =
+                xai_grok_pager::views::context_bar::context_chip_token_text(used, sampling, catalog)
+            && let Some(gate) =
+                xai_grok_pager::views::context_bar::context_chip_gate_window(sampling, catalog)
         {
-            let pct = xai_token_estimation::usage_percentage(used, total);
-            segs.push((
-                format!("{} / {} ({:.0}%)", fmt_tokens(used), fmt_tokens(total), pct),
-                base,
-            ));
+            let pct = xai_token_estimation::usage_percentage(used, gate);
+            segs.push((format!("{chip} ({pct:.0}%)"), base));
         }
     }
     if queued > 0 {
@@ -1046,7 +1047,9 @@ mod tests {
             ..Default::default()
         });
         let theme = Theme::current();
-        let area = Rect::new(0, 0, 80, 1);
+        // Two-meter chip plus `N queued · /queue` is longer than the old
+        // unlabeled used/total form. 80 columns clipped the trailing hint.
+        let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         render_prompt_info(&mut buf, area, &a, 3, "ctrl+o transcript", &theme);
         let text: String = (0..area.width)
@@ -1056,6 +1059,7 @@ mod tests {
         assert!(text.contains("2.0M"), "total context window: {text:?}");
         assert!(text.contains('%'), "percentage: {text:?}");
         assert!(text.contains("3 queued"), "queued count: {text:?}");
+        assert!(text.contains("/queue"), "queued inspection cue: {text:?}");
         assert!(
             text.trim_end().ends_with("ctrl+o transcript"),
             "trailing transcript hint: {text:?}"

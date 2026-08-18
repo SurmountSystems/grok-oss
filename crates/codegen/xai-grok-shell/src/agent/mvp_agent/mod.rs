@@ -162,6 +162,22 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
         "SuperGrokPlus" => jwt_claim == "supergrok_plus",
         _ => jwt_claim.parse::<u64>().is_ok_and(|n| n != 0),
     }
+    let server_id = meta_non_empty_str(local, "server_id")
+        .or_else(|| {
+            meta
+                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
+                .and_then(|w| meta_non_empty_str(w, "server_id"))
+        })?;
+    let cwd = meta_non_empty_str(local, "cwd")
+        .or_else(|| {
+            meta
+                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
+                .and_then(|w| meta_non_empty_str(w, "cwd"))
+        });
+    Some(ComputerSession::ExistingWorkspace {
+        server_id,
+        cwd,
+    })
 }
 /// ACP `_meta` key for the intent to run a chat session on a local workspace (pager stamps it on chat create).
 #[cfg(feature = "local-workspace")]

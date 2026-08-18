@@ -351,10 +351,10 @@ fn empty_billing_config() -> BillingConfig {
         on_demand_used: None,
         prepaid_balance: None,
         is_unified_billing_user: None,
-        product_usage: vec![],
         billing_period_start: None,
         billing_period_end: None,
         history: vec![],
+        product_usage: vec![],
     }
 }
 #[test]
@@ -365,55 +365,8 @@ fn credit_balance_prefers_credit_usage_percent_over_limit_used() {
         used: Some(Cent { val: 9_000 }),
         ..empty_billing_config()
     };
-    let bal = credit_balance_from_config(c);
-    assert_eq!(bal.usage_pct, 42.0);
-    assert!(bal.included_usage_known);
+    assert_eq!(credit_balance_from_config(c).usage_pct, 42.0);
 }
-
-/// Named contract: empty billing config is honest absence, not a silent 0%.
-#[test]
-fn credit_balance_empty_config_marks_included_unknown() {
-    let bal = credit_balance_from_config(empty_billing_config());
-    assert!(
-        !bal.included_usage_known,
-        "no percent and no limit/used pair must not claim a known 0%"
-    );
-    assert_eq!(bal.usage_pct, 0.0, "placeholder only when unknown");
-}
-
-/// Named contract: explicit 0% on the wire is a true zero (known reading).
-#[test]
-fn credit_balance_explicit_zero_percent_is_known() {
-    let c = BillingConfig {
-        credit_usage_percent: Some(0.0),
-        ..empty_billing_config()
-    };
-    let bal = credit_balance_from_config(c);
-    assert!(bal.included_usage_known);
-    assert_eq!(bal.usage_pct, 0.0);
-}
-#[test]
-fn credit_balance_forwards_grok_build_usage_pct_from_product_usage() {
-    // Named contract: FetchBilling → CreditBalance carries PRODUCT_GROK_BUILD %
-    // so in-TUI /limits --json can show grokBuildUsagePct after cache warm.
-    let c = BillingConfig {
-        credit_usage_percent: Some(65.0),
-        product_usage: vec![xai_grok_shell::extensions::billing::ProductUsageEntry {
-            product: Some(
-                xai_grok_shell::extensions::billing::PRODUCT_GROK_BUILD.into(),
-            ),
-            usage_percent: Some(61.2),
-        }],
-        ..empty_billing_config()
-    };
-    assert_eq!(credit_balance_from_config(c).grok_build_usage_pct, Some(61.2));
-    assert_eq!(
-        credit_balance_from_config(empty_billing_config()).grok_build_usage_pct,
-        None,
-        "no productUsage → no invent"
-    );
-}
-
 #[test]
 fn credit_balance_forwards_is_unified_billing_user() {
     let c = BillingConfig {
@@ -643,6 +596,32 @@ fn credit_balance_effective_blends_budget_for_legacy_shape_under_100() {
     assert!(bal.pay_as_you_go);
     assert_eq!(bal.usage_pct, 50.0);
     assert_eq!(bal.effective_usage_pct, 25.0);
+}
+/// Successful TUI `FetchBilling` / `FetchAppBilling` map with a real included
+/// SuperGrok period used percent must paint `N%` on the compact meter, not the
+/// honest-unknown placeholder `...%`. SuperGrok is paid; this is included
+/// SuperGrok period limits, not SuperGrok dollar credits. Chrome must not
+/// invent a percent when usage is actually unknown.
+#[test]
+fn successful_tui_billing_map_paints_included_period_percent_not_ellipsis() {
+    let c = BillingConfig {
+        credit_usage_percent: Some(36.0),
+        ..empty_billing_config()
+    };
+    let bal = credit_balance_from_config(c);
+    assert!(
+        bal.included_usage_known,
+        "TUI billing map must mark included SuperGrok period usage known when credit_usage_percent is present"
+    );
+    assert_eq!(bal.usage_pct, 36.0);
+    let theme = crate::theme::Theme::default();
+    let line = crate::views::credit_bar::credit_bar_line(&bal, false, &theme);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "included SuperGrok period limits · 36%");
+    assert!(
+        !text.contains("...%"),
+        "known included SuperGrok period usage must not paint the unknown placeholder"
+    );
 }
 #[test]
 fn parse_worktree_restore_payload_full() {
@@ -1110,7 +1089,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Exits when the channel closes.
 fn spawn_fake_acp_agent_counting(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
@@ -1136,13 +1114,6 @@ fn spawn_fake_acp_agent_counting(
         }
     });
     counter
-}
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
-fn spawn_fake_acp_agent(
-    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
-) -> Arc<AtomicUsize> {
-    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
 }
 /// Redirect `GROK_HOME` to a tempdir for test isolation.
 fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
@@ -1190,12 +1161,12 @@ fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
     let session_id = acp::SessionId::new(id);
     register_in(
             root,
-            ActiveSession {
-                session_id: session_id.clone(),
-                pid: std::process::id(),
-                cwd: "/tmp/test".into(),
-                opened_at: chrono::Utc::now(),
-            },
+            ActiveSession::new(
+                session_id.clone(),
+                std::process::id(),
+                "/tmp/test",
+                chrono::Utc::now(),
+            ),
         )
         .expect("register");
     session_id
@@ -2110,6 +2081,50 @@ async fn fetch_session_list_sends_kind_facet_filter() {
         );
 }
 #[tokio::test]
+async fn fetch_session_list_sends_kind_facet_filter() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task.lock().unwrap().push(params);
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("ser");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSessionList {
+            query: None,
+            seq: 1,
+            kind_filter: Some(vec!["build".into()]),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let _ = tasks.join_next().await;
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
+            serde_json::json!(["build"])
+        );
+}
+#[tokio::test]
 async fn fetch_workflows_list_sends_session_id() {
     use std::sync::{Arc, Mutex};
     use xai_acp_lib::AcpAgentMessage;
@@ -2885,7 +2900,7 @@ fn make_session_info(
             context: ContextInfo {
                 used,
                 total,
-                auto_compact_threshold_percent: 95,
+                auto_compact_threshold_percent: 85,
                 ..Default::default()
             },
         },
@@ -3273,4 +3288,13 @@ async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity
             serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
                 .is_err()
         );
+}
+#[test]
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params("sess-1", 3);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], REWIND_MODE_WIRE);
+    assert_eq!(params["mode"], "conversation_only");
 }

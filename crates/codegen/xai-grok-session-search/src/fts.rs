@@ -1248,6 +1248,46 @@ mod tests {
         );
     }
 
+    /// `/resume` search types a session UUID; CLI `--resume <id>` works because
+    /// it looks up by id globally. FTS only indexed title+content, so pasting
+    /// the id into search returned nothing (GB-4249).
+    #[test]
+    fn test_query_matches_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let id = "019f870d-6976-7d73-a12a-52e9d4aebcd4";
+        index
+            .upsert_doc(&test_doc(
+                id,
+                "unrelated title",
+                "body text with no identifier",
+            ))
+            .unwrap();
+
+        let qr = index.query(id, None, 10, 0, false).unwrap();
+        assert_eq!(qr.results.len(), 1, "full session id must match");
+        assert_eq!(qr.results[0].session_id, id);
+        assert!(
+            qr.results[0]
+                .matched_fields
+                .iter()
+                .any(|f| f == "session_id")
+        );
+
+        let prefix = index.query("019f870d-6976", None, 10, 0, false).unwrap();
+        assert_eq!(prefix.results.len(), 1, "session id prefix must match");
+        assert_eq!(prefix.results[0].session_id, id);
+
+        let mut other_cwd = test_doc("019f870d-6976-7d73-a12a-ffffffffffff", "other", "unrelated");
+        other_cwd.cwd = "/other".to_string();
+        index.upsert_doc(&other_cwd).unwrap();
+        let scoped = index
+            .query(id, Some("/test/workspace"), 10, 0, false)
+            .unwrap();
+        assert_eq!(scoped.results.len(), 1);
+        assert_eq!(scoped.results[0].session_id, id);
+    }
+
     #[test]
     fn test_query_cwd_filter() {
         let tmp = TempDir::new().unwrap();

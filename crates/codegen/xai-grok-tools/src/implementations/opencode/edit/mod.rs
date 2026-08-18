@@ -245,6 +245,12 @@ impl xai_tool_runtime::Tool for EditTool {
             }
         }
 
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &path, &ctx, &resources, "edit",
+            )
+            .await?;
+
         // ── Route to creation or replacement ────────────────────────
         if input.old_string.is_empty() {
             handle_new_file_creation(
@@ -334,6 +340,19 @@ async fn handle_new_file_creation(
             })?;
     }
 
+    let formatted =
+        crate::util::rust_edit_verify::after_structured_rust_write(path, &write_content);
+    if formatted != write_content
+        && let Err(e) = fs.write_file(path, formatted.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
+    let write_content = formatted;
+
     // Emit FileWritten notification.
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
@@ -352,7 +371,7 @@ async fn handle_new_file_creation(
 
     let tool_output_for_prompt = format!(
         "The file {} has been created. Here's the content:\n\n{snippet}",
-        &input.file_path,
+        input.file_path,
     );
 
     let edits = vec![SearchReplaceEditDetail {
@@ -372,7 +391,7 @@ async fn handle_new_file_creation(
             tool_output_for_prompt,
             tool_output_for_prompt_concise: Some(format!(
                 "The file {} has been created.",
-                &input.file_path
+                input.file_path
             )),
             absolute_path: path.to_path_buf(),
             edits: SearchReplaceEditContextInformation { details: edits },
@@ -499,19 +518,19 @@ async fn handle_replacement(
         let (snippet, _, _) = render_snippet(&new_text, &input.new_string, *pos, CONTEXT_LINES);
         let default_msg = format!(
             "The file {} has been updated. Here's a relevant snippet of the edited file:\n\n{snippet}",
-            &input.file_path,
+            input.file_path,
         );
-        let concise_msg = format!("The file {} has been updated.", &input.file_path);
+        let concise_msg = format!("The file {} has been updated.", input.file_path);
         (default_msg, concise_msg)
     } else {
         let default_msg = format!(
             "All {} occurrences of the specified string were successfully replaced in {}.",
             new_positions.len(),
-            &input.file_path,
+            input.file_path,
         );
         let concise_msg = format!(
             "The file {} has been updated. All occurrences were successfully replaced.",
-            &input.file_path,
+            input.file_path,
         );
         (default_msg, concise_msg)
     };
@@ -527,11 +546,22 @@ async fn handle_replacement(
             )
         })?;
 
+    let formatted = crate::util::rust_edit_verify::after_structured_rust_write(path, &write_text);
+    if formatted != write_text
+        && let Err(e) = fs.write_file(path, formatted.as_bytes()).await
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %e,
+            "ACP filesystem sync of rustfmt output failed; disk already formatted"
+        );
+    }
+
     // Emit FileWritten notification (must match bytes on disk).
     notification_handle.send_file_written(FileWritten {
         tool_call_id: tool_call_id.to_string(),
         absolute_path: path.to_path_buf(),
-        content: write_text,
+        content: formatted,
         previous_content: Some(old_text.clone()),
         is_new_file: false,
     });
@@ -1089,6 +1119,8 @@ mod tests {
 
     /// A3 gate: `GROK_DENY_REPLACE_ALL=1` → InvalidInput, file unchanged.
     #[tokio::test]
+    // Process-env serialization across awaits is intentional for this hermetic test.
+    #[allow(clippy::await_holding_lock)]
     async fn bulk_policy_denies_replace_all_when_env_set() {
         use crate::types::resources::OwnerSessionId;
         use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
@@ -1126,6 +1158,8 @@ mod tests {
 
     /// A3 gate: same old→new storm across N files → InvalidInput on Nth; last file unchanged.
     #[tokio::test]
+    // Process-env serialization across awaits is intentional for this hermetic test.
+    #[allow(clippy::await_holding_lock)]
     async fn bulk_policy_storm_denies_and_leaves_file_unchanged() {
         use crate::types::resources::OwnerSessionId;
         use crate::util::bulk_edit_policy::test_env::{ENV_LOCK, EnvGuard};
@@ -1256,7 +1290,9 @@ mod tests {
             SearchReplaceOutput::EditsApplied(applied) => {
                 assert_eq!(applied.absolute_path, subdir.join("lib.rs"));
                 let content = std::fs::read_to_string(subdir.join("lib.rs")).unwrap();
-                assert_eq!(content, "fn main() { /* edited */ }\n");
+                // `.rs` writes run rustfmt (file-level infer-from-path verify).
+                // edition 2024 keeps the comment on the `{` line and moves `}`.
+                assert_eq!(content, "fn main() { /* edited */\n}\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
@@ -1303,6 +1339,49 @@ mod tests {
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+
+    // ── Per-path write lock (same contract as search_replace) ────
+
+    /// OpenCode edit must not write a path another agent already holds.
+    /// Same meaning as `two_agents_cannot_write_the_same_path_at_once`
+    /// for search_replace: holder named, file named, disk unchanged.
+    #[tokio::test]
+    async fn opencode_edit_cannot_write_a_path_another_agent_already_holds() {
+        use crate::implementations::editor_infra::per_path_write_lock::try_acquire_write;
+        use crate::types::resources::OwnerSessionId;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shared.txt");
+        std::fs::write(&path, "original\n").unwrap();
+        let _held = try_acquire_write(&path, "explore-agent-a").unwrap();
+
+        let mut resources = test_resources(tmp.path());
+        resources.insert(OwnerSessionId("explore-agent-b".to_string()));
+
+        let err = xai_tool_runtime::Tool::run(
+            &EditTool,
+            test_ctx(resources.into_shared()),
+            make_input("shared.txt", "original\n", "changed by b\n"),
+        )
+        .await
+        .expect_err("second writer must be a tool error");
+
+        assert!(
+            err.detail.contains("explore-agent-a"),
+            "error must name the holder: {}",
+            err.detail
+        );
+        assert!(
+            err.detail.contains("shared.txt"),
+            "error must name the file: {}",
+            err.detail
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "original\n",
+            "disk must be unchanged when the lock is held"
+        );
     }
 
     // ── Notification sent ───────────────────────────────────────

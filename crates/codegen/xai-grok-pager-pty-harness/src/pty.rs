@@ -3,12 +3,13 @@
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{ExitStatus, PtySize, native_pty_system};
 use xai_grok_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+use xai_tty_utils::ProcessGroup;
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 /// Grace after group SIGTERM before SIGKILL so a responsive child can run TERM cleanup. Wedged children fall through to SIGKILL.
@@ -99,6 +100,8 @@ pub(crate) enum PtyRead {
 pub struct PtyController {
     child: Box<dyn portable_pty::Child + Send>,
     process_tree: Option<TestProcessTree>,
+    /// Strong handle for ProcessScope enrollment (Weak stays live while owned).
+    process_group: Option<Arc<ProcessGroup>>,
     exit_status: Option<ExitStatus>,
     exit_observed: bool,
     spawn_pid: Option<u32>,
@@ -203,6 +206,7 @@ impl PtyController {
         Ok(Self {
             child,
             process_tree,
+            process_group,
             exit_status: None,
             exit_observed: false,
             spawn_pid: process_pid,
@@ -448,6 +452,8 @@ impl PtyController {
     }
 
     fn release_process_tree(&mut self) {
+        // Drop ProcessScope strong handle first so Weak cannot kill a reused PID.
+        self.process_group = None;
         if let Some(mut tree) = self.process_tree.take() {
             tree.release();
             #[cfg(test)]

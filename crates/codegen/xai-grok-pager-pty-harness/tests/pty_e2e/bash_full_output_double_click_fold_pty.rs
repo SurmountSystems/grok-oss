@@ -67,8 +67,6 @@ async fn bash_full_output_double_click_fold_pty() {
     harness
         .wait_for_text("L12", Duration::from_secs(30))
         .expect("bash output tail");
-    // Live tail can show L06–L12 while L01 is still clipped; wait for
-    // expand-on-finish before asserting the head is present.
     harness
         .wait_for_turn_idle(Duration::from_secs(20))
         .expect("bash turn idle before expand-on-finish assert");
@@ -80,7 +78,7 @@ async fn bash_full_output_double_click_fold_pty() {
                 harness.screen_contents()
             )
         });
-    for line in ["L03", "L06", "L09"] {
+    for line in ["L01", "L03", "L09"] {
         assert!(
             harness.contains_text(line),
             "finished ! command must not truncate output ({line} missing)\nscreen:\n{}",

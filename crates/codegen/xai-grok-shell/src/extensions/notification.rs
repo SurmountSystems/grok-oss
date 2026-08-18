@@ -552,7 +552,13 @@ pub enum SessionUpdate {
         elapsed_ms: Option<i64>,
         /// Summary preview (first ~100 chars of summary)
         summary_preview: Option<String>,
+        /// Replacement stayed in history, but the drop was not useful.
+        /// Further AUTO is sticky-suppressed for this session.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saved_too_little: bool,
     },
+    /// AUTO did not start because the last full-replace saved too little.
+    AutoCompactSkippedTinySavings,
     /// Auto-compact failed
     AutoCompactFailed {
         /// Error message

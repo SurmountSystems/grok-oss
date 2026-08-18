@@ -167,8 +167,7 @@ async fn compute_all_changes(
                 let resolved = cwd.join(path);
                 changes.push(FileChange::Add {
                     path: resolved,
-                    // Post-edit trailing-ws strip (default ON; env override).
-                    content: crate::util::trailing_ws::prepare_for_write(contents.clone()),
+                    content: contents.clone(),
                 });
             }
             Hunk::DeleteFile { path } => {
@@ -196,8 +195,6 @@ async fn compute_all_changes(
                         ApplyPatchError::ComputeReplacements(msg) => msg,
                         other => other.to_string(),
                     })?;
-                // Post-edit trailing-ws strip (default ON; env override).
-                let new_content = crate::util::trailing_ws::prepare_for_write(new_content);
 
                 if let Some(dest) = move_path {
                     let resolved_dest = cwd.join(dest);
@@ -408,6 +405,33 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
             ));
         }
 
+        let lock_paths: Vec<PathBuf> = parsed
+            .hunks
+            .iter()
+            .flat_map(|hunk| match hunk {
+                Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => {
+                    vec![cwd.join(path)]
+                }
+                Hunk::UpdateFile {
+                    path, move_path, ..
+                } => {
+                    let mut paths = vec![cwd.join(path)];
+                    if let Some(dest) = move_path {
+                        paths.push(cwd.join(dest));
+                    }
+                    paths
+                }
+            })
+            .collect();
+        let _write_locks =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_paths_for_tool(
+                lock_paths,
+                &ctx,
+                &resources,
+                "apply_patch",
+            )
+            .await?;
+
         // ── Phase 2: Compute all changes in memory (no writes yet) ───
         let changes = match compute_all_changes(&cwd, &fs, &parsed.hunks).await {
             Ok(c) => c,
@@ -419,6 +443,7 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
 
         // ── Phase 3: Apply all changes (write to filesystem) ─────
         let mut file_results = Vec::new();
+        let mut pending_written: Vec<(PathBuf, String, Option<String>, bool)> = Vec::new();
 
         for change in &changes {
             match change {
@@ -525,7 +550,6 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                     original_content,
                     new_content,
                 } => {
-                    // Create parent dirs for destination.
                     ensure_parent_dirs(dest_path).await?;
                     fs.write_file(dest_path, new_content.as_bytes())
                         .await
@@ -541,16 +565,7 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                             e.to_string(),
                         )
                     })?;
-
-                    // Notify destination (new file at new location).
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: dest_path.clone(),
-                        content: new_content.clone(),
-                        previous_content: None,
-                        is_new_file: true,
-                    });
-                    // Notify source (deleted).
+                    pending_written.push((dest_path.clone(), new_content.clone(), None, true));
                     notification_handle.send_file_written(FileWritten {
                         tool_call_id: tool_call_id.clone(),
                         absolute_path: source_path.clone(),
@@ -558,7 +573,6 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                         previous_content: Some(original_content.clone()),
                         is_new_file: false,
                     });
-
                     file_results.push(ApplyPatchFileResult {
                         path: source_path.clone(),
                         action: "moved".to_string(),
@@ -566,6 +580,39 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                         new_text: new_content.clone(),
                         move_to: Some(dest_path.clone()),
                     });
+                }
+            }
+        }
+
+        let format_pairs: Vec<(PathBuf, String)> = pending_written
+            .iter()
+            .map(|(path, content, _, _)| (path.clone(), content.clone()))
+            .collect();
+        let formatted = crate::util::rust_edit_verify::after_structured_rust_writes(&format_pairs);
+        for ((path, original, previous, is_new), formatted_content) in
+            pending_written.into_iter().zip(formatted)
+        {
+            if formatted_content != original
+                && let Err(e) = fs.write_file(&path, formatted_content.as_bytes()).await
+            {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "ACP filesystem sync of rustfmt output failed; disk already formatted"
+                );
+            }
+            notification_handle.send_file_written(FileWritten {
+                tool_call_id: tool_call_id.clone(),
+                absolute_path: path.clone(),
+                content: formatted_content.clone(),
+                previous_content: previous,
+                is_new_file: is_new,
+            });
+            for result in &mut file_results {
+                let matches_dest = result.move_to.as_ref() == Some(&path);
+                let matches_path = result.path == path && result.action != "deleted";
+                if matches_dest || matches_path {
+                    result.new_text = formatted_content.clone();
                 }
             }
         }

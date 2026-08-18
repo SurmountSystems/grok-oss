@@ -54,6 +54,10 @@ pub struct SubagentAttemptInfo {
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
     pub parent_prompt_id: Option<Arc<str>>,
+    /// Session that spawned this agent. L2s name the main thread. L3s name their L2.
+    pub parent_session_id: Option<Arc<str>>,
+    /// Nesting depth from the main thread. `1` is an L2. `2` is an L3 specialist.
+    pub depth: Option<u32>,
     pub started_at: Instant,
     /// Latest progress/finish update, else `started_at`; the dashboard's "last activity" sort key.
     pub last_progress_at: Instant,

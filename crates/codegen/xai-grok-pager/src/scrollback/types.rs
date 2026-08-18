@@ -2,7 +2,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ratatui::style::Color;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -22,16 +24,11 @@ pub enum WrapMode {
 
 /// Accent/bullet color style for a block.
 /// Used by both `accent()` and `bullet()` trait methods.
-/// When `animated` is true, the renderer uses a wave animation effect
-/// (unless [`Self::striped`] is set — then the rail cycles the DOGE
-/// striped-down glyph marquee in `color`).
+/// When `animated` is true, the renderer uses a wave animation effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccentStyle {
     pub color: Color,
     pub animated: bool,
-    /// Prefer dashed/striped vertical glyphs over solid `┃`.
-    /// Used for Yellow context/time/meta rails under DOGE.
-    pub striped: bool,
 }
 
 impl AccentStyle {
@@ -40,7 +37,6 @@ impl AccentStyle {
         Self {
             color,
             animated: false,
-            striped: false,
         }
     }
 
@@ -49,28 +45,6 @@ impl AccentStyle {
         Self {
             color,
             animated: true,
-            striped: false,
-        }
-    }
-
-    /// Static rail using striped (dashed) vertical glyphs in `color`.
-    ///
-    /// Context/time/meta (Yellow role): solid yellow `┃` is wrong; the rail
-    /// should read as yellow stripes.
-    pub const fn striped(color: Color) -> Self {
-        Self {
-            color,
-            animated: false,
-            striped: true,
-        }
-    }
-
-    /// Animated striped rail: cycles the DOGE striped-down marquee in `color`.
-    pub const fn striped_animated(color: Color) -> Self {
-        Self {
-            color,
-            animated: true,
-            striped: true,
         }
     }
 
@@ -295,6 +269,40 @@ impl BlockLine {
     pub fn with_joiner(mut self, joiner: Option<String>) -> Self {
         self.joiner = joiner;
         self
+    }
+
+    /// Screen rect of the always-on bubble copy glyph, if this line carries one.
+    pub(crate) fn bubble_copy_button_rect(&self, content_x: u16, screen_y: u16) -> Option<Rect> {
+        let col = self.copy_button_col?;
+        let width = crate::glyphs::copy_icon().width() as u16;
+        Some(Rect::new(
+            content_x.saturating_add(col),
+            screen_y,
+            width.max(1),
+            1,
+        ))
+    }
+
+    /// Paint the always-on bubble copy glyph at [`Self::copy_button_col`].
+    ///
+    /// Call after content and the timestamp overlay so the glyph is not
+    /// wiped by the gutter clear and is not part of wrap geometry.
+    pub(crate) fn paint_bubble_copy_button(
+        &self,
+        buf: &mut Buffer,
+        content_x: u16,
+        screen_y: u16,
+        style: Style,
+    ) {
+        let Some(col) = self.copy_button_col else {
+            return;
+        };
+        buf.set_string_safe(
+            content_x.saturating_add(col),
+            screen_y,
+            crate::glyphs::copy_icon(),
+            style,
+        );
     }
 }
 

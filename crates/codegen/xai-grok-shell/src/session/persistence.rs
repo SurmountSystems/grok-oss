@@ -159,11 +159,7 @@ use serde::{Deserialize, Serialize};
 
 // /btw side question persistence types
 
-/// A single /btw side-question **turn** persisted to `btw_history.jsonl`.
-///
-/// Multi-turn follow-ups reuse the same `btw_session_id` and append another
-/// line (multi-entry history, ordered by `asked_at`). There is no nested
-/// turns array — each JSONL row is one Q/A.
+/// A single /btw side question entry persisted to `btw_history.jsonl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BtwEntry {
@@ -2713,6 +2709,29 @@ fn collect_session_files_recursive_with_artifacts(
 /// Queue a fresh session's local-only ACP history to `remote_sync` (xAI updates are never synced), returning the count.
 /// Resumed sessions are forward-only.
 /// Their prior history may already be on the backend (which appends by content, no per-message id), so re-sending would duplicate.
+fn backfill_updates_to_sync(
+    created_fresh: bool,
+    updates: Vec<SessionUpdate>,
+    remote_sync: &RemoteSync,
+) -> usize {
+    if !created_fresh {
+        return 0;
+    }
+    let mut backfilled = 0usize;
+    for update in updates {
+        if let SessionUpdate::Acp(notification) = update {
+            remote_sync.queue(*notification);
+            backfilled += 1;
+        }
+    }
+    remote_sync.flush();
+    backfilled
+}
+
+/// Queue a fresh session's local-only ACP history to `remote_sync` (xAI updates
+/// are never synced), returning the count. Resumed sessions are forward-only:
+/// their prior history may already be on the backend (which appends by content,
+/// no per-message id), so re-sending would duplicate.
 fn backfill_updates_to_sync(
     created_fresh: bool,
     updates: Vec<SessionUpdate>,

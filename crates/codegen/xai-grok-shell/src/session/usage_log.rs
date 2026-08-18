@@ -19,29 +19,29 @@ use serde::Serialize;
 use xai_grok_sampling_types::{TokenUsage, reported_cost_ticks};
 
 /// Filename under the session directory.
-pub const USAGE_FILE: &str = "usage.jsonl";
+pub(crate) const USAGE_FILE: &str = "usage.jsonl";
 
 /// Schema version stamped on every row.
-pub const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// `turn_type` for a main-agent tool-loop model call.
-pub const TURN_TYPE_MAIN: &str = "main";
+pub(crate) const TURN_TYPE_MAIN: &str = "main";
 
 /// `turn_type` for a subagent / task-agent model call.
-pub const TURN_TYPE_AGENT_TURN: &str = "agent_turn";
+pub(crate) const TURN_TYPE_AGENT_TURN: &str = "agent_turn";
 
 /// `agent_kind` for the primary session agent (not a subagent).
-pub const AGENT_KIND_MAIN: &str = "main";
+pub(crate) const AGENT_KIND_MAIN: &str = "main";
 
 /// Fallback `agent_kind` when a subagent session has no type label.
-pub const AGENT_KIND_SUBAGENT: &str = "subagent";
+pub(crate) const AGENT_KIND_SUBAGENT: &str = "subagent";
 
 /// One JSONL row in `usage.jsonl` (schema v1).
 ///
 /// Field names are snake_case and SQL-friendly. Optional token/cost fields are
 /// omitted when unknown so incomplete rows stay compact.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct UsageRecord {
+pub(crate) struct UsageRecord {
     pub schema_version: u32,
     /// Row id (ULID, Crockford base32).
     pub event_ulid: String,
@@ -85,14 +85,14 @@ pub struct UsageRecord {
 
 /// Identity fields that distinguish main vs subagent/task rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageIdentity {
+pub(crate) struct UsageIdentity {
     pub turn_type: String,
     pub agent_kind: String,
     pub work_ulid: Option<String>,
 }
 
 impl UsageIdentity {
-    pub fn main() -> Self {
+    pub(crate) fn main() -> Self {
         Self {
             turn_type: TURN_TYPE_MAIN.to_owned(),
             agent_kind: AGENT_KIND_MAIN.to_owned(),
@@ -102,7 +102,7 @@ impl UsageIdentity {
 
     /// Subagent / task-agent identity. `agent_kind` should be the task
     /// `subagent_type` (e.g. `explore`); falls back to [`AGENT_KIND_SUBAGENT`].
-    pub fn agent_turn(agent_kind: impl Into<String>, work_ulid: Option<String>) -> Self {
+    pub(crate) fn agent_turn(agent_kind: impl Into<String>, work_ulid: Option<String>) -> Self {
         let kind = agent_kind.into();
         Self {
             turn_type: TURN_TYPE_AGENT_TURN.to_owned(),
@@ -118,7 +118,7 @@ impl UsageIdentity {
 
 impl UsageRecord {
     /// Build a complete model-call row from provider usage + identity.
-    pub fn model_call(
+    pub(crate) fn model_call(
         identity: UsageIdentity,
         session_id: impl Into<String>,
         prompt_id: Option<String>,
@@ -151,7 +151,7 @@ impl UsageRecord {
     }
 
     /// Build an incomplete row when the provider omitted usage.
-    pub fn incomplete(
+    pub(crate) fn incomplete(
         identity: UsageIdentity,
         session_id: impl Into<String>,
         prompt_id: Option<String>,
@@ -180,7 +180,7 @@ impl UsageRecord {
     }
 
     /// Build a complete main-loop model-call row from provider usage.
-    pub fn main_model_call(
+    pub(crate) fn main_model_call(
         session_id: impl Into<String>,
         prompt_id: Option<String>,
         model_id: Option<String>,
@@ -200,7 +200,7 @@ impl UsageRecord {
     }
 
     /// Build an incomplete main-loop row when the provider omitted usage.
-    pub fn main_incomplete(
+    pub(crate) fn main_incomplete(
         session_id: impl Into<String>,
         prompt_id: Option<String>,
         model_id: Option<String>,
@@ -209,7 +209,7 @@ impl UsageRecord {
     }
 
     /// Build a complete subagent/task model-call row.
-    pub fn agent_model_call(
+    pub(crate) fn agent_model_call(
         agent_kind: impl Into<String>,
         work_ulid: Option<String>,
         session_id: impl Into<String>,
@@ -231,7 +231,7 @@ impl UsageRecord {
     }
 
     /// Build an incomplete subagent/task row when the provider omitted usage.
-    pub fn agent_incomplete(
+    pub(crate) fn agent_incomplete(
         agent_kind: impl Into<String>,
         work_ulid: Option<String>,
         session_id: impl Into<String>,
@@ -251,7 +251,7 @@ impl UsageRecord {
 ///
 /// Never panics; never returns an error to the caller. First failure logs a
 /// single warning (same pattern as `events.jsonl`).
-pub fn append_usage_record(session_dir: &Path, record: &UsageRecord) {
+pub(crate) fn append_usage_record(session_dir: &Path, record: &UsageRecord) {
     static ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
     let path = session_dir.join(USAGE_FILE);
@@ -283,7 +283,7 @@ pub fn append_usage_record(session_dir: &Path, record: &UsageRecord) {
 }
 
 /// Convenience: build + append a model-call row with identity. Fail-open.
-pub fn record_model_call(
+pub(crate) fn record_model_call(
     session_dir: &Path,
     identity: UsageIdentity,
     session_id: &str,
@@ -306,7 +306,7 @@ pub fn record_model_call(
 }
 
 /// Convenience: build + append an incomplete row with identity. Fail-open.
-pub fn record_incomplete(
+pub(crate) fn record_incomplete(
     session_dir: &Path,
     identity: UsageIdentity,
     session_id: &str,
@@ -318,7 +318,7 @@ pub fn record_incomplete(
 }
 
 /// Convenience: build + append a main model-call row. Fail-open.
-pub fn record_main_model_call(
+pub(crate) fn record_main_model_call(
     session_dir: &Path,
     session_id: &str,
     prompt_id: Option<String>,
@@ -340,7 +340,7 @@ pub fn record_main_model_call(
 }
 
 /// Convenience: build + append an incomplete main row. Fail-open.
-pub fn record_main_incomplete(
+pub(crate) fn record_main_incomplete(
     session_dir: &Path,
     session_id: &str,
     prompt_id: Option<String>,
@@ -356,7 +356,7 @@ pub fn record_main_incomplete(
 }
 
 /// Convenience: build + append a subagent/task model-call row. Fail-open.
-pub fn record_agent_model_call(
+pub(crate) fn record_agent_model_call(
     session_dir: &Path,
     agent_kind: &str,
     work_ulid: Option<String>,
@@ -380,7 +380,7 @@ pub fn record_agent_model_call(
 }
 
 /// Convenience: build + append an incomplete subagent/task row. Fail-open.
-pub fn record_agent_incomplete(
+pub(crate) fn record_agent_incomplete(
     session_dir: &Path,
     agent_kind: &str,
     work_ulid: Option<String>,
@@ -409,6 +409,7 @@ mod tests {
             total_tokens: 12_000,
             reasoning_tokens: 10,
             cached_prompt_tokens: 200,
+            cache_creation_prompt_tokens: 0,
         }
     }
 

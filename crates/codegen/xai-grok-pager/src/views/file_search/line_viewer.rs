@@ -638,12 +638,14 @@ pub struct PlanViewerExtras {
     pub feedback_active: bool,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
-    /// `A approve w/ comment` — approval mode only.
+    /// Unused Notes hit target (CTA removed; kept so hover/mouse stay typed).
     pub approve_notes_button_area: Option<Rect>,
     pub approve_notes_hovered: bool,
-    /// Casual plan-preview comment CTA (not a primary approval action).
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
+    /// Prompt is the comment composer (Comment CTA or focused plan box).
+    /// Idle present is false. Comment-flow footer paints Clarify.
+    pub comment_flow_active: bool,
     pub abandon_button_area: Option<Rect>,
     pub abandon_hovered: bool,
     pub copy_button_area: Option<Rect>,
@@ -692,10 +694,6 @@ pub struct LineViewerState {
     pub fullscreen_button_area: Option<Rect>,
     /// Whether the fullscreen button is hovered.
     pub fullscreen_hovered: bool,
-    /// Cached copy (⧉) button rect from last render (top bar, left of ↗).
-    pub copy_button_area: Option<Rect>,
-    /// Whether the copy button is hovered.
-    pub copy_hovered: bool,
     /// Plan-specific state. `Some` only when `kind == PlanPreview`.
     /// Keeps plan-only fields (buttons, approval, double-click) out of the generic viewer.
     pub plan: Option<PlanViewerExtras>,
@@ -716,10 +714,6 @@ pub struct LineViewerState {
     /// When `true`, the viewer uses the full overlay area instead of the 75% centered popup.
     /// Toggled by Ctrl+F.
     pub fullscreen: bool,
-    /// When `true` (and not fullscreen), dock the viewer as a right-hand
-    /// side panel without dimming the chat — used for parked plan approval
-    /// (option B). File previews keep the centered popup.
-    pub side_panel: bool,
 }
 
 impl LineViewerState {
@@ -761,8 +755,6 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
-            copy_button_area: None,
-            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -771,7 +763,6 @@ impl LineViewerState {
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
-            side_panel: false,
         })
     }
 
@@ -824,8 +815,6 @@ impl LineViewerState {
             close_hovered: false,
             fullscreen_button_area: None,
             fullscreen_hovered: false,
-            copy_button_area: None,
-            copy_hovered: false,
             plan: None,
             initial_scroll_range: None,
             title_override: None,
@@ -834,7 +823,6 @@ impl LineViewerState {
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
-            side_panel: false,
         })
     }
 
@@ -984,6 +972,19 @@ impl LineViewerState {
 
     pub fn feedback_active(&self) -> bool {
         self.plan.as_ref().is_some_and(|p| p.feedback_active)
+    }
+
+    /// Soft plan review: right-side pane, not the 75% centered overlay.
+    pub fn is_soft_plan_side_pane(&self) -> bool {
+        self.kind == LineViewerKind::PlanPreview && !self.fullscreen
+    }
+
+    /// Width reserved on the right for a soft plan pane.
+    pub fn soft_plan_pane_width(full_width: u16) -> u16 {
+        let half = full_width / 2;
+        let min = 24.min(full_width);
+        let leave_left = 16.min(full_width.saturating_sub(min));
+        half.max(min).min(full_width.saturating_sub(leave_left))
     }
 
     /// Whether the plan modal should render the action-button footer.
@@ -1477,11 +1478,13 @@ pub fn render_line_viewer(
         let popup_w = full_area.width.saturating_sub(pad_w);
         let popup_h = full_area.height.saturating_sub(TOP_PAD);
         (Rect::new(popup_x, popup_y, popup_w, popup_h), false)
-    } else if viewer.side_panel {
-        // Right-hand drawer: leave left ~55% for chat/scrollback.
-        const TOP_PAD: u16 = 0;
-        let popup_area = side_panel_rect(full_area, TOP_PAD);
-        (popup_area, false)
+    } else if viewer.is_soft_plan_side_pane() {
+        let pane_w = LineViewerState::soft_plan_pane_width(full_area.width);
+        let popup_x = full_area.x + full_area.width.saturating_sub(pane_w);
+        (
+            Rect::new(popup_x, full_area.y, pane_w, full_area.height),
+            false,
+        )
     } else {
         let popup_width = (full_area.width as f32 * 0.75) as u16;
         let popup_height = (full_area.height as f32 * 0.75) as u16;
@@ -1496,10 +1499,6 @@ pub fn render_line_viewer(
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
-        // Drop stale chrome hit targets from a wider prior frame.
-        viewer.copy_button_area = None;
-        viewer.close_button_area = None;
-        viewer.fullscreen_button_area = None;
         return;
     }
 
@@ -1620,9 +1619,9 @@ pub fn render_line_viewer(
     let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
     let close_visible = viewer.close_button_area.is_some();
     let (fs_label, fs_w): (String, u16) = if close_visible {
-        (format!("[{fs_icon}]"), 3)
+        (format!(" [{fs_icon}]"), 4)
     } else {
-        (format!("[{fs_icon}] "), 4)
+        (format!(" [{fs_icon}] "), 5)
     };
     if right_edge > popup_area.x + fs_w + 2 {
         let fs_x = right_edge - fs_w;
@@ -1637,7 +1636,6 @@ pub fn render_line_viewer(
         let fs_span = Span::styled(fs_label, fs_style);
         buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
         viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
-        right_edge = fs_x;
     } else {
         viewer.fullscreen_button_area = None;
     }
@@ -1774,10 +1772,11 @@ pub fn render_line_viewer(
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
 
         if is_approval {
-            // Clickable CTA buttons (mouse primary; keys remain accelerators).
-            // Side panels are often ~36 cols at 80-wide terminals — full labels
-            // (~80 cols) must not drop all hit targets. Try full → compact →
-            // key-only until the row fits.
+            // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
+            // prefixes. Narrow docks drop separators, then drop the badge.
+            // Idle: Comment is the notes entry. After Comment / prompt
+            // focus, Clarify replaces it so the typed comment can ride.
+            let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
 
@@ -1797,78 +1796,43 @@ pub fn render_line_viewer(
         let total_w = if show_copy { with_copy_w } else { base_w };
 
                 let mut x = inner.x + (inner.width - total_w) / 2;
-                let areas = [
-                    // approve
-                    {
-                        let ax = x;
-                        for span in &span_sets[0] {
-                            let w = span.width() as u16;
-                            buf.set_span(x, bottom_y, span, w);
-                            x += w;
-                        }
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
-                        Some(Rect::new(ax, bottom_y, widths[0], 1))
-                    },
-                    // notes (+ optional comment badge)
-                    {
-                        let nx = x;
-                        for span in &span_sets[1] {
-                            let w = span.width() as u16;
-                            buf.set_span(x, bottom_y, span, w);
-                            x += w;
-                        }
-                        if badge_w > 0 {
-                            buf.set_string(x, bottom_y, &badge_text, badge_style);
-                            x += badge_w;
-                        }
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
-                        Some(Rect::new(nx, bottom_y, widths[1], 1))
-                    },
-                    // clarify
-                    {
-                        let cx = x;
-                        for span in &span_sets[2] {
-                            let w = span.width() as u16;
-                            buf.set_span(x, bottom_y, span, w);
-                            x += w;
-                        }
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
-                        Some(Rect::new(cx, bottom_y, widths[2], 1))
-                    },
-                    // revise
-                    {
-                        let rx = x;
-                        for span in &span_sets[3] {
-                            let w = span.width() as u16;
-                            buf.set_span(x, bottom_y, span, w);
-                            x += w;
-                        }
-                        buf.set_string(x, bottom_y, separator, sep_style);
-                        x += sep_w;
-                        Some(Rect::new(rx, bottom_y, widths[3], 1))
-                    },
-                    // quit
-                    {
-                        let qx = x;
-                        for span in &span_sets[4] {
-                            let w = span.width() as u16;
-                            buf.set_span(x, bottom_y, span, w);
-                            x += w;
-                        }
-                        Some(Rect::new(qx, bottom_y, widths[4], 1))
-                    },
-                ];
+                let mut areas: [Option<Rect>; 4] = [None; 4];
+                for i in 0..4 {
+                    let start = x;
+                    let style = if hovers[i] {
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .bg(theme.bg_base)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text_primary).bg(theme.bg_base)
+                    };
+                    buf.set_string(x, bottom_y, labels[i], style);
+                    x += widths[i];
+                    if i == 0 && with_badge && badge_w > 0 {
+                        buf.set_string(x, bottom_y, &badge_text, badge_style);
+                        x += badge_w;
+                    }
+                    areas[i] = Some(Rect::new(start, bottom_y, widths[i], 1));
+                    if i < 3 {
+                        buf.set_string(x, bottom_y, sep, sep_style);
+                        x += sep_w_here;
+                    }
+                }
 
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = areas[0];
-                plan.approve_notes_button_area = areas[1];
-                plan.questions_button_area = areas[2];
-                plan.send_button_area = areas[3];
-                plan.abandon_button_area = areas[4];
-                plan.comment_button_area = None;
+                if comment_flow {
+                    plan.questions_button_area = areas[1];
+                    plan.comment_button_area = None;
+                } else {
+                    plan.comment_button_area = areas[1];
+                    plan.questions_button_area = None;
+                }
+                plan.send_button_area = areas[2];
+                plan.abandon_button_area = areas[3];
+                plan.approve_notes_button_area = None;
+                plan.copy_button_area = None;
                 painted = true;
                 break;
             }
@@ -1882,18 +1846,19 @@ pub fn render_line_viewer(
                     x += w;
                 }
                 let plan = viewer.plan_mut();
-                plan.approve_button_area = areas[0];
-                plan.approve_notes_button_area = areas[1];
-                plan.questions_button_area = areas[2];
-                plan.send_button_area = areas[3];
-                plan.abandon_button_area = areas[4];
+                plan.approve_button_area = None;
+                plan.approve_notes_button_area = None;
+                plan.questions_button_area = None;
+                plan.send_button_area = None;
+                plan.abandon_button_area = None;
                 plan.comment_button_area = None;
+                plan.copy_button_area = None;
             }
         } else {
-            // Casual: c comment [badge] | s send (when comments exist)
             let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
             let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
-
+            let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
+            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
             let (send_w, send_spans): (u16, Option<Vec<Span>>) = if comment_count > 0 {
                 let spans = build_shortcut_button('s', "send", approve_hovered, theme);
                 let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
@@ -1903,6 +1868,7 @@ pub fn render_line_viewer(
             };
 
             let mut total_w = comment_w.saturating_add(badge_w);
+            total_w = total_w.saturating_add(sep_w).saturating_add(copy_w);
             if send_w > 0 {
                 total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
             }
@@ -1976,6 +1942,7 @@ pub fn render_line_viewer(
                 plan.questions_button_area = None;
                 plan.send_button_area = None;
                 plan.comment_button_area = None;
+                plan.copy_button_area = None;
                 plan.abandon_button_area = None;
             }
         } else {
@@ -2315,10 +2282,329 @@ mod tests {
         );
     }
 
+    /// Soft park is a right-docked pane, not the 75% centered dimmed overlay.
     #[test]
     fn markdown_viewer_comment_range_maps_full_soft_break_paragraph() {
         // Commenting round-trip: selecting all rows of a soft-break paragraph must map back to the full file line range
         // The agent then inspects the correct lines; this used to collapse to a single line number
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        buf[(2, 12)].set_char('X');
+        let left_bg_before = buf[(2, 12)].bg;
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("soft park must paint a plan pane");
+        let centered_75_x =
+            full.x + (full.width.saturating_sub((full.width as f32 * 0.75) as u16)) / 2;
+        assert!(
+            modal.x >= full.width / 2,
+            "soft park must sit on the right half, not a centered overlay; modal={modal:?}"
+        );
+        assert!(
+            modal.x > centered_75_x + 8,
+            "soft park must not be the 75% centered popup (that starts near x={centered_75_x}); modal={modal:?}"
+        );
+        assert!(
+            modal.y <= full.y + 1,
+            "soft park must not be vertically centered; modal={modal:?}"
+        );
+        assert_eq!(
+            buf[(2, 12)].symbol(),
+            "X",
+            "left transcript columns must stay visible"
+        );
+        assert_eq!(
+            buf[(2, 12)].bg,
+            left_bg_before,
+            "left transcript must not be dim_area-blended"
+        );
+
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                footer.to_ascii_lowercase().contains(needle),
+                "right pane must keep the four idle CTAs; missing {needle} in {footer:?}"
+            );
+        }
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "right pane must not paint Notes or Quit; got {footer:?}"
+        );
+    }
+
+    /// Named contract: idle plan-approval footer is four clickable CTAs
+    /// (Approve / Comment / Revise / Exit), not the 1.0.3
+    /// `request changes` + `c comment` placeholder row, and not Notes / Quit.
+    #[test]
+    fn plan_approval_footer_paints_five_cta_vocabulary() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        assert!(
+            !footer.contains("request changes"),
+            "approval footer must not use the 1.0.3 request-changes placeholder; got {footer:?}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                footer.to_ascii_lowercase().contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes"),
+            "approval footer must not paint Notes; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("quit"),
+            "approval footer must not paint Quit; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("clarify"),
+            "idle approval footer must not paint standalone Clarify; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "Approve must be a clickable hit target"
+        );
+        assert!(
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target"
+        );
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify is comment-flow only, not idle"
+        );
+        assert!(
+            plan.send_button_area.is_some(),
+            "Revise must be a clickable hit target"
+        );
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "Exit must be a clickable hit target"
+        );
+    }
+
+    /// Named contract (G1): footer last button is Exit, not Quit.
+    #[test]
+    fn plan_footer_exit_not_quit() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            lower.contains("exit"),
+            "approval footer must name Exit; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("quit"),
+            "approval footer must not name Quit; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "Exit must be a clickable hit target"
+        );
+    }
+
+    /// Named contract (G1): Notes (`A`) is removed from the footer.
+    #[test]
+    fn plan_footer_has_no_notes_button() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("notes"),
+            "approval footer must not paint Notes; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("clarify"),
+            "idle footer must not paint standalone Clarify; got {footer:?}"
+        );
+    }
+
+    /// Idle present footer is Approve / Comment / Revise / Exit.
+    /// Standalone Clarify is not an idle decision CTA.
+    #[test]
+    fn plan_approval_idle_footer_paints_comment_not_clarify() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().comment_flow_active = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "idle footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("clarify"),
+            "idle footer must not paint standalone Clarify; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify must not be an idle hit target"
+        );
+        assert!(plan.approve_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// After Comment (or focusing the plan prompt), footer is
+    /// Approve / Clarify / Revise / Exit so the typed comment can ride
+    /// with implement, read-only questions, or rewrite.
+    #[test]
+    fn plan_approval_comment_flow_footer_paints_clarify() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().comment_flow_active = true;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "comment-flow footer must name {needle}; got {footer:?}"
+            );
+        }
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.questions_button_area.is_some(),
+            "Clarify must be a clickable comment-flow hit target"
+        );
+        assert!(
+            plan.comment_button_area.is_none(),
+            "Comment is the entry; comment-flow replaces it with Clarify"
+        );
+    }
+
+    #[test]
+    fn markdown_viewer_comment_range_maps_full_soft_break_paragraph() {
+        // Commenting round-trip: selecting all rows of a soft-break paragraph
+        // must map back to the full file line range so the agent inspects the
+        // correct lines. Pre-fix this collapsed to a single line number.
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "Line one,\nLine two,\nLine three.".to_owned(),
@@ -2331,143 +2617,5 @@ mod tests {
 
         assert_eq!(viewer.selected_line_range(), Some(1..4));
         assert_eq!(viewer.line_range_suffix(), Some(":1-3".to_owned()));
-    }
-
-    /// Regression: side-panel clamp must not panic when overlay width < 25
-    /// (soft min 24 would exceed max if written as clamp(24, width-1)).
-    #[test]
-    fn side_panel_rect_narrow_widths_do_not_panic() {
-        for w in [1u16, 10, 19, 20, 23, 24, 25, 40, 80] {
-            let area = Rect::new(0, 0, w, 30);
-            let panel = side_panel_rect(area, 0);
-            assert!(
-                panel.width <= w,
-                "width {w}: panel wider than overlay ({})",
-                panel.width
-            );
-            assert_eq!(panel.x + panel.width, area.x + area.width, "flush-right");
-            assert!(panel.height <= 30);
-            // min ≤ max always: panel width is at least 1 when overlay has room.
-            if w > 0 {
-                assert!(panel.width >= 1);
-            }
-        }
-    }
-
-    #[test]
-    fn side_panel_rect_wide_prefers_about_45_percent() {
-        let area = Rect::new(0, 0, 100, 40);
-        let panel = side_panel_rect(area, 0);
-        assert_eq!(panel.width, 45);
-        assert_eq!(panel.x, 55);
-        assert_eq!(panel.height, 40);
-    }
-
-    /// Named contract: line-viewer top bar paints a clickable ⧉ hit target
-    /// left of ↗/✗ so one-click whole-body copy works without the `Y` key.
-    #[test]
-    fn line_viewer_top_bar_sets_copy_button_hit_area() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-
-        let mut viewer = LineViewerState::open_markdown_content(
-            "plan.md",
-            "# Plan\n\nCopy me whole\n".to_owned(),
-            None,
-        )
-        .expect("open plan");
-        viewer.kind = LineViewerKind::PlanPreview;
-        viewer.side_panel = true;
-        viewer.plan_mut().feedback_active = true;
-        viewer.plan_mut().show_action_buttons = false;
-
-        let full = Rect::new(0, 0, 80, 24);
-        let mut buf = Buffer::empty(full);
-        let theme = crate::theme::Theme::current();
-        render_line_viewer(
-            &mut buf,
-            full,
-            &mut viewer,
-            std::path::Path::new("/tmp"),
-            &theme,
-            0,
-        );
-
-        assert!(
-            viewer.copy_button_area.is_some(),
-            "plan top bar must expose ⧉ copy hit target next to enlarge/close"
-        );
-        assert!(
-            viewer.fullscreen_button_area.is_some(),
-            "enlarge button still present beside copy"
-        );
-        // Copy sits left of enlarge on the same row.
-        let copy = viewer.copy_button_area.unwrap();
-        let fs = viewer.fullscreen_button_area.unwrap();
-        assert_eq!(copy.y, fs.y, "copy and enlarge share the top border row");
-        assert!(
-            copy.x + copy.width <= fs.x,
-            "copy must sit left of enlarge (copy.x={} w={} fs.x={})",
-            copy.x,
-            copy.width,
-            fs.x
-        );
-    }
-
-    /// Named contract: plan-approval side panel footer always exposes
-    /// clickable CTA hit targets (approve / notes / clarify / revise / quit),
-    /// even when the panel is too narrow for the full long labels.
-    #[test]
-    fn plan_approval_narrow_side_panel_footer_sets_cta_hit_areas() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-
-        let mut viewer = LineViewerState::open_markdown_content(
-            "plan.md",
-            "# Plan\n\nDo the thing\n".to_owned(),
-            None,
-        )
-        .expect("open plan");
-        viewer.kind = LineViewerKind::PlanPreview;
-        viewer.side_panel = true;
-        viewer.fullscreen = false;
-        viewer.plan_mut().feedback_active = true;
-        viewer.plan_mut().show_action_buttons = false;
-
-        // ~36 cols is a typical side-panel width at 80-col terminals (45%).
-        // Full labels need ~80 cols and used to drop all hit areas.
-        let full = Rect::new(0, 0, 80, 24);
-        let mut buf = Buffer::empty(full);
-        let theme = crate::theme::Theme::current();
-        render_line_viewer(
-            &mut buf,
-            full,
-            &mut viewer,
-            std::path::Path::new("/tmp"),
-            &theme,
-            0,
-        );
-
-        let plan = viewer.plan_ref().expect("plan extras");
-        assert!(
-            plan.approve_button_area.is_some(),
-            "narrow side panel must still expose Approve hit target"
-        );
-        assert!(
-            plan.approve_notes_button_area.is_some(),
-            "narrow side panel must still expose Approve-with-notes hit target"
-        );
-        assert!(
-            plan.questions_button_area.is_some(),
-            "narrow side panel must still expose Clarify hit target"
-        );
-        assert!(
-            plan.send_button_area.is_some(),
-            "narrow side panel must still expose Revise hit target"
-        );
-        assert!(
-            plan.abandon_button_area.is_some(),
-            "narrow side panel must still expose Quit hit target"
-        );
     }
 }

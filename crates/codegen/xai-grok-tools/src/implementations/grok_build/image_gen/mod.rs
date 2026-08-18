@@ -824,9 +824,8 @@ mod tests {
             "peer handle must see same cooldown"
         );
 
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) };
         }
     }
 }

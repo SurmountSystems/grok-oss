@@ -1000,13 +1000,24 @@ fn retry_footer_reason(err: &SamplingError) -> String {
     }
 }
 
+/// Live retry wait chrome. Under 60 seconds stays a whole-second count so
+/// short backoff copy (`2s`, `1s`) does not become `2.0s`. At or above 60
+/// seconds uses compact minutes (`15m43s`), never `943s`.
+fn format_retry_wait(d: Duration) -> String {
+    let secs = d.as_secs().max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        xai_tty_utils::format_human_duration(Duration::from_secs(secs))
+    }
+}
+
 /// Append a short backoff hint for non-rate-limit retries (Esc still cancels
 /// the wait via `sleep_for_retry`). Rate limits use their own shared-wait copy.
 fn with_backoff_hint(reason: String, backoff: Option<Duration>) -> String {
     match backoff {
         Some(b) if !b.is_zero() => {
-            let secs = b.as_secs().max(1);
-            format!("{reason} · next try in {secs}s")
+            format!("{reason} · next try in {}", format_retry_wait(b))
         }
         _ => reason,
     }
@@ -1028,9 +1039,12 @@ fn emit_retrying(
         let key = provider_key_for_config(config);
         let rem = SharedRateLimitStore::process_default().remaining(&key);
         if let Some(secs) = err.retry_after() {
-            reason = format!("{reason} · wait {secs}s (shared across grok-oss processes)");
+            reason = format!(
+                "{reason} · wait {} (shared across grok-oss processes)",
+                format_retry_wait(Duration::from_secs(secs))
+            );
         } else if !rem.is_zero() {
-            reason = format!("{reason} · shared wait {}s", rem.as_secs().max(1));
+            reason = format!("{reason} · shared wait {}", format_retry_wait(rem));
         } else {
             reason = format!("{reason} · coordinating with other grok-oss sessions");
         }
@@ -1719,6 +1733,21 @@ mod tests {
         );
     }
 
+    /// Live retry wait chrome at 60s+ uses compact minutes, not `943s`.
+    #[test]
+    fn retry_footer_long_wait_uses_minutes_not_raw_seconds() {
+        let long = with_backoff_hint("timed out".into(), Some(Duration::from_secs(943)));
+        assert_eq!(long, "timed out · next try in 15m43s");
+        assert!(!long.contains("943s"), "{long}");
+        assert!(!long.contains("943 seconds"), "{long}");
+        assert_eq!(format_retry_wait(Duration::from_secs(60)), "1m0s");
+        assert_eq!(
+            format_retry_wait(Duration::from_secs(2)),
+            "2s",
+            "short backoff stays whole seconds"
+        );
+    }
+
     /// Attempt number only advances on failure classify, not on stream start.
     #[test]
     fn retry_attempt_stays_1_until_second_failure_even_if_second_attempt_long() {
@@ -2368,6 +2397,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(err.is_retryable(), "521 soft-retries same identity");
         assert!(

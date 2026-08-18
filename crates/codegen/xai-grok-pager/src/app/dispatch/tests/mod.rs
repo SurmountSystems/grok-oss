@@ -15,9 +15,11 @@ mod prompt_ack;
 mod queue_release;
 mod rewind;
 mod router;
+mod running;
 mod session;
 mod settings;
 mod soft_stop;
+mod start;
 mod status;
 mod status_line;
 mod task_result;
@@ -93,8 +95,11 @@ fn test_app() -> AppView {
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: IndexMap::new(),
-        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::new(),
-        soft_stop: crate::app::soft_stop::SoftStop::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::default(),
+        soft_stop: crate::app::soft_stop::SoftStop::default(),
+        rebuild_relaunch: None,
+        pending_tui_screenshot: false,
+        console_team_prepaid_cents: None,
         next_agent_id: 0,
         models: ModelState::default(),
         registry: crate::actions::ActionRegistry::defaults(),
@@ -205,6 +210,7 @@ fn test_app() -> AppView {
         show_tips: None,
         auto_compact_threshold_percent: None,
         auto_compact_threshold_tokens: None,
+        default_reasoning_effort: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         subagent_model_inheritance: crate::settings::FeatureOverrideState::new(
@@ -304,7 +310,6 @@ fn test_app() -> AppView {
         pending_editor: None,
         pending_pager_path: None,
         pending_pager_ansi: false,
-        pending_tui_screenshot: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
         show_resolved_model: true,
@@ -319,8 +324,6 @@ fn test_app() -> AppView {
         leader_mode: true,
         credit_balance: None,
         auto_topup: None,
-        openrouter_credit_balance: None,
-        console_team_prepaid_cents: None,
         billing_poll_wanted: false,
         leader_roster: Vec::new(),
         dashboard_local_sessions: Vec::new(),
@@ -330,6 +333,7 @@ fn test_app() -> AppView {
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         pending_running_adoptions: std::collections::HashMap::new(),
         session_picker_grouped: false,
+        scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
         session_recap_available: false,
         shell_feedback_trace_offer: false,
@@ -390,7 +394,6 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
-        cancel_resume_prompt_text: None,
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
@@ -668,7 +671,6 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -833,7 +835,6 @@ fn two_agent_app_with_bg_task() -> AppView {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -1125,14 +1126,12 @@ fn test_bal(usage_pct: f64) -> crate::views::credit_bar::CreditBalance {
         usage_pct,
         effective_usage_pct: usage_pct,
         period_end_display: None,
-        period_end_at: None,
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: None,
         prepaid_balance_cents: None,
         period_type: None,
         is_unified_billing_user: None,
-        grok_build_usage_pct: None,
-        included_usage_known: true,
+        ..Default::default()
     }
 }

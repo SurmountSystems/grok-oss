@@ -618,6 +618,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provenance_badge_is_right_aligned() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::current();
+        let matches = vec![
+            SuggestionRow {
+                display: "/login".into(),
+                description: "Log in or re-authenticate with your account".into(),
+                insert_text: "/login".into(),
+                indices: vec![],
+                tag: None,
+                provenance: Some(CommandProvenance::Builtin),
+            },
+            SuggestionRow {
+                display: "/acme:login".into(),
+                description: "Acme account login".into(),
+                insert_text: "/acme:login ".into(),
+                indices: vec![],
+                tag: None,
+                provenance: Some(CommandProvenance::Skill {
+                    source: "acme".to_string(),
+                }),
+            },
+        ];
+        let snap = SlashSnapshot {
+            open: true,
+            matches,
+            selected: 0,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buf = Buffer::empty(area);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let line0: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let line1: String = (0..80).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert!(line0.contains("Log in or re-authenticate"));
+        assert!(line1.contains("Acme account login"));
+        assert!(!line0.contains(" · built-in"));
+        // Flush right: the badge's last glyph sits in the final column.
+        assert!(line0.ends_with("built-in"), "not right-aligned: {line0:?}");
+        assert!(
+            line1.ends_with("skill · acme"),
+            "not right-aligned: {line1:?}"
+        );
+    }
+
     fn row(display: &str, description: &str) -> SuggestionRow {
         SuggestionRow {
             display: display.into(),

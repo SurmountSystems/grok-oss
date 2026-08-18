@@ -69,6 +69,12 @@ impl ToolMetadata for PlanValidateTool {
         ToolNamespace::GrokBuild
     }
 
+    /// Read-only validation of an existing design doc. Overrides the `Other`
+    /// kind default so wire metadata matches `capabilities().is_read_only`.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn description_template(&self) -> &str {
         r#"Validate a design document's PR Plan section (DAG, dependencies, structure).
 

@@ -49,6 +49,7 @@ async fn save_config_locked(
         root = TomlValue::Table(TomlMap::new());
     }
     let table = root.as_table_mut().expect("root must be a table");
+
     merge_section(table, "cli", &config.cli);
     merge_section(table, "models", &config.models);
     merge_section(table, "ui", &config.ui);
@@ -262,12 +263,16 @@ fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
     ask: &crate::tools::config::AskUserQuestionToolConfig,
 ) {
+    // All-None means nothing to write; skip so an empty [toolset] header
+    // never appears in config.toml.
     if ask.timeout_enabled.is_none() && ask.timeout_secs.is_none() {
         return;
     }
     let toolset = table
         .entry("toolset".to_string())
         .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    // Mirror merge_section's recovery: replace a non-table `toolset` scalar so
+    // a user-initiated write never silently vanishes after the success toast.
     if !matches!(toolset, TomlValue::Table(_)) {
         *toolset = TomlValue::Table(TomlMap::new());
     }
@@ -293,6 +298,7 @@ fn merge_toml_tables(
         }
     }
 }
+
 fn merge_section<T: serde::Serialize>(
     table: &mut TomlMap<String, TomlValue>,
     key: &str,
@@ -309,6 +315,8 @@ fn merge_section<T: serde::Serialize>(
                 *section = TomlValue::Table(new_fields);
             }
         }
+        // Serialized struct is empty (all-Option structs like CliConfig/HarnessConfig
+        // with every field at None). Preserve the existing section untouched.
         Ok(TomlValue::Table(_)) => {}
         Ok(_) | Err(_) => {
             table.remove(key);

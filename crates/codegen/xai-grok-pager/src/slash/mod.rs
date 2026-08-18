@@ -2226,6 +2226,7 @@ mod tests {
             "/settings",
             "/dashboard",
             "/resume",
+            "/start",
             "/model",
             "/plan",
             "/multiline",

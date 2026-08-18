@@ -236,13 +236,11 @@ impl ThinkingBlock {
     /// Format elapsed time for display.
     fn format_time(&self) -> Option<String> {
         self.elapsed_time_ms.map(|ms| {
-            let secs = ms as f64 / 1000.0;
-            if secs < 60.0 {
-                format!("{:.1}s", secs)
+            let elapsed = std::time::Duration::from_millis(ms.max(0) as u64);
+            if elapsed.as_secs() < 60 {
+                format!("{:.1}s", elapsed.as_secs_f64())
             } else {
-                let mins = (secs / 60.0).floor() as u32;
-                let remaining = secs - (mins as f64 * 60.0);
-                format!("{}m{:.0}s", mins, remaining)
+                crate::util::format_duration(elapsed)
             }
         })
     }
@@ -544,7 +542,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if is_running {
+        if crate::appearance::cache::load_always_expand_thinking() {
+            DisplayMode::Expanded
+        } else if is_running {
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -552,11 +552,19 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        DisplayMode::Truncated
+        if crate::appearance::cache::load_always_expand_thinking() {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Truncated
+        }
     }
 
     fn finished_display_mode(&self) -> Option<DisplayMode> {
-        Some(DisplayMode::Collapsed)
+        if crate::appearance::cache::load_always_expand_thinking() {
+            Some(DisplayMode::Expanded)
+        } else {
+            Some(DisplayMode::Collapsed)
+        }
     }
 
     fn has_bullet(&self, ctx: &BlockContext) -> bool {

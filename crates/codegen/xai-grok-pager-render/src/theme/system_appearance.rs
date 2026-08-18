@@ -122,9 +122,9 @@ pub fn to_theme_kind(
 ///
 /// In test builds, a shorter interval (50ms) is used so polling tests
 /// complete quickly.
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(not(test))]
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Polls via [`detect()`] only (no OSC 11) and never mutates `theme_cache::CURRENT` or `AUTO_MODE`.
@@ -201,7 +201,7 @@ pub fn clear_mock() {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use super::super::cache as theme_cache;
     use super::*;

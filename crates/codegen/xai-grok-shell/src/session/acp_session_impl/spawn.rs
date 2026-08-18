@@ -241,7 +241,6 @@ pub(crate) async fn spawn_session_actor(
     mut startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
-    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -585,29 +584,11 @@ pub(crate) async fn spawn_session_actor(
             std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                 .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
         });
-    let economic_mode = crate::util::config::economic_mode_from_disk();
-    // Seed assistant ASCII-scrub config preference from `[ui] scrub_ascii_punct`
-    // (default ON). Env `GROK_SCRUB_ASCII_PUNCT=0` still force-disables.
-    crate::session::helpers::assistant_ascii_scrub::seed_from_effective_config();
-    let effective_context_window = context_window_override.unwrap_or_else(|| {
-        let capped = crate::util::config::apply_economic_context_cap(
-            baseline_context_window.get(),
-            economic_mode,
-        );
-        std::num::NonZeroU64::new(capped).unwrap_or(baseline_context_window)
-    });
     if let Some(cw) = context_window_override {
         tracing::warn!(
             override_context_window = cw.get(),
             original_context_window = baseline_context_window.get(),
             "GROK_DEBUG_CONTEXT_WINDOW override active"
-        );
-    } else if economic_mode && effective_context_window.get() < baseline_context_window.get() {
-        tracing::info!(
-            catalog_context_window = baseline_context_window.get(),
-            effective_context_window = effective_context_window.get(),
-            cap = crate::util::config::ECONOMIC_CONTEXT_CAP,
-            "economic mode: effective context window capped for pricing"
         );
     }
     let resolved_max_retries = xai_grok_sampler::resolve_max_retries(session_max_retries_source(
@@ -1149,6 +1130,11 @@ pub(crate) async fn spawn_session_actor(
     let context_window_tokens = context_window_override
         .map(|c| c.get())
         .unwrap_or(sampling_config.context_window);
+    let scheduler_background_loops = crate::util::config::resolve_scheduler_background_loops(
+        remote_settings
+            .as_ref()
+            .and_then(|r| r.scheduler_background_loops),
+    );
     let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
         xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(
             ShellManagedGatewayToolClient {
@@ -1271,11 +1257,7 @@ pub(crate) async fn spawn_session_actor(
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
         path_not_found_hints,
-        scheduler_background_loops: crate::util::config::resolve_scheduler_background_loops(
-            remote_settings
-                .as_ref()
-                .and_then(|r| r.scheduler_background_loops),
-        ),
+        scheduler_background_loops,
         mcp_state: mcp_state.clone(),
         managed_gateway_tool_client: managed_gateway_tool_client.clone(),
         is_non_interactive: startup_hints.non_interactive,
@@ -1879,7 +1861,7 @@ pub(crate) async fn spawn_session_actor(
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
-            threshold_tokens: std::cell::Cell::new(auto_compact_threshold_tokens),
+            threshold_tokens: std::cell::Cell::new(None),
             force_compact: force_compact.clone(),
             context_window_override,
 
@@ -1887,6 +1869,7 @@ pub(crate) async fn spawn_session_actor(
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+            last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
             previous_model: std::cell::Cell::new(None),
             compaction_mode,
             verbatim_input: compaction_verbatim_input,
@@ -2530,11 +2513,13 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
+            scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
+            non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
@@ -2633,7 +2618,6 @@ pub(crate) async fn spawn_session_on_thread(
     startup_hints: StartupHints,
     client_type: ClientType,
     auto_compact_threshold_percent: u8,
-    auto_compact_threshold_tokens: Option<u64>,
     system_prompt_label: String,
     compaction_mode: xai_chat_state::CompactionMode,
     compaction_verbatim_input: bool,
@@ -2831,7 +2815,6 @@ pub(crate) async fn spawn_session_on_thread(
                         startup_hints,
                         client_type,
                         auto_compact_threshold_percent,
-                        auto_compact_threshold_tokens,
                         system_prompt_label,
                         compaction_mode,
                         compaction_verbatim_input,
@@ -2864,7 +2847,6 @@ pub(crate) async fn spawn_session_on_thread(
                         loc_tracking_enabled,
                         feedback_flags,
                         managed_mcp_handle,
-                        managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,
@@ -2881,6 +2863,8 @@ pub(crate) async fn spawn_session_on_thread(
                         goal_enabled,
                         background_workflows_enabled,
                         subagents_enabled,
+                        subagents_max_depth,
+                        workflow_max_concurrent_agents,
                         ask_user_question_enabled,
                         client_hooks,
                         prompt_display_cwd,
@@ -2910,6 +2894,7 @@ pub(crate) async fn spawn_session_on_thread(
                         parent_scheduler_handle,
                         max_turns,
                         forked_tool_override,
+                        is_chat_kind,
                     )
                     }
                     None => {
@@ -3246,6 +3231,30 @@ mod resumed_prefix_fallback_tests {
         ));
         assert!(resumed_prefix_carries_fallback_date(false, &leading_noise));
         assert!(!resumed_prefix_carries_fallback_date(true, &with_date));
+    }
+}
+
+#[cfg(test)]
+mod seed_sampling_window_tests {
+    use super::seed_sampling_context_window;
+    use crate::util::config::ECONOMIC_CONTEXT_CAP;
+
+    #[test]
+    fn spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on() {
+        let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
+        let seeded = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            seeded.get(),
+            ECONOMIC_CONTEXT_CAP,
+            "first pre-header sampling window must be the economic cap"
+        );
+        assert_eq!(seeded.get(), 200_000);
+        let uncapped = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            uncapped.get(),
+            500_000,
+            "economic off keeps the catalog window"
+        );
     }
 }
 #[cfg(test)]

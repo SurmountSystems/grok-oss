@@ -112,11 +112,7 @@ impl ReplayBuffer {
         if !incoming_notification_timestamp_in_range {
             // Pop the previously pending notification and send it immediately
             let prev = self.pending.replace(incoming);
-            if let Some(prev) = prev {
-                return Some((prev, None));
-            } else {
-                return None;
-            }
+            return prev.map(|prev| (prev, None));
         }
 
         let pending = self.pending.take();

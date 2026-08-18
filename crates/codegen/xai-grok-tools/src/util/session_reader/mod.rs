@@ -527,7 +527,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap();
         assert_eq!(v["tool"], "claude");
         let turns = v["turns"].as_array().unwrap();
-        assert!(turns.len() >= 1);
+        assert!(!turns.is_empty());
         // Inert: no executable interpretation — just text.
         let joined = serde_json::to_string(&v).unwrap();
         assert!(joined.contains("hello world") || joined.contains("hi back"));

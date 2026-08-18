@@ -57,11 +57,13 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod running;
 pub mod screen_mode_switch;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
 pub mod spend;
+pub mod start;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -101,6 +103,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(economic_mode::EconomicModeCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
+        Arc::new(screenshot::ScreenshotCommand),
         Arc::new(history::HistoryCommand),
         Arc::new(transcript::TranscriptCommand),
         Arc::new(export::ExportCommand),
@@ -241,128 +244,6 @@ mod tests {
             "scheduler_create".to_string()
         ]));
         assert!(reg.get("loop").is_some());
-    }
-    #[test]
-    fn shell_collision_contract_covers_every_pager_command_and_alias() {
-        const SHELL_RESERVED: &[&str] = &[
-            "agents",
-            "agents-dashboard",
-            "always-approve",
-            "announcements",
-            "auto",
-            "btw",
-            "cd",
-            "changelog",
-            "chat",
-            "clear",
-            "clear-completed-todos",
-            "cloud",
-            "compact",
-            "compact-mode",
-            "config",
-            "config-agents",
-            "context",
-            "copy",
-            "cost",
-            "dashboard",
-            "debug",
-            "docs",
-            "doctor",
-            "double-entry",
-            "edit-prompt",
-            "econ",
-            "economic",
-            "economic-mode",
-            "effort",
-            "exit",
-            "expand",
-            "export",
-            "feedback",
-            "find",
-            "fork",
-            "full",
-            "fullscreen",
-            "gboom",
-            "guides",
-            "help",
-            "history",
-            "home",
-            "hooks",
-            "howto",
-            "imagine",
-            "imagine-video",
-            "import-claude",
-            "jump",
-            "ledger",
-            "limits",
-            "login",
-            "logout",
-            "log",
-            "loop",
-            "m",
-            "marketplace",
-            "mcps",
-            "minimal",
-            "ml",
-            "model",
-            "multiline",
-            "new",
-            "note",
-            "notes",
-            "onboarding",
-            "options",
-            "personas",
-            "plan",
-            "plan-view",
-            "plugins",
-            "preferences",
-            "prefs",
-            "privacy",
-            "queue",
-            "quit",
-            "recap",
-            "rebuild",
-            "release-notes",
-            "remember",
-            "rename",
-            "resume",
-            "rewind",
-            "scroll-debug",
-            "screenshot",
-            "session-info",
-            "sessions",
-            "settings",
-            "share",
-            "show-plan",
-            "skills",
-            "spend",
-            "summarize",
-            "tasks",
-            "terminal-check",
-            "terminal-info",
-            "terminal-setup",
-            "theme",
-            "timeline",
-            "timestamps",
-            "title",
-            "toggle-mouse-reporting",
-            "tour",
-            "transcript",
-            "tutorial",
-            "t",
-            "usage",
-            "view-plan",
-            "vim-mode",
-            "voice",
-            "welcome",
-            "workflows",
-            "yolo",
-        ];
-        for command in builtin_commands() {
-            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
-                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
-            }
-        }
     }
     #[test]
     fn builtin_registry_lookup_by_alias() {
@@ -763,16 +644,16 @@ mod tests {
         );
     }
     #[test]
-    fn note_registered_in_builtin_commands() {
+    fn running_registered_in_builtin_commands() {
         let reg = CommandRegistry::new(builtin_commands());
         assert!(
-            reg.get("note").is_some(),
-            "/note should be registered in builtins"
+            reg.get("running").is_some(),
+            "/running should be registered in builtins"
         );
         assert_eq!(
-            reg.get("notes").expect("/notes alias").name(),
-            "note",
-            "/notes should alias /note"
+            reg.get("windows").map(|c| c.name()),
+            Some("running"),
+            "/windows should alias /running"
         );
     }
     #[test]

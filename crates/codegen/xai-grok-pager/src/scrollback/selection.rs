@@ -40,7 +40,7 @@ pub struct SelectionBox {
     pub close_hovered: bool,
     /// Optional close label; `None` uses default `✗`.
     pub close_label: Option<&'static str>,
-    /// Optional action label left of close (e.g. todo pane clear-finished `[−]`).
+    /// Optional action label left of close (todo pane clear-finished `[−]`).
     pub action_label: Option<&'static str>,
     /// Whether the action control is currently hovered.
     pub action_hovered: bool,
@@ -253,7 +253,6 @@ impl SelectionBox {
             } else if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
                 cell.set_char(border_chars::TOP_RIGHT).set_style(self.style);
             }
-            // Optional action left of close (todo clear-finished [−] when open + finished).
             self.paint_action_label(buf);
         }
 
@@ -447,7 +446,6 @@ mod tests {
 
     #[test]
     fn action_button_sits_left_of_close_with_gap() {
-        // Wide enough for [−] + gap + ✗
         let label = clear_finished_chrome();
         let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default())
             .with_closable(true, false)
@@ -458,7 +456,6 @@ mod tests {
         assert_eq!(action.y, close.y);
         assert_eq!(action.width, label.chars().count() as u16);
         assert_eq!(action.width, 3, "clear-finished chrome is icon-width [−]");
-        // Gap of one cell between action right edge and close left.
         assert_eq!(action.x + action.width + 1, close.x);
     }
 
@@ -473,8 +470,7 @@ mod tests {
         let action = open.action_button_rect().expect("action without close");
         assert_eq!(action.width, label.chars().count() as u16);
         assert_eq!(action.y, 1);
-        // Reserved: [action][gap][1-cell close slot] against right edge.
-        let right_x = 0 + 40 - 1;
+        let right_x = 40 - 1;
         assert_eq!(action.x + action.width + 1 + 1 - 1, right_x);
     }
 
@@ -512,13 +508,9 @@ mod tests {
 
         let label = clear_finished_chrome();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
-        let sel = SelectionBox::new(
-            Rect::new(0, 2, 40, 4),
-            // Border style deliberately agent magenta — action must not inherit it.
-            Style::default().fg(magenta),
-        )
-        .with_action_label(Some(label), false)
-        .with_action_enabled(true);
+        let sel = SelectionBox::new(Rect::new(0, 2, 40, 4), Style::default().fg(magenta))
+            .with_action_label(Some(label), false)
+            .with_action_enabled(true);
         sel.render_action_only(&mut buf);
 
         let action = sel.action_button_rect().expect("action");
@@ -536,7 +528,6 @@ mod tests {
             cell.fg, magenta,
             "clear-finished must not inherit agent magenta"
         );
-        // Icon paints (bracketed minus), not the long "Clear finished" string.
         let mut painted = String::new();
         for x in action.x..action.x + action.width {
             if let Some(c) = buf.cell((x, action.y)) {
@@ -626,7 +617,6 @@ mod tests {
             cell.fg, theme.gray,
             "disabled must read dimmer than enabled idle gray"
         );
-        // First glyph of the bracketed icon is still painted.
         assert_eq!(cell.symbol().chars().next(), Some('['));
     }
 }

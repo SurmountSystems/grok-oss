@@ -511,6 +511,26 @@ mod tests {
     }
 
     #[test]
+    fn long_running_subagent_uses_minutes_not_raw_seconds() {
+        let agents = [RunningSubagent {
+            subagent_id: "sub-long",
+            subagent_type: Some("explore"),
+            description: Some("compiled from src/systems"),
+            elapsed_secs: 943,
+        }];
+        let state = ActiveAgentReminderState {
+            running_subagents: &agents,
+            ..Default::default()
+        };
+        let out = format_active_agent_reminder(&state, Some(&tools_native())).expect("reminder");
+        assert!(
+            out.contains("(running for 15m43s)"),
+            "943 seconds must read as minutes: {out}"
+        );
+        assert!(!out.contains("943s") && !out.contains("943 seconds"));
+    }
+
+    #[test]
     fn uses_renamed_tool_names_verbatim() {
         let agents = [RunningSubagent {
             subagent_id: "sa-1",

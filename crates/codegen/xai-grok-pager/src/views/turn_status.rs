@@ -1,6 +1,6 @@
 //! Turn status line: a single-row widget showing the current turn activity.
 //!
-//! Layout: `⠧ Run command 0.2s         1m20s ⇣12k [pause] [stop]`
+//! Layout: `⠧ Run command 0.2s              1m20s ⇣12k [pause] [stop]`
 //!
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
@@ -39,16 +39,8 @@ pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 /// Compute the pulsing diamond color for any "waiting on you" cue.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
-    if crate::theme::Theme::current_kind() == crate::theme::ThemeKind::Doge {
-        if brightness >= 0.5 {
-            accent
-        } else {
-            theme.bg_base
-        }
-    } else {
-        crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
-            .unwrap_or(accent)
-    }
+    crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
+        .unwrap_or(accent)
 }
 #[derive(Debug, Default)]
 pub struct TurnStatusOutput {
@@ -368,7 +360,6 @@ pub fn render_turn_status(
     let available_for_label = (area.width as usize)
         .saturating_sub(spinner_width)
         .saturating_sub(phase_timer_width)
-        .saturating_sub(queue_suffix_width)
         .saturating_sub(min_gap)
         .saturating_sub(right_width)
         .saturating_sub(2);
@@ -537,7 +528,7 @@ fn compute_activity(
             let style = if is_ask || has_desc {
                 Style::default().fg(theme.text_secondary)
             } else {
-                Style::default().fg(theme.accent_running)
+                Style::default().fg(theme.accent_success)
             };
             (style, String::new(), true)
         }
@@ -638,9 +629,28 @@ pub fn should_show(
     session_starting_since: Option<Instant>,
     watchers: Watchers,
     parked: bool,
+) -> bool {
+    should_show_with_global_pause(
+        state,
+        drain_blocked,
+        mcp_init_progress,
+        watchers,
+        parked,
+        false,
+    )
+}
+
+/// [`should_show`] plus the Work B resume row: global pause keeps the
+/// turn-status line visible after every session goes idle so `[resume]`
+/// stays discoverable.
+pub fn should_show_with_global_pause(
+    state: &AgentState,
+    drain_blocked: bool,
+    mcp_init_progress: Option<&McpInitProgress>,
+    watchers: Watchers,
+    parked: bool,
     global_paused: bool,
 ) -> bool {
-    // Resume must stay discoverable after every session goes idle under pause.
     if global_paused && !parked {
         return true;
     }
@@ -853,7 +863,6 @@ mod tests {
             false,
             None,
             Watchers::default(),
-            false,
             false
         ));
         assert!(should_show(
@@ -861,7 +870,6 @@ mod tests {
             false,
             None,
             Watchers::default(),
-            false,
             false
         ));
         assert!(!should_show(
@@ -869,7 +877,6 @@ mod tests {
             false,
             None,
             Watchers::default(),
-            false,
             false
         ));
     }
@@ -918,7 +925,6 @@ mod tests {
             true,
             None,
             Watchers::default(),
-            false,
             false
         ));
     }
@@ -942,21 +948,13 @@ mod tests {
                 ..Watchers::default()
             },
         ] {
-            assert!(should_show(
-                &AgentState::Idle,
-                false,
-                None,
-                watchers,
-                false,
-                false
-            ));
+            assert!(should_show(&AgentState::Idle, false, None, watchers, false));
         }
         assert!(!should_show(
             &AgentState::TurnRunning,
             false,
             None,
             Watchers::default(),
-            false,
             false
         ));
     }
@@ -970,16 +968,14 @@ mod tests {
                 commands: 1,
                 ..Watchers::default()
             },
-            true,
-            false
+            true
         ));
         assert!(should_show(
             &AgentState::TurnRunning,
             false,
             None,
             Watchers::default(),
-            true,
-            false
+            true
         ));
     }
     /// Collect every rendered glyph in `area` into a single string.
@@ -1231,10 +1227,6 @@ mod tests {
             text.contains("1 subagent still running") && !text.contains("subagents"),
             "single subagent must use the singular noun, got: {text:?}"
         );
-        assert!(
-            !text.contains("Enter queues"),
-            "singular subagent idle must not claim Enter queues, got: {text:?}"
-        );
     }
     #[test]
     fn idle_with_one_workflow_counts_run_once() {
@@ -1413,16 +1405,14 @@ mod tests {
 
     #[test]
     fn parked_with_watchers_renders_cue_not_running_chrome() {
-        // A parked running turn renders the still-running cue — never the busy
-        // spinner/timers/[stop] chrome (the wait aborts as soon as the user
-        // types, so that chrome would lie).
+        // The wait aborts as soon as the user types, so busy chrome would lie.
         let text = render_parked_with_watchers(Watchers {
             commands: 2,
             ..Watchers::default()
         });
         assert!(
-            text.contains("2 commands still running"),
-            "parked with bg work must render the still-running cue, got: {text:?}"
+            text.contains("2 commands still running \u{00b7} send a message to interrupt"),
+            "parked with bg work must render the interruptible still-running cue, got: {text:?}"
         );
         assert!(
             !text.contains("Waiting") && !text.contains("[stop]"),
@@ -1431,20 +1421,15 @@ mod tests {
     }
 
     #[test]
-    fn parked_without_watchers_renders_nothing() {
+    fn parked_without_watchers_renders_waiting_cue() {
         let text = render_parked_with_watchers(Watchers::default());
         assert!(
-            text.trim().is_empty(),
-            "parked with no watchers must render nothing, got: {text:?}"
+            text.contains("waiting \u{00b7} send a message to interrupt"),
+            "watcherless parked must render the waiting interrupt cue, got: {text:?}"
         );
-    }
-
-    #[test]
-    fn idle_with_no_watchers_renders_nothing() {
-        let text = render_idle_with_watchers(Watchers::default());
         assert!(
-            text.trim().is_empty(),
-            "idle with no watchers must render nothing, got: {text:?}"
+            !text.contains("[stop]"),
+            "watcherless parked must not render the running-turn chrome, got: {text:?}"
         );
     }
     #[test]
@@ -1453,7 +1438,7 @@ mod tests {
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
         args.activity = &activity;
-        args.activity_started_at = Some(Instant::now() - Duration::from_secs(359));
+        args.parked = true;
         args.held_queue = 1;
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
@@ -1606,54 +1591,7 @@ mod tests {
         assert_eq!(USER_WAITING_PULSE_SPEED, 0.08);
     }
 
-    /// DOGE waiting diamond must solid-step between pure primaries — never
-    /// mid-channel gray from `blend_color` alpha fade.
-    #[test]
-    fn doge_pending_diamond_color_stays_on_pure_palette_no_gray_blend() {
-        let _pin = crate::theme::cache::pin_theme();
-        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
-        let theme = Theme::doge();
-        let accent = theme.accent_user; // pure green
-        let is_pure = |c: Color| -> bool {
-            matches!(
-                c,
-                Color::Rgb(0, 0, 0)
-                    | Color::Rgb(255, 0, 0)
-                    | Color::Rgb(0, 255, 0)
-                    | Color::Rgb(255, 255, 0)
-                    | Color::Rgb(0, 0, 255)
-                    | Color::Rgb(255, 0, 255)
-                    | Color::Rgb(0, 255, 255)
-                    | Color::Rgb(255, 255, 255)
-            )
-        };
-        let mut saw_accent = false;
-        let mut saw_black = false;
-        for tick in 0..200u64 {
-            let c = pending_diamond_color(&theme, accent, tick);
-            assert!(
-                is_pure(c),
-                "tick {tick}: diamond color {c:?} must be a DOGE pure primary (no gray blend)"
-            );
-            if c == accent {
-                saw_accent = true;
-            }
-            if c == theme.bg_base {
-                saw_black = true;
-            }
-            // Reject equal-channel mid grays explicitly.
-            if let Color::Rgb(r, g, b) = c {
-                assert!(
-                    !(r == g && g == b && r > 0 && r < 255),
-                    "tick {tick}: mid-gray RGB({r},{g},{b}) forbidden under DOGE"
-                );
-            }
-        }
-        assert!(saw_accent, "cycle must hit full accent");
-        assert!(saw_black, "cycle must hit pure black trough (solid step)");
-    }
-
-    // ── Work B: pause (white) vs stop (red) discoverability ──────────────
+    // ── Work B: pause (quiet white) vs stop (red) discoverability ─────────
 
     /// Named contract: pause paints when work is live or global pause is on;
     /// stop paints only when a primary turn or subagents can be cancelled.
@@ -1711,6 +1649,8 @@ mod tests {
     /// red, pause hover is quiet white (`text_primary`), never the same token.
     #[test]
     fn mid_turn_paints_pause_and_stop_with_distinct_hover_colors() {
+        // `NO_COLOR` (agent / CI runners) collapses Theme::current() to Reset.
+        // pin_theme forces TrueColor so the hover tokens stay distinct.
         let _pin = crate::theme::cache::pin_theme();
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         let theme = Theme::current();
@@ -1734,10 +1674,8 @@ mod tests {
             output.pause_button.is_some() && output.cancel_button.is_some(),
             "both hit rects must arm on a mouse host"
         );
-        // Pause and stop must be distinct controls (not the same rect).
         assert_ne!(output.pause_button, output.cancel_button);
 
-        // Hover colors: pause → text_primary; stop → accent_error.
         let mut hover = idle_args(Watchers::default());
         hover.state = &AgentState::TurnRunning;
         hover.activity = &activity;
@@ -1750,7 +1688,6 @@ mod tests {
         let (out, buf) = render_row(hover, 80);
         let pause_rect = out.pause_button.expect("pause hit");
         let stop_rect = out.cancel_button.expect("stop hit");
-        // Sample a non-space glyph cell inside each hit rect.
         let cell_fg = |rect: Rect| {
             (rect.x..rect.x + rect.width)
                 .find_map(|x| {
@@ -1790,10 +1727,6 @@ mod tests {
             "idle + subagents must paint pause and stop, got: {text:?}"
         );
         assert!(
-            !text.contains("Enter queues"),
-            "pause/stop stay; Enter queues must not return, got: {text:?}"
-        );
-        assert!(
             output.pause_button.is_some() && output.cancel_button.is_some(),
             "both hit rects required when subagents are live"
         );
@@ -1822,7 +1755,7 @@ mod tests {
     /// Global pause with idle sessions: row stays visible with `[resume]` only.
     #[test]
     fn global_paused_idle_paints_resume_not_stop() {
-        assert!(should_show(
+        assert!(should_show_with_global_pause(
             &AgentState::Idle,
             false,
             None,

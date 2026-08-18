@@ -1025,6 +1025,7 @@ async fn refresher_disk_retry_invalid_client_with_different_client_id_preserves_
         .refresh_chain(
             crate::token_type::TokenType::OidcSession,
             RefreshReason::ServerRejected,
+            crate::auth::manager::RefreshUrgency::UserFacing,
         )
         .await;
 

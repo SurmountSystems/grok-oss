@@ -12,6 +12,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tracing = { workspace = true }
+xai-tty-utils = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

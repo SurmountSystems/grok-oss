@@ -326,7 +326,7 @@ pub enum ActiveModal {
         /// It keeps stale results from populating a different note's review modal.
         rewrite_nonce: u64,
     },
-    /// `/limits` spend meters popup (live countdown; not a scrollback dump).
+    /// `/limits` modal (included SuperGrok period limits + extras + console).
     Limits {
         state: Box<crate::views::limits_modal::LimitsModalState>,
     },
@@ -1432,13 +1432,13 @@ mod palette_sharing_tests {
     }
     #[test]
     fn edit_prompt_palette_entry_is_minimal_only() {
-        let minimal = default_palette_entries(true, crate::app::ScreenMode::Minimal);
+        let minimal = default_palette_entries(true, &slash(crate::app::ScreenMode::Minimal));
         assert!(
             minimal
                 .iter()
                 .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
         );
-        let fullscreen = default_palette_entries(true, crate::app::ScreenMode::Fullscreen);
+        let fullscreen = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
         assert!(
             !fullscreen
                 .iter()

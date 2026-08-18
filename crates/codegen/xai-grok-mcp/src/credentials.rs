@@ -623,4 +623,76 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+
+    /// The `insert_and_save` freshness guard: a save older (by
+    /// `token_received_at`) than the on-disk entry must be skipped.
+    #[test]
+    fn stale_save_does_not_clobber_newer_disk_entry() {
+        // `StoredCredentials` is #[non_exhaustive]; construct via `new` and
+        // set the (public) timestamp field afterwards.
+        let mut older = test_stored_creds("c");
+        older.token_received_at = Some(1_000);
+        let mut newer = test_stored_creds("c");
+        newer.token_received_at = Some(2_000);
+        let no_ts = test_stored_creds("c");
+
+        assert!(
+            disk_entry_is_newer(Some(&newer), &older),
+            "older incoming vs newer disk → skip the write"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&older), &newer),
+            "newer incoming vs older disk → write proceeds"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&older), &older),
+            "equal timestamps → write proceeds (idempotent re-save)"
+        );
+        assert!(
+            !disk_entry_is_newer(None, &older),
+            "no disk entry → write proceeds"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&newer), &no_ts),
+            "timestamp-less incoming keeps pre-guard behavior (writes)"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&no_ts), &older),
+            "timestamp-less disk entry keeps pre-guard behavior (writes)"
+        );
+    }
+
+    /// The refresh-failure classifier that gates browser escalation
+    /// (`force_reauth`): network-level failures — the `oauth2` crate's
+    /// `Display` for request/parse errors — are transient; IdP rejections and
+    /// missing-credential states stay terminal (escalate, as before).
+    #[test]
+    fn refresh_failure_transient_classification() {
+        use crate::servers::mcp_refresh_failure_is_transient;
+        use rmcp::transport::auth::AuthError;
+
+        // oauth2 RequestTokenError::Request renders exactly "Request failed".
+        assert!(mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("Request failed".into())
+        ));
+        // 5xx/proxy bodies that aren't OAuth JSON parse-fail.
+        assert!(mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("Failed to parse server response".into())
+        ));
+
+        // IdP rejections carry the RFC 6749 code → terminal.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed(
+                "Server returned error response: invalid_grant: token revoked".into()
+            )
+        ));
+        // No refresh token at all → only the browser flow can help.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("No refresh token available".into())
+        ));
+        // Empty credential store → interactive auth required.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::AuthorizationRequired
+        ));
+    }
 }

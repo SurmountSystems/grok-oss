@@ -183,7 +183,7 @@ deleting history.
 
 ---
 
-## Dispatch input
+## Completing or closing a session
 
 The bottom textarea **always spawns a new session**. A selected row is the
 navigation cursor, not a reply target — open an agent to talk to it.

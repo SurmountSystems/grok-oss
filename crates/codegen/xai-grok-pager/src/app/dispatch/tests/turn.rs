@@ -1071,7 +1071,7 @@ fn cancel_turn_keeps_a_post_turn_plan_review() {
             });
     }
 
-    let _ = dispatch(Action::CancelTurn, &mut app);
+    let effects = dispatch(Action::CancelTurn, &mut app);
 
     let pav = get_agent(&app, id)
         .plan_approval_view
@@ -1317,6 +1317,7 @@ fn cancel_turn_in_subagent_overlay_ignores_always_continue_pref() {
 
     let effects = dispatch(Action::CancelTurn, &mut app);
 
+    let effects = dispatch(Action::CancelTurn, &mut app);
     assert!(
         matches!(
             effects.as_slice(),
@@ -1343,6 +1344,7 @@ fn cancel_turn_with_stale_active_subagent_still_shows_ask_panel() {
             .insert("child-1".into(), make_test_subagent("child-1", "sa-1"));
         parent.active_subagent = Some("stale-sid".into());
     }
+    app.current_ui.cancel_subagents_on_turn_cancel = Some("always_continue".into());
 
     let effects = dispatch(Action::CancelTurn, &mut app);
 
@@ -2327,6 +2329,8 @@ fn bg_task_killed_not_found_removes_task_from_inactive_agent() {
         &mut app,
     );
 
+    let agent1 = &app.agents[&AgentId(1)];
+    assert!(!agent1.session.bg_tasks.contains_key("task-B-1"));
     assert!(
         !get_agent(&app, AgentId(1))
             .session

@@ -761,6 +761,18 @@ fn remember_prepaid(meter: &ConsoleTeamPrepaidMeter) {
     }
 }
 
+/// Seed process prepaid cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_prepaid_cache(team_id: &str, balance_cents: i64) {
+    let team = team_id.trim();
+    if team.is_empty() {
+        return;
+    }
+    remember_prepaid(&ConsoleTeamPrepaidMeter {
+        team_id: team.to_owned(),
+        balance_cents,
+    });
+}
+
 /// Fetch console team prepaid balance when management key + team_id are present.
 ///
 /// When `team_id` is missing but the key is present, attempts key validation to
@@ -896,7 +908,7 @@ pub fn run_management_key_login(
     let fp = fingerprint_management_key(&key);
     eprintln!("Management API key saved (fingerprint {fp}).");
     eprintln!(
-        "This is for console team prepaid / Business Usage remaining, not SuperGrok $ extras \
+        "This is for console team prepaid / Business Usage remaining, not SuperGrok dollar credits \
          and not the inference XAI_API_KEY."
     );
     // Best-effort live validate on a dedicated runtime (CLI may already be
@@ -956,7 +968,7 @@ pub fn console_team_prepaid_setup_note(
             "Console team prepaid (business credits remaining on console.x.ai) needs a \
              Management API key: Console → Settings → Management Keys, then \
              `grok login --management-key` or [endpoints] management_api_key / \
-             XAI_MANAGEMENT_API_KEY. Not XAI_API_KEY and not SuperGrok $ extras."
+             XAI_MANAGEMENT_API_KEY. Not XAI_API_KEY and not SuperGrok dollar credits."
                 .into(),
         );
     }
@@ -1205,6 +1217,14 @@ fn remember_postpaid(meter: &ConsoleTeamPostpaidPreview) {
     }
 }
 
+/// Seed process postpaid cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_postpaid_cache(meter: ConsoleTeamPostpaidPreview) {
+    if meter.team_id.trim().is_empty() {
+        return;
+    }
+    remember_postpaid(&meter);
+}
+
 /// Structured fields for a successful postpaid preview fetch (no secrets).
 pub fn management_postpaid_success_log_fields(
     meter: &ConsoleTeamPostpaidPreview,
@@ -1314,7 +1334,7 @@ pub fn console_team_postpaid_setup_note(
             "Console team postpaid (OAuth vs API Usage dollars on console.x.ai) needs a \
              Management API key: Console → Settings → Management Keys, then \
              `grok login --management-key` or [endpoints] management_api_key / \
-             XAI_MANAGEMENT_API_KEY. Distinct from prepaid remaining and SuperGrok $ extras."
+             XAI_MANAGEMENT_API_KEY. Distinct from prepaid remaining and SuperGrok dollar credits."
                 .into(),
         );
     }
@@ -1619,6 +1639,14 @@ fn remember_usage_series(series: &ConsoleTeamUsageSeries, day_window: i64) {
             fetched_at: Instant::now(),
         });
     }
+}
+
+/// Seed process usage-series cache from a shared limits snapshot (no HTTP).
+pub fn seed_console_team_usage_series_cache(series: ConsoleTeamUsageSeries, day_window: i64) {
+    if series.team_id.trim().is_empty() {
+        return;
+    }
+    remember_usage_series(&series, day_window);
 }
 
 /// Fetch console team usage series via documented POST usage analytics.
@@ -1970,6 +1998,14 @@ mod tests {
             "{note}"
         );
         assert!(note.contains("not SuperGrok"), "{note}");
+        assert!(
+            note.contains("SuperGrok dollar credits"),
+            "setup note must name SuperGrok dollar credits: {note}"
+        );
+        assert!(
+            !note.to_ascii_lowercase().contains("extras"),
+            "setup note must not teach extras as a nickname: {note}"
+        );
         assert!(
             note.contains("not XAI_API_KEY") || note.contains("Not XAI_API_KEY"),
             "{note}"

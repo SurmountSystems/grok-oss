@@ -291,10 +291,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,
-    /// Whether `isolation = worktree` is allowed. From
-    /// `[subagents] allow_worktree` (default `false`). When `false`, spawn
-    /// forces shared workspace. Opt in with `allow_worktree = true`.
-    pub subagent_allow_worktree: bool,
     /// Whether web search is force-disabled via `--disable-web-search`.
     /// Inherited from the parent session.
     pub disable_web_search: bool,
@@ -794,14 +790,6 @@ async fn read_parent_sampling_config(
             );
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
-                // Keep dual-auth failover list so prefer_live can switch to the
-                // console key after SuperGrok is out of allowance (stripping the
-                // list left subagents on SuperGrok $ extras after the parent
-                // already moved to console).
-                failover_api_keys: creds.failover_api_keys,
-                failover_base_url: creds.failover_base_url,
-                session_base_url: creds.session_base_url,
-                session_identity_key: creds.session_identity_key,
                 base_url: cfg.base_url,
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 model: cfg.model.clone(),
@@ -847,10 +835,13 @@ async fn read_parent_sampling_config(
                     .model_compaction_at_tokens(catalog_model_id.0.as_ref()),
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
+                failover_api_keys: ctx.sampling_config.failover_api_keys.clone(),
+                failover_base_url: ctx.sampling_config.failover_base_url.clone(),
+                session_base_url: ctx.sampling_config.session_base_url.clone(),
+                session_identity_key: ctx.sampling_config.session_identity_key.clone(),
+                stashed_bearer_resolver: ctx.sampling_config.stashed_bearer_resolver.clone(),
+                session_bearer_resolver: ctx.sampling_config.session_bearer_resolver.clone(),
             };
-            // Same sticky preference as reconstruct_full_config: if SuperGrok is
-            // memoized out of allowance, start the child already on the console key.
-            let _ = xai_grok_sampler::prefer_live_identity_after_credit_exhaust(&mut inherited);
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();
             xai_grok_telemetry::unified_log::debug(
@@ -942,9 +933,9 @@ fn resolve_model_override_to_config(
     };
     let session_key = ctx.auth.as_ref().map(|a| a.key.as_str());
     let has_session_key = session_key.is_some();
-    // Same dual-auth rank as main sampling: preferred_method + auto_use_included_limits
-    // so a model override cannot re-introduce console keys while SuperGrok
-    // included weekly still has headroom (limits-before-credits).
+    // Same dual-auth rank as main sampling: preferred_method +
+    // auto_use_included_limits so a model override cannot re-introduce
+    // console keys while included SuperGrok period limits still have room.
     // Prefer live parent `agent_config` (spawn snapshot) over re-loading disk
     // config. When both are missing, fail closed (auto rank while a SuperGrok
     // session is live). When parent sampling is already SuperGrok-session-only
@@ -1890,6 +1881,17 @@ fn telemetry_owner_kind(
         xai_grok_telemetry::events::SubagentOwnerKind::Task
     }
 }
+fn telemetry_owner_kind(
+    request: &SubagentRequest,
+) -> xai_grok_telemetry::events::SubagentOwnerKind {
+    if request.owner.is_workflow() {
+        xai_grok_telemetry::events::SubagentOwnerKind::Workflow
+    } else if request.from_scheduler_loop() {
+        xai_grok_telemetry::events::SubagentOwnerKind::SchedulerLoop
+    } else {
+        xai_grok_telemetry::events::SubagentOwnerKind::Task
+    }
+}
 fn failure_result(request: &SubagentRequest, error: &str) -> SubagentResult {
     SubagentResult::failed(request.id.clone(), request.id.clone(), error)
 }
@@ -2234,6 +2236,7 @@ pub(crate) fn resolve_subagent_work_ulid(
 }
 
 /// Persist work ULID next to subagent meta and under the child session dir.
+#[allow(dead_code)]
 pub(crate) fn persist_subagent_work_ulid(
     subagent_meta_dir: &Path,
     child_session_dir: &Path,
@@ -2243,6 +2246,7 @@ pub(crate) fn persist_subagent_work_ulid(
     let _ = std::fs::write(subagent_meta_dir.join(WORK_ULID_SESSION_FILE), work_ulid);
     let _ = xai_grok_tools::util::ulid::write_work_ulid_file(child_session_dir, work_ulid);
 }
+
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 /// Uploaded to `{session_id}/subagent.json` in GCS and optionally mirrored locally.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -564,60 +564,14 @@ mod tests {
         .to_string()
     }
 
-    /// Drift guard for the hand-maintained `ALL_EVENTS`: a new `HookEventName`
-    /// variant breaks the exhaustive match below, then fails the assertion until
-    /// it is added to `ALL_EVENTS`, so no event vanishes from the flat listing.
-    #[test]
-    fn all_events_lists_every_variant() {
-        let every_variant = [
-            HookEventName::SessionStart,
-            HookEventName::UserPromptSubmit,
-            HookEventName::PreToolUse,
-            HookEventName::PostToolUse,
-            HookEventName::PostToolUseFailure,
-            HookEventName::PermissionDenied,
-            HookEventName::Stop,
-            HookEventName::StopFailure,
-            HookEventName::Notification,
-            HookEventName::SubagentStart,
-            HookEventName::SubagentStop,
-            HookEventName::SubagentEnd,
-            HookEventName::PreCompact,
-            HookEventName::PostCompact,
-            HookEventName::SessionEnd,
-        ];
-        for event in every_variant {
-            match event {
-                HookEventName::SessionStart
-                | HookEventName::UserPromptSubmit
-                | HookEventName::PreToolUse
-                | HookEventName::PostToolUse
-                | HookEventName::PostToolUseFailure
-                | HookEventName::PermissionDenied
-                | HookEventName::Stop
-                | HookEventName::StopFailure
-                | HookEventName::Notification
-                | HookEventName::SubagentStart
-                | HookEventName::SubagentStop
-                | HookEventName::SubagentEnd
-                | HookEventName::PreCompact
-                | HookEventName::PostCompact
-                | HookEventName::SessionEnd => {}
-            }
-            assert!(
-                HookRegistry::ALL_EVENTS.contains(&event),
-                "{event} is missing from ALL_EVENTS"
-            );
-        }
-    }
-
     /// Drift guard: gate events must match the `blockingEvents` the agent
     /// advertises (extensions/hooks.rs). A new gate event fails here.
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
-        // Canonicalize first: `traits()` is unreachable on alias variants.
-        let gates: std::collections::HashSet<_> = HookRegistry::ALL_EVENTS
+        // Canonicalize first to dedup alias spellings into one set entry
+        // (`traits()` itself already canonicalizes, so it's safe on aliases).
+        let gates: std::collections::HashSet<_> = HookEventName::ALL
             .iter()
             .map(|e| e.canonical())
             .filter(|e| e.traits().gate != GateKind::Observe)

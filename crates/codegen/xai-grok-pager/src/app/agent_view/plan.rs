@@ -56,7 +56,7 @@ fn log_plan_submit(action: &str) {
 impl AgentView {
     /// When plan approval is open, attach a PNG path to the plan composer so
     /// approve / revise / clarify can drain it on the same multimodal path as
-    /// a pasted screenshot (P1–P4). Returns true if a chip was inserted.
+    /// a pasted screenshot. Returns true if a chip was inserted.
     ///
     /// No-op when plan approval is not open, the path is not a readable image,
     /// or the prompt rejects the insert (policy / capacity). Callers still
@@ -255,17 +255,47 @@ impl AgentView {
             self.pending_post_turn_commit = None;
         }
     }
+
+    /// New `exit_plan_mode` present re-arms decision CTAs after Approve/Quit
+    /// and after Revise/Clarify in-flight.
+    pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
+        self.plan_decision_resolved = false;
+        self.plan_feedback_in_flight = None;
+    }
+
+    /// Status chrome for the plan decision loop.
+    ///
+    /// Parked present uses `plan_approval_status_label`. Idle Revise/Clarify
+    /// wait uses `PLAN_REVISING_STATUS` / `PLAN_WAITING_UPDATED_STATUS`.
+    /// Busy rewrite yields `None` so real turn status can paint. Never returns
+    /// `PLAN_IDLE_REVIEW_STATUS` while feedback is in flight.
+    pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
+        use crate::views::plan_approval_view::{
+            PLAN_IDLE_REVIEW_STATUS, plan_approval_status_label,
+        };
+        if let Some(ref pav) = self.plan_approval_view {
+            if self.line_viewer.is_some() {
+                return Some(plan_approval_status_label(pav.has_plan));
+            }
+            return Some(PLAN_IDLE_REVIEW_STATUS);
+        }
+        if let Some(in_flight) = self.plan_feedback_in_flight {
+            if self.session.state.is_turn_running() {
+                return None;
+            }
+            return Some(in_flight.status_label());
+        }
+        if self.should_arm_plan_decision_chrome() && self.plan_preview_available() {
+            return Some(PLAN_IDLE_REVIEW_STATUS);
+        }
+        None
+    }
+
     fn inline_plan_content(&self) -> Option<&str> {
         self.plan_approval_view
             .as_ref()
             .filter(|p| p.source == PlanReviewSource::Inline)
             .and_then(|p| p.plan_content.as_deref())
-            .filter(|s| !s.trim().is_empty())
-    }
-    /// Read non-empty session `plan.md` when the path resolves and is readable.
-    fn read_plan_file_body(&self) -> Option<String> {
-        self.plan_file_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
     }
     /// Resolve the plan body for the line-viewer preview.
@@ -283,27 +313,9 @@ impl AgentView {
         if let Some(content) = self.kept_plan.review_content(read_kept_plan_file) {
             return Some(content);
         }
-        self.read_plan_file_body()
-    }
-    /// Refresh FileBacked `plan_content` from disk so comment/feedback line
-    /// anchors match the body shown after a while-parked rewrite.
-    fn refresh_file_backed_plan_from_disk(&mut self) {
-        let is_file_backed = self
-            .plan_approval_view
-            .as_ref()
-            .is_some_and(|p| p.source == PlanReviewSource::FileBacked);
-        if !is_file_backed {
-            return;
-        }
-        let Some(disk) = self.read_plan_file_body() else {
-            return;
-        };
-        if let Some(pav) = self.plan_approval_view.as_mut() {
-            pav.has_plan = true;
-            if pav.plan_content.as_deref() != Some(disk.as_str()) {
-                pav.plan_content = Some(disk);
-            }
-        }
+        self.plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty())
     }
     /// An in-turn review's ext method dies with the turn. A post-turn review stays until the user decides.
     pub(crate) fn dismiss_in_turn_plan_review(&mut self) -> bool {
@@ -389,9 +401,6 @@ impl AgentView {
     /// When plan approval is parked without a body, opens a placeholder preview.
     /// The user then always sees a decision surface (a/s/q) instead of a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
-        // File-backed SoT: pull latest plan.md before painting so the panel
-        // and comment anchors track disk rewrites while approval is parked.
-        self.refresh_file_backed_plan_from_disk();
         // Park before open so feedback_active / footer CTAs arm on this open.
         self.park_local_idle_plan_decision_if_needed();
         let body = self.plan_body_for_preview();
@@ -421,17 +430,17 @@ impl AgentView {
         } else {
             "plan.md".to_string()
         });
-        // Casual `/view-plan` and approval soft-park both open as a right-hand
-        // side panel (half screen) so chat stays visible. Fullscreen is opt-in
-        // via Ctrl+F / the enlarge control. Force-modal
-        // (`plan_approval_park=modal`) upgrades to fullscreen after reopen in
-        // `handle_exit_plan_mode`.
-        viewer.side_panel = true;
-        viewer.fullscreen = false;
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
         {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
-            plan.feedback_active = self.plan_approval_view.is_some();
+            // Live park owns approval CTAs. After Approve/Quit or while
+            // Revising/Clarify is in flight, `/view-plan` stays view-only.
+            if self.plan_approval_view.is_none() && !self.should_arm_plan_decision_chrome() {
+                plan.feedback_active = false;
+            } else {
+                plan.feedback_active = self.plan_approval_view.is_some();
+            }
         }
         if let Some(ref pav) = self.plan_approval_view
             && !pav.comments.is_empty()
@@ -554,13 +563,10 @@ impl AgentView {
         // sees visual context on the implement turn.
         if !images.is_empty() {
             return InputOutcome::Action(Action::Interject {
-                text: "Screenshot(s) attached with plan approval.".to_owned(),
+                text: review_comments.unwrap_or_default(),
                 images,
             });
         }
-        // Approve continues implement shell-side (mid-turn or resume). Local
-        // pending stays held until that turn ends and the normal turn-end
-        // drain runs — do not race DrainQueue against the implement turn.
         InputOutcome::Changed
     }
     /// Fold freeform-only images into the session draft.
@@ -792,8 +798,7 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
-        let is_local_idle = pav.is_local_idle_decision;
-        let formatted = pav.format_feedback_with_selection(feedback.as_deref(), selection.as_ref());
+        let formatted = pav.format_feedback(feedback.as_deref());
         let to_send = if formatted.trim().is_empty() {
             feedback
         } else {
@@ -843,11 +848,10 @@ impl AgentView {
 
         if !images.is_empty() {
             return InputOutcome::Action(Action::Interject {
-                text: "Screenshot(s) attached for plan feedback.".to_owned(),
+                text: to_send.unwrap_or_default(),
                 images,
             });
         }
-        // Clarify/questions stay in plan mode shell-side — same queue gate as revise.
         InputOutcome::Changed
     }
 
@@ -859,12 +863,10 @@ impl AgentView {
         }
         InputOutcome::Changed
     }
+
     pub(crate) fn reopen_plan_approval(&mut self) {
-        // Engaging the plan surface: dismiss competing overlays so the plan
-        // paints and input routes to the line viewer (soft park left them
-        // alone). Opens as a right-hand side panel by default (option B).
-        self.active_modal = None;
-        self.block_viewer = None;
+        let keep_draft = !self.prompt.text().trim().is_empty();
+        let live_cursor = self.prompt.cursor();
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.focus = PlanApprovalFocus::Preview;
         }
@@ -894,30 +896,13 @@ impl AgentView {
     pub(super) fn discard_in_progress_comment(&mut self) {
         self.leave_plan_commenting_restore_freeform();
     }
-    /// When plan approval owns the prompt (soft park or panel), a fully typed
-    /// registered slash command must route through the normal slash pipeline
-    /// (`SendPrompt` → registry → e.g. `ShowPlan` for `/view-plan`), not be
-    /// treated as freeform revise/approve notes.
-    fn try_submit_registered_slash_from_plan_prompt(&mut self) -> Option<InputOutcome> {
-        let raw = self.prompt.text().to_string();
-        let trimmed = raw.trim();
-        if !trimmed.starts_with('/') {
-            return None;
-        }
-        let invocation = crate::slash::parse_invocation(trimmed)?;
-        let reg = self.prompt.slash_controller.registry();
-        reg.get_for_dispatch(invocation.token)?;
-        if !crate::slash::is_command_complete(trimmed, reg) {
-            return None;
-        }
-        let to_send = trimmed.to_string();
-        self.prompt.slash_commit_preview();
-        self.prompt.slash_close();
-        self.prompt.set_text("");
-        Some(InputOutcome::Action(Action::SendPrompt(to_send)))
-    }
-
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        if crate::input::key::is_paste_key(key) {
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            return self.handle_paste_key_deferred(clipboard_text);
+        }
         let is_commenting = self
             .plan_approval_view
             .as_ref()
@@ -939,6 +924,9 @@ impl AgentView {
                 Some(PlanApprovalFocus::Preview) => {
                     if let Some(ref mut pav) = self.plan_approval_view {
                         pav.focus = PlanApprovalFocus::Prompt;
+                        if pav.prompt_intent == PlanPromptIntent::Revise {
+                            pav.prompt_intent = PlanPromptIntent::Comment;
+                        }
                     }
                 }
                 None => {}
@@ -991,11 +979,15 @@ impl AgentView {
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| !pav.comments.is_empty());
-                let has_images = !self.prompt.images.is_empty();
                 let prompt_focused = self
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
+                let intent = self
+                    .plan_approval_view
+                    .as_ref()
+                    .map(|pav| pav.prompt_intent)
+                    .unwrap_or_default();
                 if prompt_focused {
                     if self.is_freeform_builtin_slash_command() {
                         let text = self.prompt.text().to_owned();
@@ -1026,21 +1018,18 @@ impl AgentView {
                             Some(trimmed.to_owned())
                         }
                     };
-                    let intent = self
-                        .plan_approval_view
-                        .as_ref()
-                        .map(|p| p.prompt_intent)
-                        .unwrap_or(PlanPromptIntent::Revise);
                     return match intent {
                         PlanPromptIntent::Questions => self.send_plan_questions(freeform),
-                        PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
-                        // Freeform stays in the prompt; approve_plan folds it
-                        // into the approved + notes Interject path.
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
+                        PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
+                        PlanPromptIntent::Comment => {
+                            self.show_toast(
+                                "Click Approve to implement, Clarify to ask, or Revise to rewrite.",
+                            );
+                            InputOutcome::Changed
+                        }
                     };
                 }
-                // Soft-park / Preview without Prompt focus: do not approve on
-                // empty Enter — mouse / empty-prompt `a` only (L1 modal-free).
                 return InputOutcome::Changed;
             }
             EnterOutcome::PassThrough => {}
@@ -1050,10 +1039,6 @@ impl AgentView {
                 if let Some(req) = self.prompt.pending_viewer_request.take() {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }
-                // Soft-park / plan-approval path owns keys; must refresh slash
-                // so `/view-plan` appears in autocomplete (normal prompt path
-                // does this in `handle_prompt_key`).
-                self.prompt.refresh_slash(&self.session.models);
                 InputOutcome::Changed
             }
             PromptEvent::Ignored => InputOutcome::Changed,
@@ -1147,10 +1132,16 @@ impl AgentView {
         if let Some(ref mut viewer) = self.line_viewer {
             viewer.rebuild_with_comments(&comments);
         }
+        // Keep chips attached during the comment draft. Restore / set_text
+        // would drop them otherwise.
+        let kept_images = self.prompt.drain_images();
         if let Some(stashed) = pav.stashed_feedback_prompt.take() {
             self.prompt.restore(stashed);
         } else {
             self.prompt.set_text("");
+        }
+        for image in kept_images {
+            let _ = self.prompt.insert_image(image);
         }
         InputOutcome::Changed
     }
@@ -1316,11 +1307,6 @@ impl AgentView {
         }
     }
     pub(super) fn send_casual_plan_comments(&mut self) -> InputOutcome {
-        // Flush in-progress casual line comment before send (same swallow bug
-        // as plan approve: mouse/`s` previously only sent already-saved list).
-        if self.casual_commenting_range.is_some() && !self.prompt.text().trim().is_empty() {
-            let _ = self.save_casual_plan_comment();
-        }
         if self.plan_comments.is_empty() {
             self.show_toast("No comments to send.");
             return InputOutcome::Changed;

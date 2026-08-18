@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn inject_countdown_after_next_reset() {
-        let body = "Live sampling: SuperGrok session\n\nSuperGrok:\n  Next reset: August 3, 19:25\n  SuperGrok dollar extras: $1";
+        let body = "Live sampling: SuperGrok session\n\nSuperGrok:\n  Next reset: August 3, 19:25\n  SuperGrok dollar credits: $1";
         let out = inject_countdown_line(body, "1d 2h 3m 4s");
         assert!(out.contains("Next reset: August 3, 19:25\n  Resets in: 1d 2h 3m 4s\n"));
     }

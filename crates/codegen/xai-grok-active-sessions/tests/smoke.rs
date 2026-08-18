@@ -6,12 +6,12 @@ use tempfile::TempDir;
 use xai_grok_active_sessions::{ActiveSession, list_in, register_in, try_unregister_in};
 
 fn session(id: &str, pid: u32) -> ActiveSession {
-    ActiveSession {
-        session_id: agent_client_protocol::SessionId::new(id),
+    ActiveSession::new(
+        agent_client_protocol::SessionId::new(id),
         pid,
-        cwd: "/tmp/test".into(),
-        opened_at: Utc::now(),
-    }
+        "/tmp/test",
+        Utc::now(),
+    )
 }
 
 #[test]

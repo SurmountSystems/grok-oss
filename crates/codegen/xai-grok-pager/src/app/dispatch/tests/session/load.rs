@@ -51,6 +51,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -365,6 +366,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -482,6 +484,7 @@ fn session_loaded_purges_replay_transient() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -510,6 +513,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -621,6 +625,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             ),
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -663,6 +668,7 @@ fn session_loaded_without_restore_no_summary() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -704,6 +710,7 @@ fn session_loaded_without_restore_resets_restore_degree() {
             restore_summary: Some("checked out abc".into()),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -721,6 +728,7 @@ fn session_loaded_without_restore_resets_restore_degree() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -750,6 +758,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -935,16 +944,6 @@ fn auth_complete_restores_view_after_mid_session_login() {
 #[test]
 fn session_loaded_drains_pending_first_prompt_to_front() {
     let mut app = fork_test_app();
-    let sid = "new-fork-sid";
-    // Host ~/.grok can retain an eager cancel-resume marker from a prior
-    // run (drain re-writes after start). Clear so this contract stays
-    // about pending_first_prompt drain, not resume pollution.
-    let cwd = app
-        .agents
-        .get(&AgentId(0))
-        .map(|a| a.session.cwd.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/tmp".into());
-    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, sid);
     dispatch(
         Action::Fork(fork_args(Some(false), Some("first directive"))),
         &mut app,
@@ -955,17 +954,18 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         .unwrap()
         .session
         .enqueue_prompt("user-typed prompt".into());
-    app.agents.get_mut(&new_id).unwrap().session.session_id = Some(sid.into());
+    app.agents.get_mut(&new_id).unwrap().session.session_id = Some("new-fork-sid".into());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: new_id,
-            session_id: sid.into(),
+            session_id: "new-fork-sid".into(),
             models: None,
             modes: None,
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -980,8 +980,6 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         expect_agent(&app, new_id).pending_first_prompt.is_none(),
         "drained prompt must be cleared"
     );
-    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd, sid);
-    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
 }
 #[test]
 fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
@@ -998,6 +996,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1103,6 +1102,7 @@ fn session_loaded_clears_stale_running_entries() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1481,7 +1481,6 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
             skipped_image_numbers: Vec::new(),
             agent_id: old_owner,
             result: Ok("old answer".into()),
-            btw_session_id: None,
             minimal_request_id: Some(request_id),
         }),
         &mut app,

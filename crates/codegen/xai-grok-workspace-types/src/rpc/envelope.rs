@@ -123,4 +123,34 @@ mod tests {
         };
         assert!(!other_hub_error.is_unknown_method());
     }
+
+    #[test]
+    fn is_unknown_method_matches_both_wire_shapes() {
+        let err = RpcError {
+            code: UNKNOWN_METHOD.to_owned(),
+            message: "workspace.export_github".to_owned(),
+        };
+        assert!(err.is_unknown_method());
+
+        let legacy = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: format!("{UNKNOWN_METHOD_ERR_PREFIX} workspace.export_github"),
+        };
+        assert!(legacy.is_unknown_method());
+
+        let rewrapped = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: format!(
+                "unknown error code: {UNKNOWN_METHOD}: {UNKNOWN_METHOD_ERR_PREFIX} \
+                 workspace.export_github"
+            ),
+        };
+        assert!(rewrapped.is_unknown_method());
+
+        let other_hub_error = RpcError {
+            code: HUB_ERROR.to_owned(),
+            message: "boom".to_owned(),
+        };
+        assert!(!other_hub_error.is_unknown_method());
+    }
 }

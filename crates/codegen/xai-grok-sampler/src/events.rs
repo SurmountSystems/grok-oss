@@ -488,6 +488,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Auth);
@@ -500,6 +501,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         let policy_info = SamplingErrorInfo::from(&policy);
         assert_eq!(policy_info.kind, SamplingErrorKind::Api);

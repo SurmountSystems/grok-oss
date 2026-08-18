@@ -735,6 +735,16 @@ impl LeaderStdioClient {
             .transcript()
             .ext_notification_count("x.ai/settings/update")
     }
+
+    /// Count of `x.ai/models/update` notifications received (catalog self-heal).
+    pub fn models_update_count(&self) -> u32 {
+        self.capture.models_update_count.load(Ordering::SeqCst)
+    }
+
+    /// Count of `x.ai/settings/update` notifications received (settings self-heal).
+    pub fn settings_update_count(&self) -> u32 {
+        self.capture.settings_update_count.load(Ordering::SeqCst)
+    }
 }
 
 pub fn leader_lock_path(home: &Path) -> PathBuf {

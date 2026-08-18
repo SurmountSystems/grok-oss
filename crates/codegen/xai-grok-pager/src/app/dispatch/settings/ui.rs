@@ -96,6 +96,10 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_update: auto_update_from_app,
                 auto_compact_threshold_percent: auto_compact_from_app,
                 auto_compact_threshold_tokens: auto_compact_tokens_from_app,
+                notifications_session_recap: notifications_session_recap_from_app,
+                notifications_session_recap_threshold_secs:
+                    notifications_session_recap_threshold_from_app,
+                features_session_recap: features_session_recap_from_app,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
                 scroll_speed: crate::appearance::cache::load_scroll_speed(),
                 respect_manual_folds: respect_manual_folds_from_app,
@@ -255,6 +259,9 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         auto_update: auto_update_from_app,
         auto_compact_threshold_percent: auto_compact_from_app,
         auto_compact_threshold_tokens: auto_compact_tokens_from_app,
+        notifications_session_recap: notifications_session_recap_from_app,
+        notifications_session_recap_threshold_secs: notifications_session_recap_threshold_from_app,
+        features_session_recap: features_session_recap_from_app,
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: respect_manual_folds_from_app,
@@ -666,7 +673,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
     use crate::settings::SettingValue;
     match (key, value) {
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
-        ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
@@ -732,6 +738,13 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("always_expand_thinking", SettingValue::Bool(b)) => {
             Some(Action::SetAlwaysExpandThinking(*b))
         }
+        ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
+        ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
+        ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
+        ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
+        ("plan_approval_park", SettingValue::Enum(s)) => {
+            Some(Action::SetPlanApprovalPark((*s).to_string()))
+        }
         ("group_tool_verbs", SettingValue::Bool(b)) => Some(Action::SetGroupToolVerbs(*b)),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             Some(Action::SetCollapsedEditBlocks(*b))
@@ -790,8 +803,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 value: *i,
             })
         }
-        ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
-        ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
         ("cancel_subagents_on_turn_cancel", SettingValue::Enum(s)) => {
             Some(Action::SetCancelSubagentsOnTurnCancel((*s).to_owned()))
         }
@@ -804,6 +815,11 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("features.session_recap", SettingValue::Bool(b)) => {
             Some(Action::SetFeaturesSessionRecap(*b))
         }
+        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
+            crate::settings::parse_auto_compact_threshold_canonical(s)
+                .map(Action::SetAutoCompactThreshold)
+        }
+        ("respect_manual_folds", SettingValue::Bool(b)) => Some(Action::SetRespectManualFolds(*b)),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             Some(Action::SetDefaultSelectedPermission((*s).to_owned()))
         }
@@ -862,10 +878,6 @@ pub(in crate::app::dispatch) fn action_for_reset(
         // show_tips / auto_update / display_refresh_auto_cadence: direct bool.
         ("show_tips", SettingValue::Bool(b)) => Some(Action::SetShowTips(*b)),
         ("auto_update", SettingValue::Bool(b)) => Some(Action::SetAutoUpdate(*b)),
-        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
-            crate::settings::parse_auto_compact_threshold_canonical(s)
-                .map(Action::SetAutoCompactThreshold)
-        }
         ("display_refresh_auto_cadence", SettingValue::Bool(b)) => {
             Some(Action::SetDisplayRefreshAutoCadence(*b))
         }
@@ -919,7 +931,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
-        ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
@@ -963,16 +974,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
         }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
-        ("bubble_copy_buttons", SettingValue::Bool(b)) => set_bubble_copy_buttons_inner(app, *b),
-        ("notifications.session_recap", SettingValue::Bool(b)) => {
-            set_notifications_session_recap_inner(app, *b)
-        }
-        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
-            set_notifications_session_recap_threshold_secs_inner(app, (*i).clamp(5, 3600) as u64)
-        }
-        ("features.session_recap", SettingValue::Bool(b)) => {
-            set_features_session_recap_inner(app, *b)
-        }
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),
         ("default_selected_permission", SettingValue::Enum(s)) => {
             set_default_selected_permission_inner(
@@ -1141,6 +1142,11 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("always_expand_thinking", SettingValue::Bool(b)) => {
             set_always_expand_thinking_inner(app, *b)
         }
+        ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
+        ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
+        ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),
+        ("bubble_copy_buttons", SettingValue::Bool(b)) => set_bubble_copy_buttons_inner(app, *b),
+        ("plan_approval_park", SettingValue::Enum(s)) => set_plan_approval_park_inner(app, s),
         ("group_tool_verbs", SettingValue::Bool(b)) => set_group_tool_verbs_inner(app, *b),
         ("collapsed_edit_blocks", SettingValue::Bool(b)) => {
             set_collapsed_edit_blocks_inner(app, *b)
@@ -1151,7 +1157,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
             super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
         }
-        // Token Economy: restore process live cache (optimistic mirror).
         ("token_economy.cap_implement_effort_when_economic", SettingValue::Bool(b)) => {
             xai_grok_shell::token_economy::set_token_economy_live_bool(
                 "cap_implement_effort_when_economic",
@@ -1184,6 +1189,38 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("token_economy.lock_implement_effort", SettingValue::Int(i)) => {
             xai_grok_shell::token_economy::set_token_economy_live_int("lock_implement_effort", *i);
+        }
+        ("notifications.session_recap", SettingValue::Bool(b)) => {
+            set_notifications_session_recap_inner(app, *b)
+        }
+        ("notifications.session_recap_threshold_secs", SettingValue::Int(i)) => {
+            set_notifications_session_recap_threshold_secs_inner(app, (*i).clamp(5, 3600) as u64)
+        }
+        ("features.session_recap", SettingValue::Bool(b)) => {
+            set_features_session_recap_inner(app, *b)
+        }
+        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
+            use crate::settings::AutoCompactThresholdChoice;
+            let default_canon = crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL;
+            match crate::settings::parse_auto_compact_threshold_canonical(s) {
+                Some(AutoCompactThresholdChoice::Percent(pct))
+                    if *s == default_canon
+                        || pct
+                            == xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT =>
+                {
+                    // Keep AppView in sync with disk after a failed first-commit of default:
+                    // disk is still None/None.
+                    app.auto_compact_threshold_percent = None;
+                    app.auto_compact_threshold_tokens = None;
+                }
+                Some(AutoCompactThresholdChoice::Percent(pct)) => {
+                    set_auto_compact_threshold_percent_inner(app, pct);
+                }
+                Some(AutoCompactThresholdChoice::Tokens(t)) => {
+                    set_auto_compact_threshold_tokens_inner(app, t);
+                }
+                None => {}
+            }
         }
         // keep_text_selection: restore the cache mirror to the canonical value.
         ("keep_text_selection", SettingValue::Enum(s)) => {
@@ -1232,29 +1269,6 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 app.auto_update = None;
             } else {
                 set_auto_update_inner(app, *b);
-            }
-        }
-        ("auto_compact_threshold_percent", SettingValue::Enum(s)) => {
-            use crate::settings::AutoCompactThresholdChoice;
-            let default_canon = crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL;
-            match crate::settings::parse_auto_compact_threshold_canonical(s) {
-                Some(AutoCompactThresholdChoice::Percent(pct))
-                    if *s == default_canon
-                        || pct
-                            == xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT =>
-                {
-                    // Keep AppView in sync with disk after a failed first-commit of default:
-                    // disk is still None/None.
-                    app.auto_compact_threshold_percent = None;
-                    app.auto_compact_threshold_tokens = None;
-                }
-                Some(AutoCompactThresholdChoice::Percent(pct)) => {
-                    set_auto_compact_threshold_percent_inner(app, pct);
-                }
-                Some(AutoCompactThresholdChoice::Tokens(t)) => {
-                    set_auto_compact_threshold_tokens_inner(app, t);
-                }
-                None => {}
             }
         }
         // fork_secondary_model: empty rollback restores baseline default.

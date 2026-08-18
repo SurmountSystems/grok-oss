@@ -1657,6 +1657,16 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                                 .unwrap_or(0);
                             *floor = (*floor).max(widest_grapheme.max(1));
                         }
+                        if !text.is_empty()
+                            && let Some(floor) = hard_floors.get_mut(col)
+                        {
+                            let widest_grapheme = text
+                                .graphemes(true)
+                                .map(unicode_display_width)
+                                .max()
+                                .unwrap_or(0);
+                            *floor = (*floor).max(widest_grapheme.max(1));
+                        }
                     }
                 }
 

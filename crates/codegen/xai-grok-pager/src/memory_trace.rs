@@ -31,6 +31,8 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -432,6 +434,11 @@ pub fn start(dir: PathBuf) {
     let _ = std::thread::Builder::new()
         .name("grok-memtrace".into())
         .spawn(move || {
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            {
+                // SAFETY: pthread_self returns this thread's valid pthread_t.
+                SAMPLER_PTHREAD.store(unsafe { libc::pthread_self() as usize }, Ordering::SeqCst);
+            }
             let mut wrote_start = false;
             loop {
                 wait_full_interval(interval);

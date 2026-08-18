@@ -1236,7 +1236,10 @@ pub enum McpError {
     #[error("MCP client error: {0}")]
     ClientError(String),
 
-    #[error("MCP server '{server}' timed out after {timeout_secs}s")]
+    #[error(
+        "MCP server '{server}' timed out after {}",
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(*timeout_secs))
+    )]
     Timeout { server: String, timeout_secs: u64 },
 
     #[error("Failed to spawn MCP server '{server}': {source}")]
@@ -2102,10 +2105,7 @@ impl McpErasedTool {
                 *is_timeout = true;
                 Err(xai_tool_runtime::ToolError::custom(
                     "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
+                    format_mcp_tool_timeout(&self.tool.name, tool_timeout),
                 ))
             }
             Err(retry_err) => Err(tool_error_for_service_error(&retry_err)),

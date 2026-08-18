@@ -248,6 +248,28 @@ mod tests {
         assert!(msg.contains("boom"), "{msg}");
     }
     #[test]
+    fn models_list_response_round_trips() {
+        let state = acp::SessionModelState::new(
+            acp::ModelId::new("grok-4"),
+            vec![acp::ModelInfo::new(acp::ModelId::new("grok-4"), "Grok 4")],
+        );
+        let ok = crate::session::ExtMethodResult::success(state)
+            .to_ext_response()
+            .unwrap();
+        let parsed = parse_models_list_response(ok.0.get()).unwrap();
+        assert_eq!(parsed.current_model_id.0.as_ref(), "grok-4");
+        assert_eq!(parsed.available_models.len(), 1);
+
+        let err = crate::session::ExtMethodResult::<acp::SessionModelState>::failure("boom")
+            .to_ext_response()
+            .unwrap();
+        let msg = parse_models_list_response(err.0.get())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("boom"), "{msg}");
+    }
+
+    #[test]
     #[serial]
     fn resolve_not_authenticated() {
         let (_dir, _g) = isolate_auth_sources();

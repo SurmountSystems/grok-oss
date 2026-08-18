@@ -145,9 +145,8 @@ mod tests {
             unsafe { std::env::remove_var(DISABLE_ENV) };
         }
         let out = f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) };
         }
         out
     }
@@ -192,6 +191,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // Process-env serialization across awaits is intentional for this hermetic test.
+    #[allow(clippy::await_holding_lock)]
     async fn observe_and_wait_share_across_handles() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os(DISABLE_ENV);

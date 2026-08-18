@@ -394,19 +394,6 @@ impl AgentView {
             }
         }
 
-        // Limits: dismissible meters popup (Esc / q).
-        if let ActiveModal::Limits { state } = modal {
-            use crate::views::limits_modal::{LimitsModalOutcome, handle_limits_key};
-            match handle_limits_key(state, key) {
-                LimitsModalOutcome::Close => {
-                    self.active_modal = None;
-                    return InputOutcome::Changed;
-                }
-                LimitsModalOutcome::Changed => return InputOutcome::Changed,
-                LimitsModalOutcome::Unchanged => return InputOutcome::Unchanged,
-            }
-        }
-
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup, and EditingValue handle their own Esc and keystrokes
@@ -2383,11 +2370,13 @@ impl AgentView {
                 crate::views::limits_modal::render_limits_modal(
                     buf,
                     area,
-                    limits_state,
-                    &theme,
+                    state,
+                    self.credit_balance.as_ref(),
                     compact,
-                    chrono::Utc::now(),
+                    &theme,
                 );
+            } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
+                crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal
@@ -3334,6 +3323,7 @@ mod command_palette_vim_input_tests {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
+        let _pin = crate::theme::cache::pin_theme();
         let render_palette_search_row = |search_active: bool| -> (bool, String) {
             let mut agent = make_agent();
             open_command_palette(&mut agent);

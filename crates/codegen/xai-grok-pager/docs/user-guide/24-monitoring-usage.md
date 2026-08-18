@@ -4,9 +4,23 @@
 > additive changes may occur without notice, renames/removals will bump the
 > version and be called out in the changelog.
 
-Grok CLI can export usage **metrics** and **events** to your organization's
+This page is **external OpenTelemetry** for org collectors. It is **not** the
+personal spend meter.
+
+For included SuperGrok period limits, SuperGrok dollar credits, and console
+team prepaid, type **`/limits`** in the TUI or click the compact meter on the
+status row. See [Authentication](02-authentication.md) and
+[Slash Commands → `/limits`](04-slash-commands.md#limits). `/spend` is the
+local Token Economy book. Spend included SuperGrok period limits on stored
+Business / Team SuperGrok logins first, then personal included, then SuperGrok
+dollar credits that never expire, then console team prepaid / console API
+credits. Remaining included SuperGrok period limits across distinct stored
+plans are added together. After included SuperGrok period limits are full,
+sampling hops to SuperGrok dollar credits, then to the console API as failover.
+
+Grok OSS can export usage **metrics** and **events** to your organization's
 own OpenTelemetry collector, so platform teams can monitor adoption, token
-consumption, tool-permission decisions, and errors across the fleet — without
+consumption, tool-permission decisions, and errors across the fleet, without
 any data flowing through SpaceXAI.
 
 ## Related settings
@@ -67,7 +81,7 @@ export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf  # or grpc
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.corp.example:4318
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <collector-token>"
-grok
+grok-oss
 ```
 
 `GROK_EXTERNAL_OTEL=1` alone enables **nothing** — you must also select at
@@ -202,6 +216,30 @@ something your local configuration did not.
 
 If your collector receives nothing at all, check the debug log
 (`grok --debug`) for `external otel:` lines — they record whether the stream
+resolved its configuration, and whether it is exporting or suppressed.
+
+## Startup suppression (why nothing arrives for the first few seconds)
+
+Because xAI can force-disable this stream fleet-wide, the CLI holds emission
+closed at startup until it knows whether that switch is set — it fetches the
+fleet policy from `/v1/settings` and only then starts exporting. In a healthy
+setup that is well under a second and invisible.
+
+**The wait is bounded**, so a deployment that cannot reach xAI still exports:
+
+- If no fleet policy can apply at all — `[features] remote_fetch = false`, or
+  `[endpoints] cli_chat_proxy_base_url` points somewhere other than xAI — the
+  stream starts immediately, governed by your local configuration.
+- If the policy fetch fails or never completes (firewalled host, offline
+  laptop), emission starts anyway once the attempt is exhausted, and in all
+  cases no later than 30 seconds after startup.
+
+A fleet policy that arrives afterwards still applies; it can only ever
+*tighten* (disable the stream or force the content gates off), never enable
+something your local configuration did not.
+
+If your collector receives nothing at all, check the debug log
+(`grok-oss --debug`) for `external otel:` lines. They record whether the stream
 resolved its configuration, and whether it is exporting or suppressed.
 
 ## Resource attributes

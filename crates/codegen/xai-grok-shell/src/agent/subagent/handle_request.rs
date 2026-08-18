@@ -1248,10 +1248,10 @@ pub(crate) async fn run_shell_child(
     let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
     let credentials = xai_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
-        failover_api_keys: effective_sampling_config.failover_api_keys.clone(),
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
         client_version: effective_sampling_config.client_version.clone(),
+        failover_api_keys: effective_sampling_config.failover_api_keys.clone(),
         failover_base_url: effective_sampling_config.failover_base_url.clone(),
         session_base_url: effective_sampling_config.session_base_url.clone(),
         session_identity_key: effective_sampling_config.session_identity_key.clone(),
@@ -1510,8 +1510,6 @@ pub(crate) async fn run_shell_child(
             non_interactive: ctx.parent_non_interactive,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
-            // Join key for usage.jsonl / cleared_todos (stable across resume).
-            work_ulid: Some(work_ulid.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
             parent_cwd: Some(ctx.parent_cwd.clone()),
             ..Default::default()

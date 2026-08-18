@@ -133,6 +133,11 @@ pub struct SubagentRequest {
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
     pub owner: SubagentOwner,
+    /// Token Economy implement-loop `--effort` (1 through 5, thoroughness).
+    /// `None` means the coordinator default (2). Not how many Review rows to
+    /// launch. The operator-ask bit is not on this request; spawn treats it
+    /// as false (one Review row).
+    pub implement_loop_effort: Option<u8>,
     pub cancel_token: CancellationToken,
     pub spawn_root: SpawnRootSpan,
     /// Model tool call that issued this spawn; `None` for harness-internal spawns.
@@ -175,6 +180,26 @@ impl SpawnRootSpan {
 impl SubagentRequest {
     pub fn from_scheduler_loop(&self) -> bool {
         self.runtime_overrides.loop_task_id.is_some()
+    }
+
+    /// The caller blocks on the foreground await budget (neither backgrounded
+    /// nor awaiting to completion).
+    pub fn awaits_in_foreground(&self) -> bool {
+        !self.run_in_background && !self.await_to_completion
+    }
+}
+
+impl SubagentRequest {
+    pub fn from_scheduler_loop(&self) -> bool {
+        self.runtime_overrides.loop_task_id.is_some()
+    }
+
+    /// Live implement-loop effort for the Review-row planner. Out of range
+    /// or missing falls back to 2 (the Token Economy desired default).
+    pub fn implement_loop_effort_or_default(&self) -> u8 {
+        self.implement_loop_effort
+            .filter(|effort| (1..=5).contains(effort))
+            .unwrap_or(2)
     }
 
     /// The caller blocks on the foreground await budget (neither backgrounded

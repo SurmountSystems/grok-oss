@@ -32,6 +32,7 @@ default-bazel = [
 ]
 
 [dependencies]
+xai-grok-extra-ca = { workspace = true }
 dunce = { workspace = true }
 agent-client-protocol = { workspace = true }
 anyhow = { workspace = true }
@@ -252,10 +253,13 @@ xai-grok-login = { workspace = true, features = ["test-support"] }
 xai-grok-sampler = { path = "../xai-grok-sampler", features = ["test-support"] }
 xai-grok-test-support = { workspace = true, features = [] }
 xai-test-utils = { workspace = true }
+pretty_assertions = { workspace = true }
 # `test-util` enables `#[tokio::test(start_paused = true)]` (paused virtual
 # clock with auto-advance) so interval-driven loop tests in `auth::refresh`
 # can assert exact tick counts deterministically without real-time sleep.
 tokio = { workspace = true, features = ["test-util"] }
+# Pre-main unified-log redirect in `src/test_support/mod.rs` (`#[ctor::ctor]`).
+ctor = { workspace = true }
 
 [dependencies.tempfile]
 workspace = true

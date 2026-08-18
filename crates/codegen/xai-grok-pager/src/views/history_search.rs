@@ -9,11 +9,13 @@
 //!   Every `PromptWidget` (one per agent view, including subagent child views) owns a `HistorySearchState`.
 //!   An eager spawn would therefore leak one parked thread per subagent for the process lifetime.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{SyncSender, sync_channel},
+    atomic::{AtomicU64, Ordering},
+    mpsc::{Receiver, SyncSender, sync_channel},
 };
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use nucleo::{
     Config, Matcher, Utf32String,
@@ -48,8 +50,8 @@ enum Msg {
 
 struct Daemon {
     shared: Arc<Mutex<Snapshot>>,
-    tx: SyncSender<Msg>,
-    _handle: JoinHandle<()>,
+    tx: SyncSender<Work>,
+    id: u64,
 }
 
 const MAX_RESULTS: usize = 100;
@@ -149,6 +151,18 @@ impl Daemon {
                 None
             }
         }
+        Msg::Stop => {}
+    }
+}
+
+impl Daemon {
+    /// Attach to the process-wide matcher thread. `None` when the spawn fails
+    /// — that attempt is not cached, so a later activation retries.
+    fn spawn() -> Option<Self> {
+        let tx = shared_sender()?;
+        let shared = Arc::new(Mutex::new(Snapshot::default()));
+        let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        Some(Self { shared, tx, id })
     }
 }
 
@@ -208,7 +222,7 @@ fn publish_query_matches(
             hits.push((i, sc));
         }
     }
-    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    hits.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
     if hits.len() > MAX_RESULTS {
         hits.truncate(MAX_RESULTS);
     }
@@ -241,7 +255,6 @@ fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
         current = match (current, next) {
             // Coalesce consecutive SetQuery, keeping the latest
             (Msg::SetQuery(_), next @ Msg::SetQuery(_)) => next,
-            // Preserve the item refresh and latest query as one atomic update.
             (Msg::SetItems(items), Msg::SetQuery(query)) => Msg::SetItemsAndQuery(items, query),
             (Msg::SetItemsAndQuery(items, _), Msg::SetQuery(query)) => {
                 Msg::SetItemsAndQuery(items, query)
@@ -252,12 +265,16 @@ fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
             (_, next) => next,
         };
     }
-    current
+    Work::Client { id, msg, out }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop);
+        let _ = self.tx.send(Work::Client {
+            id: self.id,
+            msg: Msg::Stop,
+            out: self.shared.clone(),
+        });
     }
 }
 
@@ -351,6 +368,13 @@ impl HistorySearchState {
 
     /// Whether the matcher daemon has been spawned.
     /// Regression accessor for the subagent storm test: child views must never build one.
+    #[cfg(test)]
+    pub(crate) fn daemon_built(&self) -> bool {
+        self.daemon.is_some()
+    }
+
+    /// Whether the matcher daemon has been spawned. Regression accessor for
+    /// the subagent storm test: child views must never build one.
     #[cfg(test)]
     pub(crate) fn daemon_built(&self) -> bool {
         self.daemon.is_some()
@@ -487,13 +511,7 @@ impl HistorySearchState {
 
     /// Set hovered index. Returns `true` if changed.
     pub fn set_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.snapshot.items.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.snapshot.items.len());
         let changed = clamped != self.hovered;
         self.hovered = clamped;
         changed
@@ -793,5 +811,51 @@ mod tests {
         let state = HistorySearchState::default();
         assert!(!state.is_active());
         assert_eq!(state.result_count(), 0);
+    }
+
+    /// Named contract: a second (and twentieth) history search must reuse the
+    /// matcher thread. Many live `HistorySearchState`s must not grow
+    /// `history-search` workers without bound (the dragon-npu / iso leak).
+    #[test]
+    fn many_live_states_share_one_history_search_thread() {
+        let spawned_before =
+            HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed);
+        let live_before = count_threads_named("history-search");
+        let mut states: Vec<HistorySearchState> =
+            (0..20).map(|_| HistorySearchState::new()).collect();
+        for (i, state) in states.iter_mut().enumerate() {
+            let unique = format!("unique-item-{i}");
+            let history = entries(&[&unique, "shared-other"]);
+            activate_and_poll(state, &history, "");
+            query_and_poll(state, &unique);
+            assert_eq!(
+                state.result_count(),
+                1,
+                "state {i} must match only its own item"
+            );
+            assert_eq!(state.selected_text(), Some(unique.as_str()));
+        }
+        let spawned = HISTORY_SEARCH_THREADS_SPAWNED.load(std::sync::atomic::Ordering::Relaxed)
+            - spawned_before;
+        let live_grown = count_threads_named("history-search").saturating_sub(live_before);
+        assert!(
+            spawned <= 1,
+            "20 live history searches must reuse one matcher thread, spawned {spawned}"
+        );
+        assert!(
+            live_grown <= 1,
+            "OS history-search threads must stay bounded; this burst grew {live_grown}"
+        );
+    }
+
+    fn count_threads_named(name: &str) -> usize {
+        let dir = std::fs::read_dir("/proc/self/task")
+            .expect("need /proc/self/task to count history-search workers");
+        dir.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            (comm.trim() == name).then_some(())
+        })
+        .count()
     }
 }

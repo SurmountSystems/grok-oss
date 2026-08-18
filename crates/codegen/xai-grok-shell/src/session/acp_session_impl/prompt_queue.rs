@@ -884,7 +884,7 @@ impl SessionActor {
                 queued_id = %id,
                 expected_version,
                 turn_running,
-                "queue soft-interject no-op (running id / stale / drained / not owner); rebroadcasting"
+                "queue soft interject no-op (running id / stale / drained / not owner); rebroadcasting"
             );
         }
         if !Self::has_protected_row(&state, id) {

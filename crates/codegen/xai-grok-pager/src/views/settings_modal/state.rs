@@ -965,7 +965,6 @@ fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<Row
 pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
     match key {
         "compact_mode" => Some(Action::SetCompactMode(new)),
-        "hide_header" => Some(Action::SetHideHeader(new)),
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
@@ -986,7 +985,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }
         "subagent_model_inheritance" => Some(Action::SetSubagentModelInheritance(new)),
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
-        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
@@ -1023,7 +1021,19 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }),
         "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
         "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
+        "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
+        "hide_header" => Some(Action::SetHideHeader(new)),
+        "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
+        "allow_worktree" => Some(Action::SetAllowWorktree(new)),
+        "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
+        "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
+        "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
+        "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
+        "invert_scroll" => Some(Action::SetInvertScroll(new)),
+        "show_tips" => Some(Action::SetShowTips(new)),
+        "auto_update" => Some(Action::SetAutoUpdate(new)),
+        "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         _ => None,
     }
 }
@@ -1039,10 +1049,12 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "permission_mode" => None,
         "coding_data_sharing" => None,
         "plan_mode" => None,
-        "plan_approval_park" => None,
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
+        "plan_approval_park" => None,
+        "cancel_subagents_on_turn_cancel" => None,
+        "auto_compact_threshold_percent" => None,
         _ => None,
     }
 }
@@ -1082,14 +1094,16 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             "off" => Some(Action::SetPlanMode(crate::app::actions::PlanModeKind::Off)),
             _ => None,
         },
-        "plan_approval_park" => match choice {
-            "soft" | "modal" => Some(Action::SetPlanApprovalPark(choice.to_string())),
-            _ => None,
-        },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
+        "default_reasoning_effort" => match choice {
+            "low" | "medium" | "high" => {
+                Some(Action::SetDefaultReasoningEffort(choice.to_string()))
+            }
+            _ => None,
+        },
         "render_mermaid" => {
             crate::appearance::RenderMermaid::from_canonical(choice).map(Action::SetRenderMermaid)
         }

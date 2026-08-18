@@ -39,6 +39,7 @@ REQUIRED_FILES=(
   docs/upstream-import-log.md
   docs/upstream-onto-log.md
   docs/git-workflow.md
+  doc/dev/upstream-regression-filters.md
   scripts/detect-upstream-export.sh
   scripts/import-upstream-export.sh
   scripts/sync-upstream.sh
@@ -107,6 +108,34 @@ else
   done
 fi
 
+# Catalog is the land inventory (not a second board). The file must exist
+# (REQUIRED_FILES) and still name the seven product class titles. This does
+# not prove crate `fn` names. Land agents still `rg` the catalog identifiers.
+LAND_CLASS_MARKERS=(
+  "### 1. CLI identity"
+  "### 2. Config is a surface"
+  "### 3. grok-oss SQL extras"
+  "### 4. DOGE / Surmount chrome"
+  "### 5. Dual-auth hop after included SuperGrok period limits are full"
+  "### 6. Last-session on start"
+  "### 7. Product skills are not a Python runtime"
+)
+catalog_body=""
+if [[ -n "$TREE_ISH" ]]; then
+  if path_in_tree "doc/dev/upstream-regression-filters.md"; then
+    catalog_body=$(git show "${TREE_ISH}:doc/dev/upstream-regression-filters.md" 2>/dev/null || true)
+  fi
+elif [[ -f doc/dev/upstream-regression-filters.md ]]; then
+  catalog_body=$(<doc/dev/upstream-regression-filters.md)
+fi
+if [[ -n "$catalog_body" ]]; then
+  for marker in "${LAND_CLASS_MARKERS[@]}"; do
+    if ! grep -F -q -- "$marker" <<<"$catalog_body"; then
+      missing+=("doc/dev/upstream-regression-filters.md (missing land class title: $marker)")
+    fi
+  done
+fi
+
 # Light content sniffs (worktree only) — catch xAI placeholder / empty shells.
 if [[ -z "$TREE_ISH" ]]; then
   if [[ -f AGENTS.md ]] && ! grep -q 'parent is coordinator' AGENTS.md 2>/dev/null; then
@@ -118,6 +147,34 @@ if [[ -z "$TREE_ISH" ]]; then
   if [[ -f README.md ]] && ! grep -qi 'Grok OSS\|grok-oss' README.md 2>/dev/null; then
     warn+=("README.md present but missing Grok OSS branding (possible xAI clobber)")
   fi
+  if [[ -f FORK.md ]] && ! grep -q 'non-excepted Python' FORK.md 2>/dev/null; then
+    missing+=("FORK.md land class 7 (must say a restack that installs non-excepted Python is a failed land)")
+  fi
+  guide="crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md"
+  if [[ -f $guide ]] && ! grep -q 'not a Python runtime' "$guide" 2>/dev/null; then
+    missing+=("$guide (must say product skills are not a Python runtime)")
+  fi
+  # Product skill roots in this tree. Host ~/.agents/skills is operator-owned.
+  allowed_product_skill_py() {
+    local rest="$1"
+    case "$rest" in
+      implement/scripts/memory.py|execute-plan/scripts/validate-plan.py|shared/resume-session/session_reader.py)
+        return 0
+        ;;
+      docx/*|pptx/*|xlsx/*|pdf/*)
+        [[ "$rest" == *.py ]] && return 0
+        ;;
+    esac
+    return 1
+  }
+  while IFS= read -r -d '' py; do
+    rel="${py#./}"
+    rest="${rel#.agents/skills/}"
+    rest="${rest#.grok/skills/}"
+    if ! allowed_product_skill_py "$rest"; then
+      missing+=("$rel (non-excepted Python under a product skill root)")
+    fi
+  done < <(find .agents/skills .grok/skills -name '*.py' -print0 2>/dev/null || true)
 fi
 
 if ((${#warn[@]})); then

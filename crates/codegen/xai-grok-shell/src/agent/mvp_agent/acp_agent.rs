@@ -562,6 +562,15 @@ impl acp::Agent for MvpAgent {
                     .list(acp::SessionListCapabilities::new())
                     .resume(acp::SessionResumeCapabilities::new())
         };
+        let session_capabilities = acp::SessionCapabilities::new()
+            .close(acp::SessionCloseCapabilities::new());
+        let session_capabilities = if crate::agent::chat_modes::process_chat_mode_enabled() {
+            session_capabilities
+        } else {
+            session_capabilities
+                    .list(acp::SessionListCapabilities::new())
+                    .resume(acp::SessionResumeCapabilities::new())
+        };
         Ok(
             acp::InitializeResponse::new(acp::ProtocolVersion::V1)
                 .agent_capabilities(

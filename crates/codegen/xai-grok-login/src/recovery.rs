@@ -72,6 +72,18 @@ impl RecoverySource {
             RecoverySource::Background => None,
         }
     }
+
+    /// How aggressively this recovery's refresh may behave in a dark wake:
+    /// `Background` recoveries fail soft; Turn/Relay have a user (or a live
+    /// connection) waiting and force through.
+    fn urgency(self) -> crate::auth::manager::RefreshUrgency {
+        match self {
+            RecoverySource::Turn | RecoverySource::Relay => {
+                crate::auth::manager::RefreshUrgency::UserFacing
+            }
+            RecoverySource::Background => crate::auth::manager::RefreshUrgency::Background,
+        }
+    }
 }
 /// Identity of the rejected credential for `manual_auth`.
 /// Captured from the rejected bearer (not live `inner`) so attribution is correct even after a `WrongTeam`/cleared-credential failure.
@@ -175,10 +187,13 @@ enum RecoveryStep {
     Done,
 }
 /// State machine that walks through recovery strategies after a 401.
-pub struct UnauthorizedRecovery {
+pub(crate) struct UnauthorizedRecovery {
     auth_manager: Arc<AuthManager>,
     /// The token that was rejected by the server.
     rejected_token: String,
+    /// Where this recovery was initiated; drives the KPI (via `emit`) and
+    /// the refresh urgency (background recoveries defer in dark wake).
+    source: RecoverySource,
     /// Current step in the recovery sequence.
     step: RecoveryStep,
     /// Error from `RefreshFromAuthority`, propagated as fallback when devbox recovery doesn't apply.
@@ -204,6 +219,7 @@ impl UnauthorizedRecovery {
         Self {
             auth_manager,
             rejected_token,
+            source,
             step: RecoveryStep::ReloadFromDisk,
             authority_error: None,
             authority_was_transient: false,
@@ -216,7 +232,7 @@ impl UnauthorizedRecovery {
         skip(self),
         fields(step = ?self.step, token_type = tracing::field::Empty),
     )]
-    pub async fn next(&mut self) -> Result<GrokAuth, AuthError> {
+    pub(crate) async fn next(&mut self) -> Result<GrokAuth, AuthError> {
         let span = tracing::Span::current();
         if !span.is_disabled() {
             span.record(

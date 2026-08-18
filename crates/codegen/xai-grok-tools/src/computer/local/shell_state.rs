@@ -76,6 +76,19 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
+  # Capture the user's option set (including allexport) *before* isolating
+  # this dump. `set -euo pipefail` is this function's own (set is
+  # shell-global in bash) and must not be replayed. Allexport *must* be
+  # replayed, but we turn it off for the rest of the dump so temps —
+  # especially `_emit_encoded`'s `content` holding the full `export -p`
+  # payload — are not exported into helper `exec` environments. On large
+  # CI/Nix envs that exec has been seen to fail with status 126, which
+  # then replaced the user command's exit code.
+  local posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
+  builtin set +o allexport 2>/dev/null || true
+  builtin declare +x posix_opts 2>/dev/null || true
+
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -103,13 +116,9 @@ dump_bash_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
+  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY|__grok_user_cmd' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  # errexit/pipefail here are this function's own `set -euo pipefail` (set is
-  # shell-global in bash); replaying them would abort later user commands.
-  local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
   local bash_opts

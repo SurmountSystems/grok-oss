@@ -86,10 +86,6 @@ pub(crate) enum McpDumpKind {
     LongLineJson,
     Json,
     LongLineText,
-    /// Structured JSON densified to TOON (or other non-JSON model format).
-    /// Dump body is densified text; extension `.txt` with shell search steer
-    /// (not jq — body is no longer JSON).
-    DensifiedStructured,
     Other,
 }
 
@@ -107,23 +103,10 @@ impl McpDumpKind {
         }
     }
 
-    /// Dump kind after densify: keep JSON/long-line kinds when the densified
-    /// body still classifies that way; if densify turned JSON into TOON
-    /// (non-JSON), use [`Self::DensifiedStructured`] so the operator still
-    /// gets a non-empty “query the saved file” steer under default `auto`.
-    pub(crate) fn after_densify(pre_kind: Self, densified_text: &str) -> Self {
-        let densified_kind = Self::classify(densified_text);
-        match (pre_kind, densified_kind) {
-            (_, densified @ (Self::Json | Self::LongLineJson | Self::LongLineText)) => densified,
-            (Self::Json | Self::LongLineJson, Self::Other) => Self::DensifiedStructured,
-            (_, densified) => densified,
-        }
-    }
-
     pub(crate) fn extension(self) -> &'static str {
         match self {
             Self::LongLineJson | Self::Json => "json",
-            Self::LongLineText | Self::DensifiedStructured | Self::Other => "txt",
+            Self::LongLineText | Self::Other => "txt",
         }
     }
 
@@ -144,11 +127,6 @@ impl McpDumpKind {
                 " The full output has a very long line, so grep/read_file are \
                  ineffective on it — use `{shell}` to slice/search the saved \
                  file{eg}.",
-                eg = examples_clause(&tools.text_tools()),
-            ),
-            Self::DensifiedStructured => format!(
-                " The full output is densified structured text (model format from \
-                 JSON); use `{shell}` to search/slice the saved file{eg}.",
                 eg = examples_clause(&tools.text_tools()),
             ),
             Self::Other => String::new(),
@@ -224,8 +202,6 @@ fn sanitized_stem(call_id: &str) -> String {
 ///
 /// Delegates to [`crate::util::toon::densify_structured_text_in_place`] (single
 /// policy parser; no second independent densify path).
-///
-/// No-op without allocate when the body is not structured JSON.
 pub fn densify_mcp_result_text_in_place(text: &mut String) {
     crate::util::toon::densify_structured_text_in_place(text);
 }
@@ -237,14 +213,8 @@ pub fn densify_mcp_result_text(text: &str) -> String {
 
 /// Truncate `text` in place when over the limit, dumping the full payload to
 /// the session `mcp/` dir (when available) with a pointer appended.
-///
-/// Structured JSON is densified via [`densify_mcp_result_text_in_place`] first
-/// (T3 UDAX). Dump kind is chosen with [`McpDumpKind::after_densify`] so
-/// JSON→TOON over-cap dumps still get a shell steer under default `auto`.
 async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
-    // Classify before densify so JSON→TOON still gets structured dump steer.
-    let pre_kind = McpDumpKind::classify(text.as_str());
-    // Encode structured→text under TOON policy before the byte cap.
+    // Encode structured→text under TOON policy before the byte cap (UDAX densify).
     densify_mcp_result_text_in_place(text);
 
     if text.len() <= trunc_ctx.max_output_bytes {
@@ -252,7 +222,7 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     }
 
     let total_bytes = text.len();
-    let kind = McpDumpKind::after_densify(pre_kind, text.as_str());
+    let kind = McpDumpKind::classify(text.as_str());
 
     let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| {
         folder.join("mcp").join(format!(

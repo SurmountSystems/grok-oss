@@ -726,10 +726,7 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
                 display_user_grok_path(xai_grok_config::USER_CONFIG_FILENAME)
             );
             eprintln!("  project: {}", project_path.display());
-            eprintln!(
-                "Specify which one to remove, e.g.: {} mcp remove {name} --scope project",
-                crate::app::screen_mode_relaunch::cli_hint_name()
-            );
+            eprintln!("Specify which one to remove, e.g.: grok mcp remove {name} --scope project");
             std::process::exit(1);
         }
     };

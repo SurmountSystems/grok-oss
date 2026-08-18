@@ -717,6 +717,64 @@ async fn assistant_response_push_does_not_bump_estimated_delta() {
     );
 }
 
+/// Spawn tool-call arguments carry the full L2 prompt. That body belongs
+/// on the child session, not on the parent assistant item used for
+/// estimated tokens / the 200k sampling compact.
+#[tokio::test]
+async fn parent_estimated_tokens_omit_huge_spawn_prompt() {
+    use xai_grok_sampling_types::ToolCall;
+
+    let h = TestHarness::new();
+    h.handle.record_token_usage(201_000);
+
+    let huge = "P".repeat(200_000);
+    let args = serde_json::json!({
+        "description": "Implementer Pin",
+        "prompt": huge,
+        "subagent_type": "general-purpose",
+    })
+    .to_string();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "spawn-1".into(),
+            name: "spawn_subagent".into(),
+            arguments: args.into(),
+        }]));
+
+    let estimated = h.handle.get_estimated_total_tokens().await;
+    assert!(
+        estimated < 160_000,
+        "huge spawn prompt must not count toward parent estimated tokens \
+         for sampling compact; got {estimated}"
+    );
+
+    let messages = h.handle.get_estimated_messages_tokens().await;
+    assert!(
+        messages < 15_000,
+        "stored parent conversation must not keep the 200k-char spawn prompt; \
+         messages estimate {messages}"
+    );
+
+    let conv = h.handle.get_conversation().await;
+    let ConversationItem::Assistant(a) = &conv[0] else {
+        panic!("expected assistant spawn item");
+    };
+    let stored = a.tool_calls[0].arguments.as_ref();
+    assert!(
+        !stored.contains(&huge),
+        "parent-stored spawn arguments must not keep the 200k-char prompt body"
+    );
+    assert!(
+        stored.contains("200000") || stored.contains("200_000"),
+        "pointer must name the omitted prompt size: {stored}"
+    );
+    assert!(
+        stored.to_ascii_lowercase().contains("implementer pin")
+            || stored.contains("Implementer Pin"),
+        "pointer must keep the short description: {stored}"
+    );
+}
+
 #[tokio::test]
 async fn provider_counted_model_output_persists_without_bumping_estimate() {
     let h = TestHarness::new();
@@ -836,6 +894,162 @@ async fn strip_conversation_images_replaces_only_listed_urls_and_persists() {
         "listed image part must be replaced"
     );
     let Some(ConversationItem::User(survivor)) = conv.get(1) else {
+        panic!("expected user item");
+    };
+    assert!(
+        survivor
+            .content
+            .iter()
+            .any(|p| matches!(p, xai_grok_sampling_types::ContentPart::Image { .. })),
+        "unlisted image must survive the scoped strip"
+    );
+
+    let records = h.drain_persistence();
+    // The recoverability contract: strip rewrites go through the single
+    // backup-gated flavor, never the plain, unguarded ReplaceHistory.
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r, PersistenceRecord::ReplaceHistoryForStrip(_))),
+        "strip must persist via the backup-gated flavor, got {records:?}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| matches!(r, PersistenceRecord::ReplaceHistory(_))),
+        "strip must not use the unguarded replace, got {records:?}"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_does_not_reseed_provider_tokens() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let mut h = TestHarness::with_conversation(vec![ConversationItem::User(user)]);
+    h.handle.record_token_usage(100_000);
+    let _ = h.handle.get_total_tokens().await;
+    h.drain_events();
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::Applied { stripped: 1 },
+        "ack must carry the disk-applied count"
+    );
+
+    assert_eq!(
+        h.handle.get_total_tokens().await,
+        100_000,
+        "provider total must survive a surgical strip"
+    );
+    assert!(
+        !h.drain_events()
+            .iter()
+            .any(|e| matches!(e, ChatStateEvent::ConversationReset { .. })),
+        "strip must not emit ConversationReset"
+    );
+}
+
+/// The honest-failure half of the contract: a failed disk write must
+/// surface as WriteFailed (never as Applied), so nobody tells the user a
+/// still-poisoned file was cleaned.
+#[tokio::test]
+async fn strip_conversation_images_reports_write_failure() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let (mock, persistence_rx) = MockChatPersistence::new_failing_strip_writes();
+    let h = TestHarness::with_persistence(
+        vec![ConversationItem::User(user)],
+        test_config(),
+        mock,
+        persistence_rx,
+    );
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::WriteFailed { stripped: 1 },
+        "a failed disk write must never read as Applied"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_is_a_noop_without_images() {
+    let mut h = TestHarness::with_conversation(vec![ConversationItem::user("plain text")]);
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::NoMatch,
+        "no match must be typed, not a fake success"
+    );
+
+    let conv = h.handle.get_conversation().await; // sync point
+    assert_eq!(conv.len(), 1);
+    assert!(
+        h.drain_persistence().is_empty(),
+        "no images stripped must mean no persistence write"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_replaces_only_listed_urls_and_persists() {
+    let mut user = match ConversationItem::user("look at this") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    user.add_image("data:image/png;base64,AAAA");
+    let mut later = match ConversationItem::user("and this one") {
+        ConversationItem::User(u) => u,
+        _ => unreachable!(),
+    };
+    later.add_image("data:image/png;base64,BBBB");
+    let mut h = TestHarness::with_conversation(vec![
+        ConversationItem::User(user),
+        ConversationItem::User(later),
+    ]);
+
+    let outcome = h
+        .handle
+        .strip_conversation_images(vec!["data:image/png;base64,AAAA".into()])
+        .await;
+    assert_eq!(
+        outcome,
+        crate::StripOutcome::Applied { stripped: 1 },
+        "ack must carry the disk-applied count"
+    );
+
+    let conv = h.handle.get_conversation().await; // sync point
+    assert_eq!(
+        conv.len(),
+        2,
+        "in-place strip must not add or remove conversation items"
+    );
+    let ConversationItem::User(u) = &conv[0] else {
+        panic!("expected user item");
+    };
+    assert!(
+        u.content
+            .iter()
+            .all(|p| !matches!(p, xai_grok_sampling_types::ContentPart::Image { .. })),
+        "listed image part must be replaced"
+    );
+    let ConversationItem::User(survivor) = &conv[1] else {
         panic!("expected user item");
     };
     assert!(

@@ -459,6 +459,26 @@ fn start_verbatim_compact_turns(
         (turns, CompactInputStage::Verbatim)
     }
 }
+
+/// AUTO full-replace must drop at least this many tokens to count as useful.
+/// Same spirit as intra-compaction `min_compactable_tokens`.
+pub(crate) const AUTO_COMPACT_MIN_USEFUL_DROP_TOKENS: u64 = 5_000;
+
+/// After tokens must be at most this fraction of before (20% minimum reduction).
+/// Same spirit as intra-compaction `max_reduction_ratio`.
+pub(crate) const AUTO_COMPACT_MAX_REMAINING_RATIO: f64 = 0.8;
+
+/// Whether an AUTO full-replace drop is large enough to keep compacting.
+pub(crate) fn auto_compact_savings_are_useful(tokens_before: u64, tokens_after: u64) -> bool {
+    if tokens_before == 0 {
+        return false;
+    }
+    let dropped = tokens_before.saturating_sub(tokens_after);
+    if dropped < AUTO_COMPACT_MIN_USEFUL_DROP_TOKENS {
+        return false;
+    }
+    (tokens_after as f64) <= (tokens_before as f64) * AUTO_COMPACT_MAX_REMAINING_RATIO
+}
 /// Why auto-compaction was suppressed after a deterministic failure.
 /// [`SuppressReason::as_str`] is a stable telemetry value (BQ/OTLP/dashboards key off it); don't rename the strings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, strum::AsRefStr, strum::IntoStaticStr)]
@@ -641,6 +661,7 @@ impl SessionActor {
             tokens_after,
             elapsed_ms: None,
             summary_preview: None,
+            saved_too_little: false,
         })
         .await;
         self.emit_status_snapshot_detached();
@@ -2273,6 +2294,9 @@ impl SessionActor {
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .last_auto_compact_saved_too_little
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if prev.context_window <= cfg.context_window.get() {
             return Ok(());
         }
@@ -2386,11 +2410,14 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
+                let useful =
+                    self.record_auto_compact_savings(trigger_info.tokens_used, tokens_after);
                 self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
                     tokens_before: Some(trigger_info.tokens_used),
                     tokens_after,
                     elapsed_ms: Some(elapsed_ms),
                     summary_preview: None,
+                    saved_too_little: !useful,
                 })
                 .await;
                 self.emit_status_snapshot_detached();

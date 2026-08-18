@@ -651,6 +651,11 @@ impl ToolOutput {
             _ => false,
         }
     }
+    fn format_task_duration_secs(duration_secs: f64) -> String {
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+            duration_secs.max(0.0),
+        ))
+    }
     /// Render tool output for inclusion in the model prompt with specified format.
     pub fn to_prompt_format(&self) -> String {
         match self {
@@ -749,7 +754,7 @@ impl ToolOutput {
             ToolOutput::WebFetch(o) => o.to_prompt_format(),
             ToolOutput::MCP(mcp_output) => match &mcp_output.output {
                 MCPOutputDetails::Error(error) => {
-                    format!("Failed to call {}: {}", &mcp_output.tool_name, error)
+                    format!("Failed to call {}: {}", mcp_output.tool_name, error)
                 }
                 MCPOutputDetails::OkayOutput(output) => output.to_owned(),
             },
@@ -809,8 +814,11 @@ impl ToolOutput {
                     let mut lines = vec![format!("=== Multi-wait ({}) ===", mr.mode)];
                     for r in &mr.results {
                         lines.push(format!(
-                            "--- Task {} [{}] ---\nCommand: {}\nDuration: {:.2}s",
-                            r.task_id, r.status, r.command, r.duration_secs,
+                            "--- Task {} [{}] ---\nCommand: {}\nDuration: {}",
+                            r.task_id,
+                            r.status,
+                            r.command,
+                            Self::format_task_duration_secs(r.duration_secs),
                         ));
                         if let Some(code) = r.exit_code {
                             lines.push(format!("Exit Code: {code}"));
@@ -856,7 +864,20 @@ impl ToolOutput {
                 }
                 text.push_str("\n\n");
                 text.push_str(&sub.resume_footer());
-                text
+                if text.len() > crate::DEFAULT_TOOL_OUTPUT_BYTES {
+                    let (capped, _) = crate::util::truncate::truncate_with_preview(
+                        crate::util::truncate::PartialOutput::whole(&text),
+                        crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                        crate::util::truncate::PREVIEW_SIZE,
+                        Some(
+                            "Full last answer is not stored on the parent ToolResult. \
+                             Use read_file on the on-disk report if one exists.",
+                        ),
+                    );
+                    capped
+                } else {
+                    text
+                }
             }
             ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
                 message,
@@ -1998,6 +2019,118 @@ mod tests {
             !prompt.contains("2026-03-09"),
             "no wall-clock date may survive into the prompt: {prompt}"
         );
+    }
+    #[test]
+    fn task_output_prompt_omits_empty_output_file() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-2".into(),
+            command: "true".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: String::new(),
+            ended: None,
+            duration_secs: 0.1,
+            output: "done".into(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 4,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(!prompt.contains("Output File"), "{prompt}");
+    }
+    /// The single-task detail view is duration-only: absolute `started` /
+    /// `ended` instants stay on the wire struct but must not reach the prompt.
+    #[test]
+    fn task_output_prompt_is_duration_only() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-1".into(),
+            command: "sleep 10".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: "2026-03-09T00:00:00Z".into(),
+            ended: Some("2026-03-09T00:00:05Z".into()),
+            duration_secs: 5.0,
+            output: "hello".into(),
+            output_file: "/tmp/task-1.log".into(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 5,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(prompt.contains("Duration: 5.0s"), "{prompt}");
+        assert!(prompt.contains("Output File: /tmp/task-1.log"), "{prompt}");
+        assert!(
+            !prompt.contains("Started") && !prompt.contains("Ended"),
+            "absolute instants must not be model-visible: {prompt}"
+        );
+        assert!(
+            !prompt.contains("2026-03-09"),
+            "no wall-clock date may survive into the prompt: {prompt}"
+        );
+    }
+    /// Model-visible TaskOutput wrapper must use compact minutes at 60s+,
+    /// not `Duration: 943.00s`. The inner Elapsed body is already compact;
+    /// this is the header `to_prompt_format` always sends as prompt_text.
+    #[test]
+    fn task_output_prompt_long_wait_uses_minutes_not_raw_seconds() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-wait".into(),
+            command: "wait".into(),
+            status: "running".into(),
+            exit_code: None,
+            started: "2026-03-09T00:00:00Z".into(),
+            ended: None,
+            duration_secs: 943.0,
+            output: String::new(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 0,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(
+            prompt.contains("Duration: 15m43s"),
+            "wrapper must use compact minutes: {prompt}"
+        );
+        for leak in ["943.00s", "943.0s", "943s", "943 seconds"] {
+            assert!(
+                !prompt.contains(leak),
+                "raw second leak {leak:?} in: {prompt}"
+            );
+        }
+
+        let multi = ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(
+            xai_tool_types::MultiTaskOutputResult {
+                mode: "wait_all".into(),
+                results: vec![TaskOutputResult {
+                    task_id: "task-wait".into(),
+                    command: "wait".into(),
+                    status: "running".into(),
+                    exit_code: None,
+                    started: String::new(),
+                    ended: None,
+                    duration_secs: 943.0,
+                    output: String::new(),
+                    output_file: String::new(),
+                    truncated: false,
+                    truncation_hint: String::new(),
+                    raw_output_bytes: 0,
+                }],
+                summary: "1/1 still running".into(),
+            },
+        ));
+        let multi_prompt = multi.to_prompt_format();
+        assert!(
+            multi_prompt.contains("Duration: 15m43s"),
+            "multi-wait wrapper must use compact minutes: {multi_prompt}"
+        );
+        for leak in ["943.00s", "943.0s", "943s", "943 seconds"] {
+            assert!(
+                !multi_prompt.contains(leak),
+                "raw second leak {leak:?} in: {multi_prompt}"
+            );
+        }
     }
     #[test]
     fn task_output_prompt_omits_empty_output_file() {

@@ -22,11 +22,13 @@ const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
-/// Side-panel footer CTA strip in key-only mode (narrow panel; CI default).
-/// Separator is `"  |  "` from `line_viewer` plan-approval paint.
-const KEY_ONLY_CTA_STRIP: &str = "a  |  A  |  ?";
-/// Labeled Approve button (compact/full label modes when the panel is wide).
-const LABELED_APPROVE_CTA: &str = "a approve";
+/// Word-only approval footer (separator `"  |  "` from `line_viewer` paint).
+/// Unique vs card prose (`to approve,`) and vs a lone `"approve"`.
+const LABELED_APPROVE_CTA: &str = "approve  |  comment";
+/// Full four-CTA strip when the right pane is wide enough for separators.
+const LABELED_FOOTER_STRIP: &str = "approve  |  comment  |  revise  |  exit";
+/// Narrow dock drops separators; still word-only, no letter prefixes.
+const NARROW_FOOTER_STRIP: &str = "approve comment revise exit";
 
 const PLAN_BODY: &str = "\
 # Plan GBT3703Repro
@@ -98,15 +100,33 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // Prefer the chrome markers (product signal) over SETUP_SENTINEL, which may not be visible under the plan viewer
     // Without the shell re-park this times out.
     //
-    // Markers: card header always; CTA strip is either labeled (`a approve` /
-    // `s revise`) or key-only (`a  |  A  |  ?`) when the ~45% side panel is
-    // too narrow for compact labels (120-col CI default).
-    resumed
-        .wait_for_text("Plan ready for review", WELCOME_TIMEOUT)
-        .context("restored plan-ready card after resume")?;
+    // Markers, any of:
+    // - full TUI status (`Plan ready. Side panel open`)
+    // - minimal-mode card header (`Plan ready for review`)
+    // - word-only footer (`approve  |  clarify  |  revise  |  exit`), or
+    //   the same four words with space separators on a narrow dock.
+    // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
+    // must accept the fullscreen status line. Waiting only for the minimal
+    // card header times out even when the side-panel CTAs are already up.
     wait_for_any_text(
         &mut resumed,
-        &[LABELED_APPROVE_CTA, "s revise", KEY_ONLY_CTA_STRIP],
+        &[
+            "Plan ready. Side panel open",
+            "Plan ready for review",
+            LABELED_FOOTER_STRIP,
+            NARROW_FOOTER_STRIP,
+            LABELED_APPROVE_CTA,
+        ],
+        WELCOME_TIMEOUT,
+    )
+    .context("restored plan-ready chrome after resume")?;
+    wait_for_any_text(
+        &mut resumed,
+        &[
+            LABELED_FOOTER_STRIP,
+            NARROW_FOOTER_STRIP,
+            LABELED_APPROVE_CTA,
+        ],
         WELCOME_TIMEOUT,
     )
     .context("restored approval CTA chrome after --continue")?;
@@ -125,9 +145,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Soft-park without panel is non-capturing for bare `a`. Default park
-    // auto-opens the side panel; click its Approve CTA (not card prose /
-    // "Enter:approve" shortcut text).
+    // Letters type; empty Enter never Approves. Default park auto-opens
+    // the right pane; click the painted Approve word (not card prose).
     click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))

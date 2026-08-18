@@ -14,6 +14,9 @@ use ratatui::text::{Line, Span};
 
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SubagentBlockKind;
+use crate::scrollback::blocks::tool::hook::{
+    HookRunCounts, render_group_hook_counts_inline_suffix,
+};
 use crate::scrollback::blocks::tool::{ToolCallBlock, VerbGroupKind};
 use crate::scrollback::entry::ScrollbackEntry;
 use crate::scrollback::types::DisplayMode;
@@ -141,7 +144,7 @@ pub struct VerbGroupHeaderLabel {
     pub text: String,
     /// Any member still running (animated accent and present-tense verbs).
     pub running: bool,
-    /// Any member failed (error accent).
+    /// Any member or summarized hook failed (error accent).
     pub failed: bool,
 }
 
@@ -198,7 +201,7 @@ pub fn verb_group_header_label(
             RunStep::Break => break,
             RunStep::ThoughtMember | RunStep::Transparent => continue,
         };
-        acc.push(kind, entry);
+        acc.push(kind, entry, true);
     }
 
     acc.into_label(theme)
@@ -253,6 +256,7 @@ struct BucketAccumulator<'e> {
     buckets: Vec<Bucket<'e>>,
     running: bool,
     failed_count: usize,
+    hook_counts: HookRunCounts,
 }
 
 impl<'e> BucketAccumulator<'e> {
@@ -260,7 +264,7 @@ impl<'e> BucketAccumulator<'e> {
         self.buckets.is_empty()
     }
 
-    fn push(&mut self, kind: VerbGroupKind, entry: &'e ScrollbackEntry) {
+    fn push(&mut self, kind: VerbGroupKind, entry: &'e ScrollbackEntry, include_hook_counts: bool) {
         let pos = match self.buckets.iter().position(|b| b.kind == kind) {
             Some(pos) => pos,
             None => {
@@ -306,6 +310,9 @@ impl<'e> BucketAccumulator<'e> {
             _ => debug_assert!(false, "bucketed entry has a block with no label-extras arm"),
         }
 
+        if include_hook_counts && let Some(hook_data) = &entry.hook_data {
+            self.hook_counts.add_data(hook_data);
+        }
         if entry.is_running {
             self.running = true;
         }
@@ -359,7 +366,7 @@ impl<'e> BucketAccumulator<'e> {
             line: Line::from(spans),
             text,
             running: self.running,
-            failed: self.failed_count > 0,
+            failed: self.failed_count > 0 || self.hook_counts.has_failures(),
         }
     }
 }
@@ -390,7 +397,8 @@ mod tests {
     use super::*;
     use crate::scrollback::blocks::SubagentBlock;
     use crate::scrollback::blocks::tool::{
-        ListDirToolCallBlock, ReadToolCallBlock, SearchToolCallBlock, WebSearchToolCallBlock,
+        HookRunEntry, HookRunStatus, ListDirToolCallBlock, ReadToolCallBlock, SearchToolCallBlock,
+        ToolCallHookData, WebSearchToolCallBlock,
     };
 
     fn entry(block: ToolCallBlock) -> ScrollbackEntry {
@@ -399,6 +407,22 @@ mod tests {
 
     fn read(path: &str) -> ScrollbackEntry {
         entry(ToolCallBlock::Read(ReadToolCallBlock::new(path)))
+    }
+
+    fn hook(name: &str, status: HookRunStatus) -> HookRunEntry {
+        HookRunEntry {
+            name: name.to_owned(),
+            status,
+            output: None,
+        }
+    }
+
+    fn hooked(mut entry: ScrollbackEntry, post_hooks: Vec<HookRunEntry>) -> ScrollbackEntry {
+        entry.hook_data = Some(ToolCallHookData {
+            post_hooks,
+            ..ToolCallHookData::default()
+        });
+        entry
     }
 
     fn subagent(block: SubagentBlock) -> ScrollbackEntry {
@@ -475,6 +499,57 @@ mod tests {
         let l = label(&entries);
         assert_eq!(l.text, "Read 3 files · 2 failed");
         assert!(l.failed);
+    }
+
+    #[test]
+    fn hooked_members_aggregate_non_skipped_outcomes_once() {
+        let elapsed = std::time::Duration::from_millis(1);
+        let entries = vec![
+            hooked(
+                read("a.rs"),
+                vec![
+                    hook("ok", HookRunStatus::Success { elapsed }),
+                    hook("skip", HookRunStatus::Skipped),
+                ],
+            ),
+            hooked(
+                read("b.rs"),
+                vec![hook(
+                    "blocked",
+                    HookRunStatus::Blocked {
+                        detail: "denied".to_owned(),
+                        elapsed,
+                    },
+                )],
+            ),
+            hooked(
+                read("c.rs"),
+                vec![hook(
+                    "bad",
+                    HookRunStatus::Failed {
+                        error: "exit 1".to_owned(),
+                        elapsed,
+                    },
+                )],
+            ),
+        ];
+        let l = label(&entries);
+        assert_eq!(l.text, "Read 3 files  [hooks: 1 ok, 1 blocked, 1 failed]");
+        assert!(l.failed, "failed hooks give the group error accent");
+        let dimmed = Modifier::DIM;
+        assert_eq!(
+            l.line.spans[2].style.fg,
+            Some(Theme::current().accent_success)
+        );
+        assert!(l.line.spans[2].style.add_modifier.contains(dimmed));
+        assert_eq!(
+            l.line.spans[4].style.fg,
+            Some(Theme::current().accent_running)
+        );
+        assert_eq!(
+            l.line.spans[6].style.fg,
+            Some(Theme::current().accent_error)
+        );
     }
 
     #[test]

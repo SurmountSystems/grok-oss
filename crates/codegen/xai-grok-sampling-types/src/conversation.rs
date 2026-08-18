@@ -2530,6 +2530,10 @@ mod tests {
         assert!(output_config.effort.is_none());
     }
 
+    // ============================================================================
+    // Encrypted Reasoning Tests
+    // ============================================================================
+
     #[test]
     fn test_messages_request_cache_breakpoint_placement() {
         let json = agent_request(2);

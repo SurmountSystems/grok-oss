@@ -5,8 +5,34 @@
 use std::collections::HashMap;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::terminal::hyperlinks::SchemeFilter;
+use xai_tty_utils::{ProcessGroup, global_process_scope};
+
+/// Fire-and-forget OS helper: spawn, enroll, background-wait while holding the
+/// process-group Arc so session kill_all can still reap, and Windows job drop
+/// does not kill a still-running helper.
+fn spawn_enrolled_os_helper(mut command: std::process::Command) -> std::io::Result<()> {
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+    let mut child = command.spawn()?;
+    let group = ProcessGroup::new().and_then(|mut group| {
+        group.attach_std(&child)?;
+        Ok(Arc::new(group))
+    })?;
+    if !global_process_scope().register(&group) {
+        let _ = group.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(
+            "process scope closed; OS helper aborted",
+        ));
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        drop(group);
+    });
+    Ok(())
+}
 
 /// Outcome of attempting to open a URL in the system browser/handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,9 +168,9 @@ fn spawn_url_opener(url: &str) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    xai_grok_tools::util::detach_std_command(&mut command);
-    match command.spawn() {
-        Ok(_) => true,
+    xai_tty_utils::detach_std_command(&mut command);
+    match spawn_enrolled_os_helper(command) {
+        Ok(()) => true,
         Err(e) => {
             tracing::debug!(error = %e, "URL opener failed to spawn");
             false
@@ -184,8 +210,8 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
     #[cfg(all(not(test), not(target_os = "windows")))]
     {
-        match build_open_path_command(path).spawn() {
-            Ok(_) => true,
+        match spawn_enrolled_os_helper(build_open_path_command(path)) {
+            Ok(()) => true,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "failed to open file natively");
                 false

@@ -419,7 +419,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: true,
@@ -1241,7 +1240,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
-            cancel_resume_prompt_text: None,
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
@@ -1412,6 +1410,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             )));
         }
         agent.bind_session_id(session_id);
+        agent.scheduler_background_loops = scheduler_background_loops;
         if let Some(m) = new_models {
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
@@ -1484,10 +1483,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 session_id_clone.clone(),
             ));
         }
-        effects.push(Effect::RegisterActiveSession {
-            session_id: session_id_clone,
-            cwd: agent.session.cwd.display().to_string(),
-        });
+        if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
+            effects.push(effect);
+        }
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         identity_rebind.apply(app);
@@ -1536,6 +1534,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.mark_turn_finished(TurnEnd::Aborted);
         let session_id_clone = session_id.clone();
         agent.bind_session_id(session_id);
+        agent.scheduler_background_loops = scheduler_background_loops;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         agent.current_branch = None;
@@ -1622,10 +1621,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 session_id_clone.clone(),
             ));
         }
-        effects.push(Effect::RegisterActiveSession {
-            session_id: session_id_clone,
-            cwd: agent.session.cwd.display().to_string(),
-        });
+        if let Some(effect) = crate::app::active_session_heartbeat::register_effect(agent) {
+            effects.push(effect);
+        }
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         identity_rebind.apply(app);

@@ -206,6 +206,14 @@ pub(crate) fn minimal_renderer<'a>(
     cwd: &'a std::path::Path,
     tick: u64,
 ) -> EntryRenderer<'a> {
+    // Reserved only where it is actually painted: `ThinkingBlock::accent`
+    // returns `None` when collapsed, and reserving a column nothing paints
+    // would indent the header over a blank gutter. Collapsed reasoning has no
+    // body to delimit anyway — the folded `Thought for Xs` header cannot be
+    // mistaken for the answer. `only_thinking_spends_the_accent_column` pins
+    // reserved == painted so the two rules cannot drift apart.
+    let hide_accent = !matches!(entry.block, RenderBlock::Thinking(_))
+        || entry.display_mode() == DisplayMode::Collapsed;
     EntryRenderer::new(entry, theme)
         .with_appearance(appearance)
         .with_cwd(Some(cwd))

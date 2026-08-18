@@ -386,6 +386,19 @@ pub struct CurrentModel {
     pub reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
 }
 pub enum SessionCommand {
+    SetAutoCompactThreshold {
+        auto_compact_threshold_percent: u8,
+        auto_compact_threshold_tokens: Option<u64>,
+    },
+
+    RestoreTodoBoard {
+        plan_state: Option<crate::tools::todo::TodoState>,
+    },
+
+    ClearCompletedTodos {
+        respond_to: oneshot::Sender<usize>,
+    },
+
     Initialize {
         system_prompt: String,
     },

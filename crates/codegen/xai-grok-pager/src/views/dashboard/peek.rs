@@ -526,7 +526,10 @@ pub fn render_peek_panel(
                         };
                         let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
                         if selected && panel.focused {
-                            caret = res.cursor_pos;
+                            // Software box caret hides the terminal cursor
+                            // (`draw` returns `cursor_pos: None`). Peek still
+                            // reports the insertion cell for mouse routing.
+                            caret = res.caret_cell.or(res.cursor_pos);
                         }
                     }
                 }
@@ -1286,10 +1289,6 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("ship it");
-        // set_text preserves cursor; park at end so the insertion cell is
-        // blank and the software box caret paints there (not reverse-video
-        // on a grapheme).
-        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 5),
@@ -1315,31 +1314,7 @@ mod tests {
         assert!(content.contains("ship it"), "got: {content:?}");
         // No placeholder once the user has typed.
         assert!(!content.contains("reply\u{2026}"), "got: {content:?}");
-        // Software box caret owns the insertion cell; hardware cursor stays
-        // hidden (`PromptRenderResult::cursor_pos` is None → peek caret None).
-        // Solid half paints full-block glyph; empty half is plain space (not
-        // scannable as a unique glyph — wall-clock phase may land either way).
-        assert!(
-            res.caret.is_none(),
-            "focused reply paints the software box caret; hardware caret unreported"
-        );
-        let filled = crate::glyphs::cursor_box_filled();
-        let mut solid_plate = false;
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                if cell.symbol() == filled {
-                    solid_plate = true;
-                }
-                // Never reintroduce hole-punch mini-badge.
-                assert_ne!(
-                    cell.symbol(),
-                    "\u{25a0}",
-                    "reply must not paint black-square hole-punch caret"
-                );
-            }
-        }
-        let _ = solid_plate; // empty phase is valid; solid is optional by clock
+        assert!(res.caret.is_some(), "reply input must report a caret");
         assert!(res.reply_rect.is_some(), "reply rect must be reported");
     }
 
@@ -1673,7 +1648,6 @@ mod tests {
         panel.focused = true;
         let mut reply = test_reply();
         reply.set_text("do it differently");
-        reply.set_cursor(reply.text().len());
         let res = render_peek_panel(
             &mut buf,
             Rect::new(0, 0, 80, 8),
@@ -1704,22 +1678,8 @@ mod tests {
         );
         // The `❯ reply` row is hidden while answering.
         assert!(!content.contains("reply"), "got: {content:?}");
-        // Software box caret on the feedback field; hardware caret unreported.
-        // Empty half is space (not unique in content scan); solid is optional
-        // by wall-clock phase. Hole-punch square must never appear.
-        assert!(
-            res.caret.is_none(),
-            "focused feedback paints the software box caret; hardware caret unreported"
-        );
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                assert_ne!(
-                    buf[(x, y)].symbol(),
-                    "\u{25a0}",
-                    "feedback must not paint black-square hole-punch caret"
-                );
-            }
-        }
+        // Caret reports into the feedback field.
+        assert!(res.caret.is_some(), "feedback input must report a caret");
         assert!(
             res.reply_rect.is_some(),
             "feedback slot rect must be reported for mouse routing"

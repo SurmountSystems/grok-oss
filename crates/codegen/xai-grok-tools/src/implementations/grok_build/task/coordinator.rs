@@ -115,6 +115,35 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
     next_list_request_id: u64,
+    /// Child id → session that issued the spawn, when that child was
+    /// reparented to the root. Query/cancel-by-id from the immediate
+    /// spawner must still find the live child.
+    spawned_by_session: HashMap<String, String>,
+    /// Blocking queries that arrived before any Spawn for that id. Held
+    /// for a short grace so a fire-and-forget spawn's returned id is
+    /// waitable immediately; released as not_found if Spawn never follows.
+    queries_waiting_for_spawn: HashMap<String, Vec<QueryWaitingForSpawn>>,
+}
+
+/// A blocking query that arrived before the coordinator processed Spawn
+/// for this id.
+pub(super) struct QueryWaitingForSpawn {
+    grace_deadline: tokio::time::Instant,
+    block_until: tokio::time::Instant,
+    parent_session_id: Option<String>,
+    respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+}
+
+/// Backstop for a delete-path teardown hold: if a cancelled child never
+/// finishes, force-reopen the session's spawn admission after this long (with a
+/// warning) rather than blocking spawns for the process lifetime.
+const TEARDOWN_DRAIN_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// In-flight delete-path teardown drain: responders to resolve once the last
+/// child drains, and the backstop deadline that force-reopens admission.
+struct TeardownDrain {
+    waiters: Vec<oneshot::Sender<()>>,
+    deadline: tokio::time::Instant,
 }
 
 /// Backstop for a delete-path teardown hold: if a cancelled child never
@@ -302,6 +331,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
             next_list_request_id: 0,
+            spawned_by_session: HashMap::new(),
+            queries_waiting_for_spawn: HashMap::new(),
         }
     }
 
@@ -1354,7 +1385,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn cancel_parent_prompt(&mut self, parent_prompt_id: &str, parent_session_id: Option<&str>) {
         for child in self.active.values_mut() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.disposition = PendingDisposition::Cancelled;
                 child.cancellation.cancel();
@@ -1364,7 +1399,133 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let mut doomed = Vec::new();
         for child in self.pending.values_mut() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
+            {
+                child.cancellation.cancel();
+            }
+        }
+        self.remove_queued(|request| {
+            request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
+                && belongs_to_session(
+                    request,
+                    parent_session_id,
+                    spawned_by.get(&request.id).map(String::as_str),
+                )
+        });
+    }
+
+    fn teardown_session_children(&mut self, parent_session_id: &str) {
+        let mut cancelled = 0;
+        for child in self.active.values_mut() {
+            if child.request.parent_session_id == parent_session_id {
+                // Parent is gone: do not rebuffer this completion for a later
+                // resume of the same session id.
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                child.control.cancel();
+                cancelled += 1;
+            }
+        }
+        for child in self.pending.values_mut() {
+            if child.request.parent_session_id == parent_session_id {
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                cancelled += 1;
+            }
+        }
+        // Parent is gone here too: a queued spawn's cancelled completion must
+        // not be rebuffered for a later resume of the same session id.
+        for queued in self.queued.iter_mut() {
+            if queued.request.parent_session_id == parent_session_id {
+                queued.request.surface_completion = false;
+            }
+        }
+        cancelled += self.remove_queued(|request| request.parent_session_id == parent_session_id);
+        if cancelled > 0 {
+            tracing::info!(
+                parent_session_id,
+                cancelled,
+                "cancelled subagents on session teardown"
+            );
+        }
+    }
+
+    /// Whether any child (active, pending, or queued) still belongs to the
+    /// session. Unlike [`Self::session_running_count`] it counts every owner,
+    /// including workflow, since teardown drains all children.
+    fn session_has_children(&self, parent_session_id: &str) -> bool {
+        self.active
+            .values()
+            .map(|child| &child.request)
+            .chain(self.pending.values().map(|child| &child.request))
+            .chain(self.queued.iter().map(|queued| queued.request.as_ref()))
+            .any(|request| request.parent_session_id == parent_session_id)
+    }
+
+    /// Latch spawn admission closed for a delete-path teardown and park the
+    /// responder until the last child drains (or the backstop deadline fires).
+    fn begin_teardown_drain(&mut self, parent_session_id: String, respond_to: oneshot::Sender<()>) {
+        let deadline = tokio::time::Instant::now() + TEARDOWN_DRAIN_MAX;
+        self.spawn_blocked_sessions
+            .insert(parent_session_id.clone());
+        self.teardown_drains
+            .entry(parent_session_id)
+            .or_insert_with(|| TeardownDrain {
+                waiters: Vec::new(),
+                deadline,
+            })
+            .waiters
+            .push(respond_to);
+    }
+
+    /// Clear a delete-path hold: reopen the session's spawn admission and
+    /// resolve every parked drain responder.
+    fn clear_teardown_drain(&mut self, parent_session_id: &str) {
+        self.spawn_blocked_sessions.remove(parent_session_id);
+        if let Some(drain) = self.teardown_drains.remove(parent_session_id) {
+            for respond_to in drain.waiters {
+                let _ = respond_to.send(());
+            }
+        }
+    }
+
+    fn resolve_teardown_drain_waiters(&mut self, parent_session_id: &str) {
+        // Cheap precondition (one lookup) before the three-collection scan on
+        // every child completion: only a delete-path teardown holds a drain.
+        if !self.teardown_drains.contains_key(parent_session_id) {
+            return;
+        }
+        if self.session_has_children(parent_session_id) {
+            return;
+        }
+        self.clear_teardown_drain(parent_session_id);
+    }
+
+    /// All non-workflow children for the parent session (user Stop / Esc).
+    ///
+    /// Requires a concrete session id — unbound (`None`) is rejected so a
+    /// wildcard cannot cancel every session on a shared coordinator.
+    fn cancel_parent_session(&mut self, parent_session_id: Option<&str>) -> SubagentCancelOutcome {
+        let Some(parent_session_id) = parent_session_id else {
+            return SubagentCancelOutcome::NotFound;
+        };
+        self.spawn_blocked_sessions
+            .insert(parent_session_id.to_owned());
+        for child in self.active.values() {
+            if child.request.parent_session_id == parent_session_id
+                && !child.request.owner.is_workflow()
+            {
+                child.cancellation.cancel();
+                child.control.cancel();
+            }
+        }
+        for child in self.pending.values() {
+            if child.request.parent_session_id == parent_session_id
+                && !child.request.owner.is_workflow()
             {
                 child.disposition = PendingDisposition::Cancelled;
                 child.cancellation.cancel();
@@ -1565,9 +1726,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn cancel_workflow_children(&mut self, run_id: &str, parent_session_id: Option<&str>) {
+        let spawned_by = self.spawned_by_session.clone();
         for child in self.active.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
                 child.control.cancel();
@@ -1576,7 +1742,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let mut doomed = Vec::new();
         for child in self.pending.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
-                && belongs_to_session(&child.request, parent_session_id)
+                && belongs_to_session(
+                    &child.request,
+                    parent_session_id,
+                    spawned_by.get(&child.request.id).map(String::as_str),
+                )
             {
                 child.cancellation.cancel();
                 doomed.push(child.request.id.clone());
@@ -1649,6 +1819,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn process_deadlines(&mut self) {
         self.reap_abandoned_callers();
+        self.reap_queries_waiting_for_spawn();
         let now = tokio::time::Instant::now();
         self.expire_spawn_ready_messages(now);
         // Backstop: a delete-path hold whose drain deadline elapsed force-clears

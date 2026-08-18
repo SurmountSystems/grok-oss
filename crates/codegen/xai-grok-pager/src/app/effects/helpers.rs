@@ -366,8 +366,9 @@ pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
     if secs >= 60 {
         crate::views::dock::fmt_elapsed(secs)
     } else {
-        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
-    }
+        "Restore complete"
+    };
+    format!("{status} ({}).", format_restore_elapsed(elapsed))
 }
 /// CANONICAL wire parser for the worktree resume response.
 /// Any other code consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape MUST go through this function; do not re-implement.
@@ -1253,43 +1254,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "notifications.session_recap" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_notifications_session_recap(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "notifications.session_recap_threshold_secs" => {
-            let SettingValue::Int(i) = value else {
-                return Err(kind_mismatch(
-                    "notifications.session_recap_threshold_secs",
-                    "Int",
-                    &value,
-                ));
-            };
-            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "features.session_recap" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("features.session_recap", "Bool", &value));
-            };
-            xai_grok_shell::util::config::set_features_session_recap(b)
-                .await
-                .map_err(|e| e.to_string())
-        }
-        "bubble_copy_buttons" => {
-            let SettingValue::Bool(b) = value else {
-                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
-            };
-            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())
-        }
         "vim_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("vim_mode", "Bool", &value));
@@ -1336,6 +1300,47 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "hide_header" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("hide_header", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_hide_header(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "scrub_ascii_punct" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_scrub_ascii_punct(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "plan_approval_park" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "allow_worktree" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("allow_worktree", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_allow_worktree(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "bubble_copy_buttons" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("bubble_copy_buttons", "Bool", &value));
+            };
+            tokio::task::spawn_blocking(move || crate::appearance::persist_bubble_copy_buttons(b))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
         "group_tool_verbs" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("group_tool_verbs", "Bool", &value));
@@ -1357,6 +1362,34 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("prompt_suggestions", "Bool", &value));
             };
             xai_grok_shell::util::config::set_prompt_suggestions(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("notifications.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "notifications.session_recap_threshold_secs" => {
+            let SettingValue::Int(i) = value else {
+                return Err(kind_mismatch(
+                    "notifications.session_recap_threshold_secs",
+                    "Int",
+                    &value,
+                ));
+            };
+            xai_grok_shell::util::config::set_notifications_session_recap_threshold_secs(i)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "features.session_recap" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("features.session_recap", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_features_session_recap(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1514,14 +1547,6 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
-        "plan_approval_park" => {
-            let SettingValue::Enum(s) = value else {
-                return Err(kind_mismatch("plan_approval_park", "Enum", &value));
-            };
-            xai_grok_shell::util::config::set_plan_approval_park(s.to_string())
-                .await
-                .map_err(|e| e.to_string())
-        }
         "hunk_tracker_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("hunk_tracker_mode", "Enum", &value));
@@ -1619,22 +1644,22 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "default_reasoning_effort" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("default_reasoning_effort", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_default_reasoning_effort(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }
-
-/// After a successful disk write of auto-compact threshold, notify the agent
-/// so open sessions update their `threshold_percent` / `threshold_tokens`
-/// Cells without restart.
+/// Live-apply auto-compact threshold to open sessions after disk persist.
 ///
-/// Params use the **committed Settings enum value** (not a re-resolve that
-/// can race disk). That is intentional race-safety: open sessions see the
-/// preference the user just saved. Full resolve precedence (env
-/// `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` / `_TOKENS` above session TOML) still
-/// applies on the next spawn / model-switch re-resolve — so a process env
-/// override can temporarily sit under a Settings live-apply until that next
-/// resolve. Do not add a second canonical-string parser here; reuse
-/// [`crate::settings::parse_auto_compact_threshold_canonical`].
+/// Reuses [`crate::settings::parse_auto_compact_threshold_canonical`]. A process
+/// env override can temporarily sit under this live-apply until the next spawn
+/// or model-switch re-resolve.
 pub(crate) async fn notify_auto_compact_threshold_changed(
     tx: &AcpAgentTx,
     value: &crate::settings::SettingValue,
@@ -1675,7 +1700,6 @@ pub(crate) async fn notify_auto_compact_threshold_changed(
         tracing::warn!("Failed to send auto_compact_threshold_changed notification: {e}");
     }
 }
-
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 /// `BestEffort` fires ACP `x.ai/yolo_mode_changed` before the disk write (it fires regardless of the outcome, and a queued first prompt sent right after must not overtake it behind the config lock).
 /// `WithRollback` persists first and notifies only on disk success, so the agent never sees a value the UI is about to roll back.
@@ -1850,35 +1874,27 @@ pub(super) fn persist_hint(
 pub(super) fn credit_balance_from_config(
     c: xai_grok_shell::extensions::billing::BillingConfig,
 ) -> crate::views::credit_bar::CreditBalance {
-    // Honest absence (shell SSOT): no percent and no usable limit → unknown,
-    // not a silent 0% for status chrome. Read while `c` is still fully borrowed.
     let (included_opt, _) =
         xai_grok_shell::extensions::billing::included_usage_and_period_end(&c);
     let included_usage_known = included_opt.is_some();
-    let usage_pct = included_opt
-        .map(|pct| pct.clamp(0.0, 100.0))
-        .unwrap_or(0.0);
-    // Capture productUsage Build % before other fields consume `c`.
-    let grok_build_usage_pct =
-        xai_grok_shell::extensions::billing::grok_build_usage_percent(&c);
     let limit = c.monthly_limit.map(|v| v.val).unwrap_or(0);
     let used = c.used.map(|v| v.val).unwrap_or(0);
     let has_credit_pct = c.credit_usage_percent.is_some();
-    let period_end_raw = c
+    // Same included SuperGrok period used percent as /limits
+    // (`credit_balance_from_billing_config`). Do not invent a second formula.
+    let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
+    let period_end_display = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end);
-    let period_end_at = period_end_raw.as_ref().and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-    });
-    let period_end_display = period_end_at.map(|dt| {
-        dt.with_timezone(&chrono::Local)
-            .format("%B %-d, %H:%M")
-            .to_string()
-    });
+        .or(c.billing_period_end)
+        .and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
+                })
+        });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1886,9 +1902,7 @@ pub(super) fn credit_balance_from_config(
         .on_demand_used
         .map(|v| v.val)
         .unwrap_or_else(|| (used - limit).max(0));
-    let effective_usage_pct = if !included_usage_known {
-        0.0
-    } else if on_demand_val > 0 {
+    let effective_usage_pct = if on_demand_val > 0 {
         if usage_pct >= 100.0 {
             (on_demand_used_cents as f64 / on_demand_val as f64 * 100.0).min(100.0)
         } else if has_credit_pct {
@@ -1909,15 +1923,14 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
-        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),
         prepaid_balance_cents: c.prepaid_balance.map(|v| v.val),
         period_type,
         is_unified_billing_user: c.is_unified_billing_user,
-        grok_build_usage_pct,
         included_usage_known,
+        ..Default::default()
     }
 }
 /// Whether the balance carries a non-zero prepaid credit balance (signed cents).

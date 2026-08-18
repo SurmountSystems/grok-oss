@@ -47,6 +47,8 @@ use crate::types::resources::{
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
+mod dangerous_cargo;
+
 #[derive(thiserror::Error, Debug)]
 pub enum BashError {
     #[error("Failed to spawn command: {0}")]
@@ -1997,6 +1999,13 @@ impl xai_tool_runtime::Tool for BashTool {
             ));
         }
 
+        // --- Refuse crate-wide / workspace cargo (do not spawn cargo) ---
+        // Same intercept style as memory.py: decide before TerminalBackend.
+        // Do not rewrite argv into a guessed file list.
+        if let Some(message) = dangerous_cargo::try_parse_dangerous_cargo_refuse(&input.command) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
+
         // --- Skill-script intercepts (embedded Rust; never spawn python) ---
         // Known allowlisted host skill scripts are handled in-process.
         // Unknown python still shells.
@@ -2327,10 +2336,6 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_delta: None,
                 was_bare_echo: false,
             };
-            // Gate the no-op end-turn reminder on the same switch as every other
-            // system reminder (absent resource => enabled, mirroring
-            // `finalize_output`), so toolsets with `system_reminders_enabled=false`
-            // don't receive it.
             let append_noop_reminder = resources
                 .lock()
                 .await
@@ -3749,7 +3754,8 @@ mod tests {
             output_delta: None,
             was_bare_echo: false,
         };
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         bash
     }
 
@@ -3802,7 +3808,8 @@ mod tests {
         let mut bash = make_bash_output(-1, "partial\n");
         bash.signal = Some("timeout".to_string());
         bash.timed_out = true;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         // Synthetic kill reasons render as `exit: killed (reason)` — no
         // redundant `[signal=…]` / `[timeout]` annotation.
         assert!(
@@ -3848,7 +3855,7 @@ mod tests {
             let mut bash = make_bash_output(-1, "partial\n");
             bash.signal = Some(reason.to_string());
             bash.output_for_prompt =
-                format_default_prompt(&bash, /* append_noop_reminder */ true);
+                format_default_prompt(&bash, /* append_noop_reminder */ false);
             let expected = format!("exit: killed ({})", reason);
             assert!(
                 bash.output_for_prompt.starts_with(&expected),
@@ -3868,7 +3875,7 @@ mod tests {
 
         let mut oom = make_bash_output(137, "killed\n");
         oom.signal = Some("oom".to_string());
-        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ true);
+        oom.output_for_prompt = format_default_prompt(&oom, /* append_noop_reminder */ false);
         assert!(oom.output_for_prompt.starts_with("exit: 137 [signal=oom]"));
     }
 
@@ -3878,7 +3885,8 @@ mod tests {
         bash.signal = Some("backgrounded".to_string());
         bash.output_file = "/tmp/bg.log".to_string();
         bash.total_bytes = 10000;
-        bash.output_for_prompt = format_default_prompt(&bash, /* append_noop_reminder */ true);
+        bash.output_for_prompt =
+            format_default_prompt(&bash, /* append_noop_reminder */ false);
         assert!(
             bash.output_for_prompt
                 .starts_with("[Command moved to background]")
@@ -3887,91 +3895,6 @@ mod tests {
             bash.output_for_prompt
                 .contains("still running in the background")
         );
-    }
-
-    fn bash_output_with_command(command: &str, output: &str) -> BashOutput {
-        BashOutput {
-            output: output.as_bytes().to_vec(),
-            output_for_prompt: BashOutput::make_output_for_prompt(output),
-            exit_code: 0,
-            command: command.to_string(),
-            truncated: false,
-            signal: None,
-            timed_out: false,
-            description: None,
-            current_dir: "/tmp".to_string(),
-            output_file: String::new(),
-            total_bytes: output.len(),
-            output_delta: None,
-            was_bare_echo: false,
-        }
-    }
-
-    #[test]
-    fn default_prompt_noop_command_appends_end_turn_reminder() {
-        for cmd in [
-            "true",
-            ":",
-            "",
-            "   ",
-            "\t\n",
-            "echo ok",
-            "echo \"Healthy.\"",
-            "echo \"s14=198; s11 full. Healthy.\"",
-            "printf hi",
-            "printf 'done\\n'",
-        ] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, ""),
-                /* append_noop_reminder */ true,
-            );
-            assert!(
-                prompt.contains(NOOP_END_TURN_REMINDER),
-                "no-op command {cmd:?} should append the end-turn reminder, got: {prompt:?}"
-            );
-        }
-    }
-
-    /// With `append_noop_reminder = false` (session `system_reminders_enabled=false`),
-    /// the no-op end-turn reminder is suppressed even for no-op commands. Mirrors
-    /// gating the reminder on the shared `SystemRemindersEnabled` switch.
-    #[test]
-    fn default_prompt_noop_reminder_suppressed_when_disabled() {
-        for cmd in ["true", ":", "", "echo ok", "printf hi"] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, ""),
-                /* append_noop_reminder */ false,
-            );
-            assert!(
-                !prompt.contains("<system-reminder>"),
-                "no-op command {cmd:?} must not append the reminder when disabled, got: {prompt:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn default_prompt_normal_command_has_no_end_turn_reminder() {
-        for cmd in [
-            "true && echo hi",
-            "run-true",
-            "grep : file",
-            "cat file",
-            "echo $VAR",
-            "echo x > f",
-            "echo a | cat",
-            "echo $(date)",
-            "echo hi; ls",
-            "printf '%s' \"$x\"",
-        ] {
-            let prompt = format_default_prompt(
-                &bash_output_with_command(cmd, "hi\n"),
-                /* append_noop_reminder */ true,
-            );
-            assert!(
-                !prompt.contains("<system-reminder>"),
-                "normal command {cmd:?} must not append the end-turn reminder, got: {prompt:?}"
-            );
-        }
     }
 
     // ─── contains_background_operator unit tests ───
@@ -4760,13 +4683,11 @@ mod tests {
                 .as_str()
                 .expect("max_wait description");
             assert!(
-                desc.contains("Optional max_wait in milliseconds")
-                    && desc.contains("`max_wait: 0`"),
+                desc.contains("Optional max_wait in milliseconds"),
                 "renamed timeout must appear in property description:\n{desc}"
             );
             assert!(
-                !desc.contains("`timeout: 0`")
-                    && !desc.contains("Optional timeout in milliseconds"),
+                !desc.contains("Optional timeout in milliseconds"),
                 "canonical timeout must not remain in property description:\n{desc}"
             );
         }
@@ -4810,7 +4731,7 @@ mod tests {
                 .as_str()
                 .expect("timeout description");
             assert!(
-                desc.contains("Optional timeout in milliseconds") && desc.contains("`timeout: 0`"),
+                desc.contains("Optional timeout in milliseconds"),
                 "property description must match schema key, not kind-wide alias:\n{desc}"
             );
             assert!(
@@ -6421,11 +6342,17 @@ mod tests {
     }
 
     fn make_tracking_resources() -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        // If shell is wrongly used for memory.py, surface a distinctive error.
+        make_tracking_resources_with(MockTerminal::failing())
+    }
+
+    fn make_tracking_resources_with(
+        inner: MockTerminal,
+    ) -> (Resources, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mock = TrackingTerminal {
             called: called.clone(),
-            // If shell is wrongly used for memory.py, surface a distinctive error.
-            inner: MockTerminal::failing(),
+            inner,
         };
         let mut resources = Resources::new();
         let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
@@ -6599,6 +6526,148 @@ mod tests {
                 let v: serde_json::Value = serde_json::from_str(text.trim()).expect("list JSON");
                 assert_eq!(v["tool"], "claude");
                 assert!(v["sessions"].is_array());
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    // ─── Dangerous crate-wide cargo refuse ───
+    //
+    // Agents must not spawn crate-wide / workspace cargo from bash. The
+    // structured edit hook formats the files it wrote; bash must refuse
+    // the old mop argv and must not start cargo. Honest
+    // `cargo test -p <crate> --lib <filter>` stays allowed.
+
+    async fn run_bash_tracking_success(
+        cmd: &str,
+    ) -> (
+        Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (resources, called) =
+            make_tracking_resources_with(MockTerminal::success("should-not-run-cargo\n", 0));
+        let tool = BashTool;
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await;
+        (result, called)
+    }
+
+    fn refuse_message_from_result(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        cmd: &str,
+    ) -> String {
+        match result {
+            Err(err) => err.to_string(),
+            Ok(BashToolOutput::Foreground(bash)) => {
+                assert_ne!(
+                    bash.exit_code, 0,
+                    "dangerous cargo `{cmd}` must be refused, not exit 0; output={}",
+                    bash.output_for_prompt
+                );
+                let out = String::from_utf8_lossy(&bash.output);
+                format!("{}\n{out}", bash.output_for_prompt)
+            }
+            Ok(BashToolOutput::Background(_)) => {
+                panic!("dangerous cargo `{cmd}` must not start a background task")
+            }
+        }
+    }
+
+    fn assert_dangerous_cargo_refused(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        called: &std::sync::atomic::AtomicBool,
+        cmd: &str,
+    ) {
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "dangerous cargo must not reach TerminalBackend (cargo must not spawn): {cmd}"
+        );
+        let message = refuse_message_from_result(result, cmd);
+        assert!(
+            !message.contains("should-not-run-cargo"),
+            "refuse for `{cmd}` leaked the mock shell output: {message}"
+        );
+        let lower = message.to_lowercase();
+        assert!(
+            lower.contains("cargo"),
+            "refuse for `{cmd}` should mention cargo: {message}"
+        );
+        assert!(
+            lower.contains("refuse")
+                || lower.contains("not spawn")
+                || lower.contains("do not run")
+                || lower.contains("crate-wide")
+                || lower.contains("workspace-wide"),
+            "refuse for `{cmd}` should say why (refuse / do not run crate-wide cargo): {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt --all";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_fmt_package_without_file_list_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo fmt -p xai-grok-pager";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --all-targets";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy -p xai-grok-pager --all-targets -- -D warnings";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_clippy_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo clippy --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_workspace_is_refused_and_does_not_spawn_shell() {
+        let cmd = "cargo test --workspace";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_nextest_run_without_package_or_filter_is_refused_and_does_not_spawn_shell()
+     {
+        let cmd = "cargo nextest run";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_dangerous_cargo_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn dangerous_cargo_test_package_lib_filter_is_not_refused() {
+        let cmd = "cargo test -p xai-grok-tools --lib implement_memory_snapshot_intercept";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "honest cargo test -p <crate> --lib <filter> must still reach TerminalBackend: {cmd}"
+        );
+        match result.expect("honest cargo test must not be refused as invalid arguments") {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+                assert_eq!(
+                    String::from_utf8_lossy(&bash.output),
+                    "should-not-run-cargo\n"
+                );
             }
             BashToolOutput::Background(_) => panic!("expected foreground"),
         }

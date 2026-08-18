@@ -777,35 +777,6 @@ impl SkillsFileWatcher {
 
         tracing::info!(dirs = watched, "skills file watcher started");
 
-        let mut refresh_dirs = vec![(grok_home.join("workflows"), RecursiveMode::NonRecursive)];
-        if let Some(cwd) = cwd {
-            let project_root = crate::session::workflow::registry::project_root(cwd);
-            let project_grok = project_root.join(".grok");
-            let parent_watch = if project_grok.is_dir() {
-                project_grok.clone()
-            } else {
-                project_root
-            };
-            if !dirs_to_watch.iter().any(|dir| dir == &parent_watch) {
-                match debouncer
-                    .watcher()
-                    .watch(&parent_watch, RecursiveMode::NonRecursive)
-                {
-                    Ok(()) => {}
-                    Err(error) => log_watch_error(
-                        &error,
-                        "failed to watch workflow discovery parent directory",
-                    ),
-                }
-            }
-            refresh_dirs.push((project_grok.clone(), RecursiveMode::NonRecursive));
-            refresh_dirs.push((project_grok.join("workflows"), RecursiveMode::NonRecursive));
-        }
-        let refreshed_dirs = refresh_dirs
-            .iter()
-            .filter(|(dir, _)| dir.is_dir())
-            .map(|(dir, _)| dir.clone())
-            .collect();
         Some((
             Self {
                 debouncer,

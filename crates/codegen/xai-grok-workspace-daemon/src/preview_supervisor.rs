@@ -655,6 +655,81 @@ async fn scrape_metrics_loop(
     }
 }
 
+// ── Preview-metrics scraper ────────────────────────────────────────────────
+
+const PREVIEW_METRICS_PATH: &str = "/__control/metrics";
+const PREVIEW_METRICS_PREFIX: &str = "preview_proxy_";
+const PREVIEW_METRICS_SCRAPE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn metrics_url(control_port: u16) -> String {
+    format!(
+        "http://{}:{control_port}{PREVIEW_METRICS_PATH}",
+        Ipv4Addr::LOCALHOST
+    )
+}
+
+/// Scrapes the proxy's loopback-only metrics and donates them via the hub pump.
+pub async fn supervise_preview_metrics(control_port: Option<u16>, shutdown: watch::Receiver<bool>) {
+    scrape_metrics_loop(
+        control_port.unwrap_or(DEFAULT_PREVIEW_CONTROL_PORT),
+        PREVIEW_METRICS_SCRAPE_INTERVAL,
+        shutdown,
+        |body| {
+            if let Some(sink) = xai_computer_hub_sdk::metric_donate::active_metrics_sink() {
+                sink.export_text_exposition(body, PREVIEW_METRICS_PREFIX);
+            }
+        },
+    )
+    .await;
+}
+
+async fn scrape_metrics_loop(
+    control_port: u16,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    mut donate: impl FnMut(&str),
+) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let url = metrics_url(control_port);
+    let client = match reqwest::Client::builder()
+        .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, "preview-metrics scraper: HTTP client build failed; disabled");
+            return;
+        }
+    };
+    tracing::info!(%url, "starting preview-metrics scraper");
+
+    // Scrape-first: a short-lived sandbox must not exit with zero samples.
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(body) => donate(&body),
+                Err(e) => {
+                    tracing::debug!(%url, error = %e, "preview-metrics scrape body read failed");
+                }
+            },
+            Ok(resp) => {
+                tracing::debug!(%url, status = resp.status().as_u16(), "preview-metrics scrape returned an error status");
+            }
+            // Proxy absent (disabled / starting / restarting): quiet no-op.
+            Err(e) if e.is_connect() || e.is_timeout() => {}
+            Err(e) => {
+                tracing::debug!(%url, error = %e, "preview-metrics scrape failed");
+            }
+        }
+        if sleep_or_shutdown(interval, &mut shutdown).await {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

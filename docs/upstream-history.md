@@ -156,7 +156,13 @@ git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
 
-just check
+# Land: files-only assert is not enough. Walk FORK seven product classes
+# and prove catalog named tests still exist (doc/dev/upstream-regression-filters.md).
+just upstream-assert-process-pins
+just upstream-land-filters
+# rg each Required-land identifier for a matching fn. Missing fn = failed land.
+# Chrome-only, paint-only bubble copy, or skills Python reintroduced is a failed land.
+just check   # quality only; cannot fail a deleted catalog test
 git push -u origin HEAD
 # PR: base=main head=onto-xai/<short>  — close related export issues
 # append docs/upstream-onto-log.md
@@ -230,37 +236,32 @@ buckets — never tree-wide bulk checkout, never 18 parallel one-file agents.
 Detail also in project [`AGENTS.md`](../AGENTS.md) § *Onto / put-history*.
 ### Live stack (update when tip moves)
 
-**Snapshot: 2026-07-24 — product stack complete; join merge staged.**
+**Snapshot: 2026-08-12 — restack onto public Grok Build 1.0.3 (`e5fd4816`).**
 
 | Field | Value |
 |-------|--------|
-| Branch | `onto-xai/6e386420825b` |
-| xAI tip | `6e386420825bd44ae648c63e7c8cba12fcec9401` (tree `3db5a3bd…`) |
-| Product tip (pre-join) | `56d1fc2` — **Fixes compaction setting (#13)** |
-| Onto tree (must keep) | `2cbad23add473ad095a7a622fcd172d466543bdf` |
-| Join | `join-main-into-onto.sh` done (`-s ours`); **MERGE_HEAD=`8b933eb`**, await human **signed** merge commit |
-| Supersedes issues | #11, #14 |
+| Branch | `onto-xai/b13fa526f511` (same PR #36 name; old joined tip on `backup/onto-xai-b13fa526f511-0f61ff44-joined-20260812`) |
+| xAI tip | `e5fd4816d43260c15ba785f103990c1ed6cea230` (tree `25eefa9bdb3a4748cc065be3fa8200d04bc54493`) |
+| Onto first-parent tip | `ee8a80d28cf5df2841b3762396b5921837e15813` (24 first-parent picks from `b13fa526f511..09c407e2`) |
+| Onto tip (after join) | `e08e596167538f9e72da0760865340adfa34868f` |
+| Compile mop | `4651593a1da1bbaf2831f316791cfb6d69c663e6` (shell + pager + update; tree `42dfccb62b5258ec7d8505f71e7318d89e88746a`) |
+| Onto tree | `42dfccb62b5258ec7d8505f71e7318d89e88746a` (after compile mop; join tree was `ae3568e6fa7dcff47a63ca6f87c6c3e8fec18d28`) |
+| Join | Done (`e08e5961`, `-s ours` via commit-tree); `origin/main` (`f17e84d8`) is ancestor |
 | Cherry-picks | **Done** — no active pick |
+| Toolchain | `rust-toolchain.toml` / fenix **1.97.1** |
+| Nucleo | `FuzzySearchManager` reuse-per-root; `Nucleo::new(..., Some(2), 1)` |
 
-**Finished on tip:** OpenRouter → Branding (#2) → Rate limits (#3) → Merge 2 (#4) → impl (#7) → merge xai 2 (#12) → compaction (#13).
+**Finished on tip:** OpenRouter through `09c407e2 merge upstream` replayed onto 1.0.3, then join current `origin/main`, then compile mop `4651593a`. Report: `.agents/reports/recon-restack-1.0.3-2026-08-12.md`.
 
-**Human now (join already staged — do not re-run join):**
+**Human next:**
 
 ```bash
-git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
-  -m "Join Surmount archive history so main is an ancestor of this tip." \
-  -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
-
-git merge-base --is-ancestor 8b933ebdc8d7 HEAD
-test "$(git rev-parse 'HEAD^{tree}')" = "2cbad23add473ad095a7a622fcd172d466543bdf"
-
-just check
-git push -u origin HEAD
-# PR base=main head=onto-xai/6e386420825b ; close #11 #14
-# finalize docs/upstream-onto-log.md with post-join SHA
+# already authorized: force-with-lease this PR branch only
+git push --force-with-lease origin onto-xai/b13fa526f511
+# do not create a new PR; SurmountSystems/grok-oss#36 updates
 ```
 
-**Historical notes:** #12 mega resolved via 3 strategic subagents; MSRV lock regenerate with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.
+**Historical notes:** Resume from mid-stack at `75a84a52` after 3/9 picks. Recon-unsigned intermediates via `ALLOW_UNSIGNED` + `commit-tree` (PreToolUse blocks `--no-gpg-sign` string). Mega-picks #4/#12 used intentional ours/theirs groups, not bulk tree checkout.
 
 #### #7 — 18 unmerged paths (resolve carefully)
 
@@ -302,7 +303,9 @@ chmod +x scripts/join-main-into-onto.sh
 git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
-just check
+just upstream-assert-process-pins
+just upstream-land-filters
+just check   # quality only; walk catalog named tests first
 git push -u origin HEAD
 # PR base=main head=onto-xai/6e386420825b ; close #11 #14 ; final onto-log row
 ```
@@ -358,9 +361,10 @@ with a clean tree.
   - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
   - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
-- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, run the core block in [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) (or FORK § *Upstream regression filters*), **or at least `just check` / `just ci`**. Smoke: DOGE default, window titles / `title.enabled`, stuck-retry / StreamResumed, `shell_collision`, dual-auth if those areas churned.
-- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone.
-- [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block above is the minimum besides assert
+- [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, walk the **seven product classes** in [`FORK.md`](../FORK.md) § *Land checklist* and [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) § *Required land inventory*: CLI identity first token `grok-oss`; `/settings` plus unread-config readers plus DOGE picker; grok-oss ledger `/spend` ingest; DOGE/chrome paint; dual-auth hop after included SuperGrok period limits are full; last-session on start; product skills are not a Python runtime. Walk extra neighbors the catalog already lists (bubble click, plan present is not Approve, SHA-aware `/rebuild`, nucleo, `from_config` cold catalog, pause / Clear finished, always-three-layer product prompt, user-guide hop / spend-order). Do not invent a second numbered board. Then `rg` the catalog identifiers; a named filter with no matching `fn` is a failed land. **Helper-green is a failed land** (`contains("grok")` version tests, schema-without-`/spend`, serde-only `hide_header`, rank-without-hop, catalog-exists-without-paint, bundle-still-has-junk-`.py`). A chrome-only inventory is a failed land. Paint-only bubble copy is a failed land. Skills Python reintroduced is a failed land. `just check` / `just ci` cannot fail a deleted test. Optional reminder after assert: `just upstream-land-filters`.
+- [ ] **Paint / dogfood.** Operator check after the named paint `fn`s exist, not the only check: Human/agent rails, titled composer white frame with yellow title only, plan five CTAs (Approve / Notes / Clarify / Revise / Quit), included SuperGrok period limits compact meter (click opens `/limits`), SIGUSR1 fleet still alive after a **failed** install. Do not accept "compile mop re-applied seams" without the seven-class cargo list.
+- [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check `/limits`, DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone. A guide with zero `/limits` hits is a failed land.
+- [ ] `just ci` or at least `just check` (prefer full gate before PR); if skipping full gate, the product filter block plus name-existence check above is the minimum besides assert
 - [ ] `docs/upstream-import-log.md` updated
 - [ ] Signed commit on Surmount (no signing bypass)
 
@@ -379,6 +383,11 @@ project skill roots, and user-guide; operator skill packs live under
 | Product commits cherry-picked on onto | Onto tip missing a pin before join (`-s ours` cannot backfill) |
 
 Assert anytime: `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins`.
+That proves files exist, including the catalog file and its seven product
+class titles. It does not prove crate `fn` names. After assert, walk FORK
+§ *Land checklist* and `doc/dev/upstream-regression-filters.md` (name-check
+then cheat-sheet cargo). Reminder: `just upstream-land-filters`. `just check`
+is quality only.
 
 **Join does not restore content** — missing process files on the onto tip stay
 missing after `merge -s ours`. Chat-only pins do not survive compaction or recon.

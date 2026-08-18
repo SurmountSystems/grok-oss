@@ -406,6 +406,7 @@ impl SessionActor {
             }
         };
 
+        log_prompt_cache_hit("recap", setup.client.api_backend(), &response);
         let raw_response = response.assistant_text();
         let summary = session_recap::clean_recap_text(&raw_response);
         if summary.is_empty() {

@@ -229,8 +229,10 @@ pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: b
     } else {
         "--fullscreen"
     };
-    let cli = cli_hint_name();
-    format!("{GROK_SCREEN_MODE_ENV}={mode} {cli} {flag} --resume {session_id}")
+    format!(
+        "{GROK_SCREEN_MODE_ENV}={mode} {} {flag} --resume {session_id}",
+        crate::client_identity::PRODUCT_CLI_NAME
+    )
 }
 
 /// Replace the current process with a relaunch into the requested screen mode.
@@ -790,31 +792,18 @@ mod tests {
         let cli = cli_hint_name();
         let full = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert_eq!(
-            full,
-            format!("GROK_SCREEN_MODE=fullscreen {cli} --fullscreen --resume abc-sid")
+            screen_mode_relaunch_resume_hint("abc-sid", false),
+            "GROK_SCREEN_MODE=fullscreen grok-oss --fullscreen --resume abc-sid"
         );
-        assert!(
-            !full.contains(" grok "),
-            "must not use upstream binary name: {full}"
-        );
-        let min = screen_mode_relaunch_resume_hint("abc-sid", true);
         assert_eq!(
-            min,
-            format!("GROK_SCREEN_MODE=minimal {cli} --minimal --resume abc-sid")
+            screen_mode_relaunch_resume_hint("abc-sid", true),
+            "GROK_SCREEN_MODE=minimal grok-oss --minimal --resume abc-sid"
         );
+        let fullscreen = screen_mode_relaunch_resume_hint("abc-sid", false);
         assert!(
-            !min.contains(" grok "),
-            "must not use upstream binary name: {min}"
+            !fullscreen.contains(" grok --"),
+            "must not tell operators to run upstream grok --resume:\n{fullscreen}"
         );
-    }
-
-    #[test]
-    fn is_product_cli_name_accepts_install_and_versioned_names() {
-        assert!(is_product_cli_name("grok-oss"));
-        assert!(is_product_cli_name("grok"));
-        assert!(is_product_cli_name("grok-0.2.101-linux-x86_64"));
-        assert!(!is_product_cli_name("xai_grok_pager-abc123"));
-        assert!(!is_product_cli_name("deps"));
     }
 
     // ── effective_minimal_preference ─────────────────────────────────────

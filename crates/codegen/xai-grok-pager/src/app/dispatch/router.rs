@@ -48,7 +48,7 @@ use super::prompt::{
     dispatch_show_plan_nudge, dispatch_show_undo_tip, dispatch_show_word_select_tip,
 };
 use super::queue;
-use super::queue::{dispatch_drain_queue, dispatch_force_drain_queue};
+use super::queue::dispatch_drain_queue;
 use super::rewind::{
     dispatch_rewind, dispatch_rewind_cancel_offer, dispatch_rewind_confirm,
     dispatch_rewind_confirm_never_ask, dispatch_rewind_dismiss, dispatch_rewind_dismiss_error,
@@ -106,14 +106,13 @@ use super::status::{
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_copy_entry_content, dispatch_dump_input_log, dispatch_export_conversation,
-    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
+    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
-    persist_cancel_resume_on_graceful_quit,
 };
 use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect, ModelChoice};
@@ -168,35 +167,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => confirmed_quit(app),
         Action::QuitForUpdate => {
-            persist_cancel_resume_on_graceful_quit(app);
             let mut effects = unregister_all_active_sessions(app);
             app.quit_for_update = true;
             effects.push(Effect::Quit);
             effects
-        }
-        Action::RebuildAndRelaunch => {
-            let ActiveView::Agent(agent_id) = app.active_view else {
-                return vec![];
-            };
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
-                    fraction: 0.0,
-                    detail: "Starting rebuild".into(),
-                });
-                agent.show_toast_ticks("Rebuild 0%  Starting rebuild", 255);
-                agent
-                    .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(
-                        "Starting /rebuild: resolve source tree, just install, \
-                     soft-relaunch leaders, signal peer TUIs to re-exec, then re-exec this session on the new binary.",
-                    ));
-            }
-            let start_dir =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            vec![Effect::RunRebuild {
-                start_dir,
-                agent_id,
-            }]
         }
         Action::ResumeForeignSession => {
             let Some(hint) = app.take_foreign_resume_hint() else {
@@ -690,12 +664,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             app.fps_hud.toggle();
             vec![]
         }
-        Action::CaptureTuiScreenshot => {
-            // Capture runs in the event loop after present, where the
-            // terminal buffer is available. Flag only here (sync dispatch).
-            app.pending_tui_screenshot = true;
-            vec![]
-        }
         Action::ToggleScrollLog => {
             let msg = match app.scroll_state.toggle_scroll_log() {
                 Some(path) => format!("scroll log: recording to {}", path.display()),
@@ -725,10 +693,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
-            vec![]
-        }
-        Action::CopyEntryContent { idx } => {
-            dispatch_copy_entry_content(app, idx);
             vec![]
         }
         Action::CopyAssistantMessage { n, file_path } => {
@@ -1113,8 +1077,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CancelTurn => dispatch_cancel_turn(app),
-        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
-        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
@@ -1132,15 +1094,51 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ResetSessionTitleToAuto => dispatch_reset_session_title(app),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
-        Action::ShowLimits => dispatch_show_limits(app),
-        Action::ShowSpend => dispatch_show_spend(app),
-        Action::ShowLimitsJson => dispatch_show_limits_json(app),
         Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
-        Action::ClearCompletedTodos => dispatch_clear_completed_todos(app),
-        Action::AddSessionNote { text, tags } => dispatch_add_session_note(app, text, tags),
-        Action::ShowNotes => dispatch_show_notes(app),
+        Action::ShowRunningSessions => super::running::dispatch_show_running_sessions(app),
+        Action::ShowLimits => super::status::dispatch_show_limits(app),
+        Action::ShowSpend => super::status::dispatch_show_spend(app),
+        Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
+        Action::ClearCompletedTodos => super::status::dispatch_clear_completed_todos(app),
+        Action::AddSessionNote { text, tags } => {
+            super::notes::dispatch_add_session_note(app, text, tags)
+        }
+        Action::ShowNotes => super::notes::dispatch_show_notes(app),
+        Action::RebuildAndRelaunch => {
+            let crate::app::app_view::ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
+                    fraction: 0.0,
+                    detail: "Starting rebuild".into(),
+                });
+                agent.show_toast("Starting rebuild");
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Starting /rebuild: resolve source tree, just install, \
+                     then re-exec this session on the new binary.",
+                    ));
+            }
+            let start_dir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            vec![crate::app::actions::Effect::RunRebuild {
+                start_dir,
+                agent_id,
+            }]
+        }
+        Action::CaptureTuiScreenshot => {
+            app.pending_tui_screenshot = true;
+            vec![]
+        }
+        Action::ToggleGlobalPause => super::global_pause::dispatch_toggle_global_pause(app),
+        Action::StartPausedOrInterruptedWork => {
+            super::start::dispatch_start_paused_or_interrupted(app)
+        }
+        Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
@@ -1196,6 +1194,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetScrollLines(v) => set_scroll_lines(app, v),
         Action::SetShowThinkingBlocks(v) => set_show_thinking_blocks(app, v),
         Action::SetAlwaysExpandThinking(v) => set_always_expand_thinking(app, v),
+        Action::SetHideHeader(v) => set_hide_header(app, v),
+        Action::SetPlanApprovalPark(s) => set_plan_approval_park(app, s),
+        Action::SetAllowWorktree(v) => set_allow_worktree(app, v),
+        Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
+        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
@@ -1204,27 +1207,27 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetResumeCanceledTurnOnRestart(v) => set_resume_canceled_turn_on_restart(app, v),
         Action::SetTokenEconomyBool { field, value } => set_token_economy_bool(app, field, value),
         Action::SetTokenEconomyInt { field, value } => set_token_economy_int(app, field, value),
-        Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
-        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),
         Action::SetNotificationsSessionRecap(v) => set_notifications_session_recap(app, v),
         Action::SetNotificationsSessionRecapThresholdSecs(v) => {
             set_notifications_session_recap_threshold_secs(app, v)
         }
         Action::SetFeaturesSessionRecap(v) => set_features_session_recap(app, v),
+        Action::SetAutoCompactThreshold(v) => set_auto_compact_threshold(app, v),
+        Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
         Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
+        Action::SetDefaultReasoningEffort(s) => set_default_reasoning_effort(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
-        Action::SetHideHeader(v) => set_hide_header(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
@@ -1253,7 +1256,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
-        Action::SetAutoCompactThreshold(v) => set_auto_compact_threshold(app, v),
         Action::SetDisplayRefreshAutoCadence(v) => set_display_refresh_auto_cadence(app, v),
         Action::PreviewTheme(v) => preview_theme(app, v),
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),

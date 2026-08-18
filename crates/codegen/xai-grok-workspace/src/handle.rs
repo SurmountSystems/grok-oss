@@ -2206,7 +2206,7 @@ impl WorkspaceHandle {
         limit: usize,
     ) -> crate::file_system::FuzzyPollOutcome {
         use crate::file_system::FuzzyPollOutcome;
-        let mut manager = self.shared.fuzzy_searches.lock().await;
+        let manager = self.shared.fuzzy_searches.lock().await;
         if !manager.is_current_query(search_id, query_version) {
             return FuzzyPollOutcome::Stale;
         }
@@ -2248,7 +2248,7 @@ impl WorkspaceHandle {
         &self,
         search_id: &str,
     ) -> Option<crate::file_system::FuzzySearchData> {
-        let mut manager = self.shared.fuzzy_searches.lock().await;
+        let manager = self.shared.fuzzy_searches.lock().await;
         manager.get_results(search_id)
     }
     pub async fn fuzzy_close(&self, search_id: &str) -> bool {

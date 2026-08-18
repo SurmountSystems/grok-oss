@@ -1651,4 +1651,44 @@ mod tests {
             "accumulated deltas must equal the terminal card body even when truncated"
         );
     }
+
+    /// A cancelled tool future drops the `Child` before any wait/kill path
+    /// runs; the spawn config must kill rg on drop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_spawned_grep_child_kills_rg() {
+        let tmp = TempDir::new().unwrap();
+        // Overflow the stdout pipe so rg blocks on write and stays alive until killed.
+        let line = format!("needle {}\n", "x".repeat(120));
+        fs::write(tmp.path().join("big.txt"), line.repeat(20_000)).unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let ctx = test_ctx(resources.into_shared());
+
+        let step = prepare_grep(&ctx, &make_grep_input("needle"))
+            .await
+            .expect("prepare_grep");
+        let ready = match step {
+            GrepStep::Ready(r) => r,
+            GrepStep::Early(out) => panic!("expected spawned rg, got early output: {out:?}"),
+        };
+        let pid = ready.child.id().expect("child pid");
+
+        // Hold the read end open (no EPIPE death) and drop the child mid-run.
+        let GrepReady {
+            child, stdout_pipe, ..
+        } = ready;
+        drop(child);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !xai_tty_utils::process_not_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rg (pid {pid}) still running 5s after its Child was dropped — leaked"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(stdout_pipe);
+    }
 }

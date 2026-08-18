@@ -340,6 +340,36 @@ impl SamplingError {
         )
     }
 
+    /// True when the model or gateway reports capacity / overload.
+    ///
+    /// Stream errors classify on `error_type` only (`overloaded_error`,
+    /// `service_unavailable_error`). HTTP 529 is always capacity. Other 5xx
+    /// bodies classify when the message names those same types or
+    /// "overloaded". A 4xx that merely mentions the word is a request
+    /// error, not capacity.
+    pub fn is_overloaded(&self) -> bool {
+        match self {
+            SamplingError::StreamError { error_type, .. } => {
+                error_type == "overloaded_error" || error_type == "service_unavailable_error"
+            }
+            SamplingError::Api {
+                status, message, ..
+            } => {
+                status.as_u16() == 529
+                    || (status.is_server_error() && api_message_is_overloaded(message))
+            }
+            SamplingError::Auth { .. }
+            | SamplingError::InvalidConfiguration(_)
+            | SamplingError::Http(_)
+            | SamplingError::Serialization(_)
+            | SamplingError::EventStreamError(_)
+            | SamplingError::IdleTimeout { .. }
+            | SamplingError::EmptyResponse { .. }
+            | SamplingError::MaxTokensTruncation
+            | SamplingError::DoomLoopDetected { .. } => false,
+        }
+    }
+
     pub fn is_payload_too_large(&self) -> bool {
         matches!(
             self,
@@ -425,6 +455,16 @@ impl SamplingError {
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
         }
+    }
+
+    /// Whether retry is explicitly vetoed: auth, credits exhausted, a
+    /// `x-should-retry: false` header, or a context-length overflow.
+    /// Do not auto-retry these as transport flakiness.
+    pub fn is_retry_vetoed(&self) -> bool {
+        matches!(self, Self::Auth { .. })
+            || self.is_credit_exhausted()
+            || self.should_retry_header() == Some(false)
+            || self.is_context_length_error()
     }
 
     pub fn model_metadata(&self) -> Option<&ResponseModelMetadata> {
@@ -688,6 +728,14 @@ pub fn is_transient_api_status(code: u16) -> bool {
     matches!(code, 429 | 500 | 502..=504 | 520..=527 | 530)
 }
 
+/// Whether an HTTP status is worth retrying: the same 429 + any 5xx rule CCP
+/// publishes in `x-should-retry`, minus Cloudflare's origin-TLS 525/526.
+/// See [xAI Rate Limits](https://docs.x.ai/developers/rate-limits)
+/// (accessed: 2026-08-12) for retry-after / 429; 52x pages are Cloudflare edge.
+pub fn is_retryable_api_status(status: StatusCode) -> bool {
+    RetryPolicy::edge_client().should_retry(status.as_u16())
+}
+
 /// True when the status is a Cloudflare-style origin/edge outage (52x), not
 /// a normal app 5xx. Used for operator messaging.
 pub fn is_edge_outage_status(code: u16) -> bool {
@@ -909,6 +957,11 @@ const TEAM_CREDIT_FALLBACK: &str = "Your team has either used all available cred
 reached its monthly spending limit. Add credits or raise the monthly spend limit on console.x.ai.";
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
+fn api_message_is_overloaded(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("overloaded") || lower.contains("service_unavailable_error")
+}
+
 pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() {
         return true;
@@ -1522,6 +1575,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             err.is_auth_error(),
@@ -1543,6 +1597,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!policy.is_auth_error());
     }
@@ -1617,6 +1672,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(payment.is_credit_exhausted());
         assert!(!payment.is_auth_error());
@@ -1627,6 +1683,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(or_body.is_credit_exhausted());
         assert!(!or_body.is_auth_error());
@@ -1637,6 +1694,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(build.is_credit_exhausted());
 
@@ -1646,6 +1704,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!plain_403.is_credit_exhausted());
 
@@ -1655,6 +1714,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !unauthorized.is_credit_exhausted(),
@@ -1678,6 +1738,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             heavy_403.is_credit_exhausted(),
@@ -1690,6 +1751,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(60),
             should_retry: None,
+            error_code: None,
         };
         assert!(
             heavy_429.is_credit_exhausted(),
@@ -1704,6 +1766,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             plan_limit.is_credit_exhausted(),
@@ -1717,6 +1780,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!bare_403.is_credit_exhausted());
 
@@ -1726,6 +1790,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             !guidelines.is_credit_exhausted(),
@@ -1747,6 +1812,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(
             err.is_credit_exhausted(),
@@ -1761,6 +1827,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!bare.is_credit_exhausted());
         let guidelines = SamplingError::Api {
@@ -1769,6 +1836,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            error_code: None,
         };
         assert!(!guidelines.is_credit_exhausted());
 
@@ -2030,6 +2098,16 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             error_code: Some(ApiErrorCode::parse(code)),
+        }
+        for code in [525u16, 526] {
+            assert!(
+                is_transient_api_status(code),
+                "status {code} must stay transient for sampler classify"
+            );
+            assert!(
+                !api_status(code, "tls").is_retryable(),
+                "origin-TLS {code} must not be SamplingError::is_retryable"
+            );
         }
     }
 

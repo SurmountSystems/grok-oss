@@ -35,33 +35,6 @@ pub struct TitleState<'a> {
     pub focused: bool,
 }
 
-/// Prefer rename (`display_name`) over auto-generated session title.
-///
-/// Empty and whitespace-only strings are treated as missing. Trims the
-/// chosen value for the title slot.
-pub fn resolve_session_title_name<'a>(
-    display_name: Option<&'a str>,
-    generated_session_title: Option<&'a str>,
-) -> Option<&'a str> {
-    display_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            generated_session_title
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        })
-}
-
-/// Format the busy-agent title part. Returns `None` when the count is not
-/// useful in the title (0 or 1 — single-agent activity already covers one).
-pub fn format_busy_agents_title_part(count: usize) -> Option<String> {
-    match count {
-        0 | 1 => None,
-        n => Some(format!("{n} agents")),
-    }
-}
-
 pub struct TitleManager {
     items: Vec<TitleItem>,
     last_title: String,
@@ -177,13 +150,6 @@ fn write_item(
             push_separator(buf, has_parts);
             write_truncated(buf, name, 40);
         }
-        TitleItem::Agents => {
-            let Some(label) = format_busy_agents_title_part(state.busy_agent_count) else {
-                return false;
-            };
-            push_separator(buf, has_parts);
-            buf.push_str(&label);
-        }
         TitleItem::Model => {
             let Some(model) = state.model.filter(|s| !s.is_empty()) else {
                 return false;
@@ -206,12 +172,11 @@ fn write_item(
             let Some(elapsed) = state.turn_elapsed else {
                 return false;
             };
-            let secs = elapsed.as_secs();
-            if secs < 1 {
+            if elapsed.as_secs() < 1 {
                 return false;
             }
             push_separator(buf, has_parts);
-            let _ = write!(buf, "{}s", secs);
+            let _ = write!(buf, "{}", crate::util::format_duration(elapsed));
         }
         TitleItem::ActionRequired => {
             if !state.has_pending_permissions {
@@ -296,13 +261,8 @@ fn write_truncated(buf: &mut String, s: &str, max: usize) {
 /// the OSC sequence early or inject escapes into the terminal.
 fn build_title_escape(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
-    let payload = if sanitized.is_empty() {
-        PRODUCT_CLI_NAME
-    } else {
-        sanitized.as_str()
-    };
     let mut buf = Vec::new();
-    let _ = crossterm::queue!(&mut buf, SetTitle(payload));
+    let _ = crossterm::queue!(&mut buf, SetTitle(sanitized));
     String::from_utf8(buf).expect("crossterm SetTitle produces valid UTF-8")
 }
 
@@ -330,18 +290,27 @@ mod tests {
             cwd: None,
             turn_elapsed: None,
             is_busy: false,
-            busy_agent_count: 0,
             focused: true,
         }
     }
 
     #[test]
-    fn grok_only_produces_product_cli_name() {
+    fn grok_only_produces_just_grok() {
         let cfg = config_with_items(vec![TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let state = idle_state();
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
+    }
+
+    /// Named contract: config slot stays `TitleItem::Grok`; display is `grok-oss`.
+    #[test]
+    fn title_item_grok_emits_grok_oss() {
+        let cfg = config_with_items(vec![TitleItem::Grok]);
+        let mut mgr = TitleManager::new(&cfg);
+        mgr.update(&idle_state());
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
+        assert_ne!(mgr.last_title, "grok");
     }
 
     #[test]
@@ -353,7 +322,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "my project - grok-oss");
+        assert_eq!(mgr.last_title, format!("my project - {PRODUCT_CLI_NAME}"));
     }
 
     #[test]
@@ -362,7 +331,7 @@ mod tests {
         let mut mgr = TitleManager::new(&cfg);
         let state = idle_state();
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -374,7 +343,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -383,7 +352,7 @@ mod tests {
         let mut mgr = TitleManager::new(&cfg);
 
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
 
         let activity = TurnActivity::Thinking;
         let state = TitleState {
@@ -391,7 +360,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert!(mgr.last_title.ends_with(" - grok-oss"));
+        assert!(mgr.last_title.ends_with(&format!(" - {PRODUCT_CLI_NAME}")));
         let spinner_part: String = mgr.last_title.chars().take(1).collect();
         assert!(
             TITLE_SPINNER.contains(&spinner_part.chars().next().unwrap()),
@@ -553,7 +522,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::Activity, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -565,7 +534,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert!(mgr.last_title.ends_with(" - grok-oss"));
+        assert!(mgr.last_title.ends_with(&format!(" - {PRODUCT_CLI_NAME}")));
         let spinner_part: String = mgr.last_title.chars().take(1).collect();
         assert!(
             TITLE_SPINNER.contains(&spinner_part.chars().next().unwrap()),
@@ -583,7 +552,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "Waiting - grok-oss");
+        assert_eq!(mgr.last_title, format!("Waiting - {PRODUCT_CLI_NAME}"));
     }
 
     #[test]
@@ -597,7 +566,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "Thinking - grok-oss");
+        assert_eq!(mgr.last_title, format!("Thinking - {PRODUCT_CLI_NAME}"));
     }
 
     #[test]
@@ -659,9 +628,9 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -671,18 +640,18 @@ mod tests {
         let state = idle_state();
 
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
 
         assert_eq!(mgr.update(&state), None);
         assert_eq!(mgr.last_title, "grok");
     }
 
     #[test]
-    fn empty_items_produces_product_cli_fallback() {
+    fn empty_items_produces_grok_fallback() {
         let cfg = config_with_items(vec![]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -694,7 +663,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-3 - grok-oss");
+        assert_eq!(mgr.last_title, format!("grok-3 - {PRODUCT_CLI_NAME}"));
     }
 
     #[test]
@@ -702,7 +671,7 @@ mod tests {
         let cfg = config_with_items(vec![TitleItem::Model, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -714,7 +683,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "my-project - grok-oss");
+        assert_eq!(mgr.last_title, format!("my-project - {PRODUCT_CLI_NAME}"));
     }
 
     #[test]
@@ -726,7 +695,20 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "42s - grok-oss");
+        assert_eq!(mgr.last_title, format!("42s - {PRODUCT_CLI_NAME}"));
+    }
+
+    #[test]
+    fn turn_timer_long_wait_uses_minutes_not_raw_seconds() {
+        let cfg = config_with_items(vec![TitleItem::TurnTimer, TitleItem::Grok]);
+        let mut mgr = TitleManager::new(&cfg);
+        let state = TitleState {
+            turn_elapsed: Some(std::time::Duration::from_secs(943)),
+            ..idle_state()
+        };
+        mgr.update(&state);
+        assert_eq!(mgr.last_title, format!("15m43s - {PRODUCT_CLI_NAME}"));
+        assert!(!mgr.last_title.contains("943"));
     }
 
     #[test]
@@ -738,7 +720,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -769,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_state_and_emits_product_cli_name() {
+    fn reset_clears_state_and_emits_grok() {
         let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
         let mut mgr = TitleManager::new(&cfg);
         let activity = TurnActivity::Thinking;
@@ -779,10 +761,10 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_ne!(mgr.last_title, "grok-oss");
+        assert_ne!(mgr.last_title, PRODUCT_CLI_NAME);
 
         mgr.reset();
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
         assert_eq!(mgr.spinner_frame, 0);
         assert_eq!(mgr.tick_count, 0);
     }
@@ -813,7 +795,10 @@ mod tests {
 
         // Both should contain the persistent parts.
         for t in [&t1, &t2] {
-            assert!(t.contains("grok-oss"), "title missing product brand: {t}");
+            assert!(
+                t.contains(PRODUCT_CLI_NAME),
+                "title missing product brand: {t}"
+            );
             assert!(t.contains("Responding"), "title missing 'Responding': {t}");
             assert!(t.contains("my-session"), "title missing session name: {t}");
         }
@@ -828,7 +813,7 @@ mod tests {
         let cfg = default_config();
         let mut mgr = TitleManager::new(&cfg);
         mgr.update(&idle_state());
-        assert_eq!(mgr.last_title, "grok-oss");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]
@@ -852,7 +837,7 @@ mod tests {
         mgr.update(&state);
         assert_eq!(
             mgr.last_title,
-            "Thinking - proj - grok-3 - workspace - grok-oss"
+            format!("Thinking - proj - grok-3 - workspace - {PRODUCT_CLI_NAME}")
         );
     }
 
@@ -888,139 +873,5 @@ mod tests {
             "title payload must be control-free: {inner:?}"
         );
         assert_eq!(inner, "evil]0;pwnedtitle");
-    }
-
-    /// Named contract (blank switcher): dynamic title OSC never carries an
-    /// empty payload. All-control or empty composition falls back to brand.
-    #[test]
-    fn title_escape_never_empty_payload() {
-        for seed in ["", "\x07\x1b\x00", "\u{7}"] {
-            let esc = build_title_escape(seed);
-            let inner = esc
-                .strip_prefix("\u{1b}]0;")
-                .and_then(|s| s.strip_suffix('\u{7}'))
-                .unwrap_or_else(|| panic!("crossterm OSC 0 framing for seed={seed:?}: {esc:?}"));
-            assert!(
-                !inner.is_empty(),
-                "empty OSC title blanks DE switcher; seed={seed:?}"
-            );
-            assert_eq!(inner, PRODUCT_CLI_NAME);
-        }
-        // Session-shaped title stays non-empty and unbranded here (branding
-        // is composition's job via TitleItem::Grok).
-        let esc = build_title_escape("my session");
-        let inner = esc
-            .strip_prefix("\u{1b}]0;")
-            .and_then(|s| s.strip_suffix('\u{7}'))
-            .expect("framing");
-        assert_eq!(inner, "my session");
-    }
-
-    // --- Session name resolution (display rename > generated) ---
-
-    #[test]
-    fn title_state_includes_session_name_from_display_or_generated() {
-        // Named contract: title session slot prefers display_name (rename)
-        // over generated_session_title; empty/whitespace skipped.
-        assert_eq!(
-            resolve_session_title_name(Some("renamed"), Some("auto-title")),
-            Some("renamed")
-        );
-        assert_eq!(
-            resolve_session_title_name(None, Some("auto-title")),
-            Some("auto-title")
-        );
-        assert_eq!(
-            resolve_session_title_name(Some("  "), Some("auto-title")),
-            Some("auto-title")
-        );
-        assert_eq!(resolve_session_title_name(Some(""), Some("")), None);
-        assert_eq!(resolve_session_title_name(None, None), None);
-        assert_eq!(
-            resolve_session_title_name(Some("  keep  "), None),
-            Some("keep")
-        );
-
-        let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
-        let mut mgr = TitleManager::new(&cfg);
-        let name = resolve_session_title_name(Some("my rename"), Some("generated")).unwrap();
-        let state = TitleState {
-            session_name: Some(name),
-            ..idle_state()
-        };
-        mgr.update(&state);
-        assert_eq!(mgr.last_title, "my rename - grok-oss");
-    }
-
-    // --- Busy agent count item ---
-
-    #[test]
-    fn title_state_includes_busy_agent_count() {
-        // Named contract: agents item renders "N agents" when busy count > 1;
-        // skipped at 0/1 (single-agent activity already covers one worker).
-        assert_eq!(format_busy_agents_title_part(0), None);
-        assert_eq!(format_busy_agents_title_part(1), None);
-        assert_eq!(
-            format_busy_agents_title_part(2).as_deref(),
-            Some("2 agents")
-        );
-        assert_eq!(
-            format_busy_agents_title_part(5).as_deref(),
-            Some("5 agents")
-        );
-
-        let cfg = config_with_items(vec![
-            TitleItem::SessionName,
-            TitleItem::Agents,
-            TitleItem::Grok,
-        ]);
-        let mut mgr = TitleManager::new(&cfg);
-        let state = TitleState {
-            session_name: Some("proj"),
-            busy_agent_count: 2,
-            ..idle_state()
-        };
-        mgr.update(&state);
-        assert_eq!(mgr.last_title, "proj - 2 agents - grok-oss");
-
-        let state = TitleState {
-            session_name: Some("proj"),
-            busy_agent_count: 1,
-            ..idle_state()
-        };
-        mgr.update(&state);
-        assert_eq!(mgr.last_title, "proj - grok-oss");
-    }
-
-    #[test]
-    fn default_title_items_include_agents() {
-        let items = TitleConfig::default().items;
-        assert!(
-            items.contains(&TitleItem::Agents),
-            "default title.items must include agents for multi-agent discoverability: {items:?}"
-        );
-        assert!(
-            items.contains(&TitleItem::SessionName),
-            "default title.items must include session-name: {items:?}"
-        );
-        assert!(
-            items.contains(&TitleItem::Grok),
-            "default title.items must keep brand: {items:?}"
-        );
-    }
-
-    #[test]
-    fn dashboard_title_has_session_when_available() {
-        // Pure helper: dashboard path uses the same resolve + composition.
-        let name = resolve_session_title_name(Some("dash session"), None).unwrap();
-        let cfg = config_with_items(vec![TitleItem::SessionName, TitleItem::Grok]);
-        let mut mgr = TitleManager::new(&cfg);
-        let state = TitleState {
-            session_name: Some(name),
-            busy_agent_count: 0,
-            ..idle_state()
-        };
-        mgr.update(&state);
-        assert_eq!(mgr.last_title, "dash session - grok-oss");
     }
 }

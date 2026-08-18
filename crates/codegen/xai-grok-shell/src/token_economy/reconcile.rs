@@ -1,7 +1,7 @@
 //! Double-entry reconcile: local usage book vs remote Management meters.
 //!
 //! Side-by-side books with gap honesty when local cost ticks are missing.
-//! Never invents dollars for free SuperGrok period percent.
+//! Never invents dollars for included SuperGrok period percent.
 
 use super::ledger::LocalBookSummary;
 
@@ -26,7 +26,7 @@ pub struct RemoteBookSummary {
     pub remote_setup_note: Option<String>,
 }
 
-/// Free SuperGrok period context (percent only — not USD).
+/// Included SuperGrok period context (percent only, not USD).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SuperGrokPeriodContext {
     pub usage_pct: Option<f64>,
@@ -54,35 +54,38 @@ pub fn ticks_to_usd(ticks: i64) -> f64 {
 
 /// Format the operator-facing double-entry text.
 ///
-/// Meters stay distinct: free SuperGrok period % ≠ SuperGrok top-up $ ≠
+/// Meters stay distinct: included SuperGrok period limits % ≠ SuperGrok top-up $ ≠
 /// console team prepaid ≠ postpaid OAuth vs API class ≠ local calculated spend.
 pub fn format_double_entry_report(report: &DoubleEntryReport) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("Spend (double-entry)".to_string());
     lines.push(String::new());
 
-    // Window A: free SuperGrok period context
-    lines.push("Free SuperGrok billing period (context, not USD)".to_string());
+    // Window A: included SuperGrok period context
+    lines.push("Included SuperGrok period limits (context, not USD)".to_string());
     match (
         report.supergrok_period.usage_pct,
         report.supergrok_period.period_label.as_deref(),
     ) {
         (Some(pct), Some(label)) => {
             lines.push(format!(
-                "  Free SuperGrok period used: {:.0}% ({label})",
+                "  Included SuperGrok period used: {:.0}% ({label})",
                 pct.floor()
             ));
         }
         (Some(pct), None) => {
-            lines.push(format!("  Free SuperGrok period used: {:.0}%", pct.floor()));
+            lines.push(format!(
+                "  Included SuperGrok period used: {:.0}%",
+                pct.floor()
+            ));
         }
-        _ => lines.push("  Free SuperGrok period used: not known yet".to_string()),
+        _ => lines.push("  Included SuperGrok period used: not known yet".to_string()),
     }
     if let Some(pacing) = &report.supergrok_period.pacing_sentence {
         lines.push(format!("  {pacing}"));
     }
     lines.push(
-        "  (This is free SuperGrok period allowance percent, not SuperGrok top-up dollars \
+        "  (This is included SuperGrok period limits percent, not SuperGrok top-up dollars \
 and not console team prepaid.)"
             .to_string(),
     );
@@ -179,7 +182,7 @@ and not console team prepaid.)"
     lines.push(gap_honesty_line(&report.local, &report.remote));
     lines.push(String::new());
     lines.push(
-        "Meters stay distinct: free SuperGrok period % · SuperGrok top-up $ · console team prepaid \
+        "Meters stay distinct: included SuperGrok period limits % · SuperGrok top-up $ · console team prepaid \
 · postpaid OAuth vs API class · local calculated spend."
             .to_string(),
     );
@@ -305,14 +308,14 @@ mod tests {
                 usage_pct: Some(42.0),
                 period_label: Some("weekly".into()),
                 pacing_sentence: Some(
-                    "Free SuperGrok period burn is 5% ahead of linear burn for this billing period."
+                    "Included SuperGrok period burn is 5% ahead of linear burn for this billing period."
                         .into(),
                 ),
             },
             grok_oss_db_path: Some("/tmp/grok_oss.db".into()),
         };
         let text = format_double_entry_report(&report);
-        assert!(text.contains("Free SuperGrok period"));
+        assert!(text.contains("Included SuperGrok period"));
         assert!(text.contains("not SuperGrok top-up dollars"));
         assert!(text.contains("console team prepaid") || text.contains("Console team"));
         assert!(text.contains("Local book"));

@@ -130,15 +130,22 @@ pub(crate) fn execute(
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
-        Effect::RegisterActiveSession { session_id, cwd } => {
+        Effect::RegisterActiveSession { session_id, cwd, activity, activity_line } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
             if let Err(e) = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
                 session_id,
-                pid: std::process::id(),
-                cwd,
-                opened_at: chrono::Utc::now(),
-            }) {
+                std::process::id(),
+                cwd.clone(),
+                chrono::Utc::now(),
+            )) {
                 tracing::warn!(?e, "Failed to register active session");
+            } else {
+                crate::app::active_session_heartbeat::write_blocking(
+                    &heartbeat_sid,
+                    &cwd,
+                    activity,
+                    activity_line,
+                );
             }
         }
         Effect::UnregisterActiveSession { session_id } => {
@@ -735,6 +742,19 @@ pub(crate) fn execute(
                             "FetchSessionList with kind facet filter"
                         );
                         }
+                    }
+                    if let Some(kinds) = &kind_filter {
+                        params["_meta"] = serde_json::json!({
+                        "x.ai/facetFilters": { "kind": kinds },
+                    });
+                        tracing::info!(
+                        target: "grok.pager.workspace_mode",
+                        event = "session_list_fetch",
+                        kind_filter = ?kinds,
+                        query = ?query,
+                        seq,
+                        "FetchSessionList with kind facet filter"
+                    );
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -1774,40 +1794,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ClearCompletedTodos { session_id } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move {
-                let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                });
-                let req = acp::ExtRequest::new(
-                    "x.ai/todo/clear_completed",
-                    serde_json::value::to_raw_value(&params)
-                        .expect("serialize clear_completed params")
-                        .into(),
-                );
-                match acp_send(req, &tx).await {
-                    Ok(resp) => {
-                        let resp_value: serde_json::Value =
-                            serde_json::from_str(resp.0.get()).unwrap_or_default();
-                        let cleared = resp_value
-                            .get("result")
-                            .and_then(|r| r.get("cleared"))
-                            .or_else(|| resp_value.get("cleared"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
-                        TaskResult::ClearCompletedTodosComplete {
-                            cleared,
-                            error: None,
-                        }
-                    }
-                    Err(e) => TaskResult::ClearCompletedTodosComplete {
-                        cleared: 0,
-                        error: Some(sanitize_user_error(&e.to_string())),
-                    },
-                }
-            });
-        }
         Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
             let tx = acp_tx.clone();
             tasks
@@ -2137,30 +2123,6 @@ pub(crate) fn execute(
                         result,
                     }
                 });
-        }
-        Effect::RunRebuild { start_dir, agent_id } => {
-            // Capture install stdio in xai-grok-update (never inherit TTY).
-            // Weighted progress events go through progress_tx → rebuild bar
-            // so cargo/just cannot paint the alt-screen mid-rebuild.
-            let ptx = progress_tx.clone();
-            tasks.spawn(async move {
-                let progress_agent = agent_id;
-                let result = xai_grok_update::rebuild_and_relaunch_with_progress(
-                    &start_dir,
-                    move |ev| {
-                        let _ = ptx.send(RestoreProgressMsg {
-                            agent_id: progress_agent,
-                            message: ev.detail,
-                            toast: true,
-                            fraction: Some(ev.fraction),
-                        });
-                    },
-                )
-                .await
-                .map(Box::new)
-                .map_err(|e| e.to_string());
-                TaskResult::RebuildDone { agent_id, result }
-            });
         }
         Effect::FetchChangelog => {
             tasks
@@ -4583,20 +4545,15 @@ pub(crate) fn execute(
                                     resp.0.get(),
                                 )
                                 .unwrap_or_default();
-                            let result_obj = parsed.get("result");
-                            let answer = result_obj
+                            let answer = parsed
+                                .get("result")
                                 .and_then(|r| r.get("answer"))
                                 .and_then(|a| a.as_str())
                                 .unwrap_or("No response")
                                 .to_string();
-                            let returned_session_id = result_obj
-                                .and_then(|r| r.get("btwSessionId"))
-                                .and_then(|s| s.as_str())
-                                .map(str::to_string);
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Ok(answer),
-                                btw_session_id: returned_session_id,
                                 minimal_request_id,
                                 image_notice,
                                 skipped_image_numbers,
@@ -5018,22 +4975,11 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     use xai_grok_shell::extensions::billing::BillingConfigResponse;
-                    // Always refresh OpenRouter credits alongside xAI billing so
-                    // OR-only / OR-active sessions still update the footer when
-                    // the xAI extension is unavailable (no grok.com auth).
-                    // Management team prepaid + postpaid + usage series run in
-                    // parallel (no-op when key/team unset). Postpaid and series
-                    // fill process cache for `/limits` rebuild; TTL honored
-                    // unless explicit open cleared (no unbounded spam).
-                    let (openrouter_balance, console_team_prepaid_cents, _, _) = tokio::join!(
-                        fetch_openrouter_credit_balance(),
-                        fetch_console_team_prepaid_cents(),
-                        fetch_console_team_postpaid_into_process_cache(),
-                        fetch_console_team_usage_series_into_process_cache(),
-                    );
                     let req = acp::ExtRequest::new(
                         "x.ai/billing",
-                        serde_json::value::to_raw_value(&serde_json::json!({}))
+                        serde_json::value::to_raw_value(&serde_json::json!({
+                            "forceRefresh": force_refresh,
+                        }))
                             .expect("serialize billing params")
                             .into(),
                     );
@@ -5049,35 +4995,9 @@ pub(crate) fn execute(
                             >(result.clone())
                         }
                         Err(e) => {
-                            // SuperGrok path failed — never wipe SuperGrok cache.
-                            // Still surface OR / console prepaid if we got them
-                            // (CreditBalanceFetch::Unchanged keeps last-good SuperGrok).
-                            let err_text = sanitize_user_error(&format!("{e}"));
-                            if let Some(id) =
-                                xai_grok_shell::auth::active_supergrok_identity_id(
-                                    &xai_grok_shell::util::grok_home::grok_home(),
-                                )
-                            {
-                                xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
-                                    &id, &err_text,
-                                );
-                            }
-                            if openrouter_balance.is_some()
-                                || console_team_prepaid_cents.is_some()
-                            {
-                                return TaskResult::BillingFetched {
-                                    agent_id,
-                                    balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
-                                    silent,
-                                    subscription_tier: None,
-                                    autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                    openrouter_balance,
-                                    console_team_prepaid_cents,
-                                };
-                            }
                             return TaskResult::BillingError {
                                 agent_id,
-                                error: err_text,
+                                error: sanitize_user_error(&format!("{e}")),
                                 silent,
                                 nonce,
                             };
@@ -5086,72 +5006,24 @@ pub(crate) fn execute(
                     let billing = match parsed {
                         Ok(billing) => billing,
                         Err(e) => {
-                            // Same keep-last-good SuperGrok policy as transport fail.
-                            let err_text = format!("Parse error: {e}");
-                            if let Some(id) =
-                                xai_grok_shell::auth::active_supergrok_identity_id(
-                                    &xai_grok_shell::util::grok_home::grok_home(),
-                                )
-                            {
-                                xai_grok_shell::auth::remember_supergrok_billing_poll_failed(
-                                    &id, &err_text,
-                                );
-                            }
-                            if openrouter_balance.is_some()
-                                || console_team_prepaid_cents.is_some()
-                            {
-                                return TaskResult::BillingFetched {
-                                    agent_id,
-                                    balance: crate::views::credit_bar::CreditBalanceFetch::Unchanged,
-                                    silent,
-                                    subscription_tier: None,
-                                    autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                    openrouter_balance,
-                                    console_team_prepaid_cents,
-                                };
-                            }
                             return TaskResult::BillingError {
                                 agent_id,
-                                error: err_text,
+                                error: format!("Parse error: {e}"),
                                 silent,
                                 nonce,
                             };
                         }
                     };
                     let subscription_tier = billing.subscription_tier;
-                    let period_end_rfc3339 = billing.config.as_ref().and_then(|c| {
-                        c.current_period
-                            .as_ref()
-                            .and_then(|p| p.end.clone())
-                            .or_else(|| c.billing_period_end.clone())
-                    });
-                    let period_type = billing.config.as_ref().and_then(|c| {
-                        c.current_period
-                            .as_ref()
-                            .and_then(|p| p.period_type.clone())
-                    });
-                    let balance_opt = billing.config.map(credit_balance_from_config);
-                    // Feed ranking only when included usage is a known reading
-                    // (never placeholder 0.0 with included_usage_known: false).
-                    if let Some(ref bal) = balance_opt
-                        && crate::views::credit_bar::should_apply_included_usage_side_effects(bal)
-                    {
-                        let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                        xai_grok_shell::auth::remember_active_supergrok_included_billing(
-                            &grok_home,
-                            bal.usage_pct,
-                            period_end_rfc3339.as_deref(),
-                            period_type.as_deref(),
-                        );
-                    }
-                    let autotopup = if has_prepaid_credits(balance_opt.as_ref()) {
+                    let balance = billing.config.map(credit_balance_from_config);
+                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
                         fetch_auto_topup_info(&tx).await
                     } else {
                         crate::views::credit_bar::AutoTopupFetch::Cleared
                     };
                     TaskResult::BillingFetched {
                         agent_id,
-                        balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(balance_opt),
+                        balance,
                         silent,
                         subscription_tier,
                         autotopup,
@@ -5354,6 +5226,61 @@ pub(crate) fn execute(
                         generation,
                     }
                 });
+        }
+        Effect::ClearCompletedTodos { session_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/todo/clear_completed",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize clear_completed params")
+                        .into(),
+                );
+                match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let resp_value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        let cleared = resp_value
+                            .get("result")
+                            .and_then(|r| r.get("cleared"))
+                            .or_else(|| resp_value.get("cleared"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        TaskResult::ClearCompletedTodosComplete {
+                            cleared,
+                            error: None,
+                        }
+                    }
+                    Err(e) => TaskResult::ClearCompletedTodosComplete {
+                        cleared: 0,
+                        error: Some(sanitize_user_error(&e.to_string())),
+                    },
+                }
+            });
+        }
+        Effect::RunRebuild { start_dir, agent_id } => {
+            let ptx = progress_tx.clone();
+            tasks.spawn(async move {
+                let progress_agent = agent_id;
+                let result = xai_grok_update::rebuild_and_relaunch_with_progress(
+                    &start_dir,
+                    move |ev| {
+                        let _ = ptx.send(RestoreProgressMsg {
+                            agent_id: progress_agent,
+                            message: ev.detail,
+                            toast: true,
+                            fraction: Some(ev.fraction),
+                        });
+                    },
+                )
+                .await
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+                TaskResult::RebuildDone { agent_id, result }
+            });
         }
     }
     (false, meta)
