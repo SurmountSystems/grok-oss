@@ -358,6 +358,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         QueueEntryKind::Prompt => {
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            agent.bind_or_start_live_prompt_task(&prompt_id, &queued.text);
             // Scrollback shows display text (never raw skill XML). Combined
             // drains paint one bubble per original follow-up.
             let is_skill = queued.display_as_skill;
@@ -847,6 +848,13 @@ pub(crate) fn apply_turn_start_shim(
     );
     agent.start_turn_boundary(Some(&prompt_id));
     agent.session.current_prompt_id = Some(prompt_id.clone());
+    if !adopted_from_other_client {
+        if let Some(text) = text.as_deref() {
+            agent.bind_or_start_live_prompt_task(&prompt_id, text);
+        } else {
+            agent.bind_pending_live_prompt_task(&prompt_id);
+        }
+    }
     agent.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but KEEP the
     // seen ring, so a buffer-replayed `x.ai/follow_ups` for an older response

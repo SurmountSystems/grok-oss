@@ -619,7 +619,11 @@ pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
         autotopup.as_ref(),
         live,
     );
-    let report = crate::limits_cmd::report_from_snapshot(&snap, Vec::new());
+    let report = crate::limits_cmd::report_from_snapshot_with_meter_source(
+        &snap,
+        Vec::new(),
+        xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+    );
     let json = match crate::limits_cmd::format_limits_json_pretty(&report) {
         Ok(s) => s,
         Err(e) => {

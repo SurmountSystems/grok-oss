@@ -279,6 +279,8 @@ pub(super) fn finalize_turn_from_terminal(
         .clone()
         .or_else(|| prompt_id.map(str::to_string));
 
+    // Viewer never receives PromptResponse; write metrics if the row is still open.
+    agent.complete_live_prompt_task(ending_prompt_id.as_deref(), None);
     agent.session.finish_turn(&mut agent.scrollback);
 
     // Wire meta wins; else the client-side expectation (older-shell fallback).

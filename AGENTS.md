@@ -22,6 +22,19 @@ Write new short reports under `~/.agents/reports/` on this machine. Agent
 reports stay on the local machine. They are not part of the git tree. Session
 board L1 todos stay on the session board; that board is not the reports home.
 
+### Project agent home — single source of truth (pinned 2026-07-31; reports local 2026-08-17; plans and leftover joins local 2026-08-18)
+
+Do not add a second home. Project `.agents/` is **not** the live plans,
+leftover-joins, or reports home. Live **plans** live under
+`~/.agents/plans/` (use `~/.agents/plans/<project>/` only when two
+projects would collide on the same filename). Leftover joins were leftover
+reports; new reports stay under `~/.agents/reports/`. Do not recreate
+project `.agents/reports/`, `.agents/plans/`, or `.agents/joins/` as a
+live home. Never create project-root `.grok/` for reports, plans, or
+scratch. Session `plan.md` under `.grok/sessions/` is product/session
+state and does not move to `~/.agents/`. Host dual-pin:
+`~/.grok/AGENTS.md` § *Project agent home*.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -96,8 +109,10 @@ less than product code and tests. Do not invent long essays or git nags.
    inventories, closed todos, or session history into L1. When the
    operator names work, record a pointer and implement. Do **not**
    lock that work behind a plan rewrite / present / approve cycle
-   while implementation is already running. Plan mode is for unclear
-   or large new design only. Host dual-pin: `~/.grok/AGENTS.md` §
+   while implementation is already running. After Approve, mentioned
+   work is implemented (board + spawn). See § *After Approve, implement
+   mentioned work*. Plan mode is for unclear or large new design only.
+   Host dual-pin: `~/.grok/AGENTS.md` §
    *L1 stays lean so we do not compact*.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
@@ -140,6 +155,32 @@ less than product code and tests. Do not invent long essays or git nags.
    pad a guess. Name which meter and which workspace. SuperGrok Heavy
    is a distinct weekly pool from standard SuperGrok. Dual-pin: host
    `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **grok-oss limits printout is not xAI billing truth (pinned 2026-08-19).**
+   grok-oss limits JSON and compact chrome are a client printout, not xAI
+   billing truth. Distinguish "the CLI printed X" from "the account is X."
+   Identical `nextReset` or identical included % on SuperGrok (personal)
+   and SuperGrok (business) is not proof those identities share a pool or
+   reset together. The operator signed up for personal SuperGrok and
+   business SuperGrok at different times, so those included SuperGrok
+   period weekly windows cannot honestly share one reset clock. Operator
+   Usage (grok.com / product Usage for that workspace) and the
+   console.x.ai Billing page they can see win when they contradict the
+   CLI. `console.isLive` false is sampler identity, not "credits are not
+   being used." Do not invent remaining. Do not call any pool used up.
+   Dual-pin: host `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **Fail-open plus named `/limits` commands (pinned 2026-08-19).** A client
+   100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark
+   SuperGrok used up or hop to console so this session cannot self-fix.
+   Operator Usage (grok.com for that workspace) and the console.x.ai Billing
+   page they can see win. Real SuperGrok HTTP 402 after that request failed
+   can still leave SuperGrok. Hop-back does not require console credits.
+   Same words on TUI `/limits` and CLI `grok-oss limits`: stay-supergrok,
+   use-console, meter included | dollar-credits | console | combined,
+   refresh (ForceRefresh). Sidecar `$GROK_HOME/limits_pins.json`, sibling of
+   exhausted_credits/. No new `[auth]` keys. Stock preferred_method =
+   "api_key" still pins console. Matching nextReset is not proof of a
+   shared pool. Dual-pin: host `~/.grok/AGENTS.md` § *Limits and credits
+   vocabulary*.
    **SuperGrok Heavy (operator-reported 2026-08-16; not a product-code proof):**
    SuperGrok Heavy is a real tier, distinct from standard SuperGrok. Personal
    SuperGrok Heavy and Business/Team SuperGrok Heavy are separate weekly compute
@@ -203,7 +244,10 @@ less than product code and tests. Do not invent long essays or git nags.
    never approves (clickable Approve). After one decisive
    Approve or Exit, do not re-arm CTAs until a new present. After Revise or
    Clarify, wait for re-present (no idle “Plan written / Click or /view-plan”
-   CTA re-arm mid-rewrite). User-guide `19-plan-mode`; FORK plan-approval
+   CTA re-arm mid-rewrite). After a real Approve, work starts. Do not write a
+   new session plan or re-present to "confirm" mentioned work while that
+   approved implement is in flight. See § *After Approve, implement mentioned
+   work*. User-guide `19-plan-mode`; FORK plan-approval
    bullets P1–P2.
    **Dual-auth language (pinned 2026-07-27; vocabulary 2026-08-08; omit extras 2026-08-16):** ban bare
    jargon **proactive hop**, **sticky exhaust** / **sticky hop**, and
@@ -227,7 +271,9 @@ less than product code and tests. Do not invent long essays or git nags.
    **approved** plan (or clearly in-scope residual) unless the operator
    **explicitly** defers that slice. Surmount does complete work. True
    *Ambiguity → park* stays for unclear intent only, not for optional-feeling
-   follow-ons on a locked plan. Host dual-pin: `~/.grok/AGENTS.md` same rule.
+   follow-ons on a locked plan. After Approve, mentioned work is implemented
+   (board + spawn), not parked behind another plan present. See § *After
+   Approve, implement mentioned work*. Host dual-pin: `~/.grok/AGENTS.md` same rule.
 6. **Prefer Rust tools; do not invent and run new Python/shell scripts**
    (pinned 2026-08-09; supply-chain). Prefer product/host **Rust tools and
    bins** for agent work. Agents must **not write and execute new Python
@@ -324,9 +370,10 @@ handoff files are **reports**. Write new reports under `~/.agents/reports/`
 on this machine. Do not add report files to the git tree. Do not call them
 join notes / join artifacts. Fork-join parallelism may still be named when
 explaining hierarchically structured subagent work (agent depth L1 main / L2
-subagents / L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Legacy
-files may remain under `.agents/joins/`; new work uses **reports** under
-`~/.agents/reports/`.
+subagents / L3 specialists max). Host dual-pin: `~/.grok/AGENTS.md`. Leftover
+joins were leftover reports and live under `~/.agents/reports/`. New work
+uses **reports** under `~/.agents/reports/`. Do not keep live leftover
+joins under project `.agents/joins/`.
 
 ### Agent depth L1 / L2 / L3 (pinned 2026-07-29; three layers always 2026-08-15; Hierarchical fast path 2026-08-16)
 
@@ -345,8 +392,14 @@ goes up.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. **MUST spawn L3**. Stay token-efficient. Throw context away after a report goes up. | Product work. Tool work. Greps. Edits. Tests. Skill body rewrites |
-| **L3 specialist** | All actual tools and work, in parallel | Spawn L4 (**forbidden**) |
+| **L2 subagent** | Parallelize. **MUST spawn L3**. Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Fill itself with product tool work (that is L3's job). Do not inject operator text into a live L3. |
+| **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
+
+L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools. L2 still **MUST spawn L3** for tool work so L2 does not fill and compact. That is L2's job, not a claim that L3 is weaker.
+
+Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2.
+
+L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 
 **Hierarchical fast path (pinned 2026-08-16).** The main thread may do
 these three things without spawning L2:
@@ -417,6 +470,22 @@ as optional. Do not ask "say if you want that." Do the work.
 This is not a substitute for *Ambiguity → park* when intent is actually
 unclear. A named job is not unclear. Dual-pin: host `~/.grok/AGENTS.md`
 § *Mention is in scope*.
+
+### After Approve, implement mentioned work (pinned 2026-08-19)
+
+When a plan is already Approved and implement is in flight (or clearly
+next), operator-mentioned work and "let's do that" / continue-the-approved-work
+is in scope: board upsert and spawn (or keep the healthy implementer
+running). Do not lock that work behind another plan rewrite / present /
+approve cycle. After Approve, work starts.
+
+This does not weaken present-is-not-Approve. `exit_plan_mode` tool success
+and soft-park remain present for review, not operator Approve. Empty
+freeform Enter never Approves. Always-approve is tool permissions only,
+not plan CTAs. Ambiguity still parks when intent is unclear. A named job
+during approved implement is not unclear. Complete plan verticals still
+apply: do not invent parked/optional for approved plan steps. Host dual-pin:
+`~/.grok/AGENTS.md` § *After Approve, implement mentioned work*.
 
 ## Never assume without checking
 
@@ -516,6 +585,29 @@ cannot fail a deleted catalog test. Catalog:
 - Ship product work: short hierarchical note in [`FORK.md`](FORK.md); link out.
 - **CI is checks only** — never a release package build in GHA. Local gate:
   **`just check`** / **`just ci`**. No `ci-quick` / `ci-host`.
+  Optional **`just check-remote`** realizes flake metadata and the workspace
+  cargo quality derivation (fmt, clippy, test compile) on the existing
+  trusted-user remote builder. rustc requires that builder's `surmount-remote`
+  feature (and `big-parallel`) and must not run on the caller. This laptop
+  never auto-detects `surmount-remote`; the host machines file must advertise
+  it. `--option system-features` that omit `big-parallel` does not stop local
+  nixbld: the daemon still advertises `big-parallel`. Force-remote nix also
+  passes `--cores 64` so workspace rustc can use the builder's cores. Cargo
+  on that derivation passes `--jobs` from those cores, capped at 32, and
+  uses the same **dev** profile as local `just test-clippy` (not crane
+  `--release` check/clippy).
+  **Nix jobs are not cargo/rustc workers (pinned 2026-08-18).** Nix jobs
+  are how many derivations a builder may take at once (machines-file
+  `max-jobs`, nix-daemon `max-jobs`). Workers are cargo/rustc parallelism
+  *inside one derivation* (`CARGO_BUILD_JOBS`, cargo `--jobs`,
+  `NIX_BUILD_CORES` / nix `--cores`). Do not treat machines-file 64 jobs as
+  rustc workers. Do not raise Nix max-jobs to fix a single busy rustc.
+  Laptop local max-jobs stay this laptop's cores. Host machines max-jobs is
+  how many jobs we send to the remote. `--cores 64` sets `NIX_BUILD_CORES`
+  inside a derivation. Cargo jobs 32 is an OOM hedge, not 64 Nix jobs.
+  Tiny crane vendor unpacks that prefer a
+  local build may run on the caller. Default `just check` / `just ci` and
+  GitHub Actions stay local and must not require that builder.
 - Feature branches → PR → **`main`**. Tool branches (`import/*`, `onto-xai/*`)
   land through PRs, not a second main.
 
@@ -553,7 +645,7 @@ Session-board layers only (todos / reports). **Do not confuse** with agent depth
 |---------------|--------|
 | **L0** durable residual | `RESIDUAL.md` (D0 open) / campaign docs |
 | **L1** session todos | Namespaced `plan:*` `impl:*` `pr-N:*` `recon:*` `residual:*` `ask:*` `feat:*` `bug:*` — **never casual wipe**; merge upsert only; product keep-unless-mentioned on `merge: false`. **Fib leaves:** size **1 or 2** only; larger work → split children; **progress = Σ leaf sizes** (phases/containers unsized). Prefer `meta.kind` + `parentId`. See [`doc/dev/research/todo-progress-fib-2026-07-26.md`](doc/dev/research/todo-progress-fib-2026-07-26.md). |
-| **L2** reports | Short on-disk reports under `~/.agents/reports/` on this machine (legacy leftover: `.agents/joins/`). Agent reports are not part of the git tree. |
+| **L2** reports | Short on-disk reports under `~/.agents/reports/` on this machine. Leftover joins were leftover reports and live there too. Agent reports are not part of the git tree. |
 
 ### Session board: track well and close out (pinned 2026-08-01)
 

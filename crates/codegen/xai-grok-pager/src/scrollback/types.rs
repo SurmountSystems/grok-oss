@@ -172,10 +172,10 @@ pub struct BlockLine {
     pub joiner: Option<String>,
     /// Semantic link target when paint text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
-    /// Column of the always-on bubble copy glyph, relative to the content
-    /// origin. `append_bubble_copy_button` records this and does not put
-    /// the glyph in `content` spans. Hit-testing and paint use this column
-    /// (slack in the wrap, otherwise the timestamp gutter or right pad).
+    /// Set when this line carries the always-on bubble copy glyph.
+    /// `append_bubble_copy_button` records a column and does not put the
+    /// glyph in `content` spans. Paint and hit-testing right-align the
+    /// glyph in the content area (trailing inset next to the timestamp).
     pub copy_button_col: Option<u16>,
 }
 
@@ -284,9 +284,16 @@ impl BlockLine {
     }
 
     /// Screen rect of the always-on bubble copy glyph, if this line carries one.
-    pub(crate) fn bubble_copy_button_rect(&self, content_x: u16, screen_y: u16) -> Option<Rect> {
-        let col = self.copy_button_col?;
+    /// Right-aligned in `content_width` so it sits with the timestamp chrome.
+    pub(crate) fn bubble_copy_button_rect(
+        &self,
+        content_x: u16,
+        content_width: u16,
+        screen_y: u16,
+    ) -> Option<Rect> {
+        self.copy_button_col?;
         let width = crate::glyphs::copy_icon().width() as u16;
+        let col = content_width.saturating_sub(width.max(1));
         Some(Rect::new(
             content_x.saturating_add(col),
             screen_y,
@@ -295,7 +302,7 @@ impl BlockLine {
         ))
     }
 
-    /// Paint the always-on bubble copy glyph at [`Self::copy_button_col`].
+    /// Paint the always-on bubble copy glyph at the content right edge.
     ///
     /// Call after content and the timestamp overlay so the glyph is not
     /// wiped by the gutter clear and is not part of wrap geometry.
@@ -303,18 +310,17 @@ impl BlockLine {
         &self,
         buf: &mut Buffer,
         content_x: u16,
+        content_width: u16,
         screen_y: u16,
         style: Style,
     ) {
-        let Some(col) = self.copy_button_col else {
+        if self.copy_button_col.is_none() {
             return;
-        };
-        buf.set_string_safe(
-            content_x.saturating_add(col),
-            screen_y,
-            crate::glyphs::copy_icon(),
-            style,
-        );
+        }
+        let icon = crate::glyphs::copy_icon();
+        let icon_w = icon.width() as u16;
+        let col = content_width.saturating_sub(icon_w.max(1));
+        buf.set_string_safe(content_x.saturating_add(col), screen_y, icon, style);
     }
 }
 

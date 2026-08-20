@@ -667,6 +667,7 @@ impl SchedulerActor {
             runtime_overrides: SubagentRuntimeOverrides {
                 completion_output_cap: Some(LOOP_COMPLETION_OUTPUT_CAP),
                 spawn_depth: Some(0),
+                immediate_parent_session_id: None,
                 loop_task_id: Some(task_id.to_string()),
                 ..Default::default()
             },

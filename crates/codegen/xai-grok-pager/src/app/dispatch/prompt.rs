@@ -474,6 +474,18 @@ pub(super) fn dispatch_send_prompt_inner(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    match interject::overlay_operator_clarify(agent) {
+        interject::OverlayOperatorClarify::L3Unbothered => {
+            agent.show_toast(
+                "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
+            );
+            return vec![];
+        }
+        interject::OverlayOperatorClarify::L2(_) => {
+            return interject::dispatch_interject(app, text, Vec::new());
+        }
+        interject::OverlayOperatorClarify::None => {}
+    }
     if let Some(toast) = implement_rewrite.toast {
         agent.show_toast(&toast);
     }
@@ -700,6 +712,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 // invocation: display_as_skill owns styling (no ranges).
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
+                agent.start_pending_live_prompt_task(&display_text);
                 agent
                     .session
                     .pending_prompts
@@ -740,6 +753,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     .prompt
                     .slash_controller
                     .recognized_token_ranges(&pass_text, &agent.session.models);
+                agent.start_pending_live_prompt_task(&pass_text);
                 agent
                     .session
                     .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
@@ -852,6 +866,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
+            agent.start_and_bind_live_prompt_task(&prompt_id, &text);
             // Plain image-free sends stay unarmed: shell queue state and cancelTrigger decide disposition.
 
             if consume_input {
@@ -903,6 +918,7 @@ pub(super) fn dispatch_send_prompt_inner(
             }];
         }
 
+        agent.start_pending_live_prompt_task(&text);
         agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
@@ -1137,6 +1153,13 @@ pub(super) fn handle_prompt_response(
                 .map(str::to_string),
             Err(_) => prompt_id.clone(),
         };
+        // Driver PromptResponse owns exec metrics (usage lives here). Fail-open
+        // if grok_oss.db is missing. Stale/discarded ids no-op if unbound.
+        let usage_meta = result.as_ref().ok().and_then(|pr| pr.meta.as_ref());
+        agent.complete_live_prompt_task(
+            response_pid.as_deref().or(prompt_id.as_deref()),
+            usage_meta,
+        );
         // The turn-end RPC for this prompt arrived — disarm the
         // lost-response reconcile that `handle_prompt_complete` armed
         // for it (the broadcast is emitted before the RPC response, so

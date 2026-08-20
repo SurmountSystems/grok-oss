@@ -1368,8 +1368,8 @@ fn test_selected_entry_output_divergence_uses_selected_branch() {
 }
 
 /// Message-style blocks (`AgentMessage`, `UserPrompt`, `Btw`)
-/// reserve 10 columns on the right for the timestamp overlay, so their cached
-/// output is wrapped at `content_area.width - 10`, not `content_area.width`.
+/// reserve the short timestamp plus the copy trailing inset on the right,
+/// so their cached output is wrapped at `content_area.width - reserved`.
 ///
 /// `VisibleBlockGeometry.content_width` must report the same reduced width
 /// that was used to populate the cache; otherwise any code that re-derives
@@ -1378,9 +1378,8 @@ fn test_selected_entry_output_divergence_uses_selected_branch() {
 /// slice the wrong content for the clipboard.
 #[test]
 fn message_block_content_width_subtracts_timestamp_reservation() {
-    // Picked so the message wraps to a different line count at
-    // `content_width - 10` than at `content_width`. With viewport=30
-    // and chrome=4, pane_content_width=26 and per-block content_width=16.
+    // Picked so the message wraps to a different line count at the reserved
+    // wrap width than at the full pane content width.
     let entries = vec![make_markdown_entry(
         "hello world foo bar baz qux quux corge grault garply waldo",
     )];
@@ -1389,10 +1388,14 @@ fn message_block_content_width_subtracts_timestamp_reservation() {
 
     let pane_content_width = result.selection_model.content_area.width;
     let block = &result.selection_model.visible_blocks[0];
+    let reserved = crate::scrollback::wrappers::message_right_chrome_reserve(
+        &AppearanceConfig::default(),
+        true,
+    );
     assert_eq!(
         block.content_width,
-        pane_content_width.saturating_sub(10),
-        "AgentMessage should reserve 10 cols for the timestamp"
+        pane_content_width.saturating_sub(reserved),
+        "AgentMessage should reserve timestamp plus copy trailing inset"
     );
 
     // The lines registered in the resolved model came from the cached

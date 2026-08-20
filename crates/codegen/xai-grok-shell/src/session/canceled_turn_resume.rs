@@ -8,15 +8,18 @@
 //! - on explicit user cancel (Esc / stop),
 //! - on graceful process quit (SIGTERM / first signal → Quit / `/exit`),
 //! - on `/rebuild` mid-turn cancel before re-exec,
+//! - on fearless global pause when it cancels a running primary turn (the
+//!   in-process pause gate stays in RAM; this file is the interrupted prompt),
 //! - on session load **history recovery** when no marker exists but the
 //!   loaded session still looks mid-work (unfinished subagents / running
 //!   scrollback) and a last user prompt is available.
 //!
 //! Cleared on clean successful turn finish (and rate-limit terminals). Kept
 //! on **error** terminals so reopen continues failed work. Not written for
-//! network blips alone, fearless global pause, soft stop, or **SIGKILL**
-//! (`kill -9` — no userspace handler can run; eager write is the only defense
-//! against total hard death).
+//! network blips alone, global pause when nothing is mid-turn, soft stop, or
+//! **SIGKILL** (`kill -9` — no userspace handler can run; eager write is the
+//! only defense against total hard death). The pause chip does not persist
+//! the RAM gate itself.
 //!
 //! Resume on session open is gated by `[ui] resume_canceled_turn_on_restart`
 //! (default **on**). Order on load: (A) apply marker if present **and** the

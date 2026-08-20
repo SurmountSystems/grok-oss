@@ -2750,9 +2750,7 @@ pub(crate) async fn run(
                             None,
                             Some(serde_json::json!({ "attempt": attempt })),
                         );
-                        app.show_toast(&format!(
-                            "Disconnected. Reconnecting... (attempt {attempt})"
-                        ));
+                        app.handle_session_disconnect_toast(attempt);
                         presenter.request(false);
                     }
                     ConnectionStatus::Connected { generation }

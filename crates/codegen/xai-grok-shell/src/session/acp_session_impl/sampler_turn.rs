@@ -575,6 +575,7 @@ impl SessionActor {
                 &mut sampling.session_identity_key,
             );
         }
+        crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
         sampling
     }
     /// Install auto-mode permission classifier with a live LLM side-query

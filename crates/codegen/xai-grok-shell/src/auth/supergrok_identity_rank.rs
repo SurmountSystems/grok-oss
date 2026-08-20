@@ -6,15 +6,15 @@
 //! over personal included. Among the same role, sooner reset then
 //! `identity_id`. Meters stay distinct: personal included ≠ Business included.
 //!
-//! After every SuperGrok included pool is exhausted: if any principal still has
-//! SuperGrok **$ extras** (`prepaid_balance_cents > 0`) and a **live** session
-//! JWT, keep that SuperGrok session primary and put console keys only as
-//! failover (after-burner / SuperGrok $ extras before console). Hard-expired
-//! JWTs are never after-burner primary. When extras are 0 or unknown (`None`),
-//! console leads as primary and **live** SuperGrok JWTs stay a **recovery**
-//! failover tail (plus `session_identity_key`) so console team credit/spend
-//! 403 can hop back to free SuperGrok period. Hard-expired SuperGrok is never
-//! recovery.
+//! After every SuperGrok included pool reports remaining 0: if any principal
+//! still has SuperGrok dollar credits (`prepaid_balance_cents > 0`) and a
+//! **live** session JWT, keep that SuperGrok session primary and put console
+//! keys only as failover. Hard-expired JWTs are never primary. Fail-open: when
+//! SuperGrok dollar credits are 0 or unknown (`None`), a remaining-0 printout
+//! is not proof. Keep a **live** SuperGrok JWT primary and queue console as
+//! failover for a real SuperGrok HTTP 402. Hard-expired SuperGrok is never
+//! recovery. Leave SuperGrok as primary only after HTTP 402 rotate, or later
+//! `use-console` / `preferred_method = "api_key"`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -116,9 +116,11 @@ impl CombinedIncludedRemaining {
 
 /// Sum remaining included SuperGrok period limits across distinct pools.
 ///
-/// Unified pool (`is_unified_billing_user == true`, or the same floored used
-/// percent and the same reset): count once (max remaining, not 2×).
-/// Unknown identities do not add.
+/// Unified pool (`is_unified_billing_user == true`): count once (max remaining,
+/// not 2×). Matching floored used percent and the same `reset_at` is a client
+/// printout, not proof two SuperGrok identities share one pool. Operator
+/// Usage pages they can see win. grok-oss limits JSON is a client printout,
+/// not xAI billing truth. Unknown identities do not add.
 pub fn combined_included_remaining(readings: &[IncludedPoolReading]) -> CombinedIncludedRemaining {
     let known: Vec<&IncludedPoolReading> =
         readings.iter().filter(|r| r.usage_pct.is_some()).collect();
@@ -139,14 +141,12 @@ pub fn combined_included_remaining(readings: &[IncludedPoolReading]) -> Combined
             .unwrap_or(0);
         pool_remaining.push(max_rem);
     } else {
-        // Group by (floored used percent, reset). Same pair = one pool.
-        let mut groups: std::collections::BTreeMap<(i64, Option<DateTime<Utc>>), u64> =
-            std::collections::BTreeMap::new();
+        // One pool per SuperGrok identity. Matching floored used percent and
+        // the same reset_at is not one remaining number.
+        let mut groups: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
         for r in &known {
-            let pct = r.usage_pct.unwrap();
-            let key = (pct.floor() as i64, r.reset_at);
-            let rem = included_remaining_from_usage_pct(pct);
-            let entry = groups.entry(key).or_insert(0);
+            let rem = included_remaining_from_usage_pct(r.usage_pct.unwrap());
+            let entry = groups.entry(r.identity_id.as_str()).or_insert(0);
             *entry = (*entry).max(rem);
         }
         pool_remaining.extend(groups.into_values());
@@ -494,21 +494,21 @@ pub struct AutoSupergrokOrder {
 /// from primary and failover so a silent 429/credit hop cannot burn console
 /// Grok Build $ while included weekly headroom remains.
 ///
-/// When all SuperGrok included pools are exhausted:
-/// - If any **live** SuperGrok still has **$ extras** (`prepaid_balance_cents > 0`
-///   and not hard-expired): keep that SuperGrok session primary and queue console
-///   keys as failover only (after-burner / SuperGrok $ extras before console).
-/// - If extras are 0 or unknown, or every extras session is hard-expired: console
-///   becomes primary; **non-hard-expired** SuperGrok JWTs are queued as a
-///   **recovery** failover tail (not primary) so console team credit/spend 403
-///   can hop back to free SuperGrok period. Do not invent after-burner primary
-///   without a positive prepaid reading on a live JWT.
+/// When all SuperGrok included pools report remaining 0:
+/// - If any **live** SuperGrok still has SuperGrok dollar credits
+///   (`prepaid_balance_cents > 0` and not hard-expired): keep that SuperGrok
+///   session primary and queue console keys as failover only.
+/// - Fail-open: SuperGrok dollar credits 0 or unknown is not proof. Keep a
+///   **live** SuperGrok JWT primary and queue console as failover for a real
+///   SuperGrok HTTP 402. Hard-expired SuperGrok is never recovery. Console
+///   becomes primary only when no live SuperGrok JWT remains, or later
+///   `preferred_method = "api_key"` / `use-console`.
 ///
 /// `primary_is_supergrok_included` is true whenever primary is a SuperGrok session
-/// JWT (included headroom **or** $ extras after-burner) so auth type / host stay
-/// on the SuperGrok proxy path. On after-burner both this flag and
-/// `exhausted_all_supergrok_included` are true — the name means "primary is
-/// SuperGrok session", not "included pool still has room".
+/// JWT (included headroom, SuperGrok dollar credits, or fail-open remaining 0)
+/// so auth type / host stay on the SuperGrok proxy path. Both this flag and
+/// `exhausted_all_supergrok_included` can be true together. The name means
+/// "primary is SuperGrok session", not "included pool still has room".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoCredentialOrder {
     pub primary: Option<String>,
@@ -651,9 +651,10 @@ fn sort_live_supergrok_by_reset(live: &mut [&SupergrokSessionCandidate]) {
 ///
 /// Order while any SuperGrok has included headroom: ranked SuperGrok only
 /// (console keys **omitted** from the chain — limits-before-credits).
-/// After every SuperGrok included pool is exhausted: SuperGrok $ extras (when
-/// known positive) stay primary with console as failover; otherwise console
-/// keys lead.
+/// After every SuperGrok included pool reports remaining 0: SuperGrok dollar
+/// credits (when known positive) stay primary with console as failover.
+/// Fail-open: remaining 0 and SuperGrok dollar credits 0 or unknown still keep
+/// a live SuperGrok JWT primary; console is failover for HTTP 402 only.
 pub fn order_credentials_for_preferred_auto(
     sessions: &[SupergrokSessionCandidate],
     console_keys: &[String],
@@ -725,9 +726,9 @@ pub fn order_credentials_for_preferred_auto(
         }
     }
 
-    // Included full and extras 0/None → console primary; live SuperGrok JWT as
-    // recovery failover tail so console team credit/spend 403 can hop back to
-    // free SuperGrok period. Hard-expired SuperGrok is never recovery.
+    // Fail-open: remaining 0 and SuperGrok dollar credits 0 or unknown is not
+    // proof. Keep a live SuperGrok JWT primary; console is failover for a real
+    // SuperGrok HTTP 402. Hard-expired SuperGrok is never recovery.
     let recovery: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -745,23 +746,33 @@ pub fn order_credentials_for_preferred_auto(
         }
         out
     };
-    let session_identity_key = recovery.first().cloned();
+    if !recovery.is_empty() {
+        let mut tokens = recovery;
+        let primary = tokens.remove(0);
+        let session_key = primary.clone();
+        let mut failover = tokens;
+        console.retain(|k| k != &primary && !failover.iter().any(|t| t == k));
+        failover.extend(console);
+        return AutoCredentialOrder {
+            primary: Some(primary),
+            failover,
+            primary_is_supergrok_included: true,
+            exhausted_all_supergrok_included: exhausted_all,
+            session_identity_key: Some(session_key),
+        };
+    }
 
+    // No live SuperGrok JWT (all hard-expired or empty) → console primary.
+    let session_identity_key = None;
     let mut keys = console;
     let primary = if keys.is_empty() {
         None
     } else {
         Some(keys.remove(0))
     };
-    let mut failover = keys;
-    for t in &recovery {
-        if primary.as_ref() != Some(t) && !failover.iter().any(|k| k == t) {
-            failover.push(t.clone());
-        }
-    }
     AutoCredentialOrder {
         primary,
-        failover,
+        failover: keys,
         primary_is_supergrok_included: false,
         exhausted_all_supergrok_included: exhausted_all,
         session_identity_key,
@@ -1306,10 +1317,9 @@ mod tests {
         assert!(!order.failover.iter().any(|k| k == "console-a"));
     }
 
-    /// Named contract (console-dead recovery): when free SuperGrok period is full
-    /// and SuperGrok $ extras are not known positive, console is primary but
-    /// live SuperGrok JWTs stay a recovery failover tail + session identity so
-    /// console team credit 403 can hop back to free SuperGrok period.
+    /// Fail-open: remaining 0 and SuperGrok dollar credits not known positive
+    /// keep a live SuperGrok JWT primary. Console is failover for HTTP 402.
+    /// Identifier keeps the old catalog name.
     #[test]
     fn auto_exhausted_all_console_primary_keeps_supergrok_recovery_in_failover() {
         let personal = cand(
@@ -1330,32 +1340,36 @@ mod tests {
             &[personal, business],
             &["console-1".into(), "console-2".into()],
         );
-        assert_eq!(order.primary.as_deref(), Some("console-1"));
-        assert!(!order.primary_is_supergrok_included);
-        assert!(order.exhausted_all_supergrok_included);
-        // Remaining console first, then SuperGrok recovery tail.
         assert_eq!(
-            order.failover.first().map(String::as_str),
-            Some("console-2")
+            order.primary.as_deref(),
+            Some("tok-p"),
+            "fail-open keeps SuperGrok primary on remaining 0 printout: {:?}",
+            order
         );
+        assert!(order.primary_is_supergrok_included);
+        assert!(order.exhausted_all_supergrok_included);
         assert!(
-            order.failover.iter().any(|k| k == "tok-p"),
-            "SuperGrok recovery must stay in failover: {:?}",
+            order.failover.iter().any(|k| k == "tok-b"),
+            "sibling SuperGrok stays in failover: {:?}",
             order.failover
         );
         assert!(
-            order.failover.iter().any(|k| k == "tok-b"),
-            "sibling SuperGrok recovery must stay in failover: {:?}",
+            order.failover.iter().any(|k| k == "console-1"),
+            "console is failover for a real SuperGrok HTTP 402: {:?}",
+            order.failover
+        );
+        assert!(
+            order.failover.iter().any(|k| k == "console-2"),
+            "remaining console keys stay in failover: {:?}",
             order.failover
         );
         assert_eq!(
             order.session_identity_key.as_deref(),
             Some("tok-p"),
-            "session identity key enables console→SuperGrok host/bearer hop"
+            "session identity key stays the SuperGrok JWT"
         );
-        // Exhausted SuperGrok tokens without positive extras must not lead.
-        assert_ne!(order.primary.as_deref(), Some("tok-p"));
-        assert_ne!(order.primary.as_deref(), Some("tok-b"));
+        assert_ne!(order.primary.as_deref(), Some("console-1"));
+        assert_ne!(order.primary.as_deref(), Some("console-2"));
     }
 
     /// Hard-expired SuperGrok JWT must not be recovery under ExhaustedAll.
@@ -1384,7 +1398,8 @@ mod tests {
         );
     }
 
-    /// Legacy name: Design A still keeps SuperGrok off primary under ExhaustedAll.
+    /// Fail-open: both included SuperGrok period printouts remaining 0 still
+    /// keep SuperGrok primary. Identifier keeps the old catalog name.
     #[test]
     fn auto_both_included_exhausted_console_primary_no_supergrok_primary() {
         let personal = cand(
@@ -1405,12 +1420,11 @@ mod tests {
             &[personal, business],
             &["console-1".into(), "console-2".into()],
         );
-        assert_eq!(order.primary.as_deref(), Some("console-1"));
-        assert!(!order.primary_is_supergrok_included);
+        assert_eq!(order.primary.as_deref(), Some("tok-p"));
+        assert!(order.primary_is_supergrok_included);
         assert!(order.exhausted_all_supergrok_included);
-        // SuperGrok is recovery only — never primary under ExhaustedAll.
-        assert_ne!(order.primary.as_deref(), Some("tok-p"));
-        assert_ne!(order.primary.as_deref(), Some("tok-b"));
+        assert_ne!(order.primary.as_deref(), Some("console-1"));
+        assert_ne!(order.primary.as_deref(), Some("console-2"));
         assert!(order.session_identity_key.is_some());
     }
 
@@ -1462,8 +1476,9 @@ mod tests {
             "console keys must not be in failover while included headroom: {:?}",
             order.failover
         );
-        // ExhaustedAll without extras flips console primary (sibling tests cover
-        // after-burner when extras remain).
+        // Fail-open: remaining 0 printout keeps SuperGrok primary; console is
+        // failover for HTTP 402 (after-burner still covers known-positive
+        // SuperGrok dollar credits).
         let exhausted = cand(
             "team-live",
             SupergrokAccountRole::Business,
@@ -1475,9 +1490,14 @@ mod tests {
             &[exhausted],
             &["console-env-key".into(), "console-store-key".into()],
         );
-        assert_eq!(after.primary.as_deref(), Some("console-env-key"));
+        assert_eq!(after.primary.as_deref(), Some("tok-team-live"));
         assert!(after.exhausted_all_supergrok_included);
-        assert!(!after.primary_is_supergrok_included);
+        assert!(after.primary_is_supergrok_included);
+        assert!(
+            after.failover.iter().any(|k| k == "console-env-key"),
+            "console is failover after remaining 0 printout: {:?}",
+            after.failover
+        );
     }
 
     /// Design A regression alias: included headroom still omits console.
@@ -2215,8 +2235,8 @@ mod tests {
         assert!(order.failover.iter().any(|k| k == "console-k"));
     }
 
-    /// Included full and extras 0 or unknown → console primary (not SuperGrok
-    /// after-burner primary). Live SuperGrok stays recovery-only in failover.
+    /// Fail-open: remaining 0 and SuperGrok dollar credits 0 or unknown keep
+    /// SuperGrok primary. Console is failover. Identifier keeps the old name.
     #[test]
     fn auto_after_included_and_extras_gone_console_primary() {
         let zero_extras = cand_with_extras(
@@ -2229,17 +2249,17 @@ mod tests {
         );
         let order_zero =
             order_credentials_for_preferred_auto(&[zero_extras], &["console-key".into()]);
-        assert_eq!(order_zero.primary.as_deref(), Some("console-key"));
-        assert!(!order_zero.primary_is_supergrok_included);
-        assert!(order_zero.exhausted_all_supergrok_included);
-        assert_ne!(
+        assert_eq!(
             order_zero.primary.as_deref(),
             Some("tok-supergrok"),
-            "prepaid 0 must not invent SuperGrok after-burner primary"
+            "fail-open keeps SuperGrok primary when SuperGrok dollar credits are 0"
         );
+        assert!(order_zero.primary_is_supergrok_included);
+        assert!(order_zero.exhausted_all_supergrok_included);
+        assert_ne!(order_zero.primary.as_deref(), Some("console-key"));
         assert!(
-            order_zero.failover.iter().any(|k| k == "tok-supergrok"),
-            "SuperGrok recovery tail required for console-dead hop: {:?}",
+            order_zero.failover.iter().any(|k| k == "console-key"),
+            "console is failover for HTTP 402: {:?}",
             order_zero.failover
         );
         assert_eq!(
@@ -2259,13 +2279,13 @@ mod tests {
             order_credentials_for_preferred_auto(&[unknown_extras], &["console-key".into()]);
         assert_eq!(
             order_none.primary.as_deref(),
-            Some("console-key"),
-            "honest absence of extras → console primary (do not invent after-burner)"
+            Some("tok-supergrok"),
+            "fail-open keeps SuperGrok primary when SuperGrok dollar credits are unknown"
         );
-        assert!(!order_none.primary_is_supergrok_included);
+        assert!(order_none.primary_is_supergrok_included);
         assert!(
-            order_none.failover.iter().any(|k| k == "tok-supergrok"),
-            "unknown extras still keep SuperGrok as recovery: {:?}",
+            order_none.failover.iter().any(|k| k == "console-key"),
+            "unknown SuperGrok dollar credits still keep console as failover: {:?}",
             order_none.failover
         );
         assert_eq!(
@@ -2644,8 +2664,10 @@ mod tests {
         assert_eq!(with_unknown.distinct_pool_count, 2);
     }
 
-    /// Named contract: unified pool (wire flag, or same floored used percent
-    /// and same reset) counts once (max remaining, not 2×).
+    /// Named contract: wire `is_unified_billing_user == true` counts once
+    /// (max remaining, not 2×). Matching floored used percent and reset is
+    /// not this path; see
+    /// [`combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool`].
     #[test]
     fn combined_included_remaining_does_not_double_count_unified_pool() {
         let unified_flag = combined_included_remaining(&[
@@ -2658,13 +2680,51 @@ mod tests {
         );
         assert_eq!(unified_flag.distinct_pool_count, 1);
         assert_eq!(unified_flag.used_pct_for_chrome, Some(10.0));
+    }
 
-        let same_pct_and_reset = combined_included_remaining(&[
+    /// Named contract: two SuperGrok identities with the same floored used
+    /// percent and the same reset_at are still two pools. Matching CLI
+    /// nextReset is a client printout, not xAI billing truth. Operator Usage
+    /// pages they can see win. SuperGrok is a paid product. Do not invent
+    /// remaining. Do not call any pool used up.
+    #[test]
+    fn combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool() {
+        // Same floored used percent (24.0 and 24.4 floor to 24) and the same
+        // reset. Distinct identities. Not one remaining number.
+        let combined = combined_included_remaining(&[
             pool("personal-1", Some(24.0), Some(5_000), None),
             pool("business-1", Some(24.4), Some(5_000), None),
         ]);
-        assert_eq!(same_pct_and_reset.distinct_pool_count, 1);
-        assert_eq!(same_pct_and_reset.remaining_units, 76);
-        assert_eq!(same_pct_and_reset.used_pct_for_chrome, Some(24.0));
+        let personal_rem = included_remaining_from_usage_pct(24.0);
+        let business_rem = included_remaining_from_usage_pct(24.4);
+        assert_eq!(
+            combined.distinct_pool_count, 2,
+            "matching floored used percent and the same reset_at must not collapse two SuperGrok identities into one pool"
+        );
+        assert_eq!(
+            combined.remaining_units,
+            personal_rem + business_rem,
+            "remaining must be the sum of both identities, not max of one pool"
+        );
+        assert_ne!(
+            combined.remaining_units,
+            personal_rem.max(business_rem),
+            "must not treat matching printouts as one remaining number"
+        );
+
+        // Both timestamps missing (weekly fixture path): still two pools.
+        let both_unknown_reset = combined_included_remaining(&[
+            pool("personal-1", Some(62.0), None, None),
+            pool("business-1", Some(62.4), None, None),
+        ]);
+        assert_eq!(
+            both_unknown_reset.distinct_pool_count, 2,
+            "matching percents with both reset_at missing must not collapse into one pool"
+        );
+        assert_eq!(
+            both_unknown_reset.remaining_units,
+            included_remaining_from_usage_pct(62.0) + included_remaining_from_usage_pct(62.4),
+            "remaining must still sum two identities when reset_at is unknown on both"
+        );
     }
 }

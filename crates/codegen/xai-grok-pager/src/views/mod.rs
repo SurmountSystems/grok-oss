@@ -52,6 +52,7 @@ pub mod subagent_catalog_pane;
 pub mod suggestion_controller;
 pub mod tasks_pane;
 pub mod timeline;
+pub mod todo_exec_metrics;
 pub mod todo_pane;
 pub mod turn_status;
 pub mod tutorial;

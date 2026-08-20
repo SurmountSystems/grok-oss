@@ -363,6 +363,7 @@ fn cancel_agent_turn(
     if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
         if let Some(pid) = agent.session.current_prompt_id.clone() {
             agent.note_rewound_prompt(&pid);
+            agent.complete_live_prompt_task(Some(&pid), None);
         }
         agent.prompt.set_text(&stashed.text);
         agent.prompt.restore_chip_elements(&stashed.chip_elements);
@@ -644,6 +645,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             })),
         );
 
+        agent.complete_live_prompt_task(Some(pending.prompt_id.as_str()), None);
         agent.session.finish_turn(&mut agent.scrollback);
         let event = if was_cancelling {
             // Send-now cancel renders no marker (the new prompt is the next turn).

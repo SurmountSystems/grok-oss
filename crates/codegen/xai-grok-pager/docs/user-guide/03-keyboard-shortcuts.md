@@ -305,7 +305,7 @@ Three work controls exist. They are not interchangeable:
 | **Global pause** | **`Ctrl+Shift+Space`**. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. | Pauses **all** sessions in this process: cancels in-flight turns, holds queues, then resumes only unfinished work. Not a freeze of a single stream. |
 | **Soft stop** | **`Ctrl+Shift+S` only** (no status-row button) | Lets the **current** turn finish, then holds the queue. |
 
-Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause is not continue interrupted turn (`canceled_turn_resume.json`). See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
+Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause that cancels a running turn writes continue interrupted turn (`canceled_turn_resume.json`) so last-session on start and `/start` can continue if this process dies. The pause gate itself stays in this process in RAM. See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
 

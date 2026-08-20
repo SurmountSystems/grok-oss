@@ -183,6 +183,7 @@ mod prompt;
 mod queue;
 mod render;
 pub use render::AppRenderParams;
+mod live_prompt_task;
 mod rewind;
 mod selection;
 mod session;
@@ -988,6 +989,10 @@ pub struct AgentView {
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
     pub turn_started_at: Option<Instant>,
+    /// Live prompt-as-task rows keyed by client prompt_id (ULID in grok_oss.db).
+    pub(crate) live_prompt_tasks: HashMap<String, xai_grok_shell::grok_oss::LivePromptTask>,
+    /// Composer submit minted a prompt_task before drain assigned prompt_id.
+    pub(crate) pending_live_prompt_tasks: VecDeque<xai_grok_shell::grok_oss::LivePromptTask>,
     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
     pub first_activity_logged_for: Option<Instant>,
     /// Accumulated duration the turn timer was paused (while the user was
@@ -1488,10 +1493,10 @@ pub struct AgentView {
     /// Currently open subagent view (child_session_id). When Some, the
     /// scrollback area is replaced by the subagent's framed view.
     pub active_subagent: Option<String>,
-    /// When true, this AgentView is rendering as a subagent (read-only):
-    /// - Prompt is hidden
-    /// - Cancel turn / demote to bg shortcuts are disabled
-    /// - Shortcuts bar shows subagent-specific hints
+    /// When true, this AgentView is an observational nested overlay:
+    /// composer hidden, cancel/demote shortcuts off, subagent back hints.
+    /// L2 coordinator overlays clear this so the operator can ask that L2.
+    /// L3 specialist overlays keep it set so specialists stay unbothered.
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,

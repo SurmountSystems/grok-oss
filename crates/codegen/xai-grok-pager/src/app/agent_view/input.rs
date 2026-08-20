@@ -486,7 +486,12 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
-                child_view.mark_as_subagent_view();
+                if !crate::app::subagent::overlay_child_is_l2_coordinator(
+                    &self.subagent_sessions,
+                    child_sid,
+                ) {
+                    child_view.mark_as_subagent_view();
+                }
                 return child_view.handle_input_inner(ev, registry, prompt_paging);
             }
             return InputOutcome::Unchanged;
@@ -730,7 +735,22 @@ impl AgentView {
                                 }
                             })
                     }
-                    Event::Mouse(mouse) => self.handle_line_viewer_mouse(mouse),
+                    Event::Mouse(mouse) => {
+                        let in_prompt = self
+                            .pane_areas
+                            .prompt
+                            .contains((mouse.column, mouse.row).into());
+                        if self.plan_approval_view.is_some()
+                            && self.route_plan_prompt_mouse_drag(mouse, in_prompt)
+                        {
+                            self.prompt.handle_mouse(mouse);
+                            return InputOutcome::Changed;
+                        }
+                        if self.route_plan_scrollback_mouse(mouse) {
+                            return self.handle_mouse(mouse);
+                        }
+                        self.handle_line_viewer_mouse(mouse)
+                    }
                     _ => InputOutcome::Changed,
                 };
             }
@@ -754,6 +774,8 @@ impl AgentView {
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
                         self.prompt.handle_mouse(mouse);
                         InputOutcome::Changed
+                    } else if self.route_plan_scrollback_mouse(mouse) {
+                        self.handle_mouse(mouse)
                     } else {
                         self.handle_line_viewer_mouse(mouse)
                     }
@@ -1354,6 +1376,12 @@ impl AgentView {
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
                 }
+                if self.plan_approval_view.is_some()
+                    && self.prompt.text().trim().is_empty()
+                    && self.prompt.images.is_empty()
+                {
+                    return self.abandon_plan();
+                }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()
                     && self.prompt.text().is_empty()
@@ -1534,9 +1562,13 @@ mod background_and_tasks_shortcut_tests {
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     fn ctrl(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
@@ -1756,6 +1788,171 @@ mod background_and_tasks_shortcut_tests {
         );
         assert!(child.hit_bg_button.rect.is_none());
     }
+
+    fn overlay_info(
+        child_sid: &str,
+        parent_sid: &str,
+        depth: u32,
+    ) -> crate::app::subagent::SubagentInfo {
+        crate::app::subagent::SubagentInfo {
+            subagent_id: child_sid.into(),
+            child_session_id: child_sid.into(),
+            description: "coordinate the slice".into(),
+            subagent_type: "general-purpose".into(),
+            persona: None,
+            role: None,
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: Some(parent_sid.into()),
+            depth: Some(depth),
+            started_at: std::time::Instant::now(),
+            last_progress_at: std::time::Instant::now(),
+            finished: false,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
+    }
+
+    fn parent_with_overlay_child(child_sid: &str, depth: u32) -> (super::AgentView, String) {
+        let mut parent = make_agent();
+        parent.session.session_id = Some(agent_client_protocol::SessionId::new("l1-sess"));
+        parent.session.state = crate::app::agent::AgentState::TurnRunning;
+        let mut child = make_agent();
+        child.session.session_id = Some(agent_client_protocol::SessionId::new(child_sid));
+        child.session.state = crate::app::agent::AgentState::TurnRunning;
+        child.prompt.set_text("clarify the coordinator");
+        child.prompt.set_cursor(child.prompt.text().len());
+        let parent_sid = if depth >= 2 { "l2-coord" } else { "l1-sess" };
+        if depth >= 2 {
+            parent
+                .subagent_sessions
+                .insert("l2-coord".into(), overlay_info("l2-coord", "l1-sess", 1));
+        }
+        parent.subagent_sessions.insert(
+            child_sid.to_string(),
+            overlay_info(child_sid, parent_sid, depth),
+        );
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        parent.open_subagent_fullscreen(child_sid.to_string());
+        (parent, child_sid.to_string())
+    }
+
+    #[test]
+    fn l2_overlay_enter_sends_clarify_action_and_shows_composer() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        let child = parent.subagent_views.get(&child_sid).expect("l2 child");
+        assert!(
+            !child.is_subagent_view,
+            "L2 overlay must show the operator composer"
+        );
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "clarify the coordinator");
+            }
+            other => panic!("L2 overlay Enter must send a clarify action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn l3_overlay_enter_does_not_send_and_hides_composer() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l3-specialist", 2);
+        let child = parent.subagent_views.get(&child_sid).expect("l3 child");
+        assert!(child.is_subagent_view, "L3 overlay stays observational");
+        assert_ne!(
+            child.active_pane,
+            AgentPane::Prompt,
+            "L3 overlay must not focus a composer"
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::Interject { .. })
+            ),
+            "L3 overlay must not emit a send action, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn l2_overlay_draw_keeps_composer_visible() {
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        assert!(!parent.subagent_views[&child_sid].is_subagent_view);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            !child.is_subagent_view,
+            "L2 overlay must keep the composer after the first frame"
+        );
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn l2_overlay_key_forward_does_not_mark_observational() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        let _ = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            &registry,
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(!child.is_subagent_view);
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+    }
+
     #[test]
     fn ctrl_g_toggles_tasks_and_never_demotes() {
         let registry = ActionRegistry::defaults();

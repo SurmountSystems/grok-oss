@@ -7433,14 +7433,11 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
     );
 }
 
-/// Named contract: after included SuperGrok period limits are full, the hop
-/// list on `SamplerConfig` must not stay empty when a console key is available.
-///
-/// Spend order: included SuperGrok period limits first, then SuperGrok dollar
-/// credits (session stays primary when extras are known positive), then console
-/// team prepaid / console API credits. This test covers included full + extras
-/// unknown: console must appear as primary or failover. Do not accept an empty
-/// hop as success.
+/// Named catalog contract: console is on the hop when the operator pins
+/// `preferred_method = "api_key"`, not because a client printout of included
+/// SuperGrok period remaining 0 is proof. Fail-open default stays SuperGrok
+/// until a real SuperGrok HTTP 402 or this pin. Do not accept an empty hop
+/// when the pin is set.
 #[test]
 #[serial]
 fn sampling_config_auto_use_fills_console_hop_after_included_full() {
@@ -7475,7 +7472,7 @@ fn sampling_config_auto_use_fills_console_hop_after_included_full() {
     let creds = resolve_credentials_preferring_with_supergrok_sessions(
         &model,
         &sessions,
-        Some(PreferredAuthMethod::Oidc),
+        Some(PreferredAuthMethod::ApiKey),
         true,
     );
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
@@ -7486,15 +7483,72 @@ fn sampling_config_auto_use_fills_console_hop_after_included_full() {
             .any(|k| k == "console-after-included-key");
     assert!(
         console_in_chain,
-        "after included SuperGrok period limits are full, hop must include the console key; primary={:?} failover={:?}",
+        "preferred_method=api_key must put the console key on the hop; primary={:?} failover={:?}",
         sampling.api_key, sampling.failover_api_keys
     );
-    assert!(
-        !sampling.failover_api_keys.is_empty()
-            || sampling.api_key.as_deref() == Some("console-after-included-key"),
-        "hop list must not stay empty when console should be available after included SuperGrok period limits are full; primary={:?} failover={:?}",
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("console-after-included-key"),
+        "api_key pin must keep console primary; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
+/// Fail-open default: an unproven client printout of included SuperGrok period
+/// remaining 0 and SuperGrok dollar credits $0 must keep SuperGrok primary.
+/// Operator Usage / Billing pages they can see win. Console hop is a real
+/// SuperGrok HTTP 402 or later `preferred_method = "api_key"` / use-console.
+#[test]
+#[serial]
+fn sampling_config_keeps_supergrok_primary_on_unproven_full_printout() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use xai_grok_sampler::clear_all_including_durable;
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win-printout");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let session = "session-jwt-unproven-full-printout";
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "personal-unproven-full".into(),
+            role: SupergrokAccountRole::Personal,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: session.into(),
+        prepaid_balance_cents: Some(0),
+        hard_expired: false,
+    }];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some(session),
+        "unproven remaining 0 / $0 SuperGrok dollar credits printout must keep SuperGrok primary; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert_ne!(
+        sampling.api_key.as_deref(),
+        Some("console-must-not-win-printout"),
+        "must not hop to the console key from a lying client printout"
     );
     clear_all_including_durable();
 }
@@ -7546,9 +7600,9 @@ fn sampling_config_auto_use_omits_console() {
     clear_all_including_durable();
 }
 
-/// Catalog name: `resolve_model_to_sampling_config` after included SuperGrok
-/// period limits are full must fill console failover (or console primary when
-/// SuperGrok dollar credits are unknown).
+/// Catalog name: `resolve_model_to_sampling_config` fills console when the
+/// operator pins `preferred_method = "api_key"`. Client remaining 0 printout
+/// is not the hop proof (fail-open). HTTP 402 rotate stays the live leave path.
 #[test]
 #[serial]
 fn resolve_model_to_sampling_config_auto_use() {
@@ -7582,7 +7636,7 @@ fn resolve_model_to_sampling_config_auto_use() {
     let creds = resolve_credentials_preferring_with_supergrok_sessions(
         &model,
         &sessions,
-        Some(PreferredAuthMethod::Oidc),
+        Some(PreferredAuthMethod::ApiKey),
         true,
     );
     let sc = sampling_config_for_model(&model, creds, None, None, None, None);
@@ -7593,8 +7647,15 @@ fn resolve_model_to_sampling_config_auto_use() {
             .any(|k| k == "console-resolve-model-hop");
     assert!(
         console_in_chain,
-        "resolve_model / sampling hop after included SuperGrok period limits are full must include console; primary={:?} failover={:?}",
+        "preferred_method=api_key must include console on resolve_model / sampling hop; primary={:?} failover={:?}",
         sc.api_key, sc.failover_api_keys
+    );
+    assert_eq!(
+        sc.api_key.as_deref(),
+        Some("console-resolve-model-hop"),
+        "api_key pin must keep console primary; primary={:?} failover={:?}",
+        sc.api_key,
+        sc.failover_api_keys
     );
     clear_all_including_durable();
 }

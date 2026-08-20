@@ -150,6 +150,15 @@ if [[ -z "$TREE_ISH" ]]; then
   if [[ -f FORK.md ]] && ! grep -q 'non-excepted Python' FORK.md 2>/dev/null; then
     missing+=("FORK.md land class 7 (must say a restack that installs non-excepted Python is a failed land)")
   fi
+  if [[ -f FORK.md ]] && ! grep -q 'stay-supergrok' FORK.md 2>/dev/null; then
+    missing+=("FORK.md (must name stay-supergrok)")
+  fi
+  if [[ -f FORK.md ]] && ! grep -q 'limits_pins.json' FORK.md 2>/dev/null; then
+    missing+=("FORK.md (must name limits_pins.json sidecar)")
+  fi
+  if [[ -f AGENTS.md ]] && ! grep -q 'stay-supergrok' AGENTS.md 2>/dev/null; then
+    missing+=("AGENTS.md (must name stay-supergrok fail-open / named /limits commands)")
+  fi
   guide="crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md"
   if [[ -f $guide ]] && ! grep -q 'not a Python runtime' "$guide" 2>/dev/null; then
     missing+=("$guide (must say product skills are not a Python runtime)")

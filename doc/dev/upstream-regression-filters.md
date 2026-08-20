@@ -249,15 +249,23 @@ These are not hop keys. They lock the sum used by compact chrome and `/limits` d
 | path::test | Contract |
 |------------|----------|
 | `combined_included_remaining_sums_distinct_personal_and_business_pools` | Distinct personal + Business pools sum remaining included SuperGrok period limits |
-| `combined_included_remaining_does_not_double_count_unified_pool` | Unified pool (wire flag or same floored percent + reset) counts once |
+| `combined_included_remaining_does_not_double_count_unified_pool` | Wire `is_unified_billing_user` unified pool counts once (max remaining) |
+| `combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool` | Matching floored used percent and the same reset_at is not one remaining number |
+| `matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool` | Compact remaining / Active driver do not collapse matching independent polls |
 | `compact_meter_stays_included_while_sibling_pool_has_remaining` | Compact chrome stays on included SuperGrok period limits while a sibling pool has remaining |
+| `compact_chrome_names_meter_source_not_bare_percent` | Compact chrome names included SuperGrok period limits vs SuperGrok dollar credits vs console vs combined |
+| `format_limits_active_line_names_meter_source` | `/limits` Active line names the meter-source pin |
 | `active_spend_driver_stays_included_while_any_distinct_pool_has_remaining` | Active spend driver stays included SuperGrok period limits while any distinct pool has remaining |
 
 ```bash
 cargo test -p xai-grok-shell --lib -- combined_included_remaining_sums_distinct_personal_and_business_pools \
-  combined_included_remaining_does_not_double_count_unified_pool
+  combined_included_remaining_does_not_double_count_unified_pool \
+  combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining \
-  active_spend_driver_stays_included_while_any_distinct_pool_has_remaining
+  compact_chrome_names_meter_source_not_bare_percent \
+  format_limits_active_line_names_meter_source \
+  active_spend_driver_stays_included_while_any_distinct_pool_has_remaining \
+  matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool
 ```
 
 ### 6. Last-session on start
@@ -494,10 +502,12 @@ failed land (prose sniff; no dedicated hit-count `fn`). SuperGrok is paid.
 |------------|----------|
 | `user_guide_does_not_claim_automatic_host_hop_is_unshipped` | Guide does not claim hop after included SuperGrok period limits are full is unshipped |
 | `user_guide_names_token_economy_spend_order` | Guide names spend order: included SuperGrok period limits, then SuperGrok dollar credits, then console team prepaid / console API credits |
+| `user_guide_limits_names_fail_open_and_named_commands` | Guide names fail-open (client 100% / remaining 0 / $0 must not mark SuperGrok used up) plus stay-supergrok, use-console, meter, refresh, and limits_pins.json. grok-oss limits is not xAI billing truth |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- user_guide_does_not_claim_automatic_host_hop_is_unshipped \
-  user_guide_names_token_economy_spend_order
+  user_guide_names_token_economy_spend_order \
+  user_guide_limits_names_fail_open_and_named_commands
 ```
 
 #### Seeded custom model on `session/load` stays Chat Completions
@@ -1038,9 +1048,11 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_h
   limits_snapshot_never_writes_access_tokens \
   billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
   combined_included_remaining_sums_distinct_personal_and_business_pools \
-  combined_included_remaining_does_not_double_count_unified_pool
+  combined_included_remaining_does_not_double_count_unified_pool \
+  combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining \
-  active_spend_driver_stays_included_while_any_distinct_pool_has_remaining
+  active_spend_driver_stays_included_while_any_distinct_pool_has_remaining \
+  matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool
 
 # 6. Last-session on start
 cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_when_one_exists \
@@ -1071,7 +1083,8 @@ cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_app
   clear_finished_action_idle_is_quiet_not_neon_green_or_magenta \
   clear_finished_click_does_not_open_subagent \
   user_guide_does_not_claim_automatic_host_hop_is_unshipped \
-  user_guide_names_token_economy_spend_order window_title titles_on_session
+  user_guide_names_token_economy_spend_order \
+  user_guide_limits_names_fail_open_and_named_commands window_title titles_on_session
 cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval \
   default_max_allows_l2_to_spawn_l3 rust_edit_verify dangerous_cargo
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise

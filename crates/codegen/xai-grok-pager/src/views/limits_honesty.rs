@@ -17,6 +17,10 @@
 //!   class can still move under SuperGrok session).
 //! - When console team prepaid dollars are shown, name the ≤Ns process-cache
 //!   lag and that `grok limits` / TUI `/limits` force a fresh Management fetch.
+//! - When console team prepaid dollars are shown, name that `teamPrepaidUsd`
+//!   is the Management prepaid ledger (`prepaid/balance` `total.val`), not
+//!   the console.x.ai Billing Credits total (that page includes free credits
+//!   granted).
 
 use super::credit_bar::SamplingIdentityKind;
 
@@ -56,12 +60,13 @@ team settlement as SuperGrok dollar credits.";
 /// Shown when SuperGrok session is live and the product also has team prepaid
 /// remaining and/or team postpaid OAuth class dominating. Closes the gap where
 /// chrome says included SuperGrok period limits are active while dogfood burn still settles
-/// on team Billing Credits (prepaid remaining) and/or team OAuth / Grok Build
+/// on console team prepaid remaining and/or team OAuth / Grok Build
 /// class without included SuperGrok period used % moving and without console key live.
+/// Does **not** claim Management prepaid remaining is console.x.ai Billing Credits.
 pub const NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT: &str = "Note: Active included SuperGrok \
 period limits (activeDriver) is the client spend-order driver and intent chrome, not proof of \
 which wallet settles the bill. SuperGrok session traffic can still settle on team postpaid OAuth \
-/ Grok Build class and can change console team prepaid remaining (team Billing Credits) without \
+/ Grok Build class and can change console team prepaid remaining without \
 included SuperGrok period used % moving and without the console API key being live. Product \
 tracks team prepaid remaining and team OAuth class when a management key is set; it does not \
 invent included SuperGrok period debit.";
@@ -95,6 +100,18 @@ keep last successful cents until a later successful fetch. Running grok limits o
 /limits forces a fresh Management fetch."
     )
 }
+
+/// Management prepaid ledger is not the console.x.ai Billing Credits total.
+///
+/// Shown when console team prepaid dollars are shown. `teamPrepaidUsd` maps
+/// `GET …/billing/teams/{team_id}/prepaid/balance` `total.val` (abs cents).
+/// The browser Billing Credits figure includes free credits granted and can
+/// be a different dollar amount. Not included SuperGrok period limits, not
+/// SuperGrok dollar credits, not team default credits (dashboard allotment).
+pub const NOTE_PREPAID_LEDGER_IS_NOT_BILLING_CREDITS_PAGE: &str = "Note: console team prepaid \
+remaining is the Management prepaid ledger (prepaid/balance total.val), not the console.x.ai \
+Billing Credits total. That Billing page includes free credits granted and can show a different \
+dollar amount.";
 
 /// Team default credits are a separate dashboard allotment meter.
 ///
@@ -263,6 +280,7 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     notes.push(NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string());
     if input.has_console_team_prepaid_reading {
         notes.push(note_console_team_prepaid_may_lag());
+        notes.push(NOTE_PREPAID_LEDGER_IS_NOT_BILLING_CREDITS_PAGE.to_string());
     }
     if input.has_team_default_credits_reading {
         notes.push(NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT.to_string());
@@ -555,8 +573,12 @@ mod tests {
             "must name Active / activeDriver: {note}"
         );
         assert!(
-            lower.contains("team prepaid") && lower.contains("billing credits"),
-            "must name team prepaid remaining / Billing Credits: {note}"
+            lower.contains("team prepaid"),
+            "must name team prepaid remaining: {note}"
+        );
+        assert!(
+            !lower.contains("prepaid remaining (team billing credits)"),
+            "must not equate prepaid remaining with Billing Credits: {note}"
         );
         assert!(
             lower.contains("oauth") || lower.contains("grok build"),
@@ -628,6 +650,43 @@ mod tests {
                 .iter()
                 .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
             "no team meters → no intent-not-settlement note: {bare:?}"
+        );
+    }
+
+    /// Named contract (2026-08-19): do not present Management prepaid
+    /// `teamPrepaidUsd` as console.x.ai Billing Credits. That Billing page
+    /// includes free credits granted and can show a different dollar amount.
+    #[test]
+    fn prepaid_dollars_note_does_not_present_ledger_as_billing_credits_page() {
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_console_team_prepaid_reading: true,
+            has_included_reading: false,
+            ..Default::default()
+        });
+        let joined = notes.join("\n").to_ascii_lowercase();
+        assert!(
+            joined.contains("management")
+                && joined.contains("prepaid")
+                && joined.contains("ledger"),
+            "must name Management prepaid ledger: {notes:?}"
+        );
+        assert!(
+            joined.contains("billing credits"),
+            "must name Billing Credits as the other page: {notes:?}"
+        );
+        assert!(
+            joined.contains("free credits granted"),
+            "must name free credits granted on the Billing page: {notes:?}"
+        );
+        assert!(
+            joined.contains("not") && joined.contains("billing credits"),
+            "must say the ledger is not Billing Credits: {notes:?}"
+        );
+        let active = NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT.to_ascii_lowercase();
+        assert!(
+            !active.contains("prepaid remaining (team billing credits)"),
+            "must not equate prepaid remaining with Billing Credits: {active}"
         );
     }
 

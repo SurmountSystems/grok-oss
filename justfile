@@ -9,6 +9,20 @@
 # Closest GHA repro on Linux: CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci
 # Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
 # pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
+# Optional on this Linux host: `just check-remote` realizes flake metadata
+# and the workspace cargo quality derivation (fmt, clippy, test compile) on
+# the existing trusted-user remote builder (default $HOME/.config/nix/machines).
+# rustc must not run on the caller. Those rustc jobs require surmount-remote
+# (plus big-parallel). This laptop never auto-detects surmount-remote; the
+# ssh-ng machines line must advertise it. --option system-features that omit
+# big-parallel does not stop local nixbld: the daemon still advertises
+# big-parallel. Tiny crane vendor unpacks that prefer a local build may run here.
+# Force-remote nix passes --cores 64 so one workspace rustc can use the
+# builder's cores. The host machines file max-jobs should match that width.
+# Force-remote exports NIX_SSHOPTS (this account's known_hosts; host-key
+# checks stay on) and copies that host key onto the builders line for
+# nix-daemon SSH. Default `just check` / `just ci` stay local. GitHub
+# Actions must not use check-remote.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -41,14 +55,16 @@ low_mem := env_var_or_default("CI_LOW_MEM", "")
 # nix_retry wraps whole `nix ...` invocations when per-download knobs are not
 # enough (e.g. flake metadata 503 HTML). Backoff: 5s, 15s, 45s.
 #
-# IMPORTANT: retries EVERY non-zero exit (not network-classified). Permanent
-# eval failures pay the full attempt budget + backoff. Cargo payloads are
-# intentionally OUTSIDE nix_retry so permanent compile fails once.
+# Unclassified non-zero exits retry (GHA flake-input 502/503, downloads).
+# Hard remote-assign misses (failed to start SSH connection, Failed to
+# find a machine for remote build, or missing system features after the
+# client scheduled the drv) exit on attempt 1 with no sleep. Cargo
+# payloads stay outside nix_retry so a permanent compile fails once.
 # Local fail-fast: NIX_RETRY_ATTEMPTS=1 just mem-guard
 # Override attempts: NIX_RETRY_ATTEMPTS=5 just mem-guard
 #
-# Security: +cmd is expanded as shell (trusted recipes only). Never pass
-# untrusted user input as the nix_retry command string.
+# Security: nix_retry execs the +cmd words as argv ("$@"), then appends
+# force-remote flags. Never pass untrusted user input as those words.
 # ---------------------------------------------------------------------------
 export NIX_CONFIG := '''
 download-attempts = 5
@@ -78,14 +94,119 @@ require_system:
     echo "    expected e.g. x86_64-linux or ^[a-zA-Z0-9_]+-[a-zA-Z0-9_]+$" >&2
     exit 2
 
+# Fail loud before `just check-remote` starts Nix or cargo. Reuses the
+# trusted-user builders file already named in the user Nix config. Does not
+# bake a host address. Does not fall back to local Nix store builds.
+# User SSH to Host surmount-1 is not the nix build path: require this
+# account's known_hosts entry for the machines-file builder, and export
+# NIX_SSHOPTS (UserKnownHostsFile). nix_retry also copies that host key
+# into the builders line so nix-daemon SSH can verify it.
+# After SSH BatchMode works, query the remote daemon system-features
+# (Host alias, stderr discarded). If that list omits surmount-remote,
+# exit 2 before the long quality build. Tests inject
+# GROK_NIX_REMOTE_SYSTEM_FEATURES and skip live SSH.
+[private]
+require_remote_builder:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+    else
+      export NIX_SSHOPTS="${extra_ssh}"
+    fi
+    if [[ ! -s "${file}" ]]; then
+      echo "The Nix builders file is missing or empty: ${file}." >&2
+      echo "just check-remote reuses the trusted-user machines file already named in the user Nix config (override with GROK_NIX_BUILDERS_FILE)." >&2
+      echo "Default just check stays local and does not need this file." >&2
+      exit 2
+    fi
+    if ! grep -q 'ssh-ng://' "${file}"; then
+      echo "The Nix builders file ${file} has no ssh-ng:// builder line." >&2
+      echo "just check-remote will not fall back to local Nix store builds." >&2
+      exit 2
+    fi
+    ssh_ng_host() {
+      local u="${1#ssh-ng://}"
+      u="${u%%\?*}"
+      u="${u#*@}"
+      u="${u%%/*}"
+      if [[ "${u}" == \[* ]]; then
+        u="${u#\[}"
+        u="${u%%]*}"
+      else
+        u="${u%%:*}"
+      fi
+      printf '%s' "${u}"
+    }
+    host_key_present() {
+      local host="$1"
+      [[ -s "${known_hosts}" ]] || return 1
+      ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2 ~ /^ssh-/ { found=1; exit } END { exit !found }'
+    }
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ "${line}" == ssh-ng://* ]] || continue
+      set -- ${line}
+      host="$(ssh_ng_host "${1}")"
+      if [[ -z "${host}" ]] || ! host_key_present "${host}"; then
+        echo "This account's known_hosts has no host key for the machines-file builder." >&2
+        echo "User ssh to Host surmount-1 is not the nix build SSH path (nix-daemon opens ssh-ng)." >&2
+        echo "just check-remote sets NIX_SSHOPTS to this account's known_hosts and will not fall back to a local rustc." >&2
+        exit 2
+      fi
+    done < "${file}"
+    inject_feats="${GROK_NIX_REMOTE_SYSTEM_FEATURES-}"
+    if [[ -z "${inject_feats}" ]]; then
+      if ! ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes surmount-1 true; then
+        echo "SSH BatchMode to Host surmount-1 failed." >&2
+        echo "just check-remote requires that existing remote builder and will not fall back to local Nix store builds." >&2
+        exit 2
+      fi
+    fi
+    remote_feats=""
+    if [[ -n "${inject_feats}" ]]; then
+      remote_feats="${inject_feats}"
+    else
+      set +e
+      feats_out="$(ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes surmount-1 'nix config show' 2>/dev/null)"
+      feats_status=$?
+      set -e
+      if [[ "${feats_status}" -ne 0 ]]; then
+        echo "Could not read the remote builder nix-daemon system-features over SSH BatchMode." >&2
+        echo "just check-remote will not start the long quality build until that query works." >&2
+        exit 2
+      fi
+      remote_feats="$(awk -F' = ' '/^system-features / { print $2; exit }' <<<"${feats_out}")"
+      if [[ -z "${remote_feats}" ]]; then
+        echo "The remote builder SSH reply had no system-features line." >&2
+        echo "just check-remote will not start the long quality build until the remote nix-daemon reports its feature list." >&2
+        exit 2
+      fi
+    fi
+    if ! grep -Eq '(^|[[:space:],{])surmount-remote($|[[:space:],}])' <<<"${remote_feats}"; then
+      echo "The remote nix-daemon does not list surmount-remote in its system-features." >&2
+      echo "The client machines file advertises that feature, so Nix will schedule rustc on the remote, then the daemon will refuse: missing system features." >&2
+      echo "Add surmount-remote to the builder daemon (NixOS extra-system-features / nix.conf) and restart or switch. just check-remote will not start the long quality build until that feature is present." >&2
+      exit 2
+    fi
+    echo "==> just check-remote: using builders file ${file}"
+    echo "==> just check-remote: NIX_SSHOPTS uses this account's known_hosts (host-key checks stay on)"
+    echo "==> just check-remote: rustc/clippy requires the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job. Tiny vendor unpacks that prefer a local build may run here."
+    echo "==> just check-remote: force-remote nix uses --cores 64. Host machines max-jobs should advertise that many jobs on the builder."
+
 # Retry a nix (or other) command. Integer-validates NIX_RETRY_ATTEMPTS (default 4).
-# Prints a clear banner per attempt. Permanent failures fail after all attempts.
-# Retries every non-zero exit (not network-classified); use only around store
-# realization / flake eval, never around host cargo compile payloads.
+# Prints a clear banner per attempt. Unclassified failures retry. Hard SSH /
+# no-remote-machine / missing-system-features / rustfmt Diff-in misses exit on
+# attempt 1 (no 5s/15s/45s sleep). Use only
+# around store realization / flake eval, never around host cargo compile
+# payloads.
 #
 # Before the first attempt: ensure a working `nix` is first on PATH so a
 # broken host binary does not burn the full retry budget. Override: NIX_BIN.
 [private]
+[positional-arguments]
 nix_retry +cmd:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -99,17 +220,131 @@ nix_retry +cmd:
     attempts="${raw_attempts}"
     backoff=5
     n=1
+    attempt_log="$(mktemp)"
+    enriched_builders=""
+    cleanup_nix_retry_log() { rm -f "${attempt_log}" "${enriched_builders}"; }
+    trap cleanup_nix_retry_log EXIT
+    force_remote_opts=()
+    if [[ "${GROK_NIX_FORCE_REMOTE:-}" == "1" ]]; then
+      builders_file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+      known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+      extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+      if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+        export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+      else
+        export NIX_SSHOPTS="${extra_ssh}"
+      fi
+      ssh_ng_host() {
+        local u="${1#ssh-ng://}"
+        u="${u%%\?*}"
+        u="${u#*@}"
+        u="${u%%/*}"
+        if [[ "${u}" == \[* ]]; then
+          u="${u#\[}"
+          u="${u%%]*}"
+        else
+          u="${u%%:*}"
+        fi
+        printf '%s' "${u}"
+      }
+      host_key_b64() {
+        local host="$1"
+        local line typ key
+        [[ -s "${known_hosts}" ]] || return 1
+        line="$(ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2=="ssh-ed25519" {print; exit}')"
+        if [[ -z "${line}" ]]; then
+          line="$(ssh-keygen -F "${host}" -f "${known_hosts}" 2>/dev/null | awk '!/^#/ && $2 ~ /^ssh-/ {print; exit}')"
+        fi
+        [[ -n "${line}" ]] || return 1
+        typ="$(awk '{print $2}' <<<"${line}")"
+        key="$(awk '{print $3}' <<<"${line}")"
+        printf '%s' "${typ} ${key}" | base64 -w0
+      }
+      # max-connections is ssh-ng concurrent daemon connections (copy slots).
+      # Default Nix 1 is serial NAR copy. Open hang report:
+      # https://github.com/NixOS/nix/issues/14615 (accessed: 2026-08-18).
+      max_conn="${GROK_NIX_SSH_NG_MAX_CONNECTIONS:-8}"
+      if [[ ! "${max_conn}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "==> nix_retry: GROK_NIX_SSH_NG_MAX_CONNECTIONS must be a positive integer, got: ${max_conn}" >&2
+        exit 2
+      fi
+      enriched_builders="$(mktemp)"
+      chmod 600 "${enriched_builders}"
+      while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" != ssh-ng://* ]]; then
+          printf '%s\n' "${line}" >>"${enriched_builders}"
+          continue
+        fi
+        # Parse fields with read. Do not `set --` the machines line: that
+        # replaces the nix command in "$@" and makes argv0 ssh-ng:// (exit 127).
+        uri="" systems="" ssh_key="" max_jobs="" speed="" supported="" mandatory="" host_key=""
+        read -r uri systems ssh_key max_jobs speed supported mandatory host_key _rest <<<"${line}" || true
+        if [[ "${uri}" != *"max-connections="* ]]; then
+          if [[ "${uri}" == *\?* ]]; then
+            uri="${uri}&max-connections=${max_conn}"
+          else
+            uri="${uri}?max-connections=${max_conn}"
+          fi
+        fi
+        if [[ -n "${host_key:-}" && "${host_key}" != "-" ]]; then
+          printf '%s %s %s %s %s %s %s %s\n' \
+            "${uri}" "${systems:--}" "${ssh_key:--}" "${max_jobs:--}" "${speed:--}" "${supported:--}" "${mandatory:--}" "${host_key}" >>"${enriched_builders}"
+          continue
+        fi
+        host="$(ssh_ng_host "${uri}")"
+        if ! b64="$(host_key_b64 "${host}")"; then
+          echo "==> nix_retry: this account's known_hosts has no host key for the machines-file builder. User ssh to Host surmount-1 is not the nix build SSH path." >&2
+          exit 2
+        fi
+        printf '%s %s %s %s %s %s %s %s\n' \
+          "${uri}" "${systems:--}" "${ssh_key:--}" "${max_jobs:--}" "${speed:--}" "${supported:--}" "${mandatory:--}" "${b64}" >>"${enriched_builders}"
+      done < "${builders_file}"
+      builders_file="${enriched_builders}"
+      force_remote_opts=(
+        --option builders "@${builders_file}"
+        --option builders-use-substitutes true
+        --option fallback false
+        --option system-features "kvm nixos-test uid-range"
+        --cores 64
+      )
+    fi
+    if [[ "${1:-}" == ssh-ng://* ]]; then
+      echo "==> nix_retry: the first argument is a machines-file line, not the nix command. Pass --option builders @file after the command; do not put the machines line in \"\$@\"." >&2
+      exit 2
+    fi
     while true; do
-      echo "==> nix attempt ${n}/${attempts}: {{ cmd }}"
+      if ((${#force_remote_opts[@]})); then
+        echo "==> nix attempt ${n}/${attempts}: $* ${force_remote_opts[*]}"
+      else
+        echo "==> nix attempt ${n}/${attempts}: $*"
+      fi
       set +e
-      {{ cmd }}
-      status=$?
+      set +o pipefail
+      "$@" "${force_remote_opts[@]}" 2>&1 | tee "${attempt_log}"
+      status="${PIPESTATUS[0]}"
+      set -o pipefail
       set -e
       if [[ "${status}" -eq 0 ]]; then
         exit 0
       fi
+      if grep -qE 'failed to start SSH connection|Failed to find a machine for remote build' "${attempt_log}"; then
+        echo "==> nix_retry: the builder is listed, but SSH did not start. rustc was not run locally. Not retrying this hard remote miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'missing system features' "${attempt_log}"; then
+        echo "==> nix_retry: the remote builder refused this derivation: missing system features. The client scheduled it because the machines file advertises surmount-remote. The remote nix-daemon does not list that feature in its system-features. Add surmount-remote to the builder daemon (NixOS extra-system-features / nix.conf) and restart or switch, then retry. Not retrying this hard remote miss." >&2
+        exit "${status}"
+      fi
+      if grep -qE 'Diff in ' "${attempt_log}"; then
+        echo "==> nix_retry: cargo fmt / rustfmt check failed (Diff in). That is a quality fail, not a flake 502/503. Format the listed files and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
+      if [[ "${status}" -eq 127 ]] && grep -qE 'ssh-ng://.*No such file or directory' "${attempt_log}"; then
+        echo "==> nix_retry: the command was a machines-file line (exit 127). Force-remote builders belong in --option builders @file after nix. Not retrying this hard recipe miss." >&2
+        exit "${status}"
+      fi
       if [[ "${n}" -ge "${attempts}" ]]; then
-        echo "==> nix FAILED after ${n} attempt(s) (exit ${status}): {{ cmd }}" >&2
+        echo "==> nix FAILED after ${n} attempt(s) (exit ${status}): $*" >&2
         exit "${status}"
       fi
       echo "==> nix attempt ${n} failed (exit ${status}); retrying in ${backoff}s..." >&2
@@ -137,6 +372,9 @@ nix_retry +cmd:
 #   nix_retry smoke).
 #
 # There is no `ci-quick` or `ci-host` recipe — use `check`/`ci` or `test`.
+# Optional `check-remote` sends workspace rustc/clippy to the remote builder
+# (surmount-remote). Vendor unpacks may stay on this machine. Default
+# `just check` / `just ci` stay local.
 #
 # Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
 # nix monorepo release build — that OOMs on ~16GB runners). Same flag also
@@ -145,6 +383,26 @@ nix_retry +cmd:
 
 # Alias: same full gate as `ci` (preferred short name before push).
 check: ci
+
+# Optional remote gate: flake metadata plus workspace cargo fmt/clippy/test
+# compile as Nix derivations. rustc requires the remote builder's
+# surmount-remote feature. Default `just check` stays local.
+check-remote: require_system require_remote_builder
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GROK_NIX_FORCE_REMOTE=1
+    export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+    else
+      export NIX_SSHOPTS="${extra_ssh}"
+    fi
+    echo "==> just check-remote: flake metadata"
+    just flake-meta
+    echo "==> just check-remote: workspace cargo quality as a remote Nix derivation"
+    just nix_retry nix build -L ".#workspace-cargo-quality"
 
 # Full local gate — same recipe chain as GHA quality (flake + prep + all tests/lints).
 ci: require_system
@@ -245,7 +503,17 @@ cargo-ci +cmd:
     export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
     if [[ "${CI_LOW_MEM:-}" == "1" ]]; then
       # ci-tools + stdenv first (develop), then store-only PATH scrub, then mem-guard.
-      exec nix develop {{ nix_low_mem_opts }} .#ci -c \
+      force_remote_opts=()
+      if [[ "${GROK_NIX_FORCE_REMOTE:-}" == "1" ]]; then
+        builders_file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+        force_remote_opts=(
+          --option builders "@${builders_file}"
+          --option builders-use-substitutes true
+          --option fallback false
+          --option system-features "kvm nixos-test uid-range"
+        )
+      fi
+      exec nix develop {{ nix_low_mem_opts }} "${force_remote_opts[@]}" .#ci -c \
         ./scripts/with-ci-hermetic-path.sh \
         cargo-mem-guard -- {{ cmd }}
     fi
@@ -283,7 +551,7 @@ test: test-fmt test-clippy test-unit test-doc test-mem-guard
     @echo "just test passed"
 
 # Local-only extras CI does not run.
-test-extra: test-clippy-targets test-nix-retry-smoke
+test-extra: test-clippy-targets test-nix-retry-smoke test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-quotes-quality-attr test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-exports-nix-sshopts test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features
     @echo "just test-extra passed"
 
 test-fmt:
@@ -331,7 +599,657 @@ test-clippy-targets:
       fi
     done
 
-# Smoke-test nix_retry: NIX_RETRY_ATTEMPTS=2 must fail after 2 attempts of
+# Smoke-test check-remote fail-loud: a missing builders file must exit 2
+# before any Nix or cargo work. Not on default `just test`.
+test-check-remote-builders-file-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    missing="/tmp/does-not-exist-builders-$$"
+    rm -f "${missing}"
+    set +e
+    out="$(GROK_NIX_BUILDERS_FILE="${missing}" just check-remote 2>&1)"
+    status=$?
+    set -e
+    if [[ "${status}" -ne 2 ]]; then
+      echo "test-check-remote-builders-file-smoke: expected exit 2, got ${status}" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'missing or empty' <<<"${out}"; then
+      echo "test-check-remote-builders-file-smoke: expected a missing-or-empty builders file sentence:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-builders-file-smoke: ok (missing builders file exited ${status})"
+
+# Prove `just check-remote` sends cargo fmt/clippy/test compile through a
+# remote Nix derivation (builders file via nix_retry, rustc requires
+# big-parallel). Does not realize that derivation. Default `just ci` must
+# still be local host cargo. GHA must not call check-remote.
+test-check-remote-cargo-is-remote-nix-derivation:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    gha="${root}/.github/workflows/ci.yml"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name ":") { p=1; next }
+        p && /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    remote_body="$(recipe_body check-remote)"
+    if grep -qE '^[[:space:]]*just[[:space:]]+(ci|test|cargo-ci)([[:space:]]|$)' <<<"${remote_body}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: check-remote must not run host just ci/test/cargo-ci:" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'GROK_NIX_FORCE_REMOTE=1' <<<"${remote_body}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: check-remote must set GROK_NIX_FORCE_REMOTE=1 so nix_retry uses the builders file:" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'nix build .*workspace-cargo-quality' <<<"${remote_body}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: check-remote must nix build .#workspace-cargo-quality:" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    ci_body="$(recipe_body ci)"
+    if ! grep -qE '^[[:space:]]*just[[:space:]]+test([[:space:]]|$)' <<<"${ci_body}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: just ci must still run local just test:" >&2
+      echo "${ci_body}" >&2
+      exit 1
+    fi
+    if grep -q 'require_remote_builder' <<<"${ci_body}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: just ci must stay local (no require_remote_builder):" >&2
+      echo "${ci_body}" >&2
+      exit 1
+    fi
+    if grep -q 'check-remote' "${gha}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: GitHub Actions must not call check-remote" >&2
+      exit 1
+    fi
+    if ! grep -q 'preferLocalBuild = false' "${flake}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix must set preferLocalBuild = false on the cargo quality derivation" >&2
+      exit 1
+    fi
+    if ! grep -q 'clippy --workspace' "${flake}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must run workspace clippy" >&2
+      exit 1
+    fi
+    if ! grep -q 'test --workspace --locked --no-run' "${flake}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must compile tests with cargo test --no-run" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    prefer="$(nix eval ".#packages.${sys}.workspace-cargo-quality.preferLocalBuild")"
+    if [[ "${prefer}" != "false" ]]; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: expected preferLocalBuild=false, got ${prefer}" >&2
+      exit 1
+    fi
+    drv="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.drvPath")"
+    if [[ ! "${drv}" == /nix/store/*.drv ]]; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: expected a store .drv, got ${drv}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-cargo-is-remote-nix-derivation: ok (check-remote builds ${drv})"
+
+# A bash shebang recipe must not leave .#attr unquoted: bash treats # as a
+# comment, so `nix build -L .#workspace-cargo-quality` becomes `nix build -L .`
+# (packages.default / grok-oss) with no requiredSystemFeatures. nix_retry must
+# not splice {{ cmd }} into the script either, or a # in the command comments
+# out the force-remote flags. Does not run check-remote or realize quality.
+test-check-remote-quotes-quality-attr:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name "([ \t]|:)") { p=1; next }
+        p && /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    remote_body="$(recipe_body check-remote)"
+    retry_body="$(recipe_body nix_retry)"
+    if grep -qE '(^|[^"'\''])\.#workspace-cargo-quality' <<<"${remote_body}"; then
+      echo "test-check-remote-quotes-quality-attr: check-remote must quote .#workspace-cargo-quality (unquoted # is a bash comment; nix then builds . / grok-oss locally):" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE '["'\'']\.#workspace-cargo-quality["'\'']' <<<"${remote_body}"; then
+      echo "test-check-remote-quotes-quality-attr: check-remote must nix build the quoted .#workspace-cargo-quality attr:" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    if grep -vE '^[[:space:]]*#' <<<"${retry_body}" | grep -qE '\{\{[[:space:]]*cmd[[:space:]]*\}\}'; then
+      echo "test-check-remote-quotes-quality-attr: nix_retry must not interpolate {{ "{{" }} cmd }} into the bash script (a # in cmd comments out force-remote flags). Use \"\$@\" \"\${force_remote_opts[@]}\":" >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE '"\$@"[[:space:]]+"\$\{force_remote_opts\[@\]\}"' <<<"${retry_body}"; then
+      echo "test-check-remote-quotes-quality-attr: nix_retry must invoke \"\$@\" \"\${force_remote_opts[@]}\" so # cannot comment force-remote flags:" >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    if ! awk '
+      $0 ~ /^nix_retry([ \t]|:)/ { found=1; exit }
+      $0 ~ /^\[positional-arguments\]/ { pos=1 }
+      $0 ~ /^\[/ { next }
+      { pos=0 }
+      END { exit found && pos ? 0 : 1 }
+    ' "${justfile}"; then
+      echo "test-check-remote-quotes-quality-attr: nix_retry must set [positional-arguments] so \"\$@\" is the command words, not empty:" >&2
+      exit 1
+    fi
+    echo "test-check-remote-quotes-quality-attr: ok (quality attr quoted; nix_retry uses argv)"
+
+# max-jobs=0 plus crane vendor unpacks that prefer a local build cannot
+# realize: Nix will not send preferLocalBuild derivations to remotes, and
+# max-jobs=0 then forbids them here. vendor-registry is runCommandLocal.
+# Force-remote must keep a local job slot for those unpacks and pin rustc
+# to the remote with requiredSystemFeatures = [ "big-parallel" ].
+test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    if grep -nE -- '--option[[:space:]]+max-jobs[[:space:]]+0' "${justfile}" | grep -q .; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: GROK_NIX_FORCE_REMOTE must not set max-jobs=0." >&2
+      echo "crane vendor-registry is runCommandLocal (preferLocalBuild). cargo-package unpacks are the same class." >&2
+      echo "Nix will not send those to remotes, so max-jobs=0 means they cannot build anywhere." >&2
+      grep -nE -- '--option[[:space:]]+max-jobs[[:space:]]+0' "${justfile}" >&2 || true
+      exit 1
+    fi
+    if ! grep -q 'surmount-remote' "${flake}"; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: flake.nix must require surmount-remote on workspace cargo rustc" >&2
+      exit 1
+    fi
+    if ! grep -A25 'workspaceCargoArtifacts = craneLib.buildDepsOnly' "${flake}" | grep -q 'surmount-remote'; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: workspaceCargoArtifacts (dep rustc) must require surmount-remote" >&2
+      exit 1
+    fi
+    if ! grep -A35 'workspace-cargo-quality = craneLib.mkCargoDerivation' "${flake}" | grep -q 'surmount-remote'; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: workspace-cargo-quality must require surmount-remote" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    feats="$(nix eval ".#packages.${sys}.workspace-cargo-quality.requiredSystemFeatures")"
+    if ! grep -q 'big-parallel' <<<"${feats}" || ! grep -q 'surmount-remote' <<<"${feats}"; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: expected requiredSystemFeatures to include big-parallel and surmount-remote, got ${feats}" >&2
+      exit 1
+    fi
+    prefer="$(nix eval ".#packages.${sys}.workspace-cargo-quality.preferLocalBuild")"
+    if [[ "${prefer}" != "false" ]]; then
+      echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: rustc derivation must keep preferLocalBuild=false, got ${prefer}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero: ok (no max-jobs=0; rustc requires big-parallel)"
+
+# Remote rustc must not stay 8-wide or inherit CARGO_BUILD_JOBS=2 from the
+# low-memory package sandbox. Force-remote nix must pass --cores 64 so
+# NIX_BUILD_CORES follows the builder, and workspace-cargo-quality must set
+# CARGO_BUILD_JOBS to 32 (OOM hedge vs 64 rustc processes). Cargo clippy
+# and test compile must pass --jobs on argv from those cores (capped), and
+# must use the dev profile like local `just test-clippy`, not crane's
+# default --release check (one rustc thread at opt-level 3). Host machines
+# max-jobs lives outside this tree. Does not realize the derivation.
+test-check-remote-uses-builder-cores:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    retry_body="$(awk '
+      $0 ~ /^nix_retry / { p=1 }
+      p && $0 ~ /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+      p { print }
+    ' "${justfile}")"
+    if ! grep -qE -- '--cores[[:space:]]+64' <<<"${retry_body}"; then
+      echo "test-check-remote-uses-builder-cores: GROK_NIX_FORCE_REMOTE / nix_retry must pass --cores 64 so one workspace rustc is not 8-wide." >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    jobs_helper="$(awk '
+      $0 ~ /workspaceCargoJobsFromCores =/ { p=1 }
+      p && $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { exit }
+      p { print }
+    ' "${flake}")"
+    quality="$(awk '
+      $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /openrouter-credentials/ { exit }
+      p { print }
+    ' "${flake}")"
+    artifacts="$(awk '
+      $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { p=1 }
+      p && $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { exit }
+      p { print }
+    ' "${flake}")"
+    if ! grep -q 'CARGO_BUILD_JOBS = "32"' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must set CARGO_BUILD_JOBS = \"32\" (not inherit 2 from commonArgs)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'CARGO_BUILD_JOBS = "32"' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must set CARGO_BUILD_JOBS = \"32\"." >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    if ! grep -q 'enableParallelBuilding = true' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must set enableParallelBuilding = true." >&2
+      exit 1
+    fi
+    if ! grep -q 'enableParallelBuilding = true' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must set enableParallelBuilding = true." >&2
+      exit 1
+    fi
+    if ! grep -q 'CARGO_BUILD_JOBS = "2"' "${flake}"; then
+      echo "test-check-remote-uses-builder-cores: commonArgs must keep CARGO_BUILD_JOBS = \"2\" for the local/GHA package sandbox." >&2
+      exit 1
+    fi
+    if ! grep -q 'CARGO_PROFILE = "dev"' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must set CARGO_PROFILE = \"dev\" so clippy/check is not crane --release (one rustc thread, opt-level 3)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'CARGO_PROFILE = "dev"' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must set CARGO_PROFILE = \"dev\" (same profile as quality, or clippy rebuilds deps)." >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--jobs' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must pass cargo --jobs on argv (CARGO_BUILD_JOBS env alone is not enough)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--jobs' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must pass cargo --jobs on argv." >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    if ! grep -q 'NIX_BUILD_CORES' <<<"${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: cargo --jobs must be taken from NIX_BUILD_CORES (then capped at 32)." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspaceCargoJobsFromCores' <<<"${quality}" || ! grep -q 'workspaceCargoJobsFromCores' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: quality and artifacts build phases must use workspaceCargoJobsFromCores before cargo --jobs." >&2
+      echo "${quality}" >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    jobs="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.CARGO_BUILD_JOBS")"
+    if [[ "${jobs}" != "32" ]]; then
+      echo "test-check-remote-uses-builder-cores: expected CARGO_BUILD_JOBS=32 on workspace-cargo-quality, got ${jobs}" >&2
+      exit 1
+    fi
+    profile="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.CARGO_PROFILE")"
+    if [[ "${profile}" != "dev" ]]; then
+      echo "test-check-remote-uses-builder-cores: expected CARGO_PROFILE=dev on workspace-cargo-quality, got ${profile}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 32 from cores on argv; CARGO_PROFILE=dev; package sandbox still 2)"
+
+# requiredSystemFeatures=big-parallel only keeps rustc off this machine when
+# local Nix does not advertise that feature. This host's user config does
+# advertise it, so force-remote must pass --option system-features that omit
+# big-parallel (and benchmark) on the caller. Do not set max-jobs=0.
+# Does not realize the workspace rustc derivation.
+test-check-remote-omits-local-big-parallel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    retry_body="$(awk '
+      $0 ~ /^nix_retry / { p=1 }
+      p && $0 ~ /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+      p { print }
+    ' "${justfile}")"
+    if grep -nE -- '--option[[:space:]]+max-jobs[[:space:]]+0' "${justfile}" | grep -q .; then
+      echo "test-check-remote-omits-local-big-parallel: GROK_NIX_FORCE_REMOTE must not set max-jobs=0." >&2
+      exit 1
+    fi
+    if ! grep -qE -- '--option[[:space:]]+system-features' <<<"${retry_body}"; then
+      echo "test-check-remote-omits-local-big-parallel: GROK_NIX_FORCE_REMOTE / nix_retry must pass --option system-features that omit big-parallel so this host cannot claim workspace rustc." >&2
+      echo "This host's nix show-config advertises big-parallel. requiredSystemFeatures alone is not enough." >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    feats="$(awk '
+      /--option[[:space:]]+system-features/ {
+        sub(/.*system-features[[:space:]]+/, "")
+        gsub(/["'\'']/, "")
+        print
+        exit
+      }
+    ' <<<"${retry_body}")"
+    if [[ -z "${feats}" ]]; then
+      echo "test-check-remote-omits-local-big-parallel: could not parse the force-remote system-features list." >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    if grep -Eq '(^|[[:space:]])big-parallel($|[[:space:]])' <<<"${feats}"; then
+      echo "test-check-remote-omits-local-big-parallel: force-remote system-features must omit big-parallel, got: ${feats}" >&2
+      exit 1
+    fi
+    if grep -Eq '(^|[[:space:]])benchmark($|[[:space:]])' <<<"${feats}"; then
+      echo "test-check-remote-omits-local-big-parallel: force-remote system-features must omit benchmark, got: ${feats}" >&2
+      exit 1
+    fi
+    shown="$(nix --option system-features "${feats}" show-config | awk -F' = ' '/^system-features / { print $2; exit }')"
+    if grep -Eq '(^|[[:space:]])big-parallel($|[[:space:]])' <<<"${shown}"; then
+      echo "test-check-remote-omits-local-big-parallel: nix --option system-features ${feats} still advertises big-parallel: ${shown}" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    required="$(nix eval ".#packages.${sys}.workspace-cargo-quality.requiredSystemFeatures")"
+    if ! grep -q 'big-parallel' <<<"${required}"; then
+      echo "test-check-remote-omits-local-big-parallel: workspace-cargo-quality must still require big-parallel, got ${required}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-omits-local-big-parallel: ok (local system-features omit big-parallel; rustc still requires it)"
+
+# --option system-features is not what the local nix-daemon builder uses.
+# This host still advertises big-parallel by default (see
+# https://nix.dev/manual/nix/2.28/command-ref/conf-file.html#conf-system-features
+# accessed: 2026-08-18). Workspace rustc .drv files must require a feature
+# this laptop never has. The host machines file must advertise that same
+# feature on the ssh-ng builder. nix build --dry-run only lists missing
+# outputs; it is not a machine-assignment proof. Does not run check-remote.
+# Does not realize the quality derivation.
+test-check-remote-workspace-rustc-not-local-eligible:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    flake="${root}/flake.nix"
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    local_feats="$(nix config show | awk -F' = ' '/^system-features / { print $2; exit }')"
+    drv_feats() {
+      local drv="$1"
+      local raw
+      raw="$(rg -o '\("requiredSystemFeatures","[^"]*"' "${drv}" | sed 's/.*","//;s/"$//' || true)"
+      echo "${raw}"
+    }
+    missing_from_local() {
+      local required="$1"
+      local miss=""
+      local f
+      for f in ${required}; do
+        if ! grep -Eq "(^|[[:space:]])${f}($|[[:space:]])" <<<"${local_feats}"; then
+          miss="${miss} ${f}"
+        fi
+      done
+      echo "${miss}"
+    }
+    quality_drv="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.drvPath")"
+    deps_drv="$(rg -o '/nix/store/[0-9a-z]+-workspace-cargo-quality-deps-[^"]+\.drv' "${quality_drv}" | head -n1)"
+    if [[ -z "${deps_drv}" || ! -e "${deps_drv}" ]]; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: expected workspace-cargo-quality-deps.drv among quality inputs" >&2
+      exit 1
+    fi
+    q_req="$(drv_feats "${quality_drv}")"
+    d_req="$(drv_feats "${deps_drv}")"
+    q_miss="$(missing_from_local "${q_req}")"
+    d_miss="$(missing_from_local "${d_req}")"
+    if [[ -z "${q_miss}" || -z "${d_miss}" ]]; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: workspace rustc .drv requiredSystemFeatures must include a feature this laptop's default Nix does not advertise." >&2
+      echo "--option system-features is ignored for local nixbld scheduling (dry-run with builders empty still takes big-parallel jobs)." >&2
+      echo "default local system-features: ${local_feats}" >&2
+      echo "quality ${quality_drv} requiredSystemFeatures: ${q_req:-<missing>}" >&2
+      echo "deps ${deps_drv} requiredSystemFeatures: ${d_req:-<missing>}" >&2
+      exit 1
+    fi
+    if ! grep -q 'surmount-remote' <<<"${q_req}${d_req}"; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: flake rustc drvs must require surmount-remote (a machines-file feature this laptop never auto-detects)." >&2
+      echo "quality requiredSystemFeatures: ${q_req}" >&2
+      echo "deps requiredSystemFeatures: ${d_req}" >&2
+      exit 1
+    fi
+    if ! grep -A20 'workspaceCargoArtifacts = craneLib.buildDepsOnly' "${flake}" | grep -q 'surmount-remote'; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: workspaceCargoArtifacts must require surmount-remote" >&2
+      exit 1
+    fi
+    if ! grep -A30 'workspace-cargo-quality = craneLib.mkCargoDerivation' "${flake}" | grep -q 'surmount-remote'; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: workspace-cargo-quality must require surmount-remote" >&2
+      exit 1
+    fi
+    file="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    if [[ ! -s "${file}" ]]; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: builders file is missing or empty (override with GROK_NIX_BUILDERS_FILE)." >&2
+      exit 1
+    fi
+    builder_feats="$(awk '$1 ~ /^ssh-ng:/ { print $6; exit }' "${file}")"
+    if ! grep -Eq '(^|,)surmount-remote(,|$)' <<<"${builder_feats}"; then
+      echo "test-check-remote-workspace-rustc-not-local-eligible: the ssh-ng builder supported-features column must include surmount-remote (do not print the builders URI)." >&2
+      echo "parsed supported-features: ${builder_feats}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-workspace-rustc-not-local-eligible: ok (rustc requires surmount-remote; local Nix does not advertise it; machines file does)"
+
+# Force-remote must export NIX_SSHOPTS with this account's known_hosts so
+# client SSH (and any Nix process that honors the env) can verify the
+# builder. Must not disable host-key checks. Does not run check-remote.
+test-check-remote-exports-nix-sshopts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name "([ \t]|:)") { p=1; next }
+        p && /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    remote_body="$(recipe_body check-remote)"
+    retry_body="$(recipe_body nix_retry)"
+    require_body="$(recipe_body require_remote_builder)"
+    combined="${remote_body}"$'\n'"${retry_body}"$'\n'"${require_body}"
+    if ! grep -q 'NIX_SSHOPTS' <<<"${combined}"; then
+      echo "test-check-remote-exports-nix-sshopts: check-remote / nix_retry / require_remote_builder must export NIX_SSHOPTS:" >&2
+      echo "${combined}" >&2
+      exit 1
+    fi
+    if ! grep -q 'UserKnownHostsFile' <<<"${combined}"; then
+      echo "test-check-remote-exports-nix-sshopts: NIX_SSHOPTS must point SSH at UserKnownHostsFile (this account's known_hosts):" >&2
+      echo "${combined}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'HOME.*\.ssh/known_hosts|GROK_NIX_KNOWN_HOSTS' <<<"${combined}"; then
+      echo "test-check-remote-exports-nix-sshopts: UserKnownHostsFile must be this account's known_hosts (HOME/.ssh/known_hosts or GROK_NIX_KNOWN_HOSTS):" >&2
+      echo "${combined}" >&2
+      exit 1
+    fi
+    if grep -q 'StrictHostKeyChecking=no' <<<"${combined}"; then
+      echo "test-check-remote-exports-nix-sshopts: must not set StrictHostKeyChecking=no:" >&2
+      echo "${combined}" >&2
+      exit 1
+    fi
+    if ! grep -q 'GROK_NIX_FORCE_REMOTE' <<<"${retry_body}"; then
+      echo "test-check-remote-exports-nix-sshopts: nix_retry must still key force-remote off GROK_NIX_FORCE_REMOTE:" >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-exports-nix-sshopts: ok (NIX_SSHOPTS uses this account's known_hosts; host-key checks stay on)"
+
+# require_remote_builder is on check-remote. User SSH to Host surmount-1
+# is not the nix build path. An empty known_hosts (or missing NIX_SSHOPTS
+# host-key file) must fail even when a dummy ssh-ng machines file exists.
+# Does not run check-remote or realize quality.
+test-check-remote-preflight-same-path-as-nix-ssh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name "([ \t]|:)") { p=1; next }
+        p && /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    remote_body="$(recipe_body check-remote)"
+    require_body="$(recipe_body require_remote_builder)"
+    retry_body="$(recipe_body nix_retry)"
+    if ! grep -qE '^check-remote:.*require_remote_builder' "${justfile}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: check-remote must invoke require_remote_builder:" >&2
+      echo "${remote_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'NIX_SSHOPTS' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: require_remote_builder must set NIX_SSHOPTS (user ssh to Host surmount-1 is not enough):" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'ssh-keygen|known_hosts' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: require_remote_builder must check this account's known_hosts for the machines-file host:" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'base64-ssh-public-host-key|sshPublicHostKey|host.key|host_key|UserKnownHostsFile' <<<"${retry_body}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: nix_retry force-remote must pass the user known_hosts key to Nix (machines host-key field or NIX_SSHOPTS UserKnownHostsFile):" >&2
+      echo "${retry_body}" >&2
+      exit 1
+    fi
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "${tmpdir}"' EXIT
+    machines="${tmpdir}/machines"
+    empty_hosts="${tmpdir}/known_hosts"
+    : >"${empty_hosts}"
+    printf '%s\n' 'ssh-ng://probe@example.invalid x86_64-linux - 1 1 surmount-remote' >"${machines}"
+    set +e
+    out="$(GROK_NIX_BUILDERS_FILE="${machines}" GROK_NIX_KNOWN_HOSTS="${empty_hosts}" just require_remote_builder 2>&1)"
+    status=$?
+    set -e
+    if [[ "${status}" -eq 0 ]]; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: empty known_hosts must fail preflight (user ssh to Host surmount-1 is not enough):" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 2 ]]; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: expected exit 2, got ${status}:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'known_hosts|NIX_SSHOPTS|host key' <<<"${out}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: fail message must name the missing host-key / NIX_SSHOPTS path:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'surmount-1|user SSH|user ssh' <<<"${out}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: fail message must say user ssh to Host surmount-1 is not enough:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|example\.invalid' <<<"${out}"; then
+      echo "test-check-remote-preflight-same-path-as-nix-ssh: preflight must not print the machines-file URI:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-preflight-same-path-as-nix-ssh: ok (same-path preflight; empty known_hosts fails; surmount-1 is not enough)"
+
+# require_remote_builder must notice when the scheduled remote's nix-daemon
+# will refuse surmount-remote (client machines file already advertises it).
+# Tests inject GROK_NIX_REMOTE_SYSTEM_FEATURES so this never SSHs to a live
+# builder. Does not run check-remote or realize quality.
+test-check-remote-preflight-remote-daemon-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name "([ \t+:]|:)") { p=1; next }
+        p && (/^\[/ || /^[a-zA-Z0-9_.-]+([ \t]|:)/) { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    require_body="$(recipe_body require_remote_builder)"
+    if ! grep -q 'GROK_NIX_REMOTE_SYSTEM_FEATURES' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: require_remote_builder must accept GROK_NIX_REMOTE_SYSTEM_FEATURES so tests can inject the daemon feature list:" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'system-features' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: require_remote_builder must query the remote daemon system-features:" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'surmount-remote' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: require_remote_builder must require surmount-remote on the remote daemon list:" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    if grep -q 'StrictHostKeyChecking=no' <<<"${require_body}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: must not set StrictHostKeyChecking=no:" >&2
+      echo "${require_body}" >&2
+      exit 1
+    fi
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "${tmpdir}"' EXIT
+    machines="${tmpdir}/machines"
+    hosts="${tmpdir}/known_hosts"
+    printf '%s\n' 'ssh-ng://probe@example.invalid x86_64-linux - 1 1 surmount-remote' >"${machines}"
+    printf '%s\n' 'example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' >"${hosts}"
+    set +e
+    miss_out="$(GROK_NIX_BUILDERS_FILE="${machines}" GROK_NIX_KNOWN_HOSTS="${hosts}" GROK_NIX_REMOTE_SYSTEM_FEATURES='benchmark big-parallel kvm nixos-test' just require_remote_builder 2>&1)"
+    miss_status=$?
+    set -e
+    if [[ "${miss_status}" -eq 0 ]]; then
+      echo "test-check-remote-preflight-remote-daemon-features: remote daemon missing surmount-remote must fail preflight:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    if [[ "${miss_status}" -ne 2 ]]; then
+      echo "test-check-remote-preflight-remote-daemon-features: expected exit 2 when the daemon list omits surmount-remote, got ${miss_status}:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'surmount-remote' <<<"${miss_out}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: fail message must name surmount-remote:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'nix-daemon|system-features' <<<"${miss_out}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: fail message must name the remote daemon system-features miss:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'extra-system-features|nix.conf' <<<"${miss_out}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: fail message must say how to add the feature on the builder daemon:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|example\.invalid|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|/id_' <<<"${miss_out}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: must not print IP, machines URI, or key paths:" >&2
+      echo "${miss_out}" >&2
+      exit 1
+    fi
+    set +e
+    ok_out="$(GROK_NIX_BUILDERS_FILE="${machines}" GROK_NIX_KNOWN_HOSTS="${hosts}" GROK_NIX_REMOTE_SYSTEM_FEATURES='benchmark big-parallel kvm nixos-test surmount-remote' just require_remote_builder 2>&1)"
+    ok_status=$?
+    set -e
+    if [[ "${ok_status}" -ne 0 ]]; then
+      echo "test-check-remote-preflight-remote-daemon-features: injected list with surmount-remote must pass preflight:" >&2
+      echo "${ok_out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|example\.invalid|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|/id_' <<<"${ok_out}"; then
+      echo "test-check-remote-preflight-remote-daemon-features: pass path must not print IP, machines URI, or key paths:" >&2
+      echo "${ok_out}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-preflight-remote-daemon-features: ok (inject miss fails; inject with surmount-remote passes; no live SSH)"
 # `false` (proves banner + integer path). Also checks invalid attempts reject.
 test-nix-retry-smoke:
     #!/usr/bin/env bash
@@ -366,7 +1284,403 @@ test-nix-retry-smoke:
     fi
     echo "test-nix-retry-smoke: ok (false failed after 2 attempts, exit ${status}; invalid attempts rejected)"
 
-# Install grok-oss -> ~/.cargo/bin (Cargo.toml [[bin]] name = "grok-oss").
+# Hard SSH / no-remote-machine text is not a flake 502/503. nix_retry must
+# exit on attempt 1 with that status and must not sleep 5s/15s/45s.
+# Unclassified failures still retry (see test-nix-retry-smoke).
+test-nix-retry-hard-remote-miss-fail-fast:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export NIX_RETRY_ATTEMPTS=4
+    run_case() {
+      local label="$1"
+      local needle="$2"
+      local start elapsed status out
+      start="$(date +%s)"
+      set +e
+      out="$(timeout 8 just nix_retry sh -c "printf '%s\\n' '${needle}'; exit 19" 2>&1)"
+      status=$?
+      set -e
+      elapsed="$(($(date +%s) - start))"
+      if [[ "${status}" -eq 124 ]]; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: still running after 8s; fail-fast should exit on attempt 1 (retries sleep 65s+)." >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if [[ "${status}" -ne 19 ]]; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: expected exit 19, got ${status}" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if grep -q 'retrying in' <<<"${out}"; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: must not sleep or retry a hard remote miss:" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if grep -qE 'attempt 2/|FAILED after [2-9]' <<<"${out}"; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: must stop on attempt 1:" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if ! grep -q 'attempt 1/4' <<<"${out}"; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: expected attempt 1/4:" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if [[ "${elapsed}" -ge 8 ]]; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: took ${elapsed}s; fail-fast should finish in a few seconds." >&2
+        exit 1
+      fi
+      if ! grep -q 'SSH did not start' <<<"${out}"; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: expected an operator sentence that SSH did not start:" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+      if ! grep -q 'rustc was not run locally' <<<"${out}"; then
+        echo "test-nix-retry-hard-remote-miss-fail-fast: ${label}: expected an operator sentence that rustc was not run locally:" >&2
+        echo "${out}" >&2
+        exit 1
+      fi
+    }
+    run_case ssh 'failed to start SSH connection'
+    run_case no-machine 'Failed to find a machine for remote build'
+    echo "test-nix-retry-hard-remote-miss-fail-fast: ok (both hard-remote strings exited on attempt 1)"
+
+# The remote nix-daemon scheduled the drv (client machines file advertises
+# surmount-remote) then refused it: missing system features. That is not a
+# flake 502/503. nix_retry must exit on attempt 1 and must not sleep
+# 5s/15s/45s. Does not run check-remote or realize a derivation.
+test-nix-retry-missing-system-features-fail-fast:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export NIX_RETRY_ATTEMPTS=4
+    needle='error: Cannot build '"'"'workspace-cargo-quality-deps'"'"'. Reason: missing system features Required features: {big-parallel, surmount-remote} Available features: {benchmark, big-parallel, kvm, nixos-test}'
+    start="$(date +%s)"
+    set +e
+    out="$(timeout 8 just nix_retry sh -c "printf '%s\\n' '${needle}'; exit 19" 2>&1)"
+    status=$?
+    set -e
+    elapsed="$(($(date +%s) - start))"
+    if [[ "${status}" -eq 124 ]]; then
+      echo "test-nix-retry-missing-system-features-fail-fast: still running after 8s; fail-fast should exit on attempt 1 (retries sleep 65s+)." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 19 ]]; then
+      echo "test-nix-retry-missing-system-features-fail-fast: expected exit 19, got ${status}" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -q 'retrying in' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: must not sleep or retry a missing-system-features refuse:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'attempt 2/|FAILED after [2-9]' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: must stop on attempt 1:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'attempt 1/4' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: expected attempt 1/4:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${elapsed}" -ge 8 ]]; then
+      echo "test-nix-retry-missing-system-features-fail-fast: took ${elapsed}s; fail-fast should finish in a few seconds." >&2
+      exit 1
+    fi
+    if ! grep -q 'missing system features' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: expected an operator sentence that names missing system features:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'machines file advertises surmount-remote' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: expected the client/machines-file vs remote-daemon mismatch:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'extra-system-features|nix.conf' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: expected how to add surmount-remote on the builder daemon:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'SSH did not start' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: this class is a daemon feature refuse, not an SSH miss:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|known_hosts|/id_|machines URI' <<<"${out}"; then
+      echo "test-nix-retry-missing-system-features-fail-fast: must not print IP, machines URI, or key paths:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-nix-retry-missing-system-features-fail-fast: ok (missing system features exited on attempt 1)"
+
+# cargo fmt --check / rustfmt prints "Diff in <path>". That is a quality
+# fail, not a flake 502/503. nix_retry must exit on attempt 1 and must not
+# sleep 5s/15s/45s. Does not run check-remote or realize a derivation.
+test-nix-retry-rustfmt-diff-fail-fast:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export NIX_RETRY_ATTEMPTS=4
+    needle='Diff in /build/source/crates/xai-grok-tui/src/session.rs:65:'
+    start="$(date +%s)"
+    set +e
+    out="$(timeout 8 just nix_retry sh -c "printf '%s\\n' '${needle}'; exit 19" 2>&1)"
+    status=$?
+    set -e
+    elapsed="$(($(date +%s) - start))"
+    if [[ "${status}" -eq 124 ]]; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: still running after 8s; fail-fast should exit on attempt 1 (retries sleep 65s+)." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 19 ]]; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: expected exit 19, got ${status}" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -q 'retrying in' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: must not sleep or retry a rustfmt / cargo-fmt Diff in fail:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'attempt 2/|FAILED after [2-9]' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: must stop on attempt 1:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'attempt 1/4' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: expected attempt 1/4:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${elapsed}" -ge 8 ]]; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: took ${elapsed}s; fail-fast should finish in a few seconds." >&2
+      exit 1
+    fi
+    if ! grep -qE 'cargo fmt|rustfmt' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: expected an operator sentence that names cargo fmt / rustfmt:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'Diff in' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: expected an operator sentence that names Diff in:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'SSH did not start|missing system features' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: this class is a rustfmt quality fail, not an SSH or daemon-feature miss:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|known_hosts|/id_|machines URI' <<<"${out}"; then
+      echo "test-nix-retry-rustfmt-diff-fail-fast: must not print IP, machines URI, or key paths:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-nix-retry-rustfmt-diff-fail-fast: ok (Diff in rustfmt check exited on attempt 1)"
+
+# GROK_NIX_FORCE_REMOTE must keep the caller command as argv0 (nix, or the
+# fake first word this smoke supplies). Copying known_hosts into builders
+# field 8 must not `set --` the machines line over "$@". Force-remote
+# flags stay after that command as --option builders @temp. Does not run
+# check-remote or realize a derivation.
+test-nix-retry-force-remote-argv-is-nix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    justfile="{{ justfile_directory() }}/justfile"
+    if awk '
+      $0 ~ /^nix_retry([ \t]|:)/ { p=1; next }
+      p && /^[A-Za-z0-9_[]/ { exit 1 }
+      p && /^[[:space:]]*set --/ { found=1 }
+      END { exit !found }
+    ' "${justfile}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: nix_retry must not set -- the machines line (that replaces \"\$@\")." >&2
+      exit 1
+    fi
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "${tmpdir}"' EXIT
+    machines="${tmpdir}/machines"
+    hosts="${tmpdir}/known_hosts"
+    argv_dump="${tmpdir}/argv"
+    field8_dump="${tmpdir}/field8"
+    builders_copy="${tmpdir}/builders-copy"
+    fake_nix="${tmpdir}/nix"
+    ssh-keygen -q -t ed25519 -N "" -f "${tmpdir}/hostkey" -C smoke
+    # known_hosts: hostname type key. Host matches ssh-ng://probe@example.invalid.
+    awk '{print "example.invalid", $1, $2}' "${tmpdir}/hostkey.pub" >"${hosts}"
+    printf '%s\n' 'ssh-ng://probe@example.invalid x86_64-linux - 1 1 big-parallel,surmount-remote' >"${machines}"
+    # Fake nix dumps argv and copies field 8 before nix_retry deletes the temp.
+    cat >"${fake_nix}" <<EOS
+    #! /usr/bin/env bash
+    set -euo pipefail
+    printf '%s\n' "\$0" "\$@" >"${argv_dump}"
+    prev2=""
+    prev1=""
+    for a in "\$@"; do
+      if [[ "\${prev2}" == "--option" && "\${prev1}" == "builders" && "\${a}" == @* ]]; then
+        f="\${a#@}"
+        cp "\${f}" "${builders_copy}"
+        awk 'NF >= 8 { print \$8; exit }' "\${f}" >"${field8_dump}"
+      fi
+      prev2="\${prev1}"
+      prev1="\${a}"
+    done
+    EOS
+    chmod +x "${fake_nix}"
+    export GROK_NIX_FORCE_REMOTE=1
+    export GROK_NIX_BUILDERS_FILE="${machines}"
+    export GROK_NIX_KNOWN_HOSTS="${hosts}"
+    export NIX_RETRY_ATTEMPTS=1
+    set +e
+    out="$(timeout 8 just nix_retry "${fake_nix}" flake metadata 2>&1)"
+    status=$?
+    set -e
+    if [[ "${status}" -eq 124 ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: still running after 8s (retries sleep on a 127 recipe miss)." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    banner="$(awk '/nix attempt / { sub(/^.*nix attempt [0-9]+\/[0-9]+: /, ""); print; exit }' <<<"${out}")"
+    first="$(awk '{ print $1; exit }' <<<"${banner}")"
+    if [[ -z "${first}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: missing nix attempt banner:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${first}" == ssh-ng://* ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: first token is the machines-file line, not the nix command (or the fake argv this smoke supplied)." >&2
+      echo "force-remote opts must follow the command; do not set -- the builders line over \"\$@\"." >&2
+      exit 1
+    fi
+    if [[ "${first}" != "${fake_nix}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: expected first token to be the fake nix this smoke supplied." >&2
+      echo "got first token: ${first}" >&2
+      exit 1
+    fi
+    if grep -q 'ssh-ng://' <<<"${banner}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: machines-file line must not appear on the nix argv banner (not extra \"\$@\")." >&2
+      exit 1
+    fi
+    if ! grep -qE -- '--option[[:space:]]+builders[[:space:]]+@' <<<"${banner}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: expected --option builders @temp on the force-remote argv:" >&2
+      echo "${banner}" >&2
+      exit 1
+    fi
+    if [[ ! -s "${field8_dump}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: dummy command must see --option builders @temp and copy field 8 (ssh public host key)." >&2
+      exit 1
+    fi
+    field8="$(tr -d '[:space:]' <"${field8_dump}")"
+    if [[ -z "${field8}" || "${field8}" == "-" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: builders field 8 (ssh public host key) must be present on the temp machines line." >&2
+      exit 1
+    fi
+    if [[ ! -s "${builders_copy}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: expected a copy of the temp builders file passed as --option builders @file." >&2
+      exit 1
+    fi
+    if ! awk 'NF >= 8 && $8 != "-" { found=1 } END { exit !found }' "${builders_copy}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: copied builders line must still have field 8." >&2
+      exit 1
+    fi
+    if [[ ! -s "${argv_dump}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: dummy nix did not run (argv0 was not the command)." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    exec_first="$(head -n1 "${argv_dump}")"
+    if [[ "${exec_first}" != "${fake_nix}" ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: executed argv0 must be the supplied nix, not the machines-file line." >&2
+      exit 1
+    fi
+    if grep -q 'ssh-ng://' "${argv_dump}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: machines-file line must not be prepended onto executed \"\$@\"." >&2
+      exit 1
+    fi
+    if ! grep -qx -- '--option' "${argv_dump}"; then
+      echo "test-nix-retry-force-remote-argv-is-nix: executed argv must still append --option builders @file after the command." >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 0 ]]; then
+      echo "test-nix-retry-force-remote-argv-is-nix: expected the dummy command to exit 0, got ${status}:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-nix-retry-force-remote-argv-is-nix: ok (argv0 is the command; builders @temp; field 8 present)"
+
+# Force-remote must append ssh-ng URI query max-connections (copy slots).
+# Default Nix is 1 (serial NAR copy). Default here is 8; GROK_NIX_SSH_NG_MAX_CONNECTIONS
+# overrides. Does not print the builders URI or host. Does not run check-remote.
+test-nix-retry-force-remote-ssh-ng-max-connections:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "${tmpdir}"' EXIT
+    machines="${tmpdir}/machines"
+    hosts="${tmpdir}/known_hosts"
+    builders_copy="${tmpdir}/builders-copy"
+    fake_nix="${tmpdir}/nix"
+    ssh-keygen -q -t ed25519 -N "" -f "${tmpdir}/hostkey" -C smoke
+    awk '{print "example.invalid", $1, $2}' "${tmpdir}/hostkey.pub" >"${hosts}"
+    printf '%s\n' 'ssh-ng://probe@example.invalid x86_64-linux - 1 1 big-parallel,surmount-remote' >"${machines}"
+    cat >"${fake_nix}" <<EOS
+    #! /usr/bin/env bash
+    set -euo pipefail
+    prev2=""
+    prev1=""
+    for a in "\$@"; do
+      if [[ "\${prev2}" == "--option" && "\${prev1}" == "builders" && "\${a}" == @* ]]; then
+        cp "\${a#@}" "${builders_copy}"
+      fi
+      prev2="\${prev1}"
+      prev1="\${a}"
+    done
+    EOS
+    chmod +x "${fake_nix}"
+    export GROK_NIX_FORCE_REMOTE=1
+    export GROK_NIX_BUILDERS_FILE="${machines}"
+    export GROK_NIX_KNOWN_HOSTS="${hosts}"
+    export NIX_RETRY_ATTEMPTS=1
+    unset GROK_NIX_SSH_NG_MAX_CONNECTIONS || true
+    set +e
+    out="$(timeout 8 just nix_retry "${fake_nix}" flake metadata 2>&1)"
+    status=$?
+    set -e
+    if [[ "${status}" -eq 124 ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: still running after 8s." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 0 ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: expected the dummy command to exit 0, got ${status}." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ ! -s "${builders_copy}" ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: dummy command must see --option builders @temp." >&2
+      exit 1
+    fi
+    uri="$(awk '$1 ~ /^ssh-ng:/ { print $1; exit }' "${builders_copy}")"
+    if [[ -z "${uri}" ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: expected an ssh-ng URI in field 1 of the temp builders line (do not print the URI)." >&2
+      exit 1
+    fi
+    query="${uri#*\?}"
+    if [[ "${uri}" == "${query}" ]] || [[ "${query}" != *max-connections=8* ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: expected max-connections=8 on the temp builders URI when GROK_NIX_SSH_NG_MAX_CONNECTIONS is unset (do not print the URI)." >&2
+      exit 1
+    fi
+    if [[ "${query}" != *max-connections=8* ]] || [[ "${query}" == *max-connections=8[0-9]* ]]; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: expected exactly max-connections=8 (do not print the URI)." >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|example\.invalid' <<<"${out}"; then
+      echo "test-nix-retry-force-remote-ssh-ng-max-connections: force-remote output must not print the machines-file URI." >&2
+      exit 1
+    fi
+    echo "test-nix-retry-force-remote-ssh-ng-max-connections: ok (default max-connections=8; URI not printed)"
 # Overrides host -fuse-ld=wild (breaks this link). See comments in recipe body.
 # Strips the installed artifact only: [profile.release] stays unstripped for
 # local debugging; release-dist keeps strip=false for sidecar extract.

@@ -243,16 +243,14 @@ pub(super) fn handle_exit_plan_mode(
         agent.show_plan_preview_if_available();
     }
 
-    if agent.line_viewer.is_some() {
-        if let Some(ref mut viewer) = agent.line_viewer {
-            viewer.plan_mut().feedback_active = true;
-        }
-        if keep_draft && let Some(ref mut pav) = agent.plan_approval_view {
-            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
-        }
-    } else if let Some(ref mut pav) = agent.plan_approval_view {
-        pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+    // Isolated present is visual. Leave Preview so the composer stays
+    // the agent prompt. Click Revise / Clarify / Comment to arm feedback.
+    if agent.line_viewer.is_some()
+        && let Some(ref mut viewer) = agent.line_viewer
+    {
+        viewer.plan_mut().feedback_active = true;
     }
+    agent.persist_unsent_composer_draft();
 
     tracing::info!(
         target_active = is_active,

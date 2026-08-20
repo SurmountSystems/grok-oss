@@ -1430,8 +1430,20 @@ pub(super) mod paste_key_tests {
             &Event::Paste("ignored".to_owned()),
             &ActionRegistry::defaults(),
         );
-        assert!(matches!(outcome, InputOutcome::Unchanged));
-        assert_eq!(agent.prompt.text(), "hidden prompt");
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "shut plan panel must not eat composer paste; got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().contains("hidden prompt"),
+            "paste must keep the mid-compose draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains("ignored"),
+            "paste must land in the composer with the panel shut, got {:?}",
+            agent.prompt.text()
+        );
     }
     /// Question-view `Event::Paste` arm routes through the classifier when
     /// the question view is in `InputMode` focus.

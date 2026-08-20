@@ -1144,7 +1144,7 @@ fn apply_billing_usage_to_session_exhaust_inner(
         tracing::info!(
             target: "xai_grok_shell::auth",
             usage_pct,
-            "SuperGrok included usage full (extras gone or unknown); remembering session out of allowance so next request uses console key"
+            "SuperGrok included usage printout full; fail-open does not remember SuperGrok out of allowance from this printout"
         );
     }
     action
@@ -1743,9 +1743,13 @@ mod tests {
 
             assert_eq!(
                 apply_billing_usage_to_session_exhaust(100.0, home),
-                AllowanceExhaustAction::Marked
+                AllowanceExhaustAction::None,
+                "fail-open: client 100% printout must not Mark"
             );
-            // Cleared only fires when a prior mark existed → proves mark.
+            assert!(!xai_grok_sampler::is_credential_exhausted(session));
+            // HTTP 402 rotate still marks; period-reset clear still works.
+            xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
             assert_eq!(
                 apply_billing_usage_to_session_exhaust(12.0, home),
                 AllowanceExhaustAction::Cleared
@@ -1834,12 +1838,12 @@ mod tests {
             let action = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
                 action,
-                AllowanceExhaustAction::Marked,
-                "personal full + extras must still mark when Business included remains; got {action:?}"
+                AllowanceExhaustAction::None,
+                "fail-open: personal 100% printout must not Mark even when Business included remains; got {action:?}"
             );
             assert!(
-                xai_grok_sampler::is_credential_exhausted(personal),
-                "personal JWT must be marked so prefer_live can hop to Business included"
+                !xai_grok_sampler::is_credential_exhausted(personal),
+                "personal JWT must stay unmarked from a client printout"
             );
             assert!(
                 !xai_grok_sampler::is_credential_exhausted(business),
@@ -1922,10 +1926,8 @@ mod tests {
             let store = CredentialsStore::at_grok_home(home);
             assert!(add_console_api_key(&store, "console-failover-key").unwrap());
 
-            // Pre-mark as if extras were unknown earlier.
-            let pre =
-                xai_grok_sampler::sync_allowance_exhaust_from_usage(100.0, Some(session), true);
-            assert_eq!(pre, AllowanceExhaustAction::Marked);
+            // Prior HTTP 402 mark, not a client 100% printout.
+            xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
             assert!(xai_grok_sampler::is_credential_exhausted(session));
 
             remember_supergrok_dollar_extras("user-1", 5_000);
@@ -1943,7 +1945,8 @@ mod tests {
         });
     }
 
-    /// Named contract (Issue 1): extras 0 or unknown still Mark under auto_use.
+    /// Fail-open: SuperGrok dollar credits 0 or unknown plus a 100% printout
+    /// must not Mark. Identifier keeps the old catalog name.
     #[test]
     #[serial_test::serial]
     fn apply_billing_100_pct_auto_use_marks_when_extras_gone_or_unknown() {
@@ -1955,26 +1958,22 @@ mod tests {
             let store = CredentialsStore::at_grok_home(home);
             assert!(add_console_api_key(&store, "console-failover-key").unwrap());
 
-            // Unknown extras → Mark.
             let action_none = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
                 action_none,
-                AllowanceExhaustAction::Marked,
-                "unknown extras must still prefer console"
+                AllowanceExhaustAction::None,
+                "unknown SuperGrok dollar credits must not Mark from a 100% printout"
             );
-            assert!(xai_grok_sampler::is_credential_exhausted(session));
-
-            // Clear and try extras 0.
-            let _ = xai_grok_sampler::sync_allowance_exhaust_from_usage(0.0, Some(session), true);
             assert!(!xai_grok_sampler::is_credential_exhausted(session));
+
             remember_supergrok_dollar_extras("user-1", 0);
             let action_zero = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
                 action_zero,
-                AllowanceExhaustAction::Marked,
-                "extras 0 must still Mark"
+                AllowanceExhaustAction::None,
+                "SuperGrok dollar credits 0 must not Mark from a 100% printout"
             );
-            assert!(xai_grok_sampler::is_credential_exhausted(session));
+            assert!(!xai_grok_sampler::is_credential_exhausted(session));
             clear_included_billing_cache();
         });
     }
@@ -2013,10 +2012,13 @@ mod tests {
             assert!(add_console_api_key(&store, "console-team-prepaid-key").unwrap());
             write_auto_use_config(home, true);
 
-            // Last period: included full → mark + sticky console path.
+            // Prior HTTP 402 mark (not a client 100% printout).
+            xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
+            assert!(xai_grok_sampler::is_credential_exhausted(session));
             assert_eq!(
                 apply_billing_usage_to_session_exhaust(100.0, home),
-                AllowanceExhaustAction::Marked
+                AllowanceExhaustAction::None,
+                "fail-open printout must not re-Mark"
             );
             assert!(xai_grok_sampler::is_credential_exhausted(session));
 
@@ -2091,16 +2093,13 @@ mod tests {
     #[serial_test::serial]
     fn load_candidates_period_reset_billing_clears_stale_memo_without_apply() {
         use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
-        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+        use xai_grok_sampler::clear_all_including_durable;
 
         with_isolated_home(|home| {
             let session = "session-jwt-stale-memo-only";
             write_oidc(home, session);
-            // Mark without going through apply (durable + process memo).
-            assert_eq!(
-                sync_allowance_exhaust_from_usage(100.0, Some(session), true),
-                AllowanceExhaustAction::Marked
-            );
+            // Prior HTTP 402 mark without going through apply.
+            xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
             assert!(xai_grok_sampler::is_credential_exhausted(session));
 
             // Billing cache only (no apply_billing): free SuperGrok period low %.
@@ -2154,7 +2153,7 @@ mod tests {
         use crate::auth::model::{SUPERGROK_PERSONAL_MULTI_SLOT, multi_slot_scope_for_auth};
         use crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto;
         use chrono::{Duration, Utc};
-        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+        use xai_grok_sampler::clear_all_including_durable;
 
         clear_all_including_durable();
         clear_included_billing_cache();
@@ -2163,8 +2162,8 @@ mod tests {
         let base = "https://auth.x.ai::heavy-client";
         let stale = "tok-stale-exhausted-multi-slot";
         let live = "tok-live-supergrok-heavy-base";
-        // dual-auth ready + 100% → mark stale SuperGrok fingerprint out of allowance
-        let _ = sync_allowance_exhaust_from_usage(100.0, Some(stale), true);
+        // Prior HTTP 402 mark on the stale SuperGrok fingerprint.
+        xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(stale));
 
         let now = Utc::now();
         let mut map = AuthStore::default();
@@ -2246,7 +2245,7 @@ mod tests {
     #[serial_test::serial]
     fn load_candidates_prefers_live_business_base_over_exhausted_team_multi_slot() {
         use chrono::{Duration, Utc};
-        use xai_grok_sampler::{clear_all_including_durable, sync_allowance_exhaust_from_usage};
+        use xai_grok_sampler::clear_all_including_durable;
 
         clear_all_including_durable();
         clear_included_billing_cache();
@@ -2255,7 +2254,7 @@ mod tests {
         let base = "https://auth.x.ai::biz-heavy";
         let stale = "tok-biz-stale-exhausted";
         let live = "tok-biz-live-heavy";
-        let _ = sync_allowance_exhaust_from_usage(100.0, Some(stale), true);
+        xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(stale));
         let now = Utc::now();
         let mut map = AuthStore::default();
         let team_id = "team-surmount-biz";
@@ -2653,13 +2652,15 @@ mod tests {
                 !supergrok_out_of_allowance_with_console_ready(home),
                 "not marked yet"
             );
+            xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
             assert_eq!(
                 apply_billing_usage_to_session_exhaust(100.0, home),
-                AllowanceExhaustAction::Marked
+                AllowanceExhaustAction::None,
+                "fail-open printout must not Mark; HTTP 402 mark is the seed"
             );
             assert!(
                 supergrok_out_of_allowance_with_console_ready(home),
-                "after mark + dual-auth, meter must treat SuperGrok as out"
+                "after HTTP 402 mark + dual-auth, meter must treat SuperGrok as out"
             );
         });
     }

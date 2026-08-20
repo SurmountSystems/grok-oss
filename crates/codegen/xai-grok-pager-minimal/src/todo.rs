@@ -119,6 +119,10 @@ pub(super) fn todo_panel_lines(
                 ),
             };
             let content = truncate_chars(t.content.lines().next().unwrap_or("").trim(), 64);
+            let content = xai_grok_pager::views::todo_exec_metrics::todo_row_content_with_metrics(
+                &content,
+                agent.todo.exec_metrics_chrome_for(t),
+            );
             // No leading pad: the caller places the panel at the shared
             // live-region left edge (`live::live_left_inset` = 0, flush-left),
             // so the glyph

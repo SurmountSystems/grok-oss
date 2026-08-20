@@ -4617,3 +4617,458 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
     );
 }
+
+fn isolated_grok_oss_guard(db: std::path::PathBuf) -> impl Drop {
+    xai_grok_shell::token_economy::set_token_economy_live(
+        xai_grok_shell::token_economy::TokenEconomyConfig {
+            grok_oss_database_path: Some(db),
+            ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+        },
+    );
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        }
+    }
+    Guard
+}
+
+fn prompt_task_count(store: &xai_grok_shell::grok_oss::GrokOssStore) -> i64 {
+    store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM prompt_tasks", [], |row| row.get(0))
+        .expect("count prompt_tasks")
+}
+
+fn first_prompt_task_id(store: &xai_grok_shell::grok_oss::GrokOssStore) -> String {
+    store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks ORDER BY created_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("prompt_task id")
+}
+
+fn usage_meta(
+    prompt_id: &str,
+    tokens_in: u64,
+    tokens_out: u64,
+    cost_usd_ticks: i64,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::json!({
+        "promptId": prompt_id,
+        "usage": {
+            "inputTokens": tokens_in,
+            "outputTokens": tokens_out,
+            "costUsdTicks": cost_usd_ticks,
+        }
+    })
+    .as_object()
+    .cloned()
+}
+
+/// Live composer submit inserts a prompt_task ULID primary key and starts
+/// HonestWorkClock. On turn complete (success, error, or cancel) a
+/// prompt_exec_metrics row is written with tokens in/out, honest work ms,
+/// model, and cost_usd_ticks (tokens per dollar). Fail-open if grok_oss.db
+/// cannot be opened. Does not invent remaining SuperGrok limits.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_composer_submit_inserts_prompt_task_and_writes_exec_metrics_on_turn_complete() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    assert_eq!(store.schema_version().unwrap(), 3, "schema stays v3");
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("finish the live write slice".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [
+            Effect::SendPrompt {
+                prompt_id, text, ..
+            },
+        ] => {
+            assert_eq!(text, "finish the live write slice");
+            prompt_id.clone()
+        }
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    assert_eq!(
+        prompt_task_count(&store),
+        1,
+        "composer submit must insert one prompt_task row"
+    );
+    let task_id = first_prompt_task_id(&store);
+    assert!(
+        xai_grok_tools::util::ulid::is_valid(&task_id),
+        "prompt_task primary key must be a ULID, got {task_id}"
+    );
+    assert_eq!(task_id.len(), 26);
+    let task = store
+        .load_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_task row");
+    assert_eq!(task.body, "finish the live write slice");
+    assert_eq!(task.status, "running");
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    1_200,
+                    400,
+                    5_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert_eq!(metrics.tokens_in, 1_200);
+    assert_eq!(metrics.tokens_out, 400);
+    assert_eq!(metrics.model, "grok-4.6");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest work ms comes from HonestWorkClock, got {}",
+        metrics.wall_ms
+    );
+    assert_eq!(metrics.cost_usd_ticks, Some(5_000_000_000));
+    let tpd = xai_grok_shell::grok_oss::tokens_per_dollar(
+        metrics.tokens_in,
+        metrics.tokens_out,
+        metrics.cost_usd_ticks,
+    )
+    .expect("known cost ticks yield tokens per dollar");
+    assert!(tpd > 0.0);
+
+    // Error complete still writes metrics.
+    let effects = dispatch(Action::SendPrompt("error turn".into()), &mut app);
+    let err_pid = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt, got {other:?}"),
+    };
+    let err_task_id: String = store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks WHERE body = ?1",
+            ["error turn"],
+            |row| row.get(0),
+        )
+        .expect("error prompt_task");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("upstream boom".into()),
+            http_status: None,
+            prompt_id: Some(err_pid),
+        }),
+        &mut app,
+    );
+    assert!(
+        store
+            .load_latest_prompt_exec_metrics_for_prompt_task(&err_task_id)
+            .unwrap()
+            .is_some(),
+        "error turn must still write prompt_exec_metrics"
+    );
+
+    // Cancel complete still writes metrics.
+    let effects = dispatch(Action::SendPrompt("cancel turn".into()), &mut app);
+    let cancel_pid = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt, got {other:?}"),
+    };
+    let cancel_task_id: String = store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks WHERE body = ?1",
+            ["cancel turn"],
+            |row| row.get(0),
+        )
+        .expect("cancel prompt_task");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+                serde_json::json!({ "promptId": cancel_pid })
+                    .as_object()
+                    .cloned(),
+            )),
+            http_status: None,
+            prompt_id: Some(cancel_pid),
+        }),
+        &mut app,
+    );
+    assert!(
+        store
+            .load_latest_prompt_exec_metrics_for_prompt_task(&cancel_task_id)
+            .unwrap()
+            .is_some(),
+        "cancel turn must still write prompt_exec_metrics"
+    );
+}
+
+/// Reconnect reload must pause HonestWorkClock so reconnect time is not
+/// counted in wall_ms. Resume when the reload window finalizes. Fail-open
+/// if grok_oss.db is missing (no live task).
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_prompt_task_pauses_honest_clock_during_reconnect_reload() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("pause clock across reconnect".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after send");
+        assert!(
+            !task.is_reconnect_paused(),
+            "clock must run until reconnect starts"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.begin_session_reload(1);
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload start");
+        assert!(
+            task.is_reconnect_paused(),
+            "reconnect reload must pause HonestWorkClock"
+        );
+        assert!(agent.finish_session_reload(1, true));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload finish");
+        assert!(
+            !task.is_reconnect_paused(),
+            "reload finalize must resume HonestWorkClock"
+        );
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    10,
+                    4,
+                    1_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+    let task_id = first_prompt_task_id(&store);
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest wall_ms still writes after reconnect pause, got {}",
+        metrics.wall_ms
+    );
+}
+
+/// Disconnect toast must pause HonestWorkClock so the gap until reload start
+/// is not counted as work. Nested reload pause keeps the first timestamp.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_prompt_task_pauses_honest_clock_at_disconnect_toast() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("pause clock at disconnect toast".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after send");
+        assert!(
+            !task.is_reconnect_paused(),
+            "clock must run until the disconnect toast"
+        );
+    }
+
+    app.handle_session_disconnect_toast(1);
+    let paused_ms = {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after disconnect toast");
+        assert!(
+            task.is_reconnect_paused(),
+            "disconnect toast must pause HonestWorkClock"
+        );
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .expect("disconnect toast");
+        assert!(
+            toast.contains("Disconnected. Reconnecting"),
+            "expected disconnect toast, got {toast}"
+        );
+        task.work_ms()
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task during toast-to-reload gap");
+        assert_eq!(
+            task.work_ms(),
+            paused_ms,
+            "toast-to-reload interval must not tick honest work_ms"
+        );
+        assert!(
+            task.is_reconnect_paused(),
+            "clock stays paused until reload resume"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.begin_session_reload(1);
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload start");
+        assert!(
+            task.is_reconnect_paused(),
+            "nested reload pause must keep the toast timestamp"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after nested reload pause");
+        assert_eq!(
+            task.work_ms(),
+            paused_ms,
+            "nested reload pause must not restart the reconnect interval"
+        );
+        assert!(agent.finish_session_reload(1, true));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload finish");
+        assert!(
+            !task.is_reconnect_paused(),
+            "reload finalize must resume HonestWorkClock"
+        );
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    10,
+                    4,
+                    1_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+    let task_id = first_prompt_task_id(&store);
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest wall_ms still writes after disconnect-toast pause, got {}",
+        metrics.wall_ms
+    );
+}
+
+/// Composer submit must not fail the send when grok_oss.db cannot be opened.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_composer_submit_fail_open_when_grok_oss_db_missing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("parent is a file");
+    let db = blocker.join("grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db);
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("still send".into()), &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "still send"),
+        "missing grok_oss.db must fail-open and still send, got {effects:?}"
+    );
+}

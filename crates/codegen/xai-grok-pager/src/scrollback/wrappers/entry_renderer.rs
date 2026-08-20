@@ -22,6 +22,33 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a nice smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
+/// Columns reserved on the right of message bubbles for the short timestamp.
+pub(crate) const TIMESTAMP_SHORT_RESERVE: u16 = 10;
+
+/// Gap plus copy glyph after the timestamp so ⧉ sits with the clock and
+/// does not overwrite message text (` ` + ⧉).
+pub(crate) const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
+
+/// Trailing inset when always-on bubble copy is on for a timestamped
+/// message block (user, assistant, /btw).
+pub(crate) fn bubble_copy_trailing_inset(appearance: &AppearanceConfig, is_message: bool) -> u16 {
+    if is_message && appearance.scrollback.display.bubble_copy_buttons {
+        BUBBLE_COPY_TRAILING_INSET
+    } else {
+        0
+    }
+}
+
+/// Right chrome for message bubbles: short timestamp plus copy inset.
+pub(crate) fn message_right_chrome_reserve(appearance: &AppearanceConfig, is_message: bool) -> u16 {
+    let ts = if is_message && appearance.show_timestamps {
+        TIMESTAMP_SHORT_RESERVE
+    } else {
+        0
+    };
+    ts + bubble_copy_trailing_inset(appearance, is_message)
+}
+
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -401,16 +428,11 @@ impl<'a> EntryRenderer<'a> {
         )
     }
 
-    /// Width reserved for the timestamp on the right side of content lines.
-    ///
-    /// When > 0, content is wrapped at `content_width - reserved` so text
-    /// never collides with the timestamp overlay.
+    /// Width reserved on the right of content lines for timestamp plus
+    /// the copy trailing inset. Content wraps at `content_width - reserved`
+    /// so text never collides with that chrome.
     fn timestamp_reserved(&self) -> u16 {
-        if self.appearance().show_timestamps && self.should_show_timestamp() {
-            10 // max short format: "  12:30 PM"
-        } else {
-            0
-        }
+        message_right_chrome_reserve(self.appearance(), self.should_show_timestamp())
     }
 
     fn accent(&self, content_width: u16) -> Option<AccentStyle> {
@@ -969,10 +991,16 @@ impl Renderable for EntryRenderer<'_> {
             let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
             // Check if mouse is hovering the timestamp zone (rightmost 10 cols
             // of the first content row).
+            let copy_inset =
+                bubble_copy_trailing_inset(self.appearance(), self.should_show_timestamp());
             let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
                 my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
+                    && mx
+                        >= content_area.x
+                            + content_area
+                                .width
+                                .saturating_sub(TIMESTAMP_SHORT_RESERVE + copy_inset)
+                    && mx < content_area.x + content_area.width.saturating_sub(copy_inset)
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -980,15 +1008,15 @@ impl Renderable for EntryRenderer<'_> {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 && first_content_y < max_row {
-                let ts_x = content_area.x + content_area.width - ts_width;
+            if content_area.width > ts_width + copy_inset + 1 && first_content_y < max_row {
+                let ts_x = content_area.x + content_area.width - ts_width - copy_inset;
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
         }
 
-        // Always-on bubble copy: paint into slack / timestamp gutter / right
-        // pad. The glyph is not in BlockLine spans (those stay wrap geometry).
+        // Always-on bubble copy: right-align into the trailing inset so the
+        // glyph sits with the timestamp, not on the first-line wrap slack.
         let icon_style = self.theme.dim();
         for (paint_row, line) in (content_area.y + if vpad_top_visible { 1 } else { 0 }..)
             .zip(output.lines.iter().skip(content_skip as usize))
@@ -996,7 +1024,13 @@ impl Renderable for EntryRenderer<'_> {
             if paint_row >= max_row {
                 break;
             }
-            line.paint_bubble_copy_button(buf, content_area.x, paint_row, icon_style);
+            line.paint_bubble_copy_button(
+                buf,
+                content_area.x,
+                content_area.width,
+                paint_row,
+                icon_style,
+            );
         }
 
         // Post-pass: adjust bullet color based on block state.
@@ -1242,7 +1276,7 @@ mod tests {
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = width - 2 - ts_width - BUBBLE_COPY_TRAILING_INSET;
         let content_row = 1u16;
 
         let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
@@ -1267,12 +1301,64 @@ mod tests {
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = width - 2 - ts_width - BUBBLE_COPY_TRAILING_INSET;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,
             "Expected short timestamp '{expected}' at row 0"
+        );
+    }
+
+    /// Copy sits with the right-aligned timestamp chrome, not on the
+    /// message body. Painting ⧉ immediately after the first-line text
+    /// overlaps the transcript (the operator-visible bug).
+    #[test]
+    fn bubble_copy_sits_with_timestamps_and_does_not_overlap_message_text() {
+        let theme = Theme::current();
+        const BODY: &str = "HELLOCOPYLAYOUT";
+        let entry = ScrollbackEntry::new(RenderBlock::agent_message(BODY));
+        let mut appearance = AppearanceConfig::default();
+        appearance.show_timestamps = true;
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
+
+        let width: u16 = 80;
+        let height = renderer.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let row = collect_row_symbols(&buf, 0, 0, width);
+        let icon = crate::glyphs::copy_icon();
+        let icon_x = (0..width)
+            .find(|&x| buf.cell((x, 0)).is_some_and(|c| c.symbol() == icon))
+            .expect("bubble copy must paint on the first content row");
+        let body_start =
+            row.find(BODY)
+                .expect("message body must paint on the first content row") as u16;
+        let body_end = body_start + BODY.len() as u16;
+        let ts = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let ts_start =
+            row.find(&ts)
+                .expect("short timestamp must paint on the first content row") as u16;
+        let ts_end = ts_start + ts.len() as u16;
+
+        assert!(
+            (body_start..body_end).all(|x| x != icon_x),
+            "copy must not overlap message text {BODY:?}; icon_x={icon_x} body={body_start}..{body_end} row={row:?}"
+        );
+        assert!(
+            icon_x >= ts_end.saturating_sub(1),
+            "copy must sit with the timestamp (at or just after it), not after the body; icon_x={icon_x} ts={ts_start}..{ts_end} body_end={body_end} row={row:?}"
+        );
+        assert!(
+            icon_x > body_end + 2,
+            "copy must not sit on the message body; icon_x={icon_x} body_end={body_end} row={row:?}"
+        );
+        assert!(
+            icon_x == width - renderer.appearance().scrollback.layout.block_pad_right - 1,
+            "copy sits at the content right edge with the timestamps; icon_x={icon_x} row={row:?}"
         );
     }
 
@@ -1301,7 +1387,7 @@ mod tests {
             .format("%H:%M:%S | %b %d")
             .to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = width - 2 - ts_width - BUBBLE_COPY_TRAILING_INSET;
 
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
@@ -1528,7 +1614,7 @@ mod tests {
         // AgentMessage has no vpad → first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
         let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
+        let ts_x = width - 2 - ts_width - BUBBLE_COPY_TRAILING_INSET;
         let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
         assert_eq!(
             rendered, expected,

@@ -209,3 +209,70 @@ fn drain_blocked_while_paused() {
     );
     assert_eq!(app.agents[&id].session.pending_prompts.len(), 1);
 }
+
+/// Named contract: fearless global pause that cancels a running primary
+/// turn must write `canceled_turn_resume.json` the same way `/rebuild`
+/// mid-turn does, so last-session on start and `/start` can continue the
+/// interrupted prompt after this process is gone. The in-memory pause
+/// gate is still RAM-only; this is only the interrupted-prompt marker.
+#[test]
+fn pause_mid_turn_writes_cancel_resume_marker_for_restart() {
+    let proj = tempfile::tempdir().unwrap();
+    let cwd = proj.path().to_path_buf();
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let sid = "pause-cancel-resume-mid-turn";
+    let prompt = "keep going after pause if this process dies";
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-pause-resume".into());
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: prompt.into(),
+            images: vec![],
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: vec![],
+            chip_elements: vec![],
+        });
+    }
+
+    let pause_effects = dispatch(Action::ToggleGlobalPause, &mut app);
+    assert!(app.global_work_pause.is_active());
+    assert!(
+        pause_effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "pause must cancel the running turn: {pause_effects:?}"
+    );
+
+    // Process state dropped: RAM pause snapshots are gone. Disk marker must
+    // still exist so reopen / `/start` can continue the interrupted prompt.
+    drop(app);
+
+    let marker =
+        xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+            .expect("load marker")
+            .expect(
+                "pause that cancels a running turn must write canceled_turn_resume.json \
+                 so reopen continues the turn",
+            );
+    assert_eq!(marker.prompt_text, prompt);
+    assert!(
+        xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
+            true,
+            Some(&marker)
+        )
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}

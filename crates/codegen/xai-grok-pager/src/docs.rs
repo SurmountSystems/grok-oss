@@ -496,6 +496,63 @@ mod tests {
         }
     }
 
+    /// Named contract: `/limits` user-guide keeps fail-open plus named
+    /// commands. grok-oss limits is a client printout, not xAI billing truth.
+    #[test]
+    fn user_guide_limits_names_fail_open_and_named_commands() {
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        for (name, content) in [
+            ("02-authentication.md", auth.content),
+            ("04-slash-commands.md", slash.content),
+        ] {
+            assert!(
+                content.contains("stay-supergrok"),
+                "{name} must name stay-supergrok"
+            );
+            assert!(
+                content.contains("use-console"),
+                "{name} must name use-console"
+            );
+            assert!(
+                content.contains("limits_pins.json"),
+                "{name} must name the limits_pins.json sidecar"
+            );
+            assert!(
+                content.contains("not xAI billing truth"),
+                "{name} must say grok-oss limits is not xAI billing truth"
+            );
+            assert!(
+                content.contains("must not mark SuperGrok used up"),
+                "{name} must say a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up"
+            );
+            assert!(
+                !content.contains("free SuperGrok"),
+                "{name} must not call SuperGrok free"
+            );
+        }
+        assert!(
+            slash.content.contains("meter included")
+                && slash.content.contains("dollar-credits")
+                && slash.content.contains("refresh"),
+            "04-slash-commands.md must name meter included|dollar-credits|console|combined and refresh"
+        );
+        assert!(
+            slash.content.contains("preferred_method") && slash.content.contains("api_key"),
+            "04-slash-commands.md must say stock preferred_method = api_key still pins console"
+        );
+        assert!(
+            slash.content.contains("does not require console credits"),
+            "04-slash-commands.md must say hop-back does not require console credits"
+        );
+    }
+
     /// Named contract: product skills are not a Python runtime. Restack must
     /// not drop this from user-guide `08-skills.md`.
     #[test]

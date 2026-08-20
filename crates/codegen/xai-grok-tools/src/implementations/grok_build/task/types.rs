@@ -195,6 +195,10 @@ pub struct SubagentRuntimeOverrides {
     pub harness_agent_type: Option<String>,
     pub completion_output_cap: Option<usize>,
     pub spawn_depth: Option<u32>,
+    /// Immediate spawner session, even when limits reparent to the root.
+    /// L3 specialists keep their L2 parent here so list chrome and tool
+    /// policy do not treat them as L2.
+    pub immediate_parent_session_id: Option<String>,
     pub output_token_budget: Option<u64>,
     pub output_schema: Option<serde_json::Value>,
     pub loop_task_id: Option<String>,

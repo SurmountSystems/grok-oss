@@ -540,6 +540,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 harness_agent_type: None,
                 completion_output_cap: None,
                 spawn_depth: None,
+                immediate_parent_session_id: None,
                 output_token_budget: None,
                 output_schema: None,
                 loop_task_id: None,

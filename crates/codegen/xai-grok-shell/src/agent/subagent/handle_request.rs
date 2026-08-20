@@ -621,13 +621,18 @@ pub(crate) async fn run_shell_child(
             .map(|m| format!("{m:?}")),
         depth: child_depth,
     };
+    let notify_parent = request
+        .runtime_overrides
+        .immediate_parent_session_id
+        .as_ref()
+        .unwrap_or(&ctx.parent_session_id);
     emit_subagent_notification(
         gateway,
         &ctx.parent_session_id,
         SessionUpdate::SubagentSpawned {
             subagent_id: subagent_id.clone(),
             child_session_id: child_session_id.0.to_string(),
-            parent_session_id: ctx.parent_session_id.clone(),
+            parent_session_id: notify_parent.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
             subagent_type: request.subagent_type.clone(),
             description: request.description.clone(),

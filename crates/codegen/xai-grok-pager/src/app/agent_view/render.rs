@@ -116,12 +116,23 @@ impl AgentView {
     /// Open the fullscreen subagent view for `child_sid`, replaying child
     /// `updates.jsonl` when scrollback only has the injected task prompt.
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
-        if let Some(child) = self.subagent_views.get_mut(&child_sid) {
-            child.mark_as_subagent_view();
-        } else {
+        if !self.subagent_views.contains_key(&child_sid) {
             return;
         }
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        let l2 = crate::app::subagent::overlay_child_is_l2_coordinator(
+            &self.subagent_sessions,
+            &child_sid,
+        );
+        if let Some(child) = self.subagent_views.get_mut(&child_sid) {
+            if l2 {
+                child.is_subagent_view = false;
+                child.set_active_pane(AgentPane::Prompt, true);
+            } else {
+                child.mark_as_subagent_view();
+                child.set_active_pane(AgentPane::Scrollback, true);
+            }
+        }
         self.active_subagent = Some(child_sid);
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
@@ -794,7 +805,12 @@ impl AgentView {
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
-            child_view.mark_as_subagent_view();
+            if !crate::app::subagent::overlay_child_is_l2_coordinator(
+                &self.subagent_sessions,
+                child_sid,
+            ) {
+                child_view.mark_as_subagent_view();
+            }
             let (_, post_flush) = child_view.draw(
                 inner,
                 buf,
@@ -1606,15 +1622,19 @@ impl AgentView {
             self.sampling_identity,
             self.credit_balance.as_ref(),
         );
-        if let Some(credits_line) = crate::views::credit_bar::credit_status_line_for_live_session(
-            self.credit_balance.as_ref(),
-            compact_identity,
-            self.console_team_prepaid_cents,
-            crate::views::credit_bar::resolve_console_team_prepaid_gap_default(),
-            self.hit_credits.hovered,
-            &theme,
-            self.chat_kind,
-        ) {
+        if let Some(credits_line) =
+            crate::views::credit_bar::credit_status_line_for_live_session_emphasizing_meter_source(
+                self.credit_balance.as_ref(),
+                compact_identity,
+                self.console_team_prepaid_cents,
+                crate::views::credit_bar::resolve_console_team_prepaid_gap_default(),
+                self.hit_credits.hovered,
+                &theme,
+                self.chat_kind,
+                crate::views::credit_bar::compact_live_principal_role_from_process(),
+                xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+            )
+        {
             status.push("credits", credits_line);
         }
         let running = self.session.current_prompt_id.as_deref();
@@ -6190,8 +6210,12 @@ mod plan_turn_row_revising_copy_tests {
             "first paint after a missed present must not auto-dock the side panel"
         );
         assert!(
-            text.contains(PLAN_IDLE_REVIEW_STATUS),
-            "first paint after a missed present must be the idle click cue, not Side panel open:\n{text}"
+            text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS),
+            "first paint after a missed present must say Plan ready, not Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains(PLAN_IDLE_REVIEW_STATUS),
+            "first paint after a missed present must not idle as Plan written. Click or /view-plan:\n{text}"
         );
         assert!(
             !text.contains("Plan ready. Side panel open"),

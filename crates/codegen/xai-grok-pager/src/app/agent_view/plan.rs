@@ -156,19 +156,22 @@ impl AgentView {
 
     /// Status chrome for the plan decision loop.
     ///
-    /// Parked present uses `plan_approval_status_label`. Idle Revise/Clarify
+    /// Open side panel uses `plan_approval_status_label`. Shut panel uses
+    /// `PLAN_READY_STATUS` (not `PLAN_IDLE_REVIEW_STATUS`). Idle Revise/Clarify
     /// wait uses `PLAN_REVISING_STATUS` / `PLAN_WAITING_UPDATED_STATUS`.
     /// Busy rewrite yields `None` so real turn status can paint. Never returns
-    /// `PLAN_IDLE_REVIEW_STATUS` while feedback is in flight.
+    /// `PLAN_IDLE_REVIEW_STATUS` while the panel is shut or feedback is in flight.
     pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
-        use crate::views::plan_approval_view::{
-            PLAN_IDLE_REVIEW_STATUS, plan_approval_status_label,
-        };
+        use crate::views::plan_approval_view::{PLAN_READY_STATUS, plan_approval_status_label};
         if let Some(ref pav) = self.plan_approval_view {
             if self.line_viewer.is_some() {
                 return Some(plan_approval_status_label(pav.has_plan));
             }
-            return Some(PLAN_IDLE_REVIEW_STATUS);
+            return Some(if pav.has_plan {
+                PLAN_READY_STATUS
+            } else {
+                "No plan written"
+            });
         }
         if let Some(in_flight) = self.plan_feedback_in_flight {
             if self.session.state.is_turn_running() {
@@ -177,7 +180,7 @@ impl AgentView {
             return Some(in_flight.status_label());
         }
         if self.should_arm_plan_decision_chrome() && self.plan_preview_available() {
-            return Some(PLAN_IDLE_REVIEW_STATUS);
+            return Some(PLAN_READY_STATUS);
         }
         None
     }
@@ -393,7 +396,9 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
-        let notes = self.prompt.text().to_string();
+        // Image chips insert `[Image #N]` into the buffer. Those tokens are
+        // not review notes. Strip them before deciding implement text.
+        let notes = self.prompt.text_without_image_chips();
         let notes = notes.trim();
         let images = self.prompt.drain_images();
         let Some(mut pav) = self.plan_approval_view.take() else {
@@ -412,13 +417,20 @@ impl AgentView {
         } else {
             None
         };
-        pav.send_approved();
+        let sent_acp = pav.send_approved();
         self.close_plan_review(pav, "build");
-        if review_comments.is_some() || !images.is_empty() {
-            return InputOutcome::Action(Action::Interject {
-                text: review_comments.unwrap_or_default(),
-                images,
-            });
+        // Idle (no waiter) must start implement. Images-only must not
+        // Interject empty text. Live-waiter Approve continues via the
+        // shell tool result; notes/images still Interject when present.
+        let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+        let text = match (review_comments, sent_acp) {
+            (Some(notes), false) => format!("{implement}\n\n{notes}"),
+            (Some(notes), true) => notes,
+            (None, false) => implement.to_string(),
+            (None, true) => String::new(),
+        };
+        if !text.is_empty() || !images.is_empty() {
+            return InputOutcome::Action(Action::Interject { text, images });
         }
         InputOutcome::Changed
     }
@@ -609,6 +621,17 @@ impl AgentView {
         }
         self.prompt.set_text("");
     }
+    /// Submit the live composer as a normal agent prompt. Does not Approve
+    /// or Revise a parked plan.
+    pub(super) fn send_composer_as_normal_prompt(&mut self) -> InputOutcome {
+        if let Some(text) = self.prompt.try_send() {
+            let action = self.prompt_input_mode.send_action(text);
+            self.prompt_input_mode = super::PromptInputMode::Normal;
+            return InputOutcome::Action(action);
+        }
+        InputOutcome::Changed
+    }
+
     pub(super) fn handle_plan_feedback_key(&mut self, key: &KeyEvent) -> InputOutcome {
         if crate::input::key::is_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
@@ -670,12 +693,9 @@ impl AgentView {
                 }
                 return InputOutcome::Changed;
             }
-            let empty_composer =
-                self.prompt.text().trim().is_empty() && self.prompt.images.is_empty();
-            if empty_composer {
-                self.cancel_line_viewer();
-                return InputOutcome::Changed;
-            }
+            // Esc dismisses the plan pane. It does not Approve, Exit, or
+            // wipe a mid-compose draft.
+            self.cancel_line_viewer();
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Preview;
             }
@@ -753,7 +773,7 @@ impl AgentView {
                         }
                     };
                 }
-                return InputOutcome::Changed;
+                return self.send_composer_as_normal_prompt();
             }
             EnterOutcome::PassThrough => {}
         }
@@ -762,6 +782,7 @@ impl AgentView {
                 if let Some(req) = self.prompt.pending_viewer_request.take() {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }
+                self.persist_unsent_composer_draft();
                 InputOutcome::Changed
             }
             PromptEvent::Ignored => InputOutcome::Changed,
@@ -2011,6 +2032,118 @@ mod plan_pane_letter_a_contract_tests {
         assert!(!agent.plan_decision_resolved);
     }
 
+    /// Bare Approve with a live waiter sends ACP `"approved"` so the shell
+    /// can continue the same turn with the implement-facing tool result.
+    /// It must not Interject the present-only "do not implement" body.
+    #[test]
+    fn bare_approve_with_live_waiter_sends_approved() {
+        let mut agent = make_agent();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-live-approve".into(),
+            plan_content: Some("# Plan\n\nBare Approve".into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            StashedPrompt::default(),
+            tx,
+        ));
+        let outcome = agent.approve_plan();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "bare Approve must close the review"
+        );
+        assert!(agent.plan_decision_resolved);
+        match outcome {
+            InputOutcome::Changed => {}
+            InputOutcome::Action(Action::Interject { ref text, .. }) => {
+                assert!(
+                    !text.contains("do not implement yet")
+                        && !text.contains("NOT operator approval"),
+                    "live-waiter Approve must not Interject present-only text: {text:?}"
+                );
+            }
+            other => panic!("bare live-waiter Approve must send approved; got {other:?}"),
+        }
+        let raw = rx
+            .try_recv()
+            .expect("bare Approve must send ACP approved")
+            .expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Local idle Approve (no live waiter) must start an implement turn.
+    #[test]
+    fn bare_idle_approve_interjects_implement_message() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
+            "# Plan\n\nIdle Approve".into(),
+        )));
+        let outcome = agent.approve_plan();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "idle Approve must close the review"
+        );
+        assert!(agent.plan_decision_resolved);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("The user approved the plan. Implement"),
+                    "idle Approve must start implement: {text:?}"
+                );
+                assert!(
+                    !text.contains("do not implement yet")
+                        && !text.contains("NOT operator approval"),
+                    "idle Approve must not use present-only text: {text:?}"
+                );
+            }
+            other => panic!("idle Approve must Interject implement; got {other:?}"),
+        }
+    }
+
+    /// Idle Approve with images only is still a real Approve. Interject
+    /// must carry the implement sentence plus the chips, not empty text.
+    #[test]
+    fn idle_approve_with_images_interjects_implement_message() {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
+            "# Plan\n\nIdle Approve with image".into(),
+        )));
+        agent
+            .prompt
+            .insert_image(super::test_fixtures::test_pasted_image())
+            .expect("fixture image must attach");
+        let outcome = agent.approve_plan();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "idle Approve must close the review"
+        );
+        assert!(agent.plan_decision_resolved);
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, images }) => {
+                assert!(
+                    text.contains("The user approved the plan. Implement"),
+                    "idle Approve with images must start implement, not empty Interject: {text:?}"
+                );
+                assert!(
+                    !text.contains("do not implement yet")
+                        && !text.contains("NOT operator approval"),
+                    "idle Approve must not use present-only text: {text:?}"
+                );
+                assert_eq!(
+                    images.len(),
+                    1,
+                    "idle Approve must keep the attached image on the implement turn"
+                );
+            }
+            other => {
+                panic!("idle Approve with images must Interject implement + images; got {other:?}")
+            }
+        }
+    }
+
     /// Comment plus Approve implements and sends the typed notes.
     #[test]
     fn comment_plus_approve_implements_with_notes() {
@@ -2721,7 +2854,7 @@ mod plan_remaining_chrome_leftover_tests {
 mod plan_rebuild_resume_and_esc_dismiss_tests {
     use super::test_fixtures::make_agent;
     use super::*;
-    use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+    use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
     use crate::views::prompt_widget::StashedPrompt;
     use agent_client_protocol as acp;
     use crossterm::event::{
@@ -2788,8 +2921,13 @@ mod plan_rebuild_resume_and_esc_dismiss_tests {
         );
         assert_eq!(
             agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "closed pane keeps Plan ready; it must not idle as Plan written. Click or /view-plan"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
             Some(PLAN_IDLE_REVIEW_STATUS),
-            "closed pane must keep the idle click cue so /view-plan can reopen"
+            "shut panel must not use the exclusive click cue"
         );
     }
 

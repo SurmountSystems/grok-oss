@@ -31,6 +31,9 @@ pub use accented::Accented;
 pub use block_renderer::BlockRenderer;
 pub use entry_renderer::EntryRenderer;
 pub(crate) use entry_renderer::group_header_chrome_prefix_width;
+pub(crate) use entry_renderer::{
+    TIMESTAMP_SHORT_RESERVE, bubble_copy_trailing_inset, message_right_chrome_reserve,
+};
 pub use padded::Padded;
 
 #[cfg(test)]

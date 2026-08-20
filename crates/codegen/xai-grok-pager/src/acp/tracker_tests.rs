@@ -2693,6 +2693,34 @@ fn activity_waiting_for_blocking_bg_plumbing_tools() {
         );
     }
 }
+/// A known-blocking wait (task output / subagent) outranks leftover Retrying.
+/// Healthy wait chrome must not look like the turn failed and is restarting.
+#[test]
+fn activity_known_blocking_wait_outranks_retry() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Other, "get_command_or_subagent_output"),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(timeout_update("t1", 60_000), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::task_output()))
+    );
+    tracker.set_retry_activity(Some(TurnActivity::Retrying {
+        attempt: 1,
+        max_retries: 3,
+        reason: "reconnecting".into(),
+    }));
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::task_output())),
+        "live wait must not be masked by Retrying chrome"
+    );
+}
+
 /// A known-blocking wait must beat an open (residual/pre-created) thought entry.
 #[test]
 fn activity_known_blocking_wait_outranks_thinking() {

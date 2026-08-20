@@ -1539,6 +1539,63 @@ async fn spawner_can_wait_on_the_id_it_just_received_while_the_task_is_live() {
     harness.actor.abort();
 }
 
+/// Limits still reparent to the root session. The request must keep the
+/// immediate L2 parent and L3 depth so SubagentSpawned and tool policy
+/// do not advertise the specialist as an L2.
+#[tokio::test]
+async fn nested_reparent_stamps_l3_depth_and_immediate_parent() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let l2 = request("l2", true);
+    let l2_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(l2).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("l2")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l2"));
+
+    let l2_backend = ChannelBackend::for_session(harness.backend.sender(), "l2");
+    let l3 = request("l3", true);
+    let l3_spawn = tokio::spawn({
+        let backend = l2_backend.clone();
+        async move { backend.spawn(l3).await }
+    });
+    let observed = harness.requests.recv().await.expect("l3 spawn observed");
+    assert_eq!(
+        observed.parent_session_id, "parent",
+        "limits still reparent the nested spawn to the root session"
+    );
+    assert_eq!(
+        observed
+            .runtime_overrides
+            .immediate_parent_session_id
+            .as_deref(),
+        Some("l2"),
+        "immediate parent must stay the L2 child session"
+    );
+    assert_eq!(
+        observed.runtime_overrides.spawn_depth,
+        Some(2),
+        "reparented specialist must stay depth 2 so spawn is stripped"
+    );
+
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
+    let _ = harness.finish.send(());
+    assert!(l3_spawn.await.unwrap().unwrap().success);
+    assert!(l2_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
 /// Fire-and-forget spawn returns the id before the coordinator processes
 /// Spawn. A blocking wait on that id must not resolve as not_found in that
 /// window. After Spawn is processed, the wait stays attached through finish.

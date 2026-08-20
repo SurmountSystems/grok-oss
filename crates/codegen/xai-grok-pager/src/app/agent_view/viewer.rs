@@ -192,9 +192,13 @@ impl AgentView {
 
         if key!(Enter).matches(key) {
             if in_plan_approval {
-                // Commenting is explicit `c` only. Empty Enter on Preview
-                // must not steal the parked surface.
-                return InputOutcome::Changed;
+                let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
+                if focus == Some(PlanApprovalFocus::Prompt) {
+                    return self.handle_plan_feedback_key(key);
+                }
+                // Preview: empty Enter never Approves. A draft submits as
+                // a normal prompt so present cannot steal the composer.
+                return self.send_composer_as_normal_prompt();
             }
             if self.is_plan_viewer() {
                 return self.enter_casual_plan_commenting();

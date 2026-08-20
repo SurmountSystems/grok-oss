@@ -226,6 +226,108 @@
             }
           );
 
+          # Full workspace cargo fmt, clippy, and test compile. `just check-remote`
+          # realizes this on the Nix remote builder. `--no-run` compiles tests
+          # without executing them in the sandbox. Not in `checks` so
+          # `nix flake check` / GHA stay local and do not need the builder.
+          # preferLocalBuild=false is not enough: Nix still uses a local
+          # nixbld worker when this machine has the required features.
+          # --option system-features is also not enough: this host's daemon
+          # still advertises big-parallel (Nix default for a many-core box;
+          # see https://nix.dev/manual/nix/2.28/command-ref/conf-file.html#conf-system-features
+          # accessed: 2026-08-18). Pin rustc to surmount-remote, a machines-file
+          # feature this laptop never auto-detects. The ssh-ng builder must
+          # advertise it. Tiny crane vendor unpacks stay untagged so they may
+          # run here (do not pair them with max-jobs=0).
+          # Override CARGO_BUILD_JOBS=2 from commonArgs (that cap is for the
+          # low-memory package sandbox). Advertise 64 Nix cores on the builder
+          # and keep cargo at 32 so one workspace clippy is not 8-wide and is
+          # less likely to OOM than 64 rustc processes at once.
+          # Crane defaults CARGO_PROFILE to release. cargo check and clippy
+          # skip LLVM, so codegen-units does not fan out a Checking rustc;
+          # --release still type-checks at opt-level 3 on one thread per
+          # crate. Use the same dev profile as local `just test-clippy`.
+          # Pass cargo --jobs on argv from NIX_BUILD_CORES (nix --cores),
+          # capped at 32. If the sandbox reports fewer cores than
+          # CARGO_BUILD_JOBS, keep 32 so a 1-core NIX_BUILD_CORES does not
+          # force one rustc. cargo fmt rejects --jobs; only clippy/check/
+          # build/test get it.
+          workspaceCargoJobsFromCores = ''
+            cargoJobs="''${NIX_BUILD_CORES:-32}"
+            case "$cargoJobs" in
+              "" | *[!0-9]*) cargoJobs=32 ;;
+            esac
+            if [ "$cargoJobs" -gt 32 ]; then
+              cargoJobs=32
+            fi
+            if [ "''${CARGO_BUILD_JOBS:-0}" -gt "$cargoJobs" ]; then
+              cargoJobs="$CARGO_BUILD_JOBS"
+            fi
+            export CARGO_BUILD_JOBS="$cargoJobs"
+          '';
+          workspaceCargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs
+            // {
+              pname = "workspace-cargo-quality";
+              preferLocalBuild = false;
+              requiredSystemFeatures = [
+                "big-parallel"
+                "surmount-remote"
+              ];
+              # Dev-profile CFLAGS are -O0. Nix gcc wrapping still injects
+              # _FORTIFY_SOURCE; jemalloc configure then compiles probes with
+              # -O0 -Werror and dies with "cannot determine return type of
+              # strerror_r". Same reason ciLowMemEnv drops fortify for host
+              # cargo. fortify3 is the nixos-unstable sibling of fortify.
+              hardeningDisable = [
+                "fortify"
+                "fortify3"
+              ];
+              enableParallelBuilding = true;
+              CARGO_BUILD_JOBS = "32";
+              CARGO_PROFILE = "dev";
+              buildPhaseCargoCommand = ''
+                ${workspaceCargoJobsFromCores}
+                cargoWithProfile check --jobs "$CARGO_BUILD_JOBS" --locked --all-targets
+                cargoWithProfile build --jobs "$CARGO_BUILD_JOBS" --locked
+              '';
+              checkPhaseCargoCommand = ''
+                ${workspaceCargoJobsFromCores}
+                cargoWithProfile test --jobs "$CARGO_BUILD_JOBS" --locked --no-run
+              '';
+            }
+          );
+
+          workspace-cargo-quality = craneLib.mkCargoDerivation (
+            commonArgs
+            // {
+              pname = "workspace-cargo-quality";
+              cargoArtifacts = workspaceCargoArtifacts;
+              pnameSuffix = "";
+              preferLocalBuild = false;
+              requiredSystemFeatures = [
+                "big-parallel"
+                "surmount-remote"
+              ];
+              hardeningDisable = [
+                "fortify"
+                "fortify3"
+              ];
+              enableParallelBuilding = true;
+              CARGO_BUILD_JOBS = "32";
+              CARGO_PROFILE = "dev";
+              buildPhaseCargoCommand = ''
+                ${workspaceCargoJobsFromCores}
+                cargo fmt --all -- --check
+                cargoWithProfile clippy --jobs "$CARGO_BUILD_JOBS" --workspace --lib --bins --locked -- -D warnings
+                cargoWithProfile test --jobs "$CARGO_BUILD_JOBS" --workspace --locked --no-run
+                # cargo 1.97 refuses --doc with --no-run ("can't skip running
+                # doc tests with --no-run"). Doctest *execution* stays out of
+                # this sandbox; rustdoc examples are not compile-only here.
+              '';
+            }
+          );
+
           openrouter-credentials = craneLib.cargoTest (
             commonArgs
             // {
@@ -377,6 +479,7 @@
             cargo-mem-guard-unwrapped
             cargo-mem-guard-tests
             cargoCheck
+            workspace-cargo-quality
             openrouter-credentials
             justPkg
             ci-tools
@@ -401,6 +504,7 @@
             cargo-mem-guard
             ci-tools
             cargo-mem-guard-unwrapped
+            workspace-cargo-quality
             ;
         }
       );

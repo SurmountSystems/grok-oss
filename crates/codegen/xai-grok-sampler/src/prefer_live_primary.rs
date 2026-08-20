@@ -1,14 +1,15 @@
-//! Prefer a live dual-auth identity after SuperGrok (or primary) is out of allowance.
+//! Prefer a live failover identity after a memoized-dead console primary.
 //!
-//! When SuperGrok session (or any primary) is memoized out of allowance and a
-//! live failover remains, reorder [`SamplerConfig`] so the **first** HTTP
-//! attempt already uses the console key (or next live identity) — no SuperGrok
-//! try, no per-turn Retrying switch chrome.
+//! Fail-open SuperGrok: a leftover HTTP 402 memo does not hop reconstruct.
+//! Stay reconstruct already restores SuperGrok when the stay sidecar is set.
+//! This request hops after SuperGrok HTTP 402.
 //!
-//! Shell must call [`prefer_live_identity_after_credit_exhaust`] after rebuilding
-//! session config each turn (`reconstruct_full_config` / `prepare_sampler_for_turn`);
-//! otherwise resolve always re-pins SuperGrok as primary and the request task
-//! re-switches every prompt.
+//! When a console primary is memoized out of allowance and a live failover
+//! remains, reorder [`SamplerConfig`] so the first HTTP attempt already uses
+//! the next live identity.
+//!
+//! Shell may call [`prefer_live_identity_after_credit_exhaust`] after rebuilding
+//! session config each turn (`reconstruct_full_config` / `prepare_sampler_for_turn`).
 
 use grok_rate_limit::fingerprint_secret;
 
@@ -246,30 +247,127 @@ pub fn prune_exhausted_failover_candidates(config: &mut SamplerConfig) {
     });
 }
 
-/// If primary is memoized out of allowance and a live failover remains, rotate
-/// config to that failover **before** any HTTP (silent preference; stay on the
-/// console key after switch).
+/// Switch live identity to the console key because the operator asked
+/// (`use-console` sidecar). Does **not** mark SuperGrok used up and does not
+/// require `[auth] preferred_method = "api_key"`.
+pub fn prefer_console_identity_for_use_console_pin(config: &mut SamplerConfig) -> bool {
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    let sess = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_owned();
+
+    let already_console = !active.is_empty()
+        && !is_session_identity(config, &active)
+        && config.bearer_resolver.is_none();
+    if already_console {
+        if let Some(url) = config.failover_base_url.clone()
+            && looks_like_cli_chat_proxy_url(&config.base_url)
+            && !looks_like_cli_chat_proxy_url(&url)
+        {
+            switch_api_host_with_identity(config, &url);
+            return true;
+        }
+        return false;
+    }
+
+    let idx = config.failover_api_keys.iter().position(|k| {
+        let t = k.trim();
+        !t.is_empty()
+            && t != active
+            && (sess.is_empty() || t != sess)
+            && !is_session_identity(config, t)
+    });
+    let Some(idx) = idx else {
+        return false;
+    };
+    let console = config.failover_api_keys.remove(idx);
+    let console_trim = console.trim().to_owned();
+    config
+        .failover_api_keys
+        .retain(|k| k.trim() != console_trim);
+    if !active.is_empty() {
+        config.failover_api_keys.retain(|k| k.trim() != active);
+        config.failover_api_keys.insert(0, active);
+    }
+    config.api_key = Some(console);
+    if config.bearer_resolver.is_some() {
+        config.stashed_bearer_resolver = config.bearer_resolver.take();
+    }
+    config.bearer_resolver = None;
+    if let Some(url) = config.failover_base_url.clone() {
+        switch_api_host_with_identity(config, &url);
+    }
+    true
+}
+
+/// Keep or restore SuperGrok as primary because the operator asked
+/// (`stay-supergrok` sidecar). Fail-open: does not mark SuperGrok used up.
+pub fn prefer_supergrok_identity_for_stay_pin(config: &mut SamplerConfig) -> bool {
+    let Some(sess) = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    if is_session_identity(config, &active) || config.bearer_resolver.is_some() {
+        if let Some(url) = config.session_base_url.clone() {
+            switch_api_host_with_identity(config, &url);
+        }
+        return false;
+    }
+
+    config.failover_api_keys.retain(|k| k.trim() != sess);
+    if !active.is_empty() && active != sess {
+        config.failover_api_keys.retain(|k| k.trim() != active);
+        config.failover_api_keys.insert(0, active);
+    }
+    config.api_key = Some(sess);
+    if let Some(resolver) = config.stashed_bearer_resolver.take() {
+        config.bearer_resolver = Some(resolver);
+    } else if let Some(resolver) = config.session_bearer_resolver.clone() {
+        config.bearer_resolver = Some(resolver);
+    }
+    if let Some(url) = config.session_base_url.clone() {
+        switch_api_host_with_identity(config, &url);
+    }
+    true
+}
+
+/// If primary is a memoized-dead **console** key and a live failover remains,
+/// rotate config to that failover before any HTTP (silent preference).
 ///
 /// Always prunes memoized-dead failover candidates first (even when primary is
-/// already a live console key) so SuperGrok extras are not the silent next hop.
+/// already a live console key).
+///
+/// Fail-open SuperGrok: a leftover HTTP 402 memo from an earlier request must
+/// not hop reconstruct between turns. Stay reconstruct already restores
+/// SuperGrok on the next rebuild when the stay sidecar is set. This request
+/// hops after SuperGrok HTTP 402 (`apply_retry_decision`).
 ///
 /// Returns switch reason when rotation applied (callers may log; UI chrome for
-/// already-memoized apply is optional — prefer silence so turns do not look
+/// already-memoized apply is optional, prefer silence so turns do not look
 /// like Retrying every prompt). Mid-request credit switches still use the
 /// request-task Retrying path.
 ///
-/// Shell: call after `reconstruct_full_config` so actor + aux clients start on
-/// console key when SuperGrok is remembered out of allowance.
+/// Shell: call after `reconstruct_full_config`.
 pub fn prefer_live_identity_after_credit_exhaust(config: &mut SamplerConfig) -> Option<String> {
-    // Prune first: console-primary dual-auth must not keep an exhausted SuperGrok
-    // session JWT queued after included weekly is marked used up.
     prune_exhausted_failover_candidates(config);
 
     if !primary_is_memoized_credit_exhausted(config) {
         return None;
     }
-    // Need at least one non-empty live failover candidate after prune.
     let active = config.api_key.as_deref().unwrap_or("").trim();
+    if is_session_identity(config, active) || config.bearer_resolver.is_some() {
+        return None;
+    }
     let has_live = config.failover_api_keys.iter().any(|k| {
         let t = k.trim();
         !t.is_empty() && t != active && !exhausted_identity::is_exhausted(&fingerprint_secret(t))
@@ -327,55 +425,48 @@ mod tests {
     use super::*;
     use crate::config::SamplerConfig;
 
-    /// Named contract: memoized SuperGrok exhaust + dual-auth → config primary
-    /// is already console key before any request (no SuperGrok attempt).
+    /// Named contract: memoized-dead console primary + live failover hops before
+    /// HTTP. SuperGrok leftover HTTP 402 does not use this path.
     #[test]
-    fn prefer_live_session_to_console_before_request() {
+    fn prefer_live_dead_console_hops_to_next_console_before_request() {
         exhausted_identity::with_memo_lock(|| {
-            let session = "prefer-live-session-jwt";
-            let console = "prefer-live-console-key";
-            exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            let dead = "prefer-live-dead-console-key";
+            let live = "prefer-live-next-console-key";
+            exhausted_identity::mark_exhausted(&fingerprint_secret(dead));
 
             let mut config = SamplerConfig {
-                api_key: Some(session.into()),
-                failover_api_keys: vec![console.into()],
-                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                api_key: Some(dead.into()),
+                failover_api_keys: vec![live.into()],
+                base_url: "https://api.x.ai/v1".into(),
                 model: "grok-4".into(),
-                session_identity_key: Some(session.into()),
                 failover_base_url: Some("https://api.x.ai/v1".into()),
-                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 ..Default::default()
             };
             let reason = prefer_live_identity_after_credit_exhaust(&mut config)
-                .expect("must prefer console when session memoized exhausted");
-            assert_eq!(config.api_key.as_deref(), Some(console));
-            assert!(
-                config.base_url.contains("api.x.ai"),
-                "must switch host: {}",
-                config.base_url
-            );
+                .expect("must prefer next console when console primary is memoized exhausted");
+            assert_eq!(config.api_key.as_deref(), Some(live));
             assert!(config.bearer_resolver.is_none());
             assert!(exhausted_identity::is_credential_hop_reason(&reason));
             assert!(reason.contains("console key"), "{reason}");
-            // Second apply: primary is console (live) → no further switch.
             assert!(
                 prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
-                "already on console; seamless subsequent turns"
+                "already on live console; no further switch"
             );
-            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert_eq!(config.api_key.as_deref(), Some(live));
         });
     }
 
-    /// OIDC refresh: live primary JWT differs from memoized session_identity_key.
+    /// OIDC refresh: leftover SuperGrok HTTP 402 memo on session_identity_key
+    /// must not hop reconstruct when the live api_key is a rotated jwt and a
+    /// bearer_resolver is present.
     #[test]
-    fn prefer_live_session_jwt_refresh_still_skips() {
+    fn leftover_supergrok_http_402_memo_bearer_only_does_not_hop_prefer_live_between_turns() {
         exhausted_identity::with_memo_lock(|| {
             let old_sess = "session-jwt-before-refresh";
             let new_sess = "session-jwt-after-refresh";
             let console = "console-after-refresh";
             exhausted_identity::mark_exhausted(&fingerprint_secret(old_sess));
 
-            // Bearer resolver present marks us session-side even when live key is new.
             #[derive(Debug)]
             struct FixedBearer(&'static str);
             impl crate::config::BearerResolver for FixedBearer {
@@ -397,14 +488,24 @@ mod tests {
                 ..Default::default()
             };
             assert!(primary_is_memoized_credit_exhausted(&config));
-            let _ = prefer_live_identity_after_credit_exhaust(&mut config)
-                .expect("skip after JWT refresh");
-            assert_eq!(config.api_key.as_deref(), Some(console));
-            assert!(config.bearer_resolver.is_none());
-            // Live refreshed JWT also marked so a rebuild with new token alone still skips.
-            assert!(exhausted_identity::is_exhausted(&fingerprint_secret(
-                new_sess
-            )));
+            assert!(
+                prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
+                "bearer-only SuperGrok leftover HTTP 402 memo must not hop reconstruct"
+            );
+            assert_eq!(config.api_key.as_deref(), Some(new_sess));
+            assert!(
+                config.bearer_resolver.is_some(),
+                "live SuperGrok bearer must remain"
+            );
+            assert!(
+                config.base_url.contains("cli-chat-proxy"),
+                "must stay on SuperGrok host: {}",
+                config.base_url
+            );
+            assert!(
+                !exhausted_identity::is_exhausted(&fingerprint_secret(new_sess)),
+                "rotated SuperGrok jwt must not be marked by reconstruct leftover 402"
+            );
         });
     }
 
@@ -424,19 +525,24 @@ mod tests {
         });
     }
 
-    /// B2: multi console keys stay ordered; first live key becomes primary;
-    /// remaining console keys stay in list; SuperGrok session is not re-queued.
+    /// Leftover SuperGrok HTTP 402 memo from an earlier request must not hop
+    /// reconstruct prefer_live between turns. Stay reconstruct already restores
+    /// SuperGrok on the next rebuild when the stay sidecar is set. This request
+    /// still hops after SuperGrok HTTP 402 (`apply_retry_decision`).
     #[test]
-    fn prefer_live_multi_console_keys_stable_order_first_live() {
+    fn leftover_supergrok_http_402_memo_does_not_hop_prefer_live_between_turns() {
         exhausted_identity::with_memo_lock(|| {
-            let session = "b2-session-jwt";
-            let business = "b2-console-business";
-            let personal = "b2-console-personal";
+            let session = "reconstruct-leftover-402-session-jwt";
+            let console = "reconstruct-leftover-402-console-key";
             exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            assert!(exhausted_identity::is_exhausted(&fingerprint_secret(
+                session
+            )));
 
+            // Stay reconstruct already put SuperGrok back as primary.
             let mut config = SamplerConfig {
                 api_key: Some(session.into()),
-                failover_api_keys: vec![business.into(), personal.into()],
+                failover_api_keys: vec![console.into()],
                 base_url: "https://cli-chat-proxy.grok.com/v1".into(),
                 model: "grok-4".into(),
                 session_identity_key: Some(session.into()),
@@ -444,13 +550,94 @@ mod tests {
                 session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 ..Default::default()
             };
-            let reason = prefer_live_identity_after_credit_exhaust(&mut config)
-                .expect("must prefer first console key");
-            assert_eq!(config.api_key.as_deref(), Some(business));
+            assert!(
+                prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
+                "leftover SuperGrok HTTP 402 memo must not hop reconstruct between turns"
+            );
             assert_eq!(
-                config.failover_api_keys,
-                vec![personal.to_string()],
-                "remaining console keys keep multi-add / collect order"
+                config.api_key.as_deref(),
+                Some(session),
+                "SuperGrok must stay primary until this request fails with HTTP 402"
+            );
+            assert!(
+                config.base_url.contains("cli-chat-proxy"),
+                "must stay on SuperGrok host: {}",
+                config.base_url
+            );
+        });
+    }
+
+    /// Fail-open default: a memo that only exists because the client printed
+    /// included SuperGrok period limits at 100% (remaining 0) is unproven.
+    /// Operator Usage / Billing pages they can see win. Do not skip SuperGrok
+    /// or hop to the console key from that printout. A real SuperGrok HTTP 402
+    /// on this request still hops after send (`apply_retry_decision`).
+    #[test]
+    fn prefer_live_does_not_skip_supergrok_on_false_exhaust_memo_when_fail_open() {
+        exhausted_identity::with_memo_lock(|| {
+            let session = "prefer-live-false-printout-jwt";
+            let console = "prefer-live-false-printout-console";
+            // Current product marks from this printout. Fail-open must still
+            // keep SuperGrok primary (do not skip on that unproven memo).
+            let _ =
+                exhausted_identity::sync_allowance_exhaust_from_usage(100.0, Some(session), true);
+
+            let mut config = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            assert!(
+                prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
+                "prefer_live must not skip SuperGrok on an unproven client 100% printout memo"
+            );
+            assert_eq!(
+                config.api_key.as_deref(),
+                Some(session),
+                "SuperGrok must stay primary; console hop is 402 or preferred_method=api_key only"
+            );
+            assert!(
+                config.base_url.contains("cli-chat-proxy"),
+                "must stay on SuperGrok host: {}",
+                config.base_url
+            );
+        });
+    }
+
+    /// Multi console keys stay ordered: dead console primary hops to the first
+    /// live console; remaining console keys stay in list; memoized SuperGrok
+    /// session is not re-queued.
+    #[test]
+    fn prefer_live_multi_console_keys_stable_order_first_live() {
+        exhausted_identity::with_memo_lock(|| {
+            let session = "b2-session-jwt";
+            let business = "b2-console-business";
+            let personal = "b2-console-personal";
+            exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            exhausted_identity::mark_exhausted(&fingerprint_secret(business));
+
+            let mut config = SamplerConfig {
+                api_key: Some(business.into()),
+                failover_api_keys: vec![session.into(), personal.into()],
+                base_url: "https://api.x.ai/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            let reason = prefer_live_identity_after_credit_exhaust(&mut config)
+                .expect("must prefer first live console key");
+            assert_eq!(config.api_key.as_deref(), Some(personal));
+            assert!(
+                config.failover_api_keys.is_empty(),
+                "remaining console keys keep multi-add / collect order: {:?}",
+                config.failover_api_keys
             );
             assert!(
                 !config.failover_api_keys.iter().any(|k| k.trim() == session),
@@ -465,29 +652,26 @@ mod tests {
         });
     }
 
-    /// B2: first console key also out of allowance → skip to next live console
-    /// (never SuperGrok extras while a usable console key remains).
+    /// First console key also out of allowance: skip to next live console.
     #[test]
     fn prefer_live_skips_exhausted_first_console_to_next() {
         exhausted_identity::with_memo_lock(|| {
-            let session = "b2-skip-session";
             let dead_console = "b2-dead-console";
+            let also_dead = "b2-also-dead-console";
             let live_console = "b2-live-console";
-            exhausted_identity::mark_exhausted(&fingerprint_secret(session));
             exhausted_identity::mark_exhausted(&fingerprint_secret(dead_console));
+            exhausted_identity::mark_exhausted(&fingerprint_secret(also_dead));
 
             let mut config = SamplerConfig {
-                api_key: Some(session.into()),
-                failover_api_keys: vec![dead_console.into(), live_console.into()],
-                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                api_key: Some(dead_console.into()),
+                failover_api_keys: vec![also_dead.into(), live_console.into()],
+                base_url: "https://api.x.ai/v1".into(),
                 model: "grok-4".into(),
-                session_identity_key: Some(session.into()),
                 failover_base_url: Some("https://api.x.ai/v1".into()),
-                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 ..Default::default()
             };
             let _ = prefer_live_identity_after_credit_exhaust(&mut config)
-                .expect("must reach second console");
+                .expect("must reach second live console");
             assert_eq!(config.api_key.as_deref(), Some(live_console));
             assert!(config.failover_api_keys.is_empty());
             assert!(config.base_url.contains("api.x.ai"));

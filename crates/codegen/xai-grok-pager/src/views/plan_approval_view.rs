@@ -27,7 +27,12 @@ The agent exited plan mode without writing a plan.
 /// Status-line label while plan mode is active without a live reverse-request
 /// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
 /// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
+/// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
+/// Status while a plan is parked and the side panel is shut. Not exclusive
+/// keyboard capture and not the click-or-/view-plan ceremony.
+pub const PLAN_READY_STATUS: &str = "Plan ready";
 
 /// Toast when freeform Enter cannot attach to a live plan-feedback channel
 /// (Revise/Clarify already unparked) and the message will queue as a normal
@@ -41,6 +46,11 @@ pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
 
 /// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
 pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
+
+/// Model-facing text after a real plan-panel Approve with no live waiter.
+/// Mid-turn Approve uses the same sentence in the shell tool result.
+pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
+    "The user approved the plan. Implement the plan in plan.md.";
 
 /// Status while Revise unparked and the agent is rewriting `plan.md`
 /// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.

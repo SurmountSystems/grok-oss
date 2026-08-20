@@ -221,7 +221,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         &mut self,
         request: &mut SubagentRequest,
     ) -> Result<(), SubagentResult> {
-        let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
+        let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner, l2_depth)) = self
             .active
             .values()
             .find(|child| child.child_session_id == request.parent_session_id)
@@ -231,6 +231,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child.request.runtime_overrides.loop_task_id.clone(),
                     child.cancellation.is_cancelled(),
                     child.request.owner.clone(),
+                    child.request.runtime_overrides.spawn_depth.unwrap_or(1),
                 )
             })
         else {
@@ -247,6 +248,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         self.spawned_by_session
             .insert(request.id.clone(), request.parent_session_id.clone());
+        request.runtime_overrides.immediate_parent_session_id =
+            Some(request.parent_session_id.clone());
+        if request.runtime_overrides.spawn_depth.is_none() {
+            request.runtime_overrides.spawn_depth = Some(l2_depth.saturating_add(1));
+        }
         request.parent_session_id = root_parent;
         request.surface_completion = false;
         // Nested children keep workflow lineage after reparent so

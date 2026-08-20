@@ -41,6 +41,56 @@ impl AgentView {
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
+        self.restore_unsent_composer_draft();
+    }
+
+    /// Named restore rule: never clobber a non-empty live composer.
+    pub(crate) fn apply_unsent_draft_if_empty(&mut self, draft: &str) {
+        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
+            self.prompt.text(),
+            draft,
+        ) {
+            self.prompt.set_text(draft);
+        }
+    }
+
+    /// Reload the session's durable unsent composer draft after a rebuild
+    /// or session bind. Tests skip disk I/O so they do not write under
+    /// the operator's grok home.
+    pub(crate) fn restore_unsent_composer_draft(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Ok(Some(draft)) =
+            xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+                &cwd,
+                session_id.0.as_ref(),
+            )
+        else {
+            return;
+        };
+        self.apply_unsent_draft_if_empty(&draft);
+    }
+
+    /// Persist the live composer so a rebuild or session relaunch can
+    /// restore it. Tests skip disk I/O.
+    pub(crate) fn persist_unsent_composer_draft(&self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+            &cwd,
+            session_id.0.as_ref(),
+            self.prompt.text(),
+        );
     }
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
@@ -148,6 +198,8 @@ impl AgentView {
             turn_start_ms: None,
             turn_start_ms_prompt: None,
             turn_started_at: None,
+            live_prompt_tasks: HashMap::new(),
+            pending_live_prompt_tasks: VecDeque::new(),
             first_activity_logged_for: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_paused_wall: std::time::Duration::ZERO,
@@ -502,6 +554,7 @@ impl AgentView {
         ));
         self.scrollback.begin_batch();
         self.begin_replay_window();
+        self.pause_live_prompt_reconnect();
     }
     /// Record that an `isReplay` update applied while a reload window is open.
     /// No-op otherwise.
@@ -703,6 +756,7 @@ impl AgentView {
     /// on the most common reconnect outcome, once per open tab).
     #[must_use = "purge retained memory iff a heavy transient dropped"]
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
+        self.resume_live_prompt_after_reconnect();
         if let Some(pid) = self.loading_placeholder_id.take() {
             self.scrollback.remove_entry(pid);
         }
@@ -831,6 +885,14 @@ impl AgentView {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use crate::app::agent::AgentState;
         if let Some(activity) = self.session.turn_activity() {
+            // Retrying is only a tracker override. A live foreground child
+            // is a healthy wait; do not paint Retrying as if the turn failed
+            // and is restarting.
+            if matches!(activity, TurnActivity::Retrying { .. })
+                && self.has_running_foreground_subagent()
+            {
+                return Some(TurnActivity::Waiting(WaitingReason::subagent()));
+            }
             return Some(activity);
         }
         if !matches!(self.session.state, AgentState::TurnRunning) {
@@ -1439,6 +1501,56 @@ mod resolve_turn_activity_tests {
         info.description = std::sync::Arc::from(description);
         info
     }
+    /// A live foreground subagent wait is healthy work. Sticky Retrying
+    /// chrome must not paint as if the turn failed and is restarting.
+    #[test]
+    fn healthy_subagent_wait_does_not_paint_retrying() {
+        let mut view = running_view();
+        view.subagent_sessions
+            .insert("child-1".into(), running_child("flatten G1"));
+        view.session
+            .set_retry_activity(Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: "reconnecting".into(),
+            }));
+        let activity = view.resolve_turn_activity().expect("waiting activity");
+        assert!(
+            !matches!(activity, TurnActivity::Retrying { .. }),
+            "healthy subagent wait must not paint Retrying, got {activity:?}"
+        );
+        assert_eq!(activity.as_label(), "waiting_subagent");
+        let TurnActivity::Waiting(reason) = activity else {
+            panic!("expected waiting activity, got {activity:?}");
+        };
+        assert!(
+            reason.label().contains("flatten G1") || reason.label().contains("subagent"),
+            "wait chrome must name the subagent wait, got {}",
+            reason.label()
+        );
+    }
+
+    /// A real sampler retry with no live subagent wait still shows Retrying
+    /// so the footer can name the model request.
+    #[test]
+    fn sampler_retry_without_subagent_wait_still_paints_retrying() {
+        let mut view = running_view();
+        view.session
+            .set_retry_activity(Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: "HTTP 429".into(),
+            }));
+        assert!(
+            matches!(
+                view.resolve_turn_activity(),
+                Some(TurnActivity::Retrying { attempt: 1, .. })
+            ),
+            "got {:?}",
+            view.resolve_turn_activity()
+        );
+    }
+
     #[test]
     fn subagent_wait_names_single_child() {
         let mut view = running_view();

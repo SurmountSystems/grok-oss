@@ -502,9 +502,9 @@ impl AcpUpdateTracker {
     /// Current activity within the turn, derived from in-flight state.
     ///
     /// Priority order (highest first):
-    /// 1. External overrides: Retrying, AutoCompacting (from ExtNotification)
-    /// 2. Known-blocking wait (task output / wait / sleep / foreground
-    ///    subagent) — outranks Thinking, ToolRunning, and Responding.
+    /// 1. Known-blocking wait (task output / wait / sleep / foreground
+    ///    subagent). A healthy wait must not be painted as Retrying.
+    /// 2. External overrides: Retrying, AutoCompacting (from ExtNotification)
     /// 3. WritingToolCall — outranks Thinking: the first delta means reasoning
     ///    ended (the thinking scrollback block stays open until the `ToolCall`).
     /// 4. Thinking (agent is in chain-of-thought)
@@ -520,14 +520,14 @@ impl AcpUpdateTracker {
     /// When [`Self::session_cwd`] is set, execute activity titles omit a leading
     /// `cd <cwd> &&` / `;` that only restates the session working directory.
     pub fn activity(&self) -> Option<TurnActivity> {
+        if let Some(waiting) = self.activity_known_blocking_wait() {
+            return Some(waiting);
+        }
         if self.retry_activity.is_some() {
             return self.retry_activity.clone();
         }
         if self.compaction_activity.is_some() {
             return self.compaction_activity.clone();
-        }
-        if let Some(waiting) = self.activity_known_blocking_wait() {
-            return Some(waiting);
         }
         if let Some(writing) = self.fresh_writing_tool_call() {
             return Some(TurnActivity::WritingToolCall(writing.clone()));

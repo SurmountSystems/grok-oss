@@ -30,7 +30,7 @@
     fn resume_restore_parks_waiter_without_docking_side_panel() {
         use crate::app::actions::Action;
         use crate::app::dispatch::dispatch;
-        use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
 
         let mut app = make_app_with_agent("sess-1");
         {
@@ -58,8 +58,13 @@
             );
             assert_eq!(
                 agent.plan_loop_status_label(),
+                Some(PLAN_READY_STATUS),
+                "restore status is Plan ready, not Side panel open"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
                 Some(PLAN_IDLE_REVIEW_STATUS),
-                "restore status is the idle click cue, not Side panel open"
+                "restore must not idle as Plan written. Click or /view-plan"
             );
         }
 
@@ -874,4 +879,547 @@
         agent.approve_plan();
         assert_exit_plan_approved(rx);
     }
+
+    /// Resume / rebuild re-park must not dock the pane when they were typing.
+    #[test]
+    fn resume_restore_does_not_open_pane_when_composer_has_draft() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("still typing after the reboot");
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.prompt.text(),
+            "still typing after the reboot",
+            "resume present must keep the mid-compose draft"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "resume must not auto-open the plan pane while they are typing"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some(crate::views::plan_approval_view::PLAN_READY_STATUS),
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS),
+        );
+    }
+
+    /// Idle resume waiter must not steal Enter. A non-empty composer submits
+    /// a normal prompt. Empty Enter still never Approves.
+    #[test]
+    fn resume_restore_mid_compose_enter_sends_normal_prompt() {
+        use crate::actions::ActionRegistry;
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("send this as a normal prompt");
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains("send this as a normal prompt"),
+                    "Enter must submit the composer as a normal prompt, got {text:?}"
+                );
+            }
+            other => panic!("Enter must SendPrompt, got {other:?}"),
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "submitting a normal prompt must not Approve or Revise the parked plan"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "Enter must not steal the draft as Revise notes"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Enter must not complete the exit_plan_mode waiter"
+        );
+    }
+
+    /// Live mid-turn present must not steal Enter either. Draft stays a
+    /// normal prompt, not Revise notes.
+    #[test]
+    fn live_present_mid_compose_enter_sends_normal_prompt() {
+        use crate::actions::ActionRegistry;
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("oh you interrupted my typing");
+        }
+        let (ext, mut rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Isolated plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().contains("oh you interrupted my typing"),
+            "present must keep the live composer draft"
+        );
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains("oh you interrupted my typing"),
+                    "Enter must submit the draft as a normal prompt, got {text:?}"
+                );
+            }
+            other => panic!("Enter must SendPrompt after live present, got {other:?}"),
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "normal submit must leave the plan waiter parked"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+        assert!(rx.try_recv().is_err(), "Enter must not Approve or Revise");
+    }
+
+    /// Empty Enter on the idle resume waiter never Approves.
+    #[test]
+    fn resume_restore_empty_enter_never_approves() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("");
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty Enter must not Approve"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "empty Enter must not complete the waiter"
+        );
+    }
+
+    /// Esc still dismisses the open plan pane and keeps the draft.
+    #[test]
+    fn live_present_esc_dismisses_pane_and_keeps_draft() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("keep this draft");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Isolated plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "live present docks the pane");
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Esc must dismiss the plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc dismisses the pane, it does not Exit the waiter"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "keep this draft",
+            "Esc must not wipe the composer draft"
+        );
+    }
+
+    fn draw_plan_present_frame(agent: &mut crate::app::agent_view::AgentView) {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.last_terminal_size = (120, 40);
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &crate::actions::ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+    }
+
+    /// Iso 2026-08-19: plan present with a draft and the side panel shut
+    /// must still accept printable keys into the composer.
+    #[test]
+    fn plan_present_closed_panel_nonempty_composer_accepts_printable_keys() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::KeyOwner;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "fixture: panel is shut after Esc"
+        );
+        // Click-composer-then-close left Prompt focus on a hidden park.
+        // A shut panel must not keep exclusive plan key ownership.
+        agent
+            .plan_approval_view
+            .as_mut()
+            .expect("waiter stays")
+            .focus = PlanApprovalFocus::Prompt;
+        assert_eq!(
+            agent.key_owner(),
+            KeyOwner::Pane,
+            "shut plan panel must not steal the composer keyboard"
+        );
+
+        let x = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let _ = agent.handle_input(&x, &ActionRegistry::defaults());
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "present must keep the mid-compose draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains('x'),
+            "printable keys must land in the composer with the panel shut, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "typing must not Approve or Exit the parked plan"
+        );
+    }
+
+    /// Iso 2026-08-19: mouse drag on the composer is not eaten by the plan
+    /// key owner, including while the present pane is still docked.
+    #[test]
+    fn plan_present_composer_mouse_drag_is_not_eaten() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{
+            Event, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "fixture: live present docks");
+        draw_plan_present_frame(agent);
+        let ta = agent.prompt.textarea_area();
+        assert!(
+            ta.area() > 0,
+            "composer textarea must paint so a drag can hit it"
+        );
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.area() > 0,
+            "composer pane must paint so a drag can hit it"
+        );
+
+        let mouse = |kind: MouseEventKind, column: u16, row: u16| Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let row = ta.y;
+        let start = ta.x.saturating_add(1);
+        let end = ta.x.saturating_add(8).min(ta.x.saturating_add(ta.width.saturating_sub(1)));
+        let registry = ActionRegistry::defaults();
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Up(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.prompt.textarea.selection_range().is_some(),
+            "composer mouse drag must select text; plan present must not eat it"
+        );
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "a composer drag must not wipe the draft, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Iso 2026-08-19 follow-up: a drag on the transcript while the plan
+    /// side panel is still docked must select scrollback text, not get eaten
+    /// by the parked line-viewer waiter.
+    #[test]
+    fn plan_present_transcript_mouse_drag_is_not_eaten() {
+        use crate::actions::ActionRegistry;
+        use crate::scrollback::text_selection::{
+            ResolvedSelectableLine, ResolvedSelectionModel,
+        };
+        use crossterm::event::{
+            Event, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "fixture: live present docks");
+        draw_plan_present_frame(agent);
+
+        let sb = agent.pane_areas.scrollback;
+        let prompt = agent.pane_areas.prompt;
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area);
+        assert!(
+            sb.area() > 0,
+            "scrollback must paint so a drag can hit it; sb={sb:?}"
+        );
+        let row = sb.y.saturating_add(sb.height / 2).max(sb.y.saturating_add(1));
+        let start = sb.x.saturating_add(1);
+        let end = sb
+            .x
+            .saturating_add(8)
+            .min(sb.x.saturating_add(sb.width.saturating_sub(1)));
+        let hit = |col: u16| (col, row).into();
+        assert!(
+            sb.contains(hit(start)) && sb.contains(hit(end)),
+            "drag must stay inside the transcript; sb={sb:?} start={start} end={end} row={row}"
+        );
+        if let Some(m) = modal {
+            assert!(
+                !m.contains(hit(start)) && !m.contains(hit(end)),
+                "drag must miss the plan popup; modal={m:?} start={start} end={end} row={row}"
+            );
+        }
+        assert!(
+            !prompt.contains(hit(start)) && !prompt.contains(hit(end)),
+            "drag must miss the composer; prompt={prompt:?} start={start} end={end} row={row}"
+        );
+
+        let mut model = ResolvedSelectionModel::default();
+        model.push_line(ResolvedSelectableLine {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            screen_y: row,
+            screen_x: sb.x,
+            selectable_cols: 0..40,
+            text: "selectable scrollback line for plan-present drag".into(),
+            joiner_to_previous: None,
+        });
+        agent.update_scrollback_selection_state(model, Default::default());
+
+        let mouse = |kind: MouseEventKind, column: u16, row: u16| Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let registry = ActionRegistry::defaults();
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.drag_selection.is_some(),
+            "transcript mouse drag must select scrollback text; docked plan present must not eat it"
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Up(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "a transcript drag must not wipe the draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "transcript drag must not dismiss the docked plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "transcript drag must not Approve or Exit the parked plan"
+        );
+    }
+
+    /// Iso 2026-08-19: idle cue must not be Plan written. Click or /view-plan
+    /// while the side panel is shut. Shut-panel cue is Plan ready.
+    #[test]
+    fn plan_present_closed_panel_idle_cue_is_not_plan_written_click() {
+        use crate::actions::ActionRegistry;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("draft stays");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(agent.line_viewer.is_none(), "fixture: panel is shut");
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "shut panel idle cue must be Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "shut panel must not idle as Plan written. Click or /view-plan"
+        );
+        let label = agent.plan_loop_status_label().unwrap_or("");
+        assert!(
+            !label.contains("Click or /view-plan"),
+            "shut-panel status must not be the exclusive click cue, got {label:?}"
+        );
+    }
+
+    /// Rebuild / session rebind restores an unsent draft into an empty composer.
+    #[test]
+    fn session_rebind_restores_unsent_composer_draft() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("unsent_prompt_draft");
+        xai_grok_shell::session::unsent_prompt_draft::write_draft_at(
+            &path,
+            "still typing a plan note",
+        )
+        .unwrap();
+        let mut agent = make_agent(Some("sess-1"));
+        agent.prompt.set_text("");
+        let draft = xai_grok_shell::session::unsent_prompt_draft::load_draft_at(&path)
+            .unwrap()
+            .expect("draft file");
+        agent.apply_unsent_draft_if_empty(&draft);
+        assert_eq!(
+            agent.prompt.text(),
+            "still typing a plan note",
+            "empty composer after rebuild must restore the unsent draft"
+        );
+    }
+
 

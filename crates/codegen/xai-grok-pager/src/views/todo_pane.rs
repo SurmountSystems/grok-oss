@@ -8,6 +8,10 @@ use ratatui::text::{Line, Span};
 use xai_grok_shell::tools::{TodoItem, TodoStatus};
 
 use super::list_pane::ListItem;
+use super::todo_exec_metrics::{
+    format_todo_exec_metrics_chrome, load_todo_exec_metrics_fail_open, todo_prompt_task_id,
+    todo_row_content_with_metrics,
+};
 
 // ---------------------------------------------------------------------------
 // TodoPaneStyle — per-status colors
@@ -84,13 +88,24 @@ pub struct TodoListEntry {
 impl TodoListEntry {
     /// Create a new entry from a `TodoItem`.
     pub fn new(id: u64, item: TodoItem, style: &TodoPaneStyle) -> Self {
+        Self::with_metrics_chrome(id, item, style, None)
+    }
+
+    /// Create an entry whose content line includes exec-metrics chrome.
+    pub fn with_metrics_chrome(
+        id: u64,
+        item: TodoItem,
+        style: &TodoPaneStyle,
+        metrics_chrome: Option<&str>,
+    ) -> Self {
         let status_style = match item.status {
             TodoStatus::Pending => style.pending,
             TodoStatus::InProgress => style.in_progress,
             TodoStatus::Completed => style.completed,
             TodoStatus::Cancelled => style.cancelled,
         };
-        let styled = Line::from(Span::styled(item.content.clone(), status_style.text_style));
+        let content = todo_row_content_with_metrics(&item.content, metrics_chrome);
+        let styled = Line::from(Span::styled(content, status_style.text_style));
         Self {
             id,
             item,
@@ -136,6 +151,8 @@ impl ListItem for TodoListEntry {
 // TodoPane — self-contained pane owning items, state, and rendering
 // ---------------------------------------------------------------------------
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
@@ -226,6 +243,11 @@ pub struct TodoPane {
     badge_flash_until: Option<Instant>,
     /// Last theme kind seen — used to detect theme switches and restyle.
     last_theme: ThemeKind,
+    /// Fail-open exec-metrics chrome keyed by prompt_task ULID.
+    exec_metrics_chrome: HashMap<String, String>,
+    /// Isolated grok_oss.db path for fixture tests. Live paint uses Token
+    /// Economy config when this is unset.
+    exec_metrics_database_path: Option<PathBuf>,
 }
 
 impl Default for TodoPane {
@@ -261,6 +283,8 @@ impl TodoPane {
             prev_counts: TodoCounts::default(),
             badge_flash_until: None,
             last_theme: crate::theme::Theme::current_kind(),
+            exec_metrics_chrome: HashMap::new(),
+            exec_metrics_database_path: None,
         }
     }
 
@@ -285,6 +309,50 @@ impl TodoPane {
         }
         self.prev_counts = new_counts;
         self.todos = items;
+        self.refresh_exec_metrics_chrome();
+    }
+
+    /// Fixture tests: load exec metrics from this grok_oss.db instead of the
+    /// live Token Economy path.
+    #[cfg(test)]
+    pub(crate) fn set_exec_metrics_database_path_for_test(&mut self, path: PathBuf) {
+        self.exec_metrics_database_path = Some(path);
+        self.refresh_exec_metrics_chrome();
+    }
+
+    /// Compact exec-metrics suffix for a todo that has a prompt_task ULID.
+    pub fn exec_metrics_chrome_for(&self, item: &TodoItem) -> Option<&str> {
+        todo_prompt_task_id(item)
+            .and_then(|id| self.exec_metrics_chrome.get(id).map(String::as_str))
+    }
+
+    fn open_exec_metrics_store(&self) -> Option<xai_grok_shell::grok_oss::GrokOssStore> {
+        if let Some(path) = &self.exec_metrics_database_path {
+            return xai_grok_shell::grok_oss::try_open_at(path);
+        }
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
+    }
+
+    fn refresh_exec_metrics_chrome(&mut self) {
+        self.exec_metrics_chrome.clear();
+        let ids: Vec<String> = self
+            .todos
+            .iter()
+            .filter_map(|t| todo_prompt_task_id(t).map(str::to_owned))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(store) = self.open_exec_metrics_store() else {
+            return;
+        };
+        for id in ids {
+            if let Some(metrics) = load_todo_exec_metrics_fail_open(&store, &id) {
+                self.exec_metrics_chrome
+                    .insert(id, format_todo_exec_metrics_chrome(&metrics));
+            }
+        }
     }
 
     /// Compute status counts from a list of items.
@@ -409,8 +477,13 @@ impl TodoPane {
             {
                 continue;
             }
-            self.entries
-                .push(TodoListEntry::new(idx as u64, item.clone(), &self.style));
+            let chrome = self.exec_metrics_chrome_for(item).map(str::to_owned);
+            self.entries.push(TodoListEntry::with_metrics_chrome(
+                idx as u64,
+                item.clone(),
+                &self.style,
+                chrome.as_deref(),
+            ));
         }
     }
 
@@ -561,5 +634,86 @@ mod tests {
             empty_placeholder_message(false, counts(0, 2)),
             "2 cancelled."
         );
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Named contract: a session todo row paints tokens spent vs estimated,
+    /// honest wall, and Token Economy cost from stored prompt_task metrics.
+    #[test]
+    fn session_todo_list_entry_paints_tokens_wall_and_token_economy_cost() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = tmp.path().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).unwrap();
+        let task = store
+            .insert_prompt_task("ship the board chrome", "queued", None, None)
+            .unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &task.id,
+                &xai_grok_shell::grok_oss::PromptExecRecord {
+                    tokens_in: 1_200,
+                    tokens_out: 400,
+                    model: "grok-4.6".into(),
+                    reasoning_effort: Some("medium".into()),
+                    wall_ms: 943_000,
+                    estimated_tokens_in: Some(1_000),
+                    estimated_tokens_out: Some(350),
+                    estimated_wall_ms: Some(900_000),
+                    cost_usd_ticks: Some(5_000_000_000),
+                    first_reasoning_token_ms: None,
+                    tool_call_ms: None,
+                    thinking_ms: None,
+                    prefix_cost_hint_ticks: None,
+                },
+            )
+            .unwrap();
+
+        let item = TodoItem {
+            content: "ship the board chrome".into(),
+            priority: xai_grok_shell::tools::TodoPriority::default(),
+            status: TodoStatus::InProgress,
+            meta: Some(serde_json::json!({
+                crate::views::todo_exec_metrics::PROMPT_TASK_ID_META_KEY: task.id
+            })),
+            size: None,
+        };
+        let mut pane = TodoPane::new();
+        pane.set_exec_metrics_database_path_for_test(db);
+        pane.update_todos(vec![item.clone()]);
+        let chrome = pane
+            .exec_metrics_chrome_for(&item)
+            .expect("fail-open load of stored metrics");
+        assert!(
+            chrome.contains("1600 spent / 1350 estimated tokens"),
+            "tokens spent vs estimated, got {chrome:?}"
+        );
+        assert!(
+            chrome.contains("15m43s"),
+            "honest wall compact minutes, got {chrome:?}"
+        );
+        assert!(
+            !chrome.contains("943s"),
+            "must not print raw 943s, got {chrome:?}"
+        );
+        assert!(
+            chrome.contains("$0.5000 Token Economy"),
+            "Token Economy ticks, got {chrome:?}"
+        );
+        assert!(
+            chrome.contains("3200 tokens per dollar"),
+            "tokens per dollar, got {chrome:?}"
+        );
+
+        let entry =
+            TodoListEntry::with_metrics_chrome(0, item, &TodoPaneStyle::default(), Some(chrome));
+        let painted = line_text(entry.content());
+        assert!(painted.contains("ship the board chrome"));
+        assert!(painted.contains("1600 spent / 1350 estimated tokens"));
+        assert!(painted.contains("15m43s"));
+        assert!(painted.contains("$0.5000 Token Economy"));
+        assert!(painted.contains("3200 tokens per dollar"));
     }
 }

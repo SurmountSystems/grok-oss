@@ -7,6 +7,7 @@ use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::AppView;
 use crate::app::global_work_pause::{GlobalWorkPause, PausedSessionSnapshot};
+use crate::scrollback::block::RenderBlock;
 use std::time::Instant;
 
 /// Toggle fearless global pause across every agent session in this process.
@@ -61,6 +62,11 @@ fn dispatch_engage_global_pause(app: &mut AppView) -> Vec<Effect> {
     // Cancel running turns on every held session (not only the focused one).
     // Prefer stopping subagents with the turn so work truly freezes.
     for id in to_cancel {
+        // Write the existing continue-interrupted-turn marker before the
+        // in-flight stash is dropped. The live [pause] chip holds work in
+        // RAM; this file is what last-session on start and `/start` use if
+        // this process then dies. Same payload as `/rebuild` mid-turn.
+        persist_canceled_turn_resume_for_pause(app, id);
         // Drop the local in-flight stash after capture so cancel does not
         // leave a dangling rewind candidate beside the resume-once queue.
         if let Some(agent) = app.agents.get_mut(&id) {
@@ -70,6 +76,67 @@ fn dispatch_engage_global_pause(app: &mut AppView) -> Vec<Effect> {
         effects.extend(do_cancel_turn_for(app, id, true, false));
     }
     effects
+}
+
+/// Prompt text for continue-interrupted-turn when pause cancels a running turn.
+///
+/// Prefer the in-flight rewind stash. After first server activity that stash
+/// is cleared, so fall back to the last real user prompt in scrollback.
+/// Skip bash/cron bubbles so a `!` or scheduled line is not re-queued as
+/// the interrupted turn.
+fn pause_cancel_resume_prompt(agent: &crate::app::agent_view::AgentView) -> Option<String> {
+    if let Some(stashed) = agent.session.in_flight_prompt.as_ref() {
+        let text = stashed.text.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    last_user_prompt_full_text(&agent.scrollback)
+}
+
+fn last_user_prompt_full_text(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> Option<String> {
+    let len = scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::UserPrompt(block) = &entry.block {
+            if block.is_bash || block.is_cron {
+                continue;
+            }
+            let text = block.text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn persist_canceled_turn_resume_for_pause(app: &AppView, id: AgentId) {
+    use xai_grok_shell::session::canceled_turn_resume::{
+        ProcessShutdownResumeArm, arm_and_persist_process_shutdown_cancel_resume,
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return;
+    };
+    if !agent.session.state.is_turn_running() {
+        return;
+    }
+    let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+        return;
+    };
+    let Some(prompt_text) = pause_cancel_resume_prompt(agent) else {
+        return;
+    };
+    arm_and_persist_process_shutdown_cancel_resume(ProcessShutdownResumeArm {
+        cwd: agent.session.cwd.to_string_lossy().into_owned(),
+        session_id,
+        prompt_text,
+        prompt_id: agent.session.current_prompt_id.clone(),
+    });
 }
 
 pub(super) fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {

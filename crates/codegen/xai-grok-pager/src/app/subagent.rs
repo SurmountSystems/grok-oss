@@ -521,6 +521,27 @@ pub(crate) fn is_l2_list_row(
     )
 }
 
+/// True when this overlay child is an L2 coordinator the operator may ask.
+///
+/// Missing registry rows stay observational. Depth 2 or a parent that is
+/// itself a listed child is an L3 specialist and stays unbothered.
+pub(crate) fn overlay_child_is_l2_coordinator(
+    sessions: &std::collections::HashMap<String, SubagentInfo>,
+    child_sid: &str,
+) -> bool {
+    let Some(info) = sessions.get(child_sid) else {
+        return false;
+    };
+    if info.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    let child_ids: std::collections::HashSet<&str> = sessions
+        .values()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    is_l2_list_row(info, &child_ids)
+}
+
 /// How many live L3 specialists an L2 is using.
 ///
 /// Counts running, non-workflow rows whose parent session is this L2.

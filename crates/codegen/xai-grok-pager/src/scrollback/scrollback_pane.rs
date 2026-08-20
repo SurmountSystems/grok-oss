@@ -703,18 +703,15 @@ impl ScrollbackPane {
             DisplayMode::Expanded
         };
 
-        // When timestamps are shown on message blocks, reserve right margin in the
-        // block's content width so wrapped text doesn't collide with the overlaid
-        // timestamp (matches behavior in EntryRenderer for normal content).
-        let ts_reserved = if appearance.show_timestamps
-            && matches!(
-                &entry.block,
-                RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-            ) {
-            10
-        } else {
-            0
-        };
+        // When timestamps / bubble copy are shown on message blocks, reserve
+        // right margin so wrapped text does not collide with that chrome
+        // (matches EntryRenderer for normal content).
+        let is_ts_message = matches!(
+            &entry.block,
+            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+        );
+        let ts_reserved =
+            crate::scrollback::wrappers::message_right_chrome_reserve(appearance, is_ts_message);
         let content_width_for_block = layout.content_width().saturating_sub(ts_reserved);
 
         let ctx = entry.context_with_mode_and_budget(
@@ -918,7 +915,8 @@ impl ScrollbackPane {
             }
             // Render line in the content area (not overlapping with accent)
             buf.set_line_safe(content_area.x, y, &line.content, content_area.width);
-            if let Some(rect) = line.bubble_copy_button_rect(content_area.x, y) {
+            if let Some(rect) = line.bubble_copy_button_rect(content_area.x, content_area.width, y)
+            {
                 copy_hits.push((rect, selection_entry_idx));
             }
             if let (Some(range_id), Some(cols)) = (
@@ -953,10 +951,16 @@ impl ScrollbackPane {
             && let Some(ts) = entry.created_at
         {
             let first_content_y = content_area.y + if use_vpad { 1 } else { 0 };
+            let copy_inset =
+                crate::scrollback::wrappers::bubble_copy_trailing_inset(&ctx.appearance, true);
             let ts_hovered = mouse_pos.is_some_and(|(mx, my)| {
                 my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
+                    && mx
+                        >= content_area.x
+                            + content_area.width.saturating_sub(
+                                crate::scrollback::wrappers::TIMESTAMP_SHORT_RESERVE + copy_inset,
+                            )
+                    && mx < content_area.x + content_area.width.saturating_sub(copy_inset)
             });
             let ts_str = if ts_hovered {
                 ts.format("  %H:%M:%S | %b %d").to_string()
@@ -964,10 +968,10 @@ impl ScrollbackPane {
                 ts.format("  %-I:%M %p").to_string()
             };
             let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1
+            if content_area.width > ts_width + copy_inset + 1
                 && first_content_y < content_area.y + content_area.height
             {
-                let ts_x = content_area.x + content_area.width - ts_width;
+                let ts_x = content_area.x + content_area.width - ts_width - copy_inset;
                 let ts_style = Style::default().fg(theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
             }
@@ -983,7 +987,13 @@ impl ScrollbackPane {
             if paint_row >= paint_max {
                 break;
             }
-            line.paint_bubble_copy_button(buf, content_area.x, paint_row, icon_style);
+            line.paint_bubble_copy_button(
+                buf,
+                content_area.x,
+                content_area.width,
+                paint_row,
+                icon_style,
+            );
         }
 
         // vpad bottom is just empty space - no need to track y further

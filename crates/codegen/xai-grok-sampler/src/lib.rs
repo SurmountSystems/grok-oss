@@ -60,7 +60,8 @@ pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use prefer_live_primary::{
     ensure_supergrok_recovery_after_console_credit_exhaust,
-    prefer_live_identity_after_credit_exhaust, primary_is_memoized_credit_exhausted,
+    prefer_console_identity_for_use_console_pin, prefer_live_identity_after_credit_exhaust,
+    prefer_supergrok_identity_for_stay_pin, primary_is_memoized_credit_exhausted,
     prune_exhausted_failover_candidates,
 };
 pub use retry::{

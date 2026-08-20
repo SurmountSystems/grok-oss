@@ -95,6 +95,10 @@ A second SuperGrok plan is visible only after a second `grok-oss login` that sto
 
 Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json`). There is no extra daemon. Rebuild SIGUSR1 is not this. That signal means fleet relaunch after `grok-oss rebuild`.
 
+A grok-oss limits JSON or compact printout of included 100%, remaining 0, or SuperGrok dollar credits $0 must not mark SuperGrok used up or hop to console so this session cannot self-fix. grok-oss limits is a client printout, not xAI billing truth. Matching `nextReset` is not proof of a shared pool. Operator Usage (grok.com for that workspace) and the console.x.ai Billing page they can see win. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. Never invent remaining. Never call any pool used up.
+
+Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits.
+
 See [Slash Commands → `/limits`](04-slash-commands.md#limits) and [Configuration → Token Economy](05-configuration.md#token-economy).
 
 ---

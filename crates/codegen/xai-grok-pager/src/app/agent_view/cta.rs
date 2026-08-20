@@ -55,6 +55,31 @@ impl AgentView {
         });
     }
 
+    /// After a few characters in the normal composer, suggest the most
+    /// complete stored draft or template. Novel prefixes hide via
+    /// [`crate::views::prompt_suggestion::PromptSuggestionController::ghost_for`].
+    /// Fail-open when `grok_oss.db` cannot be opened.
+    pub(crate) fn refresh_stored_prompt_suggestion(&mut self) {
+        if self.prompt_input_mode != super::PromptInputMode::Normal {
+            return;
+        }
+        if !self.prompt.prompt_suggestion.enabled {
+            return;
+        }
+        let typed = self.prompt.text().to_owned();
+        if typed.chars().count() < xai_grok_shell::grok_oss::STORED_PROMPT_SUGGEST_MIN_CHARS {
+            return;
+        }
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        let Some(store) = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg) else {
+            return;
+        };
+        let suggestion = store.suggest_prompt_from_stored(&typed).ok().flatten();
+        self.prompt
+            .prompt_suggestion
+            .apply_stored_lookup(&typed, suggestion.as_ref().map(|s| s.full_text.as_str()));
+    }
+
     /// Notify the suggestion controller that the prompt text changed.
     /// Returns an Effect to dispatch if the controller wants a debounce.
     ///

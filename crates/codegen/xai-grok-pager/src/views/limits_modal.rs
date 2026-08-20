@@ -14,8 +14,8 @@ use ratatui::text::{Line, Span};
 
 use crate::theme::Theme;
 use crate::views::limits_snapshot::{
-    AllowanceMeterTone, LimitsSnapshot, countdown_is_zero, earliest_reset_at, format_limits_detail,
-    format_reset_countdown,
+    AllowanceMeterTone, LimitsSnapshot, countdown_is_zero, earliest_reset_at,
+    format_limits_detail_with_meter_source, format_reset_countdown,
 };
 use crate::views::modal_window::{
     self, ModalSizing, ModalWindowConfig, ModalWindowOutcome, ModalWindowState, Shortcut,
@@ -86,7 +86,16 @@ impl LimitsModalState {
 
     /// Content lines for render / tests (includes live countdown when known).
     pub fn content_lines(&self, now: DateTime<Utc>) -> Vec<String> {
-        let mut body = format_limits_detail(&self.snapshot);
+        self.content_lines_emphasizing_meter_source(now, None)
+    }
+
+    /// Content lines with a `/limits meter` pin on the **Active:** line.
+    pub fn content_lines_emphasizing_meter_source(
+        &self,
+        now: DateTime<Utc>,
+        meter_source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+    ) -> Vec<String> {
+        let mut body = format_limits_detail_with_meter_source(&self.snapshot, meter_source);
         if let Some(reset) = earliest_reset_at(&self.snapshot) {
             let countdown = format_reset_countdown(now, reset);
             // Inject countdown under the first "Next reset:" line.
@@ -215,7 +224,10 @@ pub fn render_limits_modal(
     // truncate at the chrome edge (dogfood: shared-pool note cut at "person").
     let width = content.width as usize;
     let mut display_lines: Vec<String> = Vec::new();
-    for raw in state.content_lines(now) {
+    for raw in state.content_lines_emphasizing_meter_source(
+        now,
+        xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+    ) {
         display_lines.extend(wrap_plain_line(&raw, width));
     }
 
@@ -353,6 +365,8 @@ fn line_style(text: &str, theme: &Theme) -> Style {
             .unwrap_or(0.0);
         Style::default().fg(tone_color(AllowanceMeterTone::from_used_pct(used), theme))
     } else if text.contains("Note:")
+        || text.contains("independently polled the same included percent")
+        || text.contains("Usage-page proof")
         || text.contains("share one SuperGrok weekly pool")
         || text.contains("shared consumer pool")
         || text.contains("unified billing")
@@ -415,7 +429,7 @@ mod tests {
 
     #[test]
     fn wrap_plain_line_breaks_on_spaces_not_mid_word() {
-        let long = "Note: personal + business share one SuperGrok weekly pool and Extra Usage Credits (not console team prepaid).";
+        let long = "Note: SuperGrok personal and SuperGrok business independently polled the same included percent and reset (client printout, not Usage-page proof they share one weekly window). Not console team prepaid.";
         let wrapped = wrap_plain_line(long, 40);
         assert!(wrapped.len() > 1, "{wrapped:?}");
         for line in &wrapped {
@@ -432,7 +446,7 @@ mod tests {
         }
         let joined = wrapped.join(" ");
         assert!(joined.contains("personal"), "{joined}");
-        assert!(joined.contains("weekly pool"), "{joined}");
+        assert!(joined.contains("weekly window"), "{joined}");
     }
 
     #[test]

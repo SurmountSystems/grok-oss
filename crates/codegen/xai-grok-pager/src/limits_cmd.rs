@@ -4,9 +4,12 @@
 //! (`fetch_credits_config_with_session`), and Management team prepaid. Never
 //! prints raw API keys, JWTs, or management secrets.
 //!
-//! Meters stay distinct: SuperGrok included weekly % ≠ SuperGrok $ extras ≠
+//! Meters stay distinct: included SuperGrok period limits % ≠ SuperGrok dollar credits ≠
 //! console team prepaid ≠ team postpaid OAuth/API class ≠ team default credits
 //! (dashboard allotment) ≠ Management usage series window.
+//! Named words persist `$GROK_HOME/limits_pins.json` (not `[auth]`). grok-oss
+//! limits JSON is a client printout, not xAI billing truth. A client 100% /
+//! remaining 0 / $0 printout must not mark SuperGrok used up.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,8 +25,23 @@ use crate::views::credit_bar::{
 use crate::views::limits_snapshot::{
     ConsoleTeamPostpaidGap, ConsoleTeamPostpaidMeter, ConsoleTeamUsageSeriesSummary,
     DiscoveredIdentities, LimitsSnapshot, PrincipalLimitsInput,
-    chrome_included_from_limits_snapshot, format_limits_detail, honesty_notes_for_snapshot,
+    active_driver_line_for_snapshot_with_meter_source, chrome_included_from_limits_snapshot,
+    format_limits_detail_with_meter_source, honesty_notes_for_snapshot,
 };
+
+/// Same named words on TUI `/limits` and CLI `grok-oss limits`.
+pub const LIMITS_WORD_STAY_SUPERGROK: &str = "stay-supergrok";
+/// Persist that the operator wants the console key.
+pub const LIMITS_WORD_USE_CONSOLE: &str = "use-console";
+/// Persist which meter chrome should emphasize.
+pub const LIMITS_WORD_METER: &str = "meter";
+/// Named ForceRefresh collect (same policy as explicit `/limits` open).
+pub const LIMITS_WORD_REFRESH: &str = "refresh";
+
+/// Usage listing for unknown extra args (slash and CLI share these words).
+pub fn limits_named_words_usage() -> &'static str {
+    "/limits, /limits --json, /limits stay-supergrok, /limits use-console, /limits meter included|dollar-credits|console|combined, or /limits refresh"
+}
 
 /// CLI args for `grok limits` / `grok limits multipoll`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
@@ -38,7 +56,19 @@ pub struct LimitsArgs {
 
 /// Subcommands under `grok limits`.
 #[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
+#[command(rename_all = "kebab-case")]
 pub enum LimitsCommand {
+    /// Persist stay SuperGrok and clear a false exhaust memo.
+    StaySupergrok,
+    /// Persist that the operator wants the console key (sidecar, not `[auth]`).
+    UseConsole,
+    /// Persist which meter chrome `/limits` should emphasize.
+    Meter {
+        #[arg(value_enum)]
+        source: LimitsMeterWord,
+    },
+    /// Force-refresh live meters (same ForceRefresh as explicit collect).
+    Refresh,
     /// Sample live limits N times and classify path (P1) vs free-period series (P2).
     ///
     /// Writes JSONL samples plus a summary under `--out-dir` (default
@@ -48,6 +78,116 @@ pub enum LimitsCommand {
     /// room). Free SuperGrok period staying flat is measurement only and does
     /// **not** fail the process.
     Multipoll(MultipollArgs),
+}
+
+/// `grok-oss limits meter` / `/limits meter` source words.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum LimitsMeterWord {
+    Included,
+    DollarCredits,
+    Console,
+    Combined,
+}
+
+impl LimitsMeterWord {
+    pub fn as_word(self) -> &'static str {
+        match self {
+            Self::Included => "included",
+            Self::DollarCredits => "dollar-credits",
+            Self::Console => "console",
+            Self::Combined => "combined",
+        }
+    }
+
+    pub fn to_meter_source(self) -> xai_grok_shell::auth::limits_pins::MeterSource {
+        match self {
+            Self::Included => xai_grok_shell::auth::limits_pins::MeterSource::Included,
+            Self::DollarCredits => xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits,
+            Self::Console => xai_grok_shell::auth::limits_pins::MeterSource::Console,
+            Self::Combined => xai_grok_shell::auth::limits_pins::MeterSource::Combined,
+        }
+    }
+
+    pub fn from_word(s: &str) -> Option<Self> {
+        match s {
+            "included" => Some(Self::Included),
+            "dollar-credits" => Some(Self::DollarCredits),
+            "console" => Some(Self::Console),
+            "combined" => Some(Self::Combined),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed `/limits` leftover words (same strings as CLI subcommands).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitsNamedAction {
+    Show,
+    Json,
+    StaySupergrok,
+    UseConsole,
+    Meter(LimitsMeterWord),
+    Refresh,
+}
+
+/// Parse TUI `/limits` leftover args using the same words as `grok-oss limits`.
+pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => Ok(LimitsNamedAction::Show),
+        ["--json"] | ["json"] => Ok(LimitsNamedAction::Json),
+        [w] if *w == LIMITS_WORD_STAY_SUPERGROK => Ok(LimitsNamedAction::StaySupergrok),
+        [w] if *w == LIMITS_WORD_USE_CONSOLE => Ok(LimitsNamedAction::UseConsole),
+        [w] if *w == LIMITS_WORD_REFRESH => Ok(LimitsNamedAction::Refresh),
+        [w] if *w == LIMITS_WORD_METER => Err(format!(
+            "Unknown argument: {args}. Use {}",
+            limits_named_words_usage()
+        )),
+        [w, src] if *w == LIMITS_WORD_METER => match LimitsMeterWord::from_word(src) {
+            Some(src) => Ok(LimitsNamedAction::Meter(src)),
+            None => Err(format!(
+                "Unknown argument: {args}. Use {}",
+                limits_named_words_usage()
+            )),
+        },
+        _ => Err(format!(
+            "Unknown argument: {args}. Use {}",
+            limits_named_words_usage()
+        )),
+    }
+}
+
+/// Persist a named pin action. Refresh/show/json do not persist.
+pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, String> {
+    use xai_grok_shell::auth::limits_pins::{
+        StaySupergrokApply, apply_meter_source, apply_stay_supergrok, apply_use_console,
+    };
+    match action {
+        LimitsNamedAction::Show | LimitsNamedAction::Json | LimitsNamedAction::Refresh => {
+            Ok(String::new())
+        }
+        LimitsNamedAction::StaySupergrok => match apply_stay_supergrok() {
+            Ok(StaySupergrokApply::Applied) => Ok(
+                "Stay SuperGrok pin written. Exhaust memo cleared. SuperGrok will be used again without requiring console credits."
+                    .into(),
+            ),
+            Ok(StaySupergrokApply::BlockedByPreferredApiKey) => Err(
+                "Console is pinned by [auth] preferred_method = api_key. stay-supergrok does not override that stock key."
+                    .into(),
+            ),
+            Err(e) => Err(format!("Could not write stay SuperGrok pin: {e}")),
+        },
+        LimitsNamedAction::UseConsole => apply_use_console()
+            .map(|()| {
+                "Use-console pin written. The operator asked for the console key (sidecar, not a new [auth] key)."
+                    .into()
+            })
+            .map_err(|e| format!("Could not write use-console pin: {e}")),
+        LimitsNamedAction::Meter(src) => apply_meter_source(src.to_meter_source())
+            .map(|()| format!("Meter source pin written: {}.", src.as_word()))
+            .map_err(|e| format!("Could not write meter source pin: {e}")),
+    }
 }
 
 /// Args for `grok limits multipoll`.
@@ -166,7 +306,9 @@ pub struct LimitsCliReport {
     /// Distinct from [`Self::live_sampling`] when SuperGrok session is live
     /// but free period is full and SuperGrok dollar extras drive after-burner.
     pub active_driver: &'static str,
-    /// Human label for the active driver (matches `/limits` **Active:** line).
+    /// Human label for the active driver (matches `/limits` **Active:** line,
+    /// including a `meter_source` pin when one is set). grok-oss limits JSON
+    /// is a client printout, not xAI billing truth.
     pub active_driver_label: String,
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
@@ -256,7 +398,8 @@ pub struct ConsoleCliSection {
     pub key_available: bool,
     /// Live sampling is currently the console key.
     pub is_live: bool,
-    /// Console team prepaid remaining USD when Management meter known.
+    /// Console team prepaid remaining USD when Management meter known
+    /// (`GET …/prepaid/balance` `total.val` abs). Not console.x.ai Billing Credits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_prepaid_usd: Option<f64>,
     /// Honest gap when team prepaid dollars unknown (snake-ish display key).
@@ -420,7 +563,24 @@ pub fn attach_flat_poll_from_history(snap: LimitsSnapshot) -> LimitsSnapshot {
 /// Build a machine-readable CLI report from a `/limits` snapshot (no I/O).
 ///
 /// Used by `grok limits --json` and in-TUI `/limits --json` (scrollback dump).
+/// No `meter_source` pin: Design A spend-order chrome. Tests stay hermetic
+/// (they do not read the operator sidecar).
 pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> LimitsCliReport {
+    report_from_snapshot_with_meter_source(snap, notes, None)
+}
+
+/// Same as [`report_from_snapshot`], with JSON `active_driver_label` honoring
+/// the same `meter_source` pin as human CLI and TUI **Active:**.
+///
+/// Wire `active_driver` stays Design A spend-order. Combined is only when
+/// remaining is across distinct SuperGrok identities. grok-oss limits JSON
+/// is a client printout, not xAI billing truth. Do not invent remaining. Do
+/// not call any pool used up.
+pub fn report_from_snapshot_with_meter_source(
+    snap: &LimitsSnapshot,
+    notes: Vec<String>,
+    meter_source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+) -> LimitsCliReport {
     let role_from_label = |label: &str| -> Option<String> {
         label
             .strip_prefix("SuperGrok (")
@@ -457,7 +617,7 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
         live_sampling_label: snap.live_sampling_line(),
         live_principal_role: snap.live_principal_label.clone(),
         active_driver: driver.as_wire(),
-        active_driver_label: format!("Active: {}", driver.as_human()),
+        active_driver_label: active_driver_line_for_snapshot_with_meter_source(snap, meter_source),
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
         flat_poll_observed_build: snap.flat_poll_observed_build,
         flat_poll_observed_extras: snap.flat_poll_observed_extras,
@@ -572,7 +732,16 @@ pub fn apply_grok_build_usage_pcts(
 
 /// Human multi-line body (same shape as in-TUI `/limits` detail).
 pub fn format_limits_human(snap: &LimitsSnapshot, notes: &[String]) -> String {
-    let mut out = format_limits_detail(snap);
+    format_limits_human_with_meter_source(snap, notes, None)
+}
+
+/// Human `/limits` body with a named meter-source pin on the **Active:** line.
+pub fn format_limits_human_with_meter_source(
+    snap: &LimitsSnapshot,
+    notes: &[String],
+    meter_source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+) -> String {
+    let mut out = format_limits_detail_with_meter_source(snap, meter_source);
     // Honesty notes already appear in the body via format_limits_detail;
     // skip duplicates when also present in the CLI notes list (JSON still
     // keeps them for machine consumers).
@@ -615,7 +784,15 @@ pub fn write_limits_output(
     if json {
         writer.write_all(format_limits_json_pretty(report)?.as_bytes())?;
     } else {
-        write!(writer, "{}", format_limits_human(snap, &report.notes))?;
+        write!(
+            writer,
+            "{}",
+            format_limits_human_with_meter_source(
+                snap,
+                &report.notes,
+                xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+            )
+        )?;
     }
     Ok(())
 }
@@ -1115,7 +1292,11 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     let (report, snap) = match console_usage_series {
         Some(series) => {
             let snap = snap.with_console_usage_series(Some(series));
-            let report = report_from_snapshot(&snap, report.notes);
+            let report = report_from_snapshot_with_meter_source(
+                &snap,
+                report.notes,
+                xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+            );
             (report, snap)
         }
         None => (report, snap),
@@ -1123,7 +1304,11 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     // Overlay stored SuperGrok roles + fingerprints (no secrets). Slot
     // inference has no JWT; doctor listings are the source of truth.
     let snap = snap.with_discovered_identities(DiscoveredIdentities::from_dual_auth(&dual));
-    let mut report = report_from_snapshot(&snap, report.notes);
+    let mut report = report_from_snapshot_with_meter_source(
+        &snap,
+        report.notes,
+        xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+    );
     let build_pcts: Vec<Option<f64>> = principal_ids
         .iter()
         .map(|id| id.as_ref().and_then(|i| build_usage.get(i).copied()))
@@ -1142,12 +1327,30 @@ fn short_id(id: &str) -> &str {
     }
 }
 
-/// Run `grok limits` / `grok limits --json` / `grok limits multipoll`.
+/// Run `grok limits` / `grok limits --json` / named pin words / `grok limits multipoll`.
 pub async fn run(args: LimitsArgs) -> Result<()> {
     match args.command {
-        None => {
+        None | Some(LimitsCommand::Refresh) => {
             let (report, snap) = collect_limits_report().await?;
             write_limits_output(&report, &snap, args.json, &mut std::io::stdout().lock())?;
+            Ok(())
+        }
+        Some(LimitsCommand::StaySupergrok) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::StaySupergrok)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
+            Ok(())
+        }
+        Some(LimitsCommand::UseConsole) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::UseConsole)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
+            Ok(())
+        }
+        Some(LimitsCommand::Meter { source }) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::Meter(source))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
             Ok(())
         }
         Some(LimitsCommand::Multipoll(mp)) => run_multipoll(mp).await,
@@ -2297,6 +2500,142 @@ mod tests {
         assert!(
             !human.contains("Active: SuperGrok extras"),
             "/limits Active line must not teach extras as a nickname: {human}"
+        );
+    }
+
+    /// Named contract: JSON `active_driver_label` honors the same
+    /// `meter_source` pin as human CLI and TUI **Active:**. Wire
+    /// `active_driver` stays Design A spend-order. grok-oss limits JSON is a
+    /// client printout, not xAI billing truth. SuperGrok is paid. Do not
+    /// invent remaining. Do not call any pool used up. Combined only when
+    /// remaining is across distinct SuperGrok identities.
+    #[test]
+    fn json_active_driver_label_honors_meter_source_pin() {
+        use crate::views::limits_snapshot::active_driver_line_for_snapshot_with_meter_source;
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+
+        let mut b = bal(6.0);
+        b.prepaid_balance_cents = Some(10_029);
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(b),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (_, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            Some("business"),
+            &[input],
+            true,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            vec![],
+        );
+
+        let dollars =
+            report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::DollarCredits));
+        assert_eq!(
+            dollars.active_driver, "supergrok_free_period",
+            "wire active_driver stays Design A spend-order"
+        );
+        assert_eq!(
+            dollars.active_driver_label, "Active: SuperGrok dollar credits",
+            "dollar-credits pin JSON label must match human Active:"
+        );
+        assert_eq!(
+            dollars.active_driver_label,
+            active_driver_line_for_snapshot_with_meter_source(
+                &snap,
+                Some(MeterSource::DollarCredits)
+            ),
+            "JSON label must match human CLI/TUI Active: for the same pin"
+        );
+        assert!(
+            !dollars
+                .active_driver_label
+                .to_ascii_lowercase()
+                .contains("extras"),
+            "must not teach extras as a nickname: {}",
+            dollars.active_driver_label
+        );
+
+        let console =
+            report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::Console));
+        assert_eq!(
+            console.active_driver_label, "Active: console team prepaid / console API credits",
+            "console pin JSON label must be complete American English: {}",
+            console.active_driver_label
+        );
+        assert_eq!(console.active_driver, "supergrok_free_period");
+
+        let included =
+            report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::Included));
+        assert_eq!(
+            included.active_driver_label,
+            "Active: included SuperGrok period limits"
+        );
+
+        let none = report_from_snapshot(&snap, vec![]);
+        assert_eq!(
+            none.active_driver_label, "Active: included SuperGrok period limits",
+            "no pin stays Design A: {}",
+            none.active_driver_label
+        );
+
+        let one_combined =
+            report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::Combined));
+        assert_eq!(
+            one_combined.active_driver_label, "Active: included SuperGrok period limits",
+            "combined pin plus one honest pool must not invent combined: {}",
+            one_combined.active_driver_label
+        );
+        assert!(
+            !one_combined
+                .active_driver_label
+                .to_ascii_lowercase()
+                .contains("combined"),
+            "combined pin with one honest pool must not name combined: {}",
+            one_combined.active_driver_label
+        );
+
+        let personal = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: Some(bal(40.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let business = PrincipalLimitsInput {
+            label: "SuperGrok (business)".into(),
+            role_label: Some("business".into()),
+            balance: Some(bal(10.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let dual = LimitsSnapshot::from_principals(
+            &[personal, business],
+            SamplingIdentityKind::SuperGrokSession,
+            Some("personal"),
+        );
+        let dual_report =
+            report_from_snapshot_with_meter_source(&dual, vec![], Some(MeterSource::Combined));
+        assert_eq!(
+            dual_report.active_driver_label, "Active: combined",
+            "combined pin plus two SuperGrok identities must name combined: {}",
+            dual_report.active_driver_label
+        );
+        assert!(
+            !dual_report.active_driver_label.contains("personal")
+                && !dual_report.active_driver_label.contains("business"),
+            "JSON combined must not flatten two identities into one workspace word: {}",
+            dual_report.active_driver_label
         );
     }
 

@@ -914,7 +914,7 @@ fn compute_activity(
         ),
         (AgentState::TurnRunning, Some(TurnActivity::Retrying { attempt, .. })) => (
             Style::default().fg(theme.warning),
-            format!("Retrying (attempt {attempt})…"),
+            format!("Retrying the model request (attempt {attempt})…"),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
@@ -1197,6 +1197,28 @@ mod tests {
             false,
         );
         assert_eq!(label, "Responding…");
+    }
+
+    #[test]
+    fn retrying_chrome_names_the_model_request() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: "transient error".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(label, "Retrying the model request (attempt 1)…");
+        assert!(!is_tool);
+        assert!(
+            !label.starts_with("Retrying (attempt"),
+            "bare Retrying (attempt N) looks like the whole session restarted: {label}"
+        );
     }
 
     #[test]

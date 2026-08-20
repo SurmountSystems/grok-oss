@@ -16,6 +16,7 @@ pub mod free_period_debit_unproven_guard;
 pub mod harness_secrets;
 pub mod included_poll_history;
 mod jwt;
+pub mod limits_pins;
 pub mod limits_snapshot_hub;
 pub(crate) mod manager;
 mod model;
