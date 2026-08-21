@@ -5,6 +5,7 @@ mod cta_e2e;
 mod dashboard;
 mod global_pause;
 mod jump;
+mod metadata;
 mod modes;
 mod notes;
 mod permissions;
@@ -329,6 +330,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
+        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -579,6 +581,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -725,6 +728,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

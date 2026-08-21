@@ -1606,7 +1606,7 @@ impl AgentView {
         let sampling_window = context_bar::footer_sampling_window(
             self.session_sampling_window,
             catalog_window,
-            crate::appearance::cache::load_economic_mode(),
+            self.is_subagent_view,
         );
         if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
@@ -2628,6 +2628,13 @@ impl AgentView {
                 bold: false,
             });
         }
+        if self.context_only_flag_visible(effective_plan) {
+            mode_flags_vec.push(PromptFlag {
+                text: "context-only",
+                color: Some(theme.accent_system),
+                bold: false,
+            });
+        }
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
         let warning = self.credit_balance.as_ref().and_then(|bal| {
@@ -3551,7 +3558,6 @@ impl AgentView {
         }
         let line_viewer_toast = self.active_toast_message().map(|s| s.to_string());
         let is_plan_viewer = self.is_plan_viewer();
-        let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
         if self.line_viewer.is_some() {
             use crate::views::file_search::line_viewer::render_line_viewer;
@@ -3680,14 +3686,8 @@ impl AgentView {
                         HintItem::new(key!('y'), "copy plan"),
                     ]
                 } else {
-                    vec![
-                        HintItem::new(key!('c'), "comment"),
-                        HintItem::new(key!('y'), "copy plan"),
-                    ]
+                    vec![HintItem::new(key!('y'), "copy plan")]
                 };
-                if has_plan_comments {
-                    h.push(HintItem::new(key!('s'), "send"));
-                }
                 if self.vim_mode {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
@@ -4924,6 +4924,54 @@ mod voice_recording_overlay_tests {
             plan.abandon_button_area.is_some(),
             "Exit must be a clickable hit target on isolated plan.md"
         );
+    }
+
+    /// `/view-plan` after Approve still paints the four idle CTAs in draw.
+    /// Casual `c:comment | y:copy plan` is not the view-plan chrome.
+    #[test]
+    fn view_plan_after_resolved_draw_paints_four_idle_ctas_not_casual_copy() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.latest_inline_plan_content = Some("# Isolated plan.md\n\nAlready approved\n".into());
+        agent.open_plan_from_view_plan_or_status();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "resolved view-plan must not park a local idle waiter"
+        );
+        assert!(agent.line_viewer.is_some());
+
+        let text = render_text(&mut agent, false);
+        let lower = text.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "/view-plan after resolved draw must name {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("c comment") && !lower.contains("c:comment"),
+            "/view-plan after resolved must not advertise casual c-comment:\n{text}"
+        );
+        assert!(
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS)
+                || agent.line_viewer.is_some(),
+            "must not re-arm shut-pane Plan ready after resolved view-plan:\n{text}"
+        );
+        assert!(
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS)
+                || text.contains("Side panel open"),
+            "if Plan ready paints at all it must be the open-pane label:\n{text}"
+        );
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("view-plan extras");
+        assert!(plan.approve_button_area.is_some());
+        assert!(plan.comment_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
     }
 
     /// Local idle park (`/view-plan` and other idle parks) first-paints
@@ -6170,12 +6218,12 @@ mod plan_turn_row_revising_copy_tests {
     }
 
     /// Live shot: `exit_plan_mode` never set `plan_approval_view` on this
-    /// view, then turn-finalize ran, then a plan body exists and chrome
-    /// should arm. First paint parks a waiter and the idle click cue.
-    /// It must not auto-dock the right pane (resume / rebuild / missed
-    /// present). `/view-plan` and a live `exit_plan_mode` still open it.
+    /// view, then turn-finalize ran, then leftover plan body exists.
+    /// First paint must not auto-dock and must not paint Plan ready while
+    /// the composer is Enter:send. `/view-plan` and a live `exit_plan_mode`
+    /// still open the pane.
     #[test]
-    fn present_then_turn_finalize_without_park_still_paints_plan_ready_not_idle_click_cue() {
+    fn present_then_turn_finalize_without_park_does_not_paint_plan_ready() {
         let mut agent = make_agent();
         agent.clear_plan_loop_flags_for_new_present();
         agent.plan_mode_active = true;
@@ -6192,26 +6240,25 @@ mod plan_turn_row_revising_copy_tests {
             "fixture: finalize before a plan body must not invent a park"
         );
 
-        // Present content is now available. Chrome should arm. Still no park.
         agent.latest_inline_plan_content = Some("# Review me\n\nBody\n".into());
         assert!(agent.plan_approval_view.is_none());
         assert!(
             agent.should_arm_plan_decision_chrome(),
-            "fixture: chrome should arm after a missed present"
+            "fixture: leftover plan.md can still arm /view-plan later"
         );
 
         let text = draw_screen(&mut agent);
         assert!(
-            agent.plan_approval_view.is_some(),
-            "missed present may still park a waiter"
+            agent.plan_approval_view.is_none(),
+            "idle leftover must not invent a local idle park on draw"
         );
         assert!(
             agent.line_viewer.is_none(),
             "first paint after a missed present must not auto-dock the side panel"
         );
         assert!(
-            text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS),
-            "first paint after a missed present must say Plan ready, not Side panel open:\n{text}"
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS),
+            "first paint after leftover plan.md must not say Plan ready while Enter is send:\n{text}"
         );
         assert!(
             !text.contains(PLAN_IDLE_REVIEW_STATUS),
@@ -6220,6 +6267,58 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains("Plan ready. Side panel open"),
             "must not auto-open Plan ready. Side panel open after a missed present:\n{text}"
+        );
+    }
+
+    /// Rebuild / idle leftover `plan.md` after implement must not paint
+    /// Plan ready while the side panel is shut and the composer is
+    /// Enter:send. That park must not swallow a mid-type draft.
+    #[test]
+    fn rebuild_or_idle_leftover_plan_does_not_paint_plan_ready_while_composer_is_send_armed() {
+        const DRAFT: &str = "btcdragonlord.com is not mine either btw";
+        let mut agent = make_agent();
+        agent.clear_plan_loop_flags_for_new_present();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = false;
+        agent.session.state = AgentState::Idle;
+        agent.latest_inline_plan_content =
+            Some("# Leftover after implement\n\nBody still on disk\n".into());
+        agent.prompt.set_text(DRAFT);
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            agent.line_viewer.is_none(),
+            "rebuild/idle leftover must not auto-dock the plan side panel"
+        );
+        assert!(
+            text.contains("Enter:send"),
+            "composer footer must stay send-armed after leftover plan.md; got:\n{text}"
+        );
+        assert!(
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS),
+            "must not paint Plan ready while the pane is shut and Enter is send:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "must not auto-open Plan ready. Side panel open after leftover plan.md:\n{text}"
+        );
+        assert!(
+            !text.contains(PLAN_IDLE_REVIEW_STATUS),
+            "must not idle as Plan written. Click or /view-plan:\n{text}"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            DRAFT,
+            "mid-type draft must remain after leftover plan chrome"
+        );
+        assert!(
+            text.contains(DRAFT),
+            "visible composer must still show the mid-type draft:\n{text}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "idle leftover plan.md must not invent a local idle park on draw"
         );
     }
 
@@ -6274,8 +6373,12 @@ mod plan_turn_row_revising_copy_tests {
             "must not open the plan viewer after a resolved plan"
         );
         assert!(
-            !text.contains("Plan ready. Side panel open"),
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS),
             "must not re-present Plan ready after Approve/Quit:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "must not re-present Plan ready. Side panel open after Approve/Quit:\n{text}"
         );
         assert!(
             !text.contains(PLAN_IDLE_REVIEW_STATUS),

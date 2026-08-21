@@ -427,10 +427,23 @@ pub fn flush_batch_clippy_and_tests_for(
         report.push_str("## Edit verify (");
         report.push_str(&pkg);
         report.push_str(")\n");
-        let cwd = cargo_invoke_cwd(&files[0]);
+        let cargo_cwd = cargo_invoke_cwd(&files[0]);
+        // clippy-driver --emit metadata writes lib*.rmeta and *.long-type-*.txt
+        // into cwd. Keep those artifacts in a temp dir, never the workspace root.
+        let clippy_scratch = tempfile::Builder::new()
+            .prefix("grok-edit-verify-")
+            .tempdir()
+            .ok();
+        let clippy_fallback = std::env::temp_dir();
+        let clippy_cwd = clippy_scratch
+            .as_ref()
+            .map(|d| d.path())
+            .unwrap_or(clippy_fallback.as_path());
         for file in &files {
-            let clippy = clippy_argv(&pkg, std::slice::from_ref(file));
-            let clippy_res = runner.run_cargo(&clippy, &cwd);
+            let mut clippy = clippy_argv(&pkg, std::slice::from_ref(file));
+            clippy.push("--out-dir".to_string());
+            clippy.push(clippy_cwd.to_string_lossy().into_owned());
+            let clippy_res = runner.run_cargo(&clippy, clippy_cwd);
             report.push_str(&format_cargo_section("clippy", &clippy, &clippy_res));
         }
         let mut ran_test = false;
@@ -441,7 +454,7 @@ pub fn flush_batch_clippy_and_tests_for(
                 FileTestPlan::Run { argv } => {
                     if seen_test.insert(argv.clone()) {
                         ran_test = true;
-                        let test_res = runner.run_cargo(&argv, &cwd);
+                        let test_res = runner.run_cargo(&argv, &cargo_cwd);
                         report.push_str(&format_cargo_section("tests", &argv, &test_res));
                     }
                 }
@@ -1182,6 +1195,8 @@ mod tests {
         test_calls: AtomicUsize,
         last_test_argv: Mutex<Vec<String>>,
         last_clippy_argv: Mutex<Vec<String>>,
+        last_clippy_cwd: Mutex<PathBuf>,
+        last_test_cwd: Mutex<PathBuf>,
         reenter_on_fmt: bool,
         clippy_fail_stderr: Mutex<Option<String>>,
     }
@@ -1194,6 +1209,8 @@ mod tests {
                 test_calls: AtomicUsize::new(0),
                 last_test_argv: Mutex::new(Vec::new()),
                 last_clippy_argv: Mutex::new(Vec::new()),
+                last_clippy_cwd: Mutex::new(PathBuf::new()),
+                last_test_cwd: Mutex::new(PathBuf::new()),
                 reenter_on_fmt: false,
                 clippy_fail_stderr: Mutex::new(None),
             })
@@ -1206,6 +1223,8 @@ mod tests {
                 test_calls: AtomicUsize::new(0),
                 last_test_argv: Mutex::new(Vec::new()),
                 last_clippy_argv: Mutex::new(Vec::new()),
+                last_clippy_cwd: Mutex::new(PathBuf::new()),
+                last_test_cwd: Mutex::new(PathBuf::new()),
                 reenter_on_fmt: true,
                 clippy_fail_stderr: Mutex::new(None),
             })
@@ -1223,12 +1242,13 @@ mod tests {
             RustfmtRunResult { ok: true }
         }
 
-        fn run_cargo(&self, argv: &[String], _cwd: &Path) -> CargoRunResult {
+        fn run_cargo(&self, argv: &[String], cwd: &Path) -> CargoRunResult {
             let is_clippy = argv.first().is_some_and(|a| a == "clippy-driver")
                 || argv.iter().any(|a| a == "clippy");
             if is_clippy {
                 self.clippy_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_clippy_argv.lock().unwrap() = argv.to_vec();
+                *self.last_clippy_cwd.lock().unwrap() = cwd.to_path_buf();
                 if let Some(stderr) = self.clippy_fail_stderr.lock().unwrap().clone() {
                     return CargoRunResult {
                         exit_code: Some(101),
@@ -1240,6 +1260,7 @@ mod tests {
             } else if argv.iter().any(|a| a == "test") {
                 self.test_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_test_argv.lock().unwrap() = argv.to_vec();
+                *self.last_test_cwd.lock().unwrap() = cwd.to_path_buf();
             }
             CargoRunResult {
                 exit_code: Some(0),
@@ -1423,5 +1444,59 @@ mod tests {
             1,
             "rustfmt rewrite must not re-enter the format hook"
         );
+    }
+
+    #[test]
+    fn clippy_driver_uses_temp_out_dir_not_the_workspace_root() {
+        let _g = RuntimeGuard::lock();
+        let spy = SpyRunner::new();
+        set_test_command_runner(spy.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        write_workspace_only_manifest(tmp.path());
+        let member = tmp.path().join("member");
+        write_package_manifest(&member, "fixture");
+        let lib = member.join("src/lib.rs");
+        write(&lib, "pub fn n() {}\n");
+        let _ = after_structured_rust_write(&lib, "pub fn n() {}\n");
+        let report = flush_batch_clippy_and_tests();
+        assert_eq!(
+            spy.clippy_calls.load(Ordering::SeqCst),
+            1,
+            "one clippy-driver for the edited file. report={report}"
+        );
+        let argv = spy.last_clippy_argv.lock().unwrap().clone();
+        let cwd = spy.last_clippy_cwd.lock().unwrap().clone();
+        assert_file_level_clippy_argv(&argv, std::slice::from_ref(&lib));
+        let out_dir = argv
+            .windows(2)
+            .find_map(|w| (w[0] == "--out-dir").then_some(PathBuf::from(w[1].as_str())));
+        let out_dir = out_dir.expect(&format!(
+            "clippy-driver must pass --out-dir so rustc metadata does not land at the workspace root: {argv:?}"
+        ));
+        assert_ne!(
+            cwd,
+            tmp.path(),
+            "clippy-driver cwd must not be the workspace root (that is how lib*.rmeta and *.long-type-*.txt appear at repo root)"
+        );
+        assert_ne!(
+            out_dir,
+            tmp.path(),
+            "--out-dir must not be the workspace root: {out_dir:?}"
+        );
+        assert!(
+            cwd != member && out_dir != member,
+            "clippy-driver artifacts must not land in the package directory either"
+        );
+        for name in [
+            "libfixture.rmeta",
+            "a.out",
+            "rust_out",
+            "fixture.long-type-1.txt",
+        ] {
+            assert!(
+                !tmp.path().join(name).exists(),
+                "workspace root must not receive rustc probe junk {name}"
+            );
+        }
     }
 }

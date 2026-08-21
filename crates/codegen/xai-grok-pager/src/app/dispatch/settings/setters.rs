@@ -477,9 +477,9 @@ pub(super) fn set_always_expand_thinking_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_always_expand_thinking(new);
     app.current_ui.always_expand_thinking = Some(new);
     for agent in app.agents.values_mut() {
-        agent.scrollback.invalidate_heights();
+        agent.scrollback.apply_always_expand_thinking_flip(new);
         for child in agent.subagent_views.values_mut() {
-            child.scrollback.invalidate_heights();
+            child.scrollback.apply_always_expand_thinking_flip(new);
         }
     }
 }
@@ -570,6 +570,26 @@ pub(in crate::app::dispatch) fn set_scrub_ascii_punct(app: &mut AppView, new: bo
     app.show_toast(&save_success_toast("ASCII-scrub punctuation", new));
     vec![Effect::PersistSetting {
         key: "scrub_ascii_punct",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_ulid_session_ids_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_ulid_session_ids(new);
+    app.current_ui.ulid_session_ids = Some(new);
+}
+
+pub(in crate::app::dispatch) fn set_ulid_session_ids(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_ulid_session_ids();
+    if prev == new {
+        return vec![];
+    }
+    set_ulid_session_ids_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("ULID session ids", new));
+    vec![Effect::PersistSetting {
+        key: "ulid_session_ids",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]

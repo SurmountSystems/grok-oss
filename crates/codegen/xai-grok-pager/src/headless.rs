@@ -808,6 +808,12 @@ pub async fn run_single_turn(
         options.permission_mode_flag.as_deref(),
         None,
     );
+    agent_config.default_context_only_mode =
+        xai_grok_shell::util::config::effective_context_only_for_launch(
+            options.yolo,
+            options.permission_mode_flag.as_deref(),
+            None,
+        );
 
     apply_agent_flag(&options.agent, &mut agent_config);
 
@@ -820,14 +826,16 @@ pub async fn run_single_turn(
         disallowed_tools: parse_comma_list(options.cli_disallowed_tools.as_deref()),
         permission_rules: parse_permission_rules_strict(&options.allow_rules, &options.deny_rules)?,
         max_turns: options.max_turns,
-        permission_mode: options
-            .permission_mode_flag
-            .as_deref()
-            .map(|s| {
+        // Agent-definition serde is camelCase (`bypassPermissions`, `auto`, …).
+        // TUI hyphenated extras (`context-only`, `always-approve`, `ask`) are
+        // not that enum; seed `default_context_only_mode` / yolo / auto instead.
+        permission_mode: match options.permission_mode_flag.as_deref() {
+            None | Some("context-only" | "always-approve" | "ask") => None,
+            Some(s) => Some(
                 serde_json::from_value(serde_json::Value::String(s.to_string()))
-                    .map_err(|e| anyhow::anyhow!("--permission-mode: invalid value: {e}"))
-            })
-            .transpose()?,
+                    .map_err(|e| anyhow::anyhow!("--permission-mode: invalid value: {e}"))?,
+            ),
+        },
     };
 
     if options.trust {

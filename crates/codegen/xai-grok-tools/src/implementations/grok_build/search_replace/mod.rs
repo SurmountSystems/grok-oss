@@ -187,6 +187,11 @@ pub(crate) async fn run_search_replace(
     if let Some(err) = validate_path_length(&input.file_path) {
         return Ok(err);
     }
+    if let Some(message) =
+        crate::util::compiler_probe_junk::refuse_write_if_compiler_probe_junk(&path, &cwd)
+    {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+    }
     if path.is_dir() {
         return Ok(SearchReplaceOutput::InvalidInput(
             "File path is a directory".to_owned(),
@@ -1814,6 +1819,42 @@ mod tests {
         assert!(
             report.is_empty(),
             "plan.md must not queue clippy or tests: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_replace_refuses_a_out_at_workspace_root_and_does_not_create_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("a.out", "", "probe\n");
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input).await;
+        match result {
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.to_ascii_lowercase().contains("refuse")
+                        || message.contains("probe junk")
+                        || message.contains("workspace root"),
+                    "search_replace refuse for a.out should say why: {message}"
+                );
+            }
+            Ok(SearchReplaceOutput::InvalidInput(message)) => {
+                assert!(
+                    message.to_ascii_lowercase().contains("refuse")
+                        || message.contains("probe junk")
+                        || message.contains("workspace root"),
+                    "search_replace refuse for a.out should say why: {message}"
+                );
+            }
+            Ok(other) => {
+                panic!("search_replace must refuse a.out at the workspace root, got {other:?}")
+            }
+        }
+        assert!(
+            !tmp.path().join("a.out").exists(),
+            "refused search_replace must not create a.out at the workspace root"
         );
     }
 

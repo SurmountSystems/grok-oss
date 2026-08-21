@@ -30,8 +30,10 @@ The agent exited plan mode without writing a plan.
 /// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
 
-/// Status while a plan is parked and the side panel is shut. Not exclusive
-/// keyboard capture and not the click-or-/view-plan ceremony.
+/// Short status that used to paint while a plan was parked and the side
+/// panel was shut. Do not return this while the composer is Enter:send.
+/// Open-pane review uses [`plan_approval_status_label`]. Leftover / rebuild
+/// `plan.md` is view-only until `/view-plan` or a live present docks.
 pub const PLAN_READY_STATUS: &str = "Plan ready";
 
 /// Toast when freeform Enter cannot attach to a live plan-feedback channel

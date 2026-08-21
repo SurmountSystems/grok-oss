@@ -166,6 +166,10 @@ impl PlanModeTracker {
     pub(crate) fn is_awaiting_plan_approval(&self) -> bool {
         self.awaiting_plan_approval
     }
+    /// Whether Approve / Quit already decided this plan.
+    pub(crate) fn is_plan_decision_resolved(&self) -> bool {
+        self.plan_decision_resolved
+    }
     /// Capture the current lifecycle state as a persistable snapshot.
     pub fn snapshot(&self) -> PlanModeSnapshot {
         PlanModeSnapshot {

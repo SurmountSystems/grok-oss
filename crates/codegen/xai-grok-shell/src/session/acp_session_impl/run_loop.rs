@@ -1041,6 +1041,11 @@ pub(super) async fn run_session(
                             let was = session.permissions.is_yolo_mode();
                             tracing::info!("Session received SetYoloMode: {}", enabled);
                             session.permissions.set_yolo_mode(enabled);
+                            if enabled {
+                                session
+                                    .context_only
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
                             // Report the ACTUAL state, not the request: the manager
                             // clamps a requested ON to OFF under the always-approve
                             // pin, so emitting `enabled` would announce a turn-on
@@ -1059,8 +1064,20 @@ pub(super) async fn run_session(
                             tracing::info!("Session received SetAutoMode: {}", enabled);
                             session.permissions.set_auto_mode(enabled);
                             if enabled {
+                                session.context_only.store(false, std::sync::atomic::Ordering::Relaxed);
                                 session.wire_permission_auto_llm_classifier().await;
                             } else {
+                                session.permissions.set_llm_side_query_wired(false);
+                            }
+                        }
+                        SessionCommand::SetContextOnlyMode { enabled } => {
+                            tracing::info!("Session received SetContextOnlyMode: {}", enabled);
+                            session
+                                .context_only
+                                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+                            if enabled {
+                                session.permissions.set_yolo_mode(false);
+                                session.permissions.set_auto_mode(false);
                                 session.permissions.set_llm_side_query_wired(false);
                             }
                         }

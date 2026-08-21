@@ -55,9 +55,9 @@ impl SessionActor {
             .model_context_window
             .set(catalog_context_window.get());
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
-            let capped = crate::util::config::apply_economic_context_cap(
+            let capped = crate::util::config::session_sampling_window(
                 catalog_context_window.get(),
-                self.compaction.economic_mode.get(),
+                self.startup_hints.is_subagent,
             );
             std::num::NonZeroU64::new(capped).unwrap_or(catalog_context_window)
         });

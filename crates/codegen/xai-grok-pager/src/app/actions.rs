@@ -561,6 +561,10 @@ pub enum Action {
     /// ASCII-scrub assistant punctuation. SHELL-owned:
     /// cache + `[ui].scrub_ascii_punct`.
     SetScrubAsciiPunct(bool),
+    /// ULID-primary session ids in grok-oss. SHELL-owned:
+    /// cache + `[ui].ulid_session_ids`. Default on. Off keeps UUID-primary
+    /// display. The ULID map still exists either way.
+    SetUlidSessionIds(bool),
     /// Always-visible bubble copy buttons. PAGER-owned:
     /// appearance + pager.toml `[scrollback.display].bubble_copy_buttons`.
     SetBubbleCopyButtons(bool),
@@ -757,6 +761,8 @@ pub enum Action {
     ShowTasks,
     /// Commit a read-only list of live grok-oss TUI windows (`/running`).
     ShowRunningSessions,
+    /// Commit live session metadata (`/metadata`): ULID, UUID, cwd, model, started, pid.
+    ShowSessionMetadata,
     /// `/limits` — included SuperGrok period limits, extras, and console meters.
     ShowLimits,
     /// `/spend` — local vs Management spend books.
@@ -1129,6 +1135,8 @@ pub enum PermissionModeKind {
     Auto,
     /// Auto-approve all tool actions. `yolo_mode = true`.
     AlwaysApprove,
+    /// Advertise no tools; refuse any tool call that still arrives.
+    ContextOnly,
 }
 impl PermissionModeKind {
     /// Canonical persisted/wire string for the kind. Matches the
@@ -1140,6 +1148,7 @@ impl PermissionModeKind {
             Self::Ask => "ask",
             Self::Auto => "auto",
             Self::AlwaysApprove => "always-approve",
+            Self::ContextOnly => "context-only",
         }
     }
     /// Bool projection onto the YOLO runtime flag — `AlwaysApprove
@@ -1155,6 +1164,10 @@ impl PermissionModeKind {
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
     }
+    /// Diagnostic mode: no tools advertised, tool calls refused.
+    pub fn is_context_only(self) -> bool {
+        matches!(self, Self::ContextOnly)
+    }
     /// Construct from a canonical string. Returns `None` for unknown
     /// strings. Used by `apply_setting_rollback("permission_mode", _)`
     /// to recover the typed kind from the `SettingValue::Enum(canonical)`
@@ -1165,6 +1178,7 @@ impl PermissionModeKind {
             "ask" => Some(Self::Ask),
             "auto" => Some(Self::Auto),
             "always-approve" => Some(Self::AlwaysApprove),
+            "context-only" => Some(Self::ContextOnly),
             _ => None,
         }
     }
@@ -1189,12 +1203,25 @@ mod permission_mode_kind_tests {
     }
     #[test]
     fn permission_mode_choices_include_auto_in_catalog() {
-        for c in ["default", "ask", "auto", "always-approve"] {
+        for c in ["default", "ask", "auto", "always-approve", "context-only"] {
             assert!(
                 PermissionModeKind::from_canonical(c).is_some(),
                 "catalog canonical {c} must parse"
             );
         }
+    }
+
+    #[test]
+    fn context_only_is_listed_with_always_approve_plan_and_auto() {
+        let kind = PermissionModeKind::from_canonical("context-only")
+            .expect("context-only must be a permission mode");
+        assert_eq!(kind.as_canonical(), "context-only");
+        assert!(!kind.is_always_approve());
+        assert!(!kind.is_auto());
+        assert!(kind.is_context_only());
+        assert!(!PermissionModeKind::AlwaysApprove.is_context_only());
+        assert!(!PermissionModeKind::Auto.is_context_only());
+        assert!(!PermissionModeKind::Ask.is_context_only());
     }
 }
 /// Canonical on/off state for `plan_mode`. Binary today (single bit

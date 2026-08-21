@@ -50,7 +50,8 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: false); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
-always_expand_thinking = false         # keep thinking fully expanded; when true, hides Ctrl+E hint
+always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
+                                       # true keeps the body open and hides the Ctrl+E hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -62,6 +63,9 @@ page_flip_on_send = true               # pin a just-sent prompt at the top of th
                                        # so sending never moves the scroll position
 scrub_ascii_punct = true               # scrub fancy punctuation in assistant text to ASCII-safe
                                        # forms (default: true); env GROK_SCRUB_ASCII_PUNCT=0 also off
+ulid_session_ids = true                # use ULIDs as the primary session id in grok-oss
+                                       # (default: true); set false to show the Grok Build UUID
+                                       # as the primary id. The ULID map still exists either way.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 auto_run_implement = true              # after a successful turn, auto-queue a trailing /implement
@@ -121,7 +125,8 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
 | `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
-| `[ui] always_expand_thinking` | false | Settings | Keep thinking blocks expanded. |
+| `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
+| `[ui] always_expand_thinking` | false | Settings | Keep thinking fully expanded. Off paints collapsed Thought-for headers, including nested overlays. Distinct from `show_thinking_blocks`. |
 | `[ui] plan_approval_park` | `soft` | Settings → Agent | Soft side panel (default) or `modal` fullscreen. |
 | `cap_implement_effort_when_economic` | true | Settings → Agent | Master for economic ceiling plus desired inject. |
 | `max_implement_effort` | 3 | Settings → Agent | Hard ceiling 1–5 when economic caps are active. |

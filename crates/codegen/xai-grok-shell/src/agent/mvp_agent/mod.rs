@@ -271,6 +271,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_model_id: acp::ModelId,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
+    pub session_context_only: bool,
     pub prompt_display_cwd: Option<String>,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
@@ -446,6 +447,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_model_id,
         session_yolo_mode,
         session_auto_mode: false,
+        session_context_only: false,
         prompt_display_cwd: None,
         is_chat_kind: true,
     }
@@ -484,6 +486,22 @@ pub(crate) fn resolve_session_auto_mode(
     meta.and_then(|m| m.get("autoMode").or_else(|| m.get("auto_mode")))
         .and_then(|v| v.as_bool())
         .unwrap_or(default_auto_mode && !session_yolo_mode)
+}
+
+/// Resolve context-only from `_meta.contextOnly` (or `context_only`). Explicit
+/// yolo or auto wins. Absent key falls back to the agent default.
+pub(crate) fn resolve_session_context_only(
+    meta: Option<&acp::Meta>,
+    default_context_only: bool,
+    session_yolo_mode: bool,
+    session_auto_mode: bool,
+) -> bool {
+    if session_yolo_mode || session_auto_mode {
+        return false;
+    }
+    meta.and_then(|m| m.get("contextOnly").or_else(|| m.get("context_only")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default_context_only)
 }
 /// Typed `_meta` payload for `PromptResponse`.
 /// camelCase keys match the bot's `_META_TOKEN_KEY_MAP`.
@@ -817,6 +835,7 @@ pub struct MvpAgent {
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
     default_auto_mode: bool,
+    default_context_only_mode: bool,
     /// `Send` mirror of `cfg.is_trace_upload_enabled()` for the per-session
     /// live collection gates (`cfg` is `!Send`; the gates run on the tokio
     /// pool). Kept current by

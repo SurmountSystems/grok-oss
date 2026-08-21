@@ -161,6 +161,8 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Seed sessions with context-only (no tools). Ignored when yolo or auto win.
+    pub default_context_only_mode: bool,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
@@ -189,6 +191,8 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     // Permission mode seeds for every session this agent creates (CLI / config).
     agent_config.default_yolo_mode = flags.default_yolo_mode;
     agent_config.default_auto_mode = flags.default_auto_mode && !flags.default_yolo_mode;
+    agent_config.default_context_only_mode =
+        flags.default_context_only_mode && !flags.default_yolo_mode && !flags.default_auto_mode;
 
     if let Some(effort) = flags.reasoning_effort_override {
         agent_config.reasoning_effort_override = Some(effort);
@@ -294,6 +298,9 @@ pub async fn connect_via_leader(
         // Leader agent is pre-running; seed modes via capabilities → session meta.
         yolo_mode: flags.default_yolo_mode,
         auto_mode: flags.default_auto_mode && !flags.default_yolo_mode,
+        context_only: flags.default_context_only_mode
+            && !flags.default_yolo_mode
+            && !flags.default_auto_mode,
         default_model: agent_config.models.default.clone(),
         client_version: Some(PAGER_CLIENT_VERSION.to_string()),
         code_nav_enabled: false,

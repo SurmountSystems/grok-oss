@@ -15,7 +15,7 @@ use crate::app::app_view::AppView;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
 };
-use crate::app::dispatch::modes::inherit_auto_mode;
+use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
@@ -197,6 +197,7 @@ fn dispatch_load_session_ungated(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,
@@ -969,6 +970,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,

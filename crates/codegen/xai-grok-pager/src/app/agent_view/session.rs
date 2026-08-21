@@ -695,6 +695,22 @@ impl AgentView {
     pub(crate) fn any_cancel_pending(&self) -> bool {
         self.session.state.is_cancelling() || self.wake_turn_cancelling()
     }
+    /// Drop a still-cancellable cancel so a keep-working interject can
+    /// steer the live turn. Compact command cancel is left alone.
+    pub(crate) fn abort_cancellable_cancel(&mut self) {
+        if matches!(
+            self.session.state,
+            crate::app::agent::AgentState::TurnCancelling
+        ) {
+            self.session.state = crate::app::agent::AgentState::TurnRunning;
+        }
+        if let Some(wake) = self.running_wake_turn.as_mut() {
+            wake.cancel_sent = false;
+        }
+        self.pending_cancel_resend = None;
+        self.cancel_trigger_hint = None;
+        self.pending_turn_end_reconcile = None;
+    }
     /// Mark the wake cancel sent. No-op without a wake turn.
     pub(crate) fn mark_wake_cancel_sent(&mut self) {
         if let Some(wake) = self.running_wake_turn.as_mut() {

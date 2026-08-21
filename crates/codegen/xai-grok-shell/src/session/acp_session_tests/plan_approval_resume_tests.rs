@@ -490,6 +490,48 @@ async fn maybe_start_blocked_while_awaiting_plan_approval() {
         .await;
 }
 
+/// Resume after Approve/Quit must not re-issue the reverse-request.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_skips_when_plan_decision_resolved() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("plan.md"), "# Leftover\n\nBody\n").unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                tracker.activate_from_tool();
+                tracker.set_awaiting_plan_approval(true);
+                let mut snap = tracker.snapshot();
+                snap.plan_decision_resolved = true;
+                *tracker = crate::session::plan_mode::PlanModeTracker::from_snapshot(
+                    dir.path().to_path_buf(),
+                    snap,
+                );
+            }
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().resume_plan_approval(completion_tx).await;
+
+            assert!(
+                actor.plan_mode.lock().is_plan_decision_resolved(),
+                "resolved sticky must survive resume"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "resume must not leave awaiting armed after a decided plan"
+            );
+            assert!(
+                gateway_rx.try_recv().is_err(),
+                "no reverse-request should be sent when the plan is already decided"
+            );
+        })
+        .await;
+}
+
 /// Resume with the flag set but no `plan.md` on disk: clear the bit and issue NO
 /// reverse-request.
 #[tokio::test(flavor = "current_thread")]

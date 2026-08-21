@@ -335,7 +335,7 @@ When you open a subagent (from a scrollback block or the tasks pane), the parent
 - L3 specialist overlays stay observational. Specialists are not interrupted by operator chat. Ask the coordinator from the L2 view instead.
 - Nesting stays: the main-thread list shows L2 coordinators only, plus how many live L3 specialists each is using. L2 and L3 are not flattened into one list.
 
-On an L2 overlay Prompt pane, `q` and `Esc` do not pop (`q` is a letter). Tab to the L2 transcript, then `q` or `Esc` pops; the title-bar close still works from Prompt. The parent's scrollback continues to show the subagent's status.
+`Esc` on an L2 or L3 overlay closes that nested view and leaves the subagent running. It does not start Cancelling. `q` on the L2 Prompt pane is a letter; from the transcript pane `q` also pops. The title-bar close button dismisses the same way. Esc while you are not in that overlay still needs a second press to confirm cancel. Keep-working / interject while Cancelling aborts the local cancel so the L2 keeps working. The parent's scrollback continues to show the subagent's status.
 
 ---
 
@@ -368,6 +368,8 @@ L3 is not a weaker agent. It has the same tools as L2 except spawn. The hard cap
 Spawn an L2 when the job needs isolation from the main thread: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
 
 L2 parallelizes, must spawn L3 for tool work, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
+
+The main (L1) session may use the catalog 500k sampling window. Nested L2 and L3 sessions never exceed 200k. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
 
 L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing the work on L2 fills L2 and causes compaction. The older softer rule (spawn L3 only when there are many greps, or after half the window) is too weak and is replaced.
 

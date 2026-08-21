@@ -75,9 +75,10 @@ fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
 ///
 /// Uses [`MarkdownContent`] for incremental markdown rendering with cached
 /// word-wrapping, plus special display modes:
-/// - **Collapsed**: Shows "Thought" or "Thought for Xs" if time is set
-/// - **Truncated** (default): Shows "…" + last N lines
-/// - **Expanded**: Full content
+/// - **Collapsed** (default when `[ui] always_expand_thinking` is off):
+///   "Thought" or "Thought for Xs" if time is set
+/// - **Truncated**: Shows "…" + last N lines
+/// - **Expanded** (default when always-expand is on): Full content
 #[derive(Debug, Clone)]
 pub struct ThinkingBlock {
     content: MarkdownContent,
@@ -494,11 +495,9 @@ impl BlockContent for ThinkingBlock {
         }
     }
 
-    fn collapse_mode(&self, is_running: bool) -> DisplayMode {
+    fn collapse_mode(&self, _is_running: bool) -> DisplayMode {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
-        } else if is_running {
-            DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
         }
@@ -508,7 +507,7 @@ impl BlockContent for ThinkingBlock {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else {
-            DisplayMode::Truncated
+            DisplayMode::Collapsed
         }
     }
 
@@ -649,6 +648,41 @@ mod tests {
                 block.finished_display_mode(),
                 Some(DisplayMode::Expanded),
                 "[ui] always_expand_thinking must keep finished thinking expanded"
+            );
+            assert_eq!(
+                block.collapse_mode(true),
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep running thinking expanded"
+            );
+            assert_eq!(
+                block.collapse_mode(false),
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep finished thinking expanded on collapse"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn always_expand_thinking_off_paints_collapsed_headers() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(false);
+            let block = ThinkingBlock::new("reason through this");
+            assert_eq!(
+                block.default_display_mode(),
+                DisplayMode::Collapsed,
+                "[ui] always_expand_thinking off must paint thinking as collapsed headers, not truncated bodies"
+            );
+            assert_eq!(
+                block.finished_display_mode(),
+                Some(DisplayMode::Collapsed),
+                "[ui] always_expand_thinking off must collapse thinking when it finishes"
+            );
+            assert_eq!(
+                block.collapse_mode(true),
+                DisplayMode::Collapsed,
+                "[ui] always_expand_thinking off must collapse running thinking too"
             );
         })
         .join()

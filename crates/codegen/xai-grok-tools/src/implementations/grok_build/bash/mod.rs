@@ -2021,6 +2021,15 @@ impl xai_tool_runtime::Tool for BashTool {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
         }
 
+        if let Some(message) =
+            crate::util::compiler_probe_junk::try_parse_compiler_probe_junk_refuse(
+                &input.command,
+                &cwd,
+            )
+        {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
+
         // --- Skill-script intercepts (embedded Rust; never spawn python) ---
         // Known allowlisted host skill scripts are handled in-process.
         // Unknown python still shells.
@@ -5506,5 +5515,90 @@ mod tests {
             }
             BashToolOutput::Background(_) => panic!("expected foreground"),
         }
+    }
+
+    fn assert_compiler_probe_junk_refused(
+        result: Result<BashToolOutput, xai_tool_runtime::ToolError>,
+        called: &std::sync::atomic::AtomicBool,
+        cmd: &str,
+    ) {
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "rustc probe junk must not reach TerminalBackend: {cmd}"
+        );
+        let message = refuse_message_from_result(result, cmd);
+        assert!(
+            !message.contains("should-not-run-cargo"),
+            "refuse for `{cmd}` leaked the mock shell output: {message}"
+        );
+        let lower = message.to_lowercase();
+        assert!(
+            lower.contains("refuse")
+                || lower.contains("probe junk")
+                || lower.contains("workspace root")
+                || lower.contains("rustc"),
+            "refuse for `{cmd}` should say why: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rustc_oneshot_without_out_dir_is_refused_and_does_not_spawn_shell() {
+        let cmd = "rustc foo.rs";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_compiler_probe_junk_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn rustc_stdin_rust_out_is_refused_and_does_not_spawn_shell() {
+        let cmd = "rustc -";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_compiler_probe_junk_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn rustc_dash_o_a_out_at_workspace_root_is_refused_and_does_not_spawn_shell() {
+        let cmd = "rustc foo.rs -o a.out";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_compiler_probe_junk_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn redirect_rmeta_at_workspace_root_is_refused_and_does_not_spawn_shell() {
+        let cmd = "echo probe > libfixture.rmeta";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert_compiler_probe_junk_refused(result, &called, cmd);
+    }
+
+    #[tokio::test]
+    async fn rustc_version_is_not_refused() {
+        let cmd = "rustc --version";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "rustc --version must still reach TerminalBackend: {cmd}"
+        );
+        result.expect("rustc --version must not be refused as invalid arguments");
+    }
+
+    #[tokio::test]
+    async fn rustc_out_dir_under_tmp_is_not_refused() {
+        let cmd = "rustc foo.rs --out-dir /tmp/grok-edit-verify-scratch";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "rustc with --out-dir under /tmp must still reach TerminalBackend: {cmd}"
+        );
+        result.expect("rustc --out-dir /tmp must not be refused as invalid arguments");
+    }
+
+    #[tokio::test]
+    async fn cargo_rustc_package_is_not_refused() {
+        let cmd = "cargo rustc -p xai-grok-tools --lib";
+        let (result, called) = run_bash_tracking_success(cmd).await;
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "cargo rustc -p is not a rustc one-shot: {cmd}"
+        );
+        result.expect("cargo rustc -p must not be refused as rustc probe junk");
     }
 }

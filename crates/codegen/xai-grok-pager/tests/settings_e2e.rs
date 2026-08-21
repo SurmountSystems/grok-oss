@@ -64,6 +64,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "hide_header",
     "always_expand_thinking",
     "scrub_ascii_punct",
+    "ulid_session_ids",
     "allow_worktree",
     "bubble_copy_buttons",
     "plan_approval_park",
@@ -360,6 +361,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 b, expected,
                 "SetScrubAsciiPunct value differs from expected"
             )
+        }
+        ("ulid_session_ids", Action::SetUlidSessionIds(b)) => {
+            assert_eq!(b, expected, "SetUlidSessionIds value differs from expected")
         }
         ("allow_worktree", Action::SetAllowWorktree(b)) => {
             assert_eq!(b, expected, "SetAllowWorktree value differs from expected")
@@ -1985,6 +1989,7 @@ fn registry_kind_membership_through_pr_14() {
             "hide_header",
             "always_expand_thinking",
             "scrub_ascii_punct",
+            "ulid_session_ids",
             "allow_worktree",
             "bubble_copy_buttons",
             "auto_run_implement",
@@ -2151,6 +2156,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_hide_header(false);
     xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
     xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
+    xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
     xai_grok_pager::appearance::cache::set_allow_worktree(false);
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     xai_grok_pager::appearance::cache::set_plan_approval_force_modal(false);
@@ -2216,6 +2222,7 @@ fn defaults_round_trip_through_registry() {
             "hide_header" => SettingValue::Bool(false),
             "always_expand_thinking" => SettingValue::Bool(false),
             "scrub_ascii_punct" => SettingValue::Bool(true),
+            "ulid_session_ids" => SettingValue::Bool(true),
             "allow_worktree" => SettingValue::Bool(false),
             "bubble_copy_buttons" => SettingValue::Bool(true),
             "plan_approval_park" => SettingValue::Enum("soft"),
@@ -2319,6 +2326,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetHideHeader(_))
             | SettingsKeyOutcome::Action(Action::SetAlwaysExpandThinking(_))
             | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
+            | SettingsKeyOutcome::Action(Action::SetUlidSessionIds(_))
             | SettingsKeyOutcome::Action(Action::SetAllowWorktree(_))
             | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
@@ -3443,7 +3451,7 @@ fn pr6_picker_seeds_choices_idx_from_pager_snapshot_yolo_true() {
     }
 }
 
-/// Exactly 4 canonical choices: {ask, auto, always-approve, default}.
+/// Exactly 5 canonical choices: {ask, auto, always-approve, default, context-only}.
 #[test]
 fn pr6_permission_mode_choices_use_canonical_strings() {
     let reg = SettingsRegistry::defaults();
@@ -3454,10 +3462,10 @@ fn pr6_permission_mode_choices_use_canonical_strings() {
     };
     assert_eq!(
         canonicals.len(),
-        4,
-        "permission_mode catalog must be exactly {{ask, auto, always-approve, default}} — adding a \
-         choice requires updating action_for_enum_commit, apply_setting_rollback, \
-         PermissionModeKind, AND load_permission_mode (PR 11 contract)",
+        5,
+        "permission_mode catalog must be exactly {{ask, auto, always-approve, default, \
+         context-only}} — adding a choice requires updating action_for_enum_commit, \
+         apply_setting_rollback, PermissionModeKind, AND load_permission_mode",
     );
     assert!(
         canonicals.contains(&"auto"),
@@ -3475,6 +3483,10 @@ fn pr6_permission_mode_choices_use_canonical_strings() {
         canonicals.contains(&"default"),
         "permission_mode must include 'default' canonical (PR 11 — agent's \
          default permission behavior)"
+    );
+    assert!(
+        canonicals.contains(&"context-only"),
+        "permission_mode must include 'context-only' canonical (no tools advertised)"
     );
 }
 
@@ -3812,6 +3824,8 @@ fn pr11_permission_mode_kind_canonical_round_trip() {
         PermissionModeKind::Default,
         PermissionModeKind::Ask,
         PermissionModeKind::AlwaysApprove,
+        PermissionModeKind::Auto,
+        PermissionModeKind::ContextOnly,
     ] {
         let canonical = kind.as_canonical();
         let recovered = PermissionModeKind::from_canonical(canonical)
@@ -3844,6 +3858,7 @@ fn pr11_permission_mode_kind_canonical_strings_match_choices_catalog() {
         PermissionModeKind::Ask,
         PermissionModeKind::Auto,
         PermissionModeKind::AlwaysApprove,
+        PermissionModeKind::ContextOnly,
     ] {
         assert!(
             catalog_canonicals.contains(kind.as_canonical()),
@@ -3853,10 +3868,10 @@ fn pr11_permission_mode_kind_canonical_strings_match_choices_catalog() {
     }
     assert_eq!(
         catalog_canonicals.len(),
-        4,
-        "catalog must be exactly {{ask, auto, always-approve, default}} — adding a fifth \
-         choice requires adding a PermissionModeKind variant AND updating action_for_enum_commit \
-         + apply_setting_rollback + load_permission_mode + this test (PR 11 contract)",
+        5,
+        "catalog must be exactly {{ask, auto, always-approve, default, context-only}} — adding \
+         another choice requires adding a PermissionModeKind variant AND updating \
+         action_for_enum_commit + apply_setting_rollback + load_permission_mode + this test",
     );
 }
 
@@ -3866,6 +3881,8 @@ fn pr11_permission_mode_kind_is_always_approve_projection() {
     use xai_grok_pager::app::actions::PermissionModeKind;
     assert!(PermissionModeKind::AlwaysApprove.is_always_approve());
     assert!(!PermissionModeKind::Ask.is_always_approve());
+    assert!(!PermissionModeKind::Auto.is_always_approve());
+    assert!(!PermissionModeKind::ContextOnly.is_always_approve());
     assert!(
         !PermissionModeKind::Default.is_always_approve(),
         "PR 11: Default must project onto yolo=false — it's an alias for Ask at runtime, \
@@ -8280,6 +8297,42 @@ fn scrub_ascii_punct_mouse_click_two_stage_toggles() {
     );
     assert_set_bool_action(outcome, "scrub_ascii_punct", false);
     xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
+}
+
+#[test]
+fn ulid_session_ids_space_dispatches_typed_setter() {
+    xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
+    let mut s = make_state();
+    navigate_to(&mut s, "ulid_session_ids");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "ulid_session_ids", false);
+    xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
+}
+
+#[test]
+fn ulid_session_ids_mouse_click_two_stage_toggles() {
+    xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "ulid_session_ids") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "ulid_session_ids", false);
+    xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
 }
 
 #[test]

@@ -1470,6 +1470,8 @@ pub struct Config {
     pub default_yolo_mode: bool,
     /// Start sessions in auto permission mode (classifier) when no per-session override.
     pub default_auto_mode: bool,
+    /// Start sessions in context-only (no tools advertised) when no per-session override.
+    pub default_context_only_mode: bool,
     /// CLI `--experimental-memory` flag. Stored for `ConfigReloader` hot-reload re-resolution.
     #[serde(skip)]
     pub cli_experimental_memory: bool,
@@ -1839,6 +1841,7 @@ impl Default for Config {
             session_summary_model_override: None,
             default_yolo_mode: false,
             default_auto_mode: false,
+            default_context_only_mode: false,
             agent_profile_path: None,
             client_version: Some(xai_grok_version::VERSION.to_string()),
             mode: AgentMode::default(),

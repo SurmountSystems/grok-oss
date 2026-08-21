@@ -8,7 +8,7 @@ pub use xai_grok_telemetry::enums::PermissionMode;
 /// Parse a `permission_mode` canonical string to `PermissionMode`.
 ///
 /// Valid values: `"always-approve"` → `AlwaysApprove`, `"auto"` → `Auto`,
-/// `"ask"` / `"default"` → `Ask`.
+/// `"context-only"` → `ContextOnly`, `"ask"` / `"default"` → `Ask`.
 /// Unknown strings fall back to `Ask` (safe direction — no YOLO on garbage).
 /// The `"ask"` and `"default"` arms are explicit so a future `Default` variant
 /// is a one-line change without touching the catch-all.
@@ -16,6 +16,7 @@ pub fn parse_permission_mode_canonical(mode_str: &str) -> PermissionMode {
     match mode_str {
         "always-approve" => PermissionMode::AlwaysApprove,
         "auto" => PermissionMode::Auto,
+        "context-only" => PermissionMode::ContextOnly,
         "ask" => PermissionMode::Ask,
         "default" => PermissionMode::Ask,
         _ => PermissionMode::Ask,
@@ -30,6 +31,7 @@ pub(crate) fn permission_mode_canonical_str(mode: PermissionMode) -> &'static st
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",
+        PermissionMode::ContextOnly => "context-only",
         PermissionMode::Ask => "ask",
     }
 }
@@ -206,6 +208,38 @@ pub fn effective_auto_for_launch(
     load_permission_mode(remote_permission_mode).is_auto()
 }
 
+/// Whether this launch should start in **context-only** (no tools advertised).
+/// CLI `--permission-mode context-only` beats config. Mutually exclusive with
+/// yolo and auto (those win if both requested).
+pub fn effective_context_only_for_launch(
+    cli_always_approve: bool,
+    cli_permission_mode: Option<&str>,
+    remote_permission_mode: Option<&str>,
+) -> bool {
+    if cli_always_approve && cli_permission_mode.is_none() {
+        return false;
+    }
+    let yolo = effective_yolo_for_launch(
+        cli_always_approve,
+        cli_permission_mode,
+        remote_permission_mode,
+    );
+    if yolo.yolo {
+        return false;
+    }
+    if effective_auto_for_launch(
+        cli_always_approve,
+        cli_permission_mode,
+        remote_permission_mode,
+    ) {
+        return false;
+    }
+    if let Some(mode) = cli_permission_mode {
+        return mode == "context-only";
+    }
+    load_permission_mode(remote_permission_mode).is_context_only()
+}
+
 /// Whether a session should activate the **auto** permission mode: the feature
 /// gate must be enabled, auto must be requested (via CLI/config/`default_auto_mode`
 /// or a client's `_meta.autoMode`), and yolo (always-approve) must not be set —
@@ -379,6 +413,24 @@ mod tests {
             PermissionMode::Ask,
             "wire format is case-sensitive; 'Always-Approve' is unknown",
         );
+        assert_eq!(
+            parse_permission_mode_canonical("context-only"),
+            PermissionMode::ContextOnly,
+            "operator-facing context-only must round-trip as its own mode, not Ask"
+        );
+        assert_eq!(
+            permission_mode_canonical_str(PermissionMode::ContextOnly),
+            "context-only",
+        );
+        assert_eq!(
+            parse_permission_mode_canonical("always-approve"),
+            PermissionMode::AlwaysApprove,
+        );
+        assert_eq!(
+            parse_permission_mode_canonical("auto"),
+            PermissionMode::Auto
+        );
+        assert_eq!(parse_permission_mode_canonical("ask"), PermissionMode::Ask);
     }
 
     /// `[ui]` key precedence (permission_mode > approval_mode > yolo) and
@@ -398,6 +450,11 @@ mod tests {
                 "[ui]\npermission_mode = \"auto\"\n",
                 PermissionMode::Auto,
                 "auto",
+            ),
+            (
+                "[ui]\npermission_mode = \"context-only\"\n",
+                PermissionMode::ContextOnly,
+                "context-only",
             ),
             (
                 "[ui]\npermission_mode = \"default\"\n",
@@ -602,6 +659,11 @@ mod tests {
         );
         assert_eq!(clamped_display_permission_mode(PermissionMode::Auto), "ask");
         assert_eq!(clamped_display_permission_mode(PermissionMode::Ask), "ask");
+        assert_eq!(
+            clamped_display_permission_mode(PermissionMode::ContextOnly),
+            "context-only",
+            "context-only is diagnostic, not a clamped-off always-approve/auto"
+        );
 
         let default_ui: TomlValue =
             toml::from_str("[ui]\npermission_mode = \"default\"\n").unwrap();
@@ -612,6 +674,10 @@ mod tests {
         );
         assert_eq!(resolved_display_permission_mode(None, Some("auto")), "ask");
         assert_eq!(resolved_display_permission_mode(None, None), "ask");
+        assert_eq!(
+            resolved_display_permission_mode(None, Some("context-only")),
+            "context-only"
+        );
     }
 
     #[test]
@@ -634,6 +700,37 @@ mod tests {
         ));
         assert!(!effective_auto_for_launch(false, Some("ask"), None));
         unsafe { std::env::remove_var("GROK_AUTO_PERMISSION_MODE") };
+    }
+
+    #[test]
+    fn effective_context_only_for_launch_permission_mode_beats_yolo() {
+        assert!(effective_context_only_for_launch(
+            false,
+            Some("context-only"),
+            None
+        ));
+        assert!(
+            effective_context_only_for_launch(true, Some("context-only"), None),
+            "explicit --permission-mode context-only beats --yolo (same as plan)"
+        );
+        if yolo_disabled_by_policy().is_none() {
+            assert!(
+                !effective_context_only_for_launch(true, None, Some("context-only")),
+                "CLI --yolo without --permission-mode wins over remote context-only"
+            );
+        }
+        assert!(!effective_context_only_for_launch(
+            false,
+            Some("always-approve"),
+            None
+        ));
+        assert!(!effective_context_only_for_launch(
+            false,
+            Some("auto"),
+            None
+        ));
+        assert!(!effective_context_only_for_launch(false, Some("ask"), None));
+        assert!(!effective_context_only_for_launch(true, None, None));
     }
 
     /// The authoritative agent-side gate (used at the `set_auto_mode` seam):

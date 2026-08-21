@@ -1072,6 +1072,17 @@ fn unregister_best_effort_swallows_io_error() {
     let bad_root = file.path().join("not-a-dir");
     unregister_active_session_best_effort_in(&bad_root, &acp::SessionId::new("s1"));
 }
+#[test]
+fn permission_mode_changed_params_context_only_payload() {
+    let params = permission_mode_changed_params("context-only");
+    assert_eq!(params["context_only"], true);
+    assert_eq!(params["yolo_mode"], false);
+    assert_eq!(params["auto_mode"], false);
+    assert_eq!(params["permission_mode"], "context-only");
+    let ask = permission_mode_changed_params("ask");
+    assert_eq!(ask["context_only"], false);
+}
+
 /// BestEffort path fires exactly one ACP notification regardless
 /// of disk outcome.
 #[tokio::test]

@@ -1,6 +1,20 @@
 //! CLI argument parsing for the pager.
 pub use crate::headless::OutputFormat;
 use clap::{ArgAction, Parser, Subcommand, ValueHint};
+
+/// CLI `--permission-mode` values: agent camelCase plus TUI hyphenated names.
+/// Do not add `context-only` to the agent `PermissionMode` EnumCount list.
+const PERMISSION_MODE_CLI_VALUES: &[&str] = &[
+    "default",
+    "acceptEdits",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
+    "plan",
+    "always-approve",
+    "ask",
+    "context-only",
+];
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -687,12 +701,13 @@ pub struct PagerArgs {
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub max_turns: Option<u32>,
-    /// Permission mode.
+    /// Permission mode (`always-approve`, `auto`, `ask`, `context-only`,
+    /// plus Claude-compatible names such as `bypassPermissions`).
     #[arg(
         long = "permission-mode",
         value_name = "MODE",
         value_parser = clap::builder::PossibleValuesParser::new(
-            xai_grok_shell::agent::config::PermissionMode::VALID_VALUES
+            PERMISSION_MODE_CLI_VALUES
         )
     )]
     pub permission_mode_flag: Option<String>,

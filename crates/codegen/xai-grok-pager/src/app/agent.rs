@@ -806,6 +806,9 @@ pub struct AgentSession {
     /// Kept in sync wherever the pager applies the mode; mutually exclusive with
     /// `yolo_mode` (yolo wins).
     pub(crate) auto_mode: bool,
+    /// Diagnostic context-only mode (no tools). Mutually exclusive with yolo
+    /// and auto (those win). Read via `is_context_only()`.
+    pub(crate) context_only_mode: bool,
     /// Prompt history for the current session, fetched from ACP
     /// (`x.ai/prompt_history` scoped via `filter_session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
@@ -943,6 +946,11 @@ impl AgentSession {
     /// field access. Mutually exclusive with `is_yolo()` (yolo wins).
     pub fn is_auto(&self) -> bool {
         self.auto_mode
+    }
+    /// Diagnostic context-only (no tools). Prefer this over direct field access.
+    /// False when `is_yolo()` or `is_auto()` is true.
+    pub fn is_context_only(&self) -> bool {
+        self.context_only_mode && !self.yolo_mode && !self.auto_mode
     }
     /// Test-only setter for `yolo_mode` (the field is private; production toggles
     /// it via the permission-mode facade). Available to sibling crates' test
@@ -1256,6 +1264,7 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

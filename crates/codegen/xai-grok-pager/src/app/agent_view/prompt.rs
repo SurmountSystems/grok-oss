@@ -667,11 +667,22 @@ impl AgentView {
         //     clipboard image/file-url probe defers off the event loop. Reading
         //     once (vs the widget re-reading for text insertion) avoids the old
         //     double `pbpaste` subprocess on macOS.
-        if crate::input::key::is_paste_key(key) {
+        //
+        //     Ctrl+Shift+V is inline text paste when the clipboard has UTF-8.
+        //     Image-only screenshot clipboards have no text; the widget would
+        //     ignore that chord. Probe the same way as Ctrl+V so a Linux
+        //     screenshot paste attaches next to an existing draft.
+        if crate::input::key::is_paste_key(key) || crate::input::key::is_inline_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
             );
-            return self.handle_paste_key_deferred(clipboard_text);
+            if crate::input::key::is_paste_key(key)
+                || clipboard_text
+                    .as_deref()
+                    .is_none_or(|text| text.trim().is_empty())
+            {
+                return self.handle_paste_key_deferred(clipboard_text);
+            }
         }
 
         // 2d. Promote agent-screen actions past the textarea.
@@ -830,18 +841,25 @@ impl AgentView {
         {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running()
-            || self.wake_turn_active()
-            || self.any_cancel_pending()
-        {
+        // Already cancelling (every mode): retry the lost-ack cancel. Ctrl+C
+        // escalates to Quit instead. Push the grace deadline so an Esc mash
+        // past the cancel cannot silently arm the rewind picker below.
+        if self.any_cancel_pending() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
+        }
+        // Busy primary (minimal / non-vim): first Esc arms confirm. Second
+        // Esc within the double-press window fires CancelTurn via
+        // PendingAction. First Esc must not start Cancelling.
+        if self.session.state.is_turn_running() || self.wake_turn_active() {
+            self.suppress_rewind_arm(std::time::Instant::now());
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
         }
 
         // The two idle arms split on pane ownership. CLEAR mutates the composer

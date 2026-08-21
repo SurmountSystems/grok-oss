@@ -483,7 +483,62 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             }
         }
         QueueEntryKind::Command => {
-            // Currently only `/compact` — future slash commands will branch here.
+            if crate::slash::queue_schedule::is_plan_slash(&queued.text) {
+                agent.plan_mode_pending = Some(true);
+                let mode_id = acp::SessionModeId::new("plan");
+                let desc =
+                    crate::slash::queue_schedule::plan_description_from_command(&queued.text);
+                if let Some(desc) = desc {
+                    let skill_token_ranges = agent
+                        .prompt
+                        .slash_controller
+                        .recognized_token_ranges(&desc, &agent.session.models);
+                    agent
+                        .session
+                        .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
+                    let inner = maybe_drain_queue(agent);
+                    let mut effects = Vec::new();
+                    for eff in inner.effects {
+                        match eff {
+                            Effect::SendPrompt {
+                                agent_id,
+                                text,
+                                prompt_id,
+                                skill_token_ranges,
+                                ..
+                            } => {
+                                effects.push(Effect::SetModeThenPrompt {
+                                    session_id: session_id.clone(),
+                                    mode_id: mode_id.clone(),
+                                    agent_id,
+                                    text,
+                                    prompt_id,
+                                    skill_token_ranges,
+                                });
+                            }
+                            other => effects.push(other),
+                        }
+                    }
+                    if effects.is_empty() {
+                        effects.push(Effect::SetSessionMode {
+                            session_id,
+                            mode_id,
+                        });
+                    }
+                    return QueueDrain {
+                        effects,
+                        page_flip_entry: inner.page_flip_entry,
+                    };
+                }
+                return QueueDrain {
+                    effects: vec![Effect::SetSessionMode {
+                        session_id,
+                        mode_id,
+                    }],
+                    page_flip_entry: None,
+                };
+            }
+            // `/compact` and `/compaction`.
             agent.session.start_command(AgentCommand::Compact);
             // Compact owns the pane; a leftover wake marker must not shadow stop.
             agent.running_wake_turn = None;

@@ -927,6 +927,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "allow_worktree" => Some(Action::SetAllowWorktree(new)),
         "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
+        "ulid_session_ids" => Some(Action::SetUlidSessionIds(new)),
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
@@ -985,6 +986,9 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             )),
             "default" => Some(Action::SetPermissionMode(
                 crate::app::actions::PermissionModeKind::Default,
+            )),
+            "context-only" => Some(Action::SetPermissionMode(
+                crate::app::actions::PermissionModeKind::ContextOnly,
             )),
             _ => None,
         },

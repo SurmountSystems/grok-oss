@@ -189,7 +189,7 @@ sends it and `Esc` returns to the options.
 
 **Post-cancel grace:** for about a second after an Esc-triggered cancel, the idle rewind arm stays suppressed — mashing Esc to stop a turn cannot silently open the rewind picker. Only the rewind arm is held; every other Esc behavior is unaffected.
 
-**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt, even while a turn is running). Bare `/feedback` opens the report pane; Esc dismisses it.
+**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt, even while a turn is running). Nested L2/L3 overlays steal Esc to **dismiss the view** and leave that subagent running; that press is not cancel and does not start Cancelling. Bare `/feedback` opens the report pane; Esc dismisses it.
 
 **Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc cancels immediately and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; Esc requires two presses within 800ms.
 

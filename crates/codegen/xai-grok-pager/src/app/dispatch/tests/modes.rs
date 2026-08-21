@@ -247,6 +247,52 @@ fn slash_plan_desc_forwards_skill_token_ranges() {
     }
 }
 
+/// Named queue path: `/queue /plan` and `/plan queue` must not enter plan
+/// mode this turn. Immediate `/plan` still does.
+#[test]
+fn queue_plan_does_not_invoke_immediately() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_queue_cmd = dispatch(Action::SendPrompt("/queue /plan".into()), &mut app);
+    assert!(
+        via_queue_cmd.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "queued /plan must not enter plan mode this turn, got {via_queue_cmd:?}"
+    );
+    assert!(
+        app.agents[&id].plan_mode_pending.is_none(),
+        "queued /plan must not set plan_mode_pending"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert_eq!(held.kind, crate::app::agent::QueueEntryKind::Command);
+    assert!(
+        held.text.starts_with("/plan"),
+        "held row should be /plan, got {}",
+        held.text
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/plan queue".into()), &mut app);
+    assert!(
+        via_token.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "/plan queue must not enter plan mode this turn, got {via_token:?}"
+    );
+    assert!(app.agents[&id].plan_mode_pending.is_none());
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
 #[test]
 fn slash_plan_with_args_already_in_plan_is_noop() {
     let mut app = test_app_with_agent();
@@ -1692,6 +1738,93 @@ fn dispatch_cycle_mode_normal_to_plan_does_not_touch_yolo() {
         matches!(effects[0], Effect::SetSessionMode { .. }),
         "Normal → Plan effect must be SetSessionMode, got {:?}",
         effects[0],
+    );
+}
+
+/// Shift+Tab from context-only (not plan) must not stack Plan on top of an
+/// empty tool list. Leave to Ask; do not hop to Auto.
+#[test]
+fn dispatch_cycle_mode_context_only_leaves_to_ask_not_plan() {
+    use crate::app::actions::PermissionModeKind;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::SetPermissionMode(PermissionModeKind::ContextOnly),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)].session.is_context_only(),
+        "setup: agent must be in context-only, not plan"
+    );
+    assert!(!app.agents[&AgentId(0)].plan_mode_pending.unwrap_or(false));
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+
+    assert_ne!(
+        app.agents[&AgentId(0)].plan_mode_pending,
+        Some(true),
+        "first Shift+Tab from context-only must not silently enter Plan"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetSessionMode { .. })),
+        "must not send SetSessionMode(Plan) on top of context-only, got {effects:?}"
+    );
+    assert_eq!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("ask"),
+        "cycle out of context-only leaves to Ask, not Auto"
+    );
+    assert!(
+        !app.agents[&AgentId(0)].session.is_context_only(),
+        "leaving must clear the context-only flag"
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_auto());
+    assert!(!app.agents[&AgentId(0)].session.is_yolo());
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistPermissionMode {
+                canonical: "ask",
+                ..
+            }
+        )),
+        "must persist Ask so the sampler leaves context-only, got {effects:?}"
+    );
+}
+
+/// Pre-session Shift+Tab from context-only must match the with-session arm.
+#[test]
+fn dispatch_cycle_mode_pre_session_context_only_leaves_to_ask_not_plan() {
+    use crate::app::actions::PermissionModeKind;
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    let _ = dispatch(
+        Action::SetPermissionMode(PermissionModeKind::ContextOnly),
+        &mut app,
+    );
+    let effects = dispatch(Action::CycleMode, &mut app);
+    let agent = &app.agents[&AgentId(0)];
+    assert_ne!(
+        agent.plan_mode_pending,
+        Some(true),
+        "pre-session cycle from context-only must not stash Plan"
+    );
+    assert!(agent.deferred_session_mode.is_none());
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
+    assert!(!agent.session.is_context_only());
+    assert!(!agent.session.is_auto());
+    assert!(!agent.session.is_yolo());
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistPermissionMode {
+                canonical: "ask",
+                session_id: None,
+                ..
+            }
+        )),
+        "pre-session leave must persist Ask, got {effects:?}"
     );
 }
 

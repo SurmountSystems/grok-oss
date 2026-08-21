@@ -223,9 +223,9 @@ impl AgentView {
     ///
     /// Also gated to an idle agent (no running, cancelling, or wake turn):
     /// while one is in flight, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
-    /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
-    /// to the dashboard. Detach mid-turn stays on
+    /// [`Self::try_handle_esc_policy`] (running → arm cancel confirm in
+    /// minimal / non-vim mode, swallow in vim mode; cancelling → retry
+    /// CancelTurn), not detach to the dashboard. Detach mid-turn stays on
     /// Ctrl+\ / Left.
     pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
         self.is_empty_focused_prompt()
@@ -234,6 +234,30 @@ impl AgentView {
             && !self.session.state.is_turn_running()
             && !self.session.state.is_cancelling()
             && !self.wake_turn_active()
+    }
+    /// Bare Esc in a nested L2/L3 overlay leaves that overlay. Inner
+    /// surfaces still own Esc first. Overlay-dismiss is not Cancel.
+    pub(crate) fn nested_overlay_esc_dismisses(&self) -> bool {
+        if self.modal_owns_input()
+            || self.block_viewer.is_some()
+            || self.line_viewer.is_some()
+            || self.agents_modal.is_some()
+            || self.persona_detail.is_some()
+            || self.scrollback_search.is_some()
+            || self.inline_edit.is_some()
+            || !matches!(self.prompt_mode, crate::app::queue_edit::PromptMode::Normal)
+            || self.prompt.any_dropdown_open()
+            || self.prompt.prompt_suggestion_visible()
+            || self.prompt.history_search.is_active()
+            || !self.no_esc_consumer_pending()
+            || !self.no_input_overlay_pending()
+        {
+            return false;
+        }
+        if self.prompt_input_mode != PromptInputMode::Normal && self.prompt.text().is_empty() {
+            return false;
+        }
+        true
     }
     /// True when a pending plan / Q&A overlay is at its top navigation state
     /// (nothing left for `Esc` to clear), so the next `Esc` backs out of the
@@ -477,10 +501,22 @@ impl AgentView {
                 .subagent_views
                 .get(child_sid)
                 .is_some_and(|c| c.is_bare_scrollback());
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && key.code == KeyCode::Esc
+                && key.modifiers.is_empty()
+                && self
+                    .subagent_views
+                    .get(child_sid)
+                    .is_some_and(|c| c.nested_overlay_esc_dismisses())
+            {
+                self.active_subagent = None;
+                return InputOutcome::Changed;
+            }
             if child_in_scrollback
                 && let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
-                && (key!('q').matches(key) || key.code == KeyCode::Esc)
+                && key!('q').matches(key)
             {
                 self.active_subagent = None;
                 return InputOutcome::Changed;
@@ -1954,6 +1990,124 @@ mod background_and_tasks_shortcut_tests {
     }
 
     #[test]
+    fn l2_overlay_esc_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        parent.subagent_views.get_mut(&child_sid).unwrap().vim_mode = false;
+        assert_eq!(
+            parent.subagent_views[&child_sid].active_pane,
+            AgentPane::Prompt
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "nested L2 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "overlay-dismiss is not Cancel"
+        );
+        assert!(
+            parent.active_subagent.is_none(),
+            "Esc must return to the parent transcript"
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            child.session.state.is_turn_running(),
+            "nested L2 must keep running"
+        );
+        assert!(
+            !child.session.state.is_cancelling(),
+            "overlay Esc must not start Cancelling chrome"
+        );
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l2_overlay_esc_empty_prompt_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        {
+            let child = parent.subagent_views.get_mut(&child_sid).unwrap();
+            child.vim_mode = false;
+            child.prompt.set_text("");
+            child.prompt.set_cursor(0);
+        }
+        assert_eq!(
+            parent.subagent_views[&child_sid].active_pane,
+            AgentPane::Prompt
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty-prompt L2 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "overlay-dismiss is not Cancel"
+        );
+        assert!(
+            parent.active_subagent.is_none(),
+            "Esc must return to the parent transcript"
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(child.session.state.is_turn_running());
+        assert!(!child.session.state.is_cancelling());
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l3_overlay_esc_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l3-specialist", 2);
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "nested L3 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(!matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        assert!(parent.active_subagent.is_none());
+        let child = parent.subagent_views.get(&child_sid).expect("l3");
+        assert!(child.session.state.is_turn_running());
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l2_overlay_esc_with_inner_goal_detail_does_not_dismiss() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        {
+            let child = parent.subagent_views.get_mut(&child_sid).unwrap();
+            child.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+            child.show_goal_detail = true;
+        }
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            parent.active_subagent.as_deref() == Some(child_sid.as_str()),
+            "inner Esc consumer must keep the overlay open"
+        );
+        assert!(!matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            !child.show_goal_detail,
+            "first Esc must close the inner surface"
+        );
+        assert!(child.session.state.is_turn_running());
+    }
+
+    #[test]
     fn ctrl_g_toggles_tasks_and_never_demotes() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
@@ -1976,6 +2130,33 @@ mod background_and_tasks_shortcut_tests {
         ));
         assert!(!agent.tasks.overlay.visible);
         assert!(!agent.tasks.overlay.focused);
+    }
+
+    #[test]
+    fn ctrl_t_from_focused_prompt_toggles_todo_overlay() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("draft");
+        let draft_len = agent.prompt.text().len();
+        agent.prompt.set_cursor(draft_len);
+        agent.set_active_pane(AgentPane::Prompt, true);
+        assert!(!agent.todo.overlay.visible, "todo overlay starts hidden");
+        let first = agent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(first, InputOutcome::Changed),
+            "Ctrl+T from the focused prompt must toggle the todos pane, got {first:?}"
+        );
+        assert!(
+            agent.todo.overlay.visible,
+            "Ctrl+T must show the todo overlay"
+        );
+        assert!(
+            agent.todo.overlay.focused,
+            "Ctrl+T must focus the todo overlay"
+        );
+        assert_eq!(agent.active_pane, AgentPane::Todo);
+        assert_eq!(agent.prompt.text(), "draft");
+        assert_eq!(agent.prompt.cursor(), draft_len);
     }
 }
 #[cfg(test)]

@@ -1048,6 +1048,12 @@ async fn run_agent_command(
         permission_mode_flag.as_deref(),
         None,
     );
+    agent_config.default_context_only_mode =
+        xai_grok_shell::util::config::effective_context_only_for_launch(
+            agent_args.yolo,
+            permission_mode_flag.as_deref(),
+            None,
+        );
     agent_config.agent_profile_path = agent_args
         .agent_profile
         .as_deref()
@@ -1136,6 +1142,9 @@ async fn run_agent_command(
         let capabilities = ClientCapabilities {
             yolo_mode: launch_yolo.yolo,
             auto_mode: agent_config.default_auto_mode && !launch_yolo.yolo,
+            context_only: agent_config.default_context_only_mode
+                && !launch_yolo.yolo
+                && !agent_config.default_auto_mode,
             default_model,
             client_version: Some(PAGER_CLIENT_VERSION.to_string()),
             code_nav_enabled: false,

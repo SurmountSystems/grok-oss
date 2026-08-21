@@ -33,6 +33,8 @@ const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
 /// Assistant ASCII scrub default ON when unset (matches UiConfig).
 const SCRUB_ASCII_PUNCT_DEFAULT: bool = UiConfig::SCRUB_ASCII_PUNCT_DEFAULT;
+/// ULID-primary session ids default ON when unset (matches UiConfig).
+const ULID_SESSION_IDS_DEFAULT: bool = UiConfig::ULID_SESSION_IDS_DEFAULT;
 /// Combine-queued-prompts rollout flag defaults OFF (opt-in).
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
 const SIMPLE_MODE_DEFAULT: bool = true;
@@ -204,6 +206,34 @@ pub fn load_scrub_ascii_punct() -> bool {
 pub fn set_scrub_ascii_punct(enabled: bool) {
     SCRUB_ASCII_PUNCT_CURRENT.with(|c| c.set(enabled));
     SCRUB_ASCII_PUNCT_LOADED.with(|l| l.set(true));
+}
+
+// -- ULID session ids (primary display) --------------------------------------
+
+thread_local! {
+    static ULID_SESSION_IDS_CURRENT: Cell<bool> = const { Cell::new(ULID_SESSION_IDS_DEFAULT) };
+    static ULID_SESSION_IDS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `ulid_session_ids`, seeding from `[ui]` on first call.
+pub fn load_ulid_session_ids() -> bool {
+    ULID_SESSION_IDS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ULID_SESSION_IDS_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "ulid_session_ids",
+                    ULID_SESSION_IDS_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ULID_SESSION_IDS_CURRENT.with(|c| c.get())
+}
+
+pub fn set_ulid_session_ids(enabled: bool) {
+    ULID_SESSION_IDS_CURRENT.with(|c| c.set(enabled));
+    ULID_SESSION_IDS_LOADED.with(|l| l.set(true));
 }
 
 // -- Combine queued prompts ---------------------------------------------------
@@ -852,6 +882,7 @@ pub fn prime(ui: &UiConfig) {
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
     set_scrub_ascii_punct(ui.scrub_ascii_punct_enabled());
+    set_ulid_session_ids(ui.ulid_session_ids_enabled());
     set_hide_header(ui.hide_header);
     set_plan_approval_force_modal(ui.plan_approval_force_modal());
     // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
@@ -980,6 +1011,7 @@ mod tests {
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
         assert_eq!(PAGE_FLIP_ON_SEND_DEFAULT, ui.page_flip_on_send_enabled());
         assert_eq!(SCRUB_ASCII_PUNCT_DEFAULT, ui.scrub_ascii_punct_enabled());
+        assert_eq!(ULID_SESSION_IDS_DEFAULT, ui.ulid_session_ids_enabled());
         assert_eq!(
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts
@@ -1139,6 +1171,23 @@ mod tests {
             assert!(
                 !load_scrub_ascii_punct(),
                 "prime must seed scrub_ascii_punct from UiConfig so disk false applies at launch"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn prime_applies_ulid_session_ids_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                ulid_session_ids: Some(false),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                !load_ulid_session_ids(),
+                "prime must seed ulid_session_ids from UiConfig so disk false applies at launch"
             );
         })
         .join()

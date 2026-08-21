@@ -57,14 +57,33 @@ The human table uses the same columns. The CLI table does not mark this window, 
 
 ### `/compact [context]`
 
-Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep:
+Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep. Alias: `/compaction`.
+
+Immediate `/compact` or `/compaction` still runs compact when the session is idle. To put compact on the existing composer prompt queue without running it this turn, use first-arg `queue` or `later`, or `/queue /compaction`. That is the same prompt queue as ordinary follow-ups, not a second queue. A cancelled compact still does not re-arm on the same turn.
 
 ```
 /compact
+/compaction
 /compact keep the auth implementation details
+/compact queue
+/queue /compaction
 ```
 
 Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* sampling window AUTO uses. With **Economic mode** on (default), that sampling window is soft-capped at 200k tokens even when the model catalog is larger (for example 500k). The footer context chip then names both windows (`used / 200K sampling · 500K catalog`) so catalog 500k is not implied as the AUTO gate.
+
+### `/queue`
+
+With no args, list the composer prompt queue as a transcript block.
+
+With a slash, hold that command on the **same** prompt queue so it does not run this turn. Supported holds: `/compaction` (and `/compact`), `/plan`, `/reports`, `/finish`. First-arg `queue` or `later` on those commands does the same hold.
+
+```
+/queue
+/queue /compaction
+/queue /plan
+/queue /reports
+/queue /finish
+```
 
 ### `/economic-mode`
 
@@ -94,6 +113,57 @@ Generate a short "where was I" summary of the session so far. Alias: `/summarize
 ### `/session-info`
 
 Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
+
+### `/finish`
+
+Write a structured post-mortem for this session. Work continues. A wrap often reveals more features worth adding. Leftover and next features stay first-class. Optional focus text is passed through to the agent. The product is not finished forever.
+
+This is **not** `/dream` (memory consolidation), **not** `/recap` (a short chat recap), and **not** `/reports` (a checkpoint while work continues). `/finish` asks the agent to document what shipped, leftover, and useful next features. The artifact is a markdown file under `~/.agents/reports/` named `finish-YYYY-MM-DD.md` (or `finish-YYYY-MM-DD-<short-session>.md` if that dated name already exists). Complete American English. No secrets.
+
+The host skill lives at `~/.agents/skills/finish/SKILL.md`. The pager builtin `/finish` keeps that slash name; a same-named skill cannot steal the bare command.
+
+Immediate `/finish` injects that skill now. To hold it on the existing composer prompt queue, use first-arg `queue` or `later`, or `/queue /finish`.
+
+```
+/finish
+/finish pager slashes and the ULID map
+/finish queue
+/queue /finish
+```
+
+### `/reports`
+
+Write a checkpoint while work continues: what landed so far, leftover, and useful next features. This is not a wrap that says the project is done.
+
+This is **not** `/finish` (session post-mortem), **not** `/dream` (memory consolidation), and **not** `/recap` (a short chat recap). The artifact is a markdown file under `~/.agents/reports/` named `reports-YYYY-MM-DD.md` (or `reports-YYYY-MM-DD-<short-session>.md` if that dated name already exists). Complete American English. No secrets.
+
+The host skill lives at `~/.agents/skills/reports/SKILL.md`. The pager builtin `/reports` keeps that slash name; a same-named skill cannot steal the bare command.
+
+Immediate `/reports` injects that skill now. To hold it on the existing composer prompt queue, use first-arg `queue` or `later`, or `/queue /reports`.
+
+```
+/reports
+/reports pager slashes
+/reports queue
+/queue /reports
+```
+
+### `/what`
+
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled lines only: **Job** (what this session is trying to do), **State** (what is actually happening), **You** (what you must do, or `nothing`), **Next** (the next concrete step the agent will take). Optional focus text is passed through.
+
+This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Plain American English. No residual codes or board ids as the body.
+
+The host skill lives at `~/.agents/skills/what/SKILL.md`. The pager builtin `/what` keeps that slash name; a same-named skill cannot steal the bare command. Immediate `/what` injects that skill now. This is not a product skill pack in the grok-oss git tree.
+
+```
+/what
+/what the last status
+```
+
+### `/metadata`
+
+Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. Fields that are not known are omitted rather than invented. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
 
 ### `/fork`
 
@@ -185,16 +255,19 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/always-approve` and `/auto`
+### `/always-approve`, `/auto`, and `/context-only`
 
-Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
+These are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
 
 | Command | When off | When already on |
 |---|---|---|
 | `/always-approve` | Skip all permission prompts | Back to ask |
 | `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
+| `/context-only` | Advertise no tools; refuse any tool call. Chat stays a conversation (redteaming / harness diagnosis) | Back to ask |
 
-Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Always-approve), `Ctrl+O`, or `/settings`.
+Running one while another is active switches modes. For example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. `/context-only` is always offered. You can also change mode with `/settings`. `Shift+Tab` still cycles Normal / Plan / Auto / Always-approve; it does not include context-only. `Ctrl+O` still toggles always-approve.
+
+Always-approve remains the preferred daily autonomy mode. Context-only is an explicit diagnostic mode, not the default.
 
 ### `/multiline`
 
@@ -222,15 +295,19 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/plan`
 
-Enter plan mode.
+Enter plan mode. Immediate `/plan` (optionally with a description) still enters plan mode when you want it now.
+
+To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue. Present is not Approve. Empty Enter never Approves.
 
 ```
 /plan [description]
+/plan queue
+/queue /plan
 ```
 
 ### `/view-plan`
 
-Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
+Open the current saved plan in the right pane. The pane uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. If grok-oss.db has an explicit recorded choice for this session, a dot marks that option. Clicking Approve is a real Approve only while a live waiter is parked; after Approve or Exit it does not re-arm Plan ready. Aliases: `/show-plan`, `/plan-view`.
 
 ---
 

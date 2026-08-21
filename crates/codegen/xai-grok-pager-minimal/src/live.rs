@@ -656,10 +656,7 @@ fn render_prompt_info(
                 .and_then(|c| (c.total > 0).then_some(c.total))
         });
         let sampling = catalog.map(|window| {
-            xai_grok_shell::util::config::apply_economic_context_cap(
-                window,
-                xai_grok_pager::appearance::cache::load_economic_mode(),
-            )
+            xai_grok_shell::util::config::session_sampling_window(window, agent.is_subagent_view)
         });
         if let Some(used) = used
             && let Some(chip) =

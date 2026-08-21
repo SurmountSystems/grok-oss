@@ -663,6 +663,8 @@ pub(crate) struct SessionActor {
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,
     pub(crate) permissions: PermissionHandle,
+    /// Advertise no tools and refuse any tool call that still arrives.
+    pub(crate) context_only: std::sync::atomic::AtomicBool,
     pub(crate) tool_context: ToolContext,
     /// Managed Read-deny glob patterns, resolved once at construction and
     /// (re-)injected into the ToolBridge so the Grep tool excludes policy-forbidden

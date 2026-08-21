@@ -2815,6 +2815,61 @@ fn slash_compact_with_context_enqueues_command() {
     assert!(matches!(&effects[0], Effect::Compact { .. }));
 }
 
+/// Named queue path: `/queue /compaction` (and `/compact queue`) must sit on
+/// the composer prompt queue and must not fire compact this turn.
+#[test]
+fn queue_compaction_does_not_invoke_immediately() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_queue_cmd = dispatch(Action::SendPrompt("/queue /compaction".into()), &mut app);
+    assert!(
+        via_queue_cmd
+            .iter()
+            .all(|e| !matches!(e, Effect::Compact { .. })),
+        "queued compaction must not Compact this turn, got {via_queue_cmd:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        1,
+        "queued compaction must occupy the composer prompt queue"
+    );
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert_eq!(held.kind, crate::app::agent::QueueEntryKind::Command);
+    assert!(
+        held.text.starts_with("/compact") || held.text.starts_with("/compaction"),
+        "held row should be compact, got {}",
+        held.text
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/compact queue".into()), &mut app);
+    assert!(
+        via_token
+            .iter()
+            .all(|e| !matches!(e, Effect::Compact { .. })),
+        "/compact queue must not Compact this turn, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+/// Immediate `/compact` still fires when the operator wants it now.
+#[test]
+fn slash_compaction_alias_invokes_compact() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("/compaction".into()), &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(
+        matches!(&effects[0], Effect::Compact { .. }),
+        "bare /compaction is the immediate alias, got {effects:?}"
+    );
+}
+
 #[test]
 fn slash_unknown_command_passthrough_enqueues_prompt() {
     let mut app = test_app_with_agent();
@@ -4681,7 +4736,11 @@ fn live_composer_submit_inserts_prompt_task_and_writes_exec_metrics_on_turn_comp
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let db = tmp.path().join("grok_oss.db");
     let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
-    assert_eq!(store.schema_version().unwrap(), 3, "schema stays v3");
+    assert_eq!(
+        store.schema_version().unwrap(),
+        xai_grok_shell::grok_oss::SCHEMA_VERSION,
+        "schema stays current grok_oss version"
+    );
     let _guard = isolated_grok_oss_guard(db.clone());
 
     let mut app = test_app_with_agent();

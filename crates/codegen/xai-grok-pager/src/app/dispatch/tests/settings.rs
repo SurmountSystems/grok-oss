@@ -1675,6 +1675,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "scrub_ascii_punct" => {
             let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
         }
+        "ulid_session_ids" => {
+            let _ = dispatch(Action::SetUlidSessionIds(false), app);
+        }
         "allow_worktree" => {
             let _ = dispatch(Action::SetAllowWorktree(true), app);
         }
@@ -1922,6 +1925,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2575,6 +2579,94 @@ fn set_collapsed_edit_blocks_refolds_live_edit_rows() {
     );
     crate::appearance::cache::set_collapsed_edit_blocks(false);
 }
+
+/// Toggling `[ui] always_expand_thinking` rematerializes stacked thinking
+/// on the parent and on a nested overlay. No restart.
+#[test]
+fn set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::types::DisplayMode;
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let child_session = make_test_agent_session(&app, id, "child-session");
+    let mut child = AgentView::new(child_session, ScrollbackState::new());
+    let parent_think = {
+        let parent = app.agents.get_mut(&id).unwrap();
+        parent
+            .scrollback
+            .push_block(RenderBlock::thinking("parent thought"))
+    };
+    let child_think = child
+        .scrollback
+        .push_block(RenderBlock::thinking("overlay thought"));
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .subagent_views
+        .insert("child-1".to_string(), Box::new(child));
+
+    assert_eq!(
+        app.agents[&id]
+            .scrollback
+            .get_by_id(parent_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Collapsed,
+        "always-expand off paints parent thinking as a header"
+    );
+    assert_eq!(
+        app.agents[&id].subagent_views["child-1"]
+            .scrollback
+            .get_by_id(child_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Collapsed,
+        "always-expand off paints nested overlay thinking as a header"
+    );
+
+    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    assert_eq!(
+        app.agents[&id]
+            .scrollback
+            .get_by_id(parent_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Expanded,
+        "Settings on must expand parent thinking immediately"
+    );
+    assert_eq!(
+        app.agents[&id].subagent_views["child-1"]
+            .scrollback
+            .get_by_id(child_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Expanded,
+        "Settings on must expand nested overlay thinking immediately"
+    );
+
+    let _ = dispatch(Action::SetAlwaysExpandThinking(false), &mut app);
+    assert_eq!(
+        app.agents[&id]
+            .scrollback
+            .get_by_id(parent_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Collapsed,
+        "Settings off must collapse parent thinking immediately"
+    );
+    assert_eq!(
+        app.agents[&id].subagent_views["child-1"]
+            .scrollback
+            .get_by_id(child_think)
+            .unwrap()
+            .display_mode,
+        DisplayMode::Collapsed,
+        "Settings off must collapse nested overlay thinking immediately"
+    );
+    crate::appearance::cache::set_always_expand_thinking(false);
+}
+
 #[test]
 fn set_show_thinking_blocks_hides_and_restores_existing_thinking_height() {
     use crate::scrollback::block::RenderBlock;
@@ -3170,6 +3262,38 @@ fn action_for_reset_permission_mode_dispatches_set_permission_mode_for_each_cano
                  Action::SetPermissionMode(Default), got {other:?}"
             )
         }
+    }
+    match action_for_reset("permission_mode", &SettingValue::Enum("auto")) {
+        Some(Action::SetPermissionMode(PermissionModeKind::Auto)) => {}
+        other => {
+            panic!(
+                "action_for_reset(permission_mode, 'auto') must produce \
+                 Action::SetPermissionMode(Auto), got {other:?}"
+            )
+        }
+    }
+    match action_for_reset("permission_mode", &SettingValue::Enum("context-only")) {
+        Some(Action::SetPermissionMode(PermissionModeKind::ContextOnly)) => {}
+        other => {
+            panic!(
+                "action_for_reset(permission_mode, 'context-only') must produce \
+                 Action::SetPermissionMode(ContextOnly), got {other:?}"
+            )
+        }
+    }
+    for canonical in ["default", "ask", "auto", "always-approve", "context-only"] {
+        let Some(Action::SetPermissionMode(kind)) =
+            action_for_reset("permission_mode", &SettingValue::Enum(canonical))
+        else {
+            panic!(
+                "action_for_reset must cover catalog canonical {canonical:?}, got none or a different Action"
+            );
+        };
+        assert_eq!(
+            kind.as_canonical(),
+            canonical,
+            "reset Action kind must round-trip catalog canonical"
+        );
     }
     assert!(action_for_reset("permission_mode", &SettingValue::Enum("bogus")).is_none());
 }

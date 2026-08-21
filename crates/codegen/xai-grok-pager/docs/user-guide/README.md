@@ -49,6 +49,6 @@ Automate, script, and integrate Grok OSS with other systems.
 | 19 | [Plan Mode](19-plan-mode.md) | Structured planning, plan-file edits, and approval before coding |
 | 20 | [Background Tasks and Monitoring](20-background-tasks.md) | `background: true`, `/loop`, `monitor`, and `Ctrl+B` to demote |
 | 21 | [Terminal Support and Troubleshooting](21-terminal-support.md) | tmux, SSH, truecolor, clipboard, and OSC 52 |
-| 22 | [Permissions and Safety](22-permissions-and-safety.md) | Modes (always-approve, auto, ask), rules, matching, hooks, and examples |
+| 22 | [Permissions and Safety](22-permissions-and-safety.md) | Modes (always-approve, auto, ask, context-only), rules, matching, hooks, and examples |
 | 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export. Spend meters and included SuperGrok period limits live on `/limits`, not here. |

@@ -101,6 +101,10 @@ no runtime reader. Serde default tests are not this class.
 | `xai-grok-pager` `settings::registry::theme_choices_include_doge_and_default_is_doge` | Theme picker includes DOGE; default is `doge` (not `groknight`) |
 | `xai-grok-pager` `hide_header_zeroes_*` / `hide_header_zeros_*` | `hide_header` zeros status / welcome / dashboard chrome |
 | `xai-grok-pager` `always_expand_thinking_keeps_blocks_expanded` | Always-expand thinking is read at paint |
+| `xai-grok-pager` `always_expand_thinking_off_paints_collapsed_headers` | Off paints collapsed Thought-for headers, including while running |
+| `xai-grok-pager` `always_expand_thinking_finish_overrides_sticky_collapsed` | Finish honors always-expand over session sticky |
+| `xai-grok-pager` `always_expand_thinking_flip_rematerializes_stacked_thinking` | Settings flip rematerializes stacked thinking rows |
+| `xai-grok-pager` `set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay` | Parent and nested overlay thinking rematerialize live |
 | `xai-grok-pager` `bubble_copy_buttons_on_paints_copy_icon` | Bubble copy chrome reads the flag |
 | `xai-grok-pager` `bubble_copy_buttons_on_paints_copy_icon_when_first_line_is_full_width` | A full-width first line still paints the always-on copy glyph |
 | `xai-grok-pager` `append_bubble_copy_button_paints_when_first_line_fills_content_width` | The paint helper still marks a hit column when the first line fills the width |
@@ -114,7 +118,7 @@ no runtime reader. Serde default tests are not this class.
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header always_expand_thinking \
   scrub_ascii_punct allow_worktree bubble_copy_buttons plan_approval_park
 cargo test -p xai-grok-pager --lib -- theme_choices_include_doge_and_default_is_doge \
-  hide_header_zeroes always_expand_thinking_keeps_blocks_expanded bubble_copy_buttons_on \
+  hide_header_zeroes always_expand_thinking bubble_copy_buttons_on \
   append_bubble_copy_button_paints clicking_human_bubble_copy clicking_assistant_bubble_copy \
   clicking_wide_human_bubble_copy
 cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui
@@ -330,14 +334,16 @@ field.
 | `xai-grok-pager` `context_chip_hover_percent_uses_sampling_window_when_catalog_differs` | Hover percent is of the sampling window |
 | `xai-grok-pager` `footer_chip_uses_session_sampling_window_when_economic_cache_is_off` | Footer chip uses the session sampling window when the pager economic cache is off |
 | `xai-grok-pager` `refresh_context_used_does_not_copy_catalog_into_session_sampling` | `refresh_context_used` does not copy catalog 500k into session sampling |
-| `xai-grok-shell` `spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on` | Spawn seeds the sampling window at the economic cap when disk economic is on |
+| `xai-grok-shell` `main_session_sampling_window_is_catalog_500k_even_when_economic_is_on` | L1 spawn seeds catalog 500k |
+| `xai-grok-shell` `nested_session_sampling_window_stays_200k_when_catalog_is_500k` | Nested spawn stays 200k |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- context_chip_names_sampling_window_when_catalog_differs \
   context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
   footer_chip_uses_session_sampling_window_when_economic_cache_is_off \
   refresh_context_used_does_not_copy_catalog_into_session_sampling
-cargo test -p xai-grok-shell --lib -- spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on
+cargo test -p xai-grok-shell --lib -- main_session_sampling_window_is_catalog_500k_even_when_economic_is_on \
+  nested_session_sampling_window_stays_200k_when_catalog_is_500k
 ```
 
 #### Plan present is not operator Approve
@@ -400,6 +406,17 @@ land. Extra class, not one of the seven numbered land classes.
 | `xai-grok-tools` `clippy_argv_includes_integration_test_path_not_package_lib` | editing `tests/<stem>.rs` still lints that path |
 | `xai-grok-tools` `clippy_argv_is_file_level_not_package_lib` | no `-p xai-grok-shell --lib` in the lint argv |
 | `xai-grok-tools` `several_rust_writes_run_file_level_clippy_per_file` | flush runs file-level clippy-driver per edited file |
+| `xai-grok-tools` `clippy_driver_uses_temp_out_dir_not_the_workspace_root` | clippy-driver `--out-dir` and cwd are a temp dir, not the workspace root |
+| `xai-grok-tools` `write_refuses_rmeta_at_workspace_root_and_does_not_create_the_file` | `write` refuses `*.rmeta` at workspace root and does not create the file |
+| `xai-grok-tools` `write_refuses_a_out_at_workspace_root_and_does_not_create_the_file` | `write` refuses `a.out` at workspace root |
+| `xai-grok-tools` `write_refuses_rust_out_at_workspace_root_and_does_not_create_the_file` | `write` refuses `rust_out` at workspace root |
+| `xai-grok-tools` `write_refuses_long_type_dump_at_workspace_root_and_does_not_create_the_file` | `write` refuses `*.long-type-*.txt` at workspace root |
+| `xai-grok-tools` `search_replace_refuses_a_out_at_workspace_root_and_does_not_create_the_file` | `search_replace` refuses `a.out` at workspace root |
+| `xai-grok-tools` `apply_patch_refuses_add_rmeta_at_workspace_root_and_does_not_create_the_file` | `apply_patch` refuses adding `*.rmeta` at workspace root |
+| `xai-grok-tools` `rustc_oneshot_without_out_dir_is_refused_and_does_not_spawn_shell` | `rustc foo.rs` is refused; rustc does not spawn |
+| `xai-grok-tools` `rustc_stdin_rust_out_is_refused_and_does_not_spawn_shell` | `rustc -` (writes `rust_out`) is refused |
+| `xai-grok-tools` `rustc_dash_o_a_out_at_workspace_root_is_refused_and_does_not_spawn_shell` | `rustc -o a.out` at workspace root is refused |
+| `xai-grok-tools` `redirect_rmeta_at_workspace_root_is_refused_and_does_not_spawn_shell` | shell redirect to `*.rmeta` at workspace root is refused |
 | `xai-grok-tools` `dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell` | `cargo fmt --all` is refused; cargo does not spawn |
 | `xai-grok-tools` `dangerous_cargo_fmt_package_without_file_list_is_refused_and_does_not_spawn_shell` | `cargo fmt -p` without a file list is refused |
 | `xai-grok-tools` `dangerous_cargo_clippy_all_targets_is_refused_and_does_not_spawn_shell` | `cargo clippy --all-targets` is refused |
@@ -414,6 +431,7 @@ land. Extra class, not one of the seven numbered land classes.
 
 ```bash
 cargo test -p xai-grok-tools --lib rust_edit_verify
+cargo test -p xai-grok-tools --lib compiler_probe_junk
 cargo test -p xai-grok-tools --lib dangerous_cargo
 ```
 
@@ -455,6 +473,26 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
   peer_relaunch_declines_equal_identity_on_same_path \
   peer_relaunch_accepts_deleted_inode_even_when_identity_equal
 cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_identity
+```
+
+#### `/rebuild` signals every live grok-oss PID
+
+SHA-aware fail-does-not-signal plus version-plus-SHA identity can stay green
+while the all-PID target list disappears. After a successful install, TUI
+`/rebuild` SIGUSR1s every other live grok-oss TUI PID in `active_sessions.json`
+(dedupe by PID). Two windows on the same `session_id` both get a signal. Self,
+dead, and non-grok PIDs are skipped. These helper tests are recon defense, not
+a new implementation. There is no catalog test that
+`rebuild_and_relaunch_with_progress` itself calls the peer walk.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-update` `rebuild_signals_each_pid_after_composite_key` | Two live grok-oss PIDs on the same `session_id` are both signal targets (dedupe by PID, not by session) |
+| `xai-grok-update` `peer_pids_to_signal_excludes_self_dead_and_non_grok` | Peer list is other live grok-oss PIDs only (not self, not dead, not non-grok) |
+
+```bash
+cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_key \
+  peer_pids_to_signal_excludes_self_dead_and_non_grok
 ```
 
 #### Nucleo reuse-per-root
@@ -863,7 +901,7 @@ Dual-auth hop + multi SuperGrok + `/limits`; `interject_contract_*`;
 `local_agents_skills_shadow_local_grok_skills`); UDAX toon filters; plan
 soft-park filters. Extra restack-droppable neighbors live under *Required land
 inventory* (plan present is not Approve, three-layer product prompt,
-`from_config` cold catalog, SHA-aware `/rebuild`, nucleo, Pause / Clear
+`from_config` cold catalog, SHA-aware `/rebuild`, all-PID `/rebuild` SIGUSR1, nucleo, Pause / Clear
 finished, user-guide hop and spend-order pins, seeded custom model on
 `session/load` stays Chat Completions). Full residual-aligned blocks
 below.
@@ -1004,7 +1042,7 @@ cargo test -p xai-grok-pager-bin --test version_without_tty
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header always_expand_thinking \
   scrub_ascii_punct allow_worktree bubble_copy_buttons plan_approval_park
 cargo test -p xai-grok-pager --lib -- theme_choices_include_doge_and_default_is_doge \
-  hide_header_zeroes always_expand_thinking_keeps_blocks_expanded bubble_copy_buttons_on \
+  hide_header_zeroes always_expand_thinking bubble_copy_buttons_on \
   append_bubble_copy_button_paints clicking_human_bubble_copy clicking_assistant_bubble_copy \
   clicking_wide_human_bubble_copy
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
@@ -1129,14 +1167,17 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
   build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
   peer_relaunch_accepts_same_semver_different_sha \
   peer_relaunch_declines_equal_identity_on_same_path \
-  peer_relaunch_accepts_deleted_inode_even_when_identity_equal
+  peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
+  rebuild_signals_each_pid_after_composite_key \
+  peer_pids_to_signal_excludes_self_dead_and_non_grok
 cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_search_per_root \
   distinct_roots_each_keep_one_search get_results_does_not_keep_a_stale_search_alive
 cargo test -p xai-grok-shell --test test_image_strip_recovery -- \
   poisoned_image_session_recovers_within_the_failing_turn
 cargo test -p xai-grok-shell --lib -- \
   limits_snapshot_mode_for_get_billing_explicit_is_force_refresh \
-  spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on
+  main_session_sampling_window_is_catalog_500k_even_when_economic_is_on \
+  nested_session_sampling_window_stays_200k_when_catalog_is_500k
 cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt
 cargo test -p xai-chat-state --lib -- parent_estimated_tokens_omit_huge_spawn_prompt
 cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_parent_ingest

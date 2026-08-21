@@ -248,10 +248,14 @@
           # --release still type-checks at opt-level 3 on one thread per
           # crate. Use the same dev profile as local `just test-clippy`.
           # Pass cargo --jobs on argv from NIX_BUILD_CORES (nix --cores),
-          # capped at 32. If the sandbox reports fewer cores than
-          # CARGO_BUILD_JOBS, keep 32 so a 1-core NIX_BUILD_CORES does not
-          # force one rustc. cargo fmt rejects --jobs; only clippy/check/
-          # build/test get it.
+          # capped at 32. Floor at CARGO_BUILD_JOBS (32) so a 1-core
+          # NIX_BUILD_CORES does not force one rustc. cargo fmt rejects
+          # --jobs; only clippy/check/build/test get it.
+          # cargo 1.97.1 has no global `cargo --jobs N` (tip: `check --jobs`).
+          # Put --jobs after the subcommand: `cargo check --jobs N`,
+          # `cargo clippy --jobs N`. A 1-token GNU jobserver (MAKEFLAGS)
+          # still wins over later --jobs, so drop MAKEFLAGS / CARGO_MAKEFLAGS
+          # / MFLAGS first.
           workspaceCargoJobsFromCores = ''
             cargoJobs="''${NIX_BUILD_CORES:-32}"
             case "$cargoJobs" in
@@ -260,13 +264,22 @@
             if [ "$cargoJobs" -gt 32 ]; then
               cargoJobs=32
             fi
-            if [ "''${CARGO_BUILD_JOBS:-0}" -gt "$cargoJobs" ]; then
-              cargoJobs="$CARGO_BUILD_JOBS"
+            floor="''${CARGO_BUILD_JOBS:-32}"
+            case "$floor" in
+              "" | *[!0-9]*) floor=32 ;;
+            esac
+            if [ "$cargoJobs" -lt "$floor" ]; then
+              cargoJobs="$floor"
             fi
             export CARGO_BUILD_JOBS="$cargoJobs"
+            unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+            echo "workspace cargo jobs=$CARGO_BUILD_JOBS NIX_BUILD_CORES=''${NIX_BUILD_CORES:-unset}"
           '';
+          # Dummy deps stubs do not need the pager build-id. GROK_GIT_SHA from
+          # dirtyShortRev would bust this drv on any dirty tree, even files
+          # cargo filter drops. grok-oss and quality keep it (build.rs).
           workspaceCargoArtifacts = craneLib.buildDepsOnly (
-            commonArgs
+            (lib.removeAttrs commonArgs [ "GROK_GIT_SHA" ])
             // {
               pname = "workspace-cargo-quality";
               preferLocalBuild = false;
@@ -288,12 +301,12 @@
               CARGO_PROFILE = "dev";
               buildPhaseCargoCommand = ''
                 ${workspaceCargoJobsFromCores}
-                cargoWithProfile check --jobs "$CARGO_BUILD_JOBS" --locked --all-targets
-                cargoWithProfile build --jobs "$CARGO_BUILD_JOBS" --locked
+                cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --all-targets
+                cargo build --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked
               '';
               checkPhaseCargoCommand = ''
                 ${workspaceCargoJobsFromCores}
-                cargoWithProfile test --jobs "$CARGO_BUILD_JOBS" --locked --no-run
+                cargo test --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --no-run
               '';
             }
           );
@@ -316,11 +329,13 @@
               enableParallelBuilding = true;
               CARGO_BUILD_JOBS = "32";
               CARGO_PROFILE = "dev";
+              # Gate only: skip post-clippy zstd of target (not an artifacts cache).
+              doInstallCargoArtifacts = false;
               buildPhaseCargoCommand = ''
                 ${workspaceCargoJobsFromCores}
                 cargo fmt --all -- --check
-                cargoWithProfile clippy --jobs "$CARGO_BUILD_JOBS" --workspace --lib --bins --locked -- -D warnings
-                cargoWithProfile test --jobs "$CARGO_BUILD_JOBS" --workspace --locked --no-run
+                cargo clippy --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --lib --bins --locked -- -D warnings
+                cargo test --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --locked --no-run
                 # cargo 1.97 refuses --doc with --no-run ("can't skip running
                 # doc tests with --no-run"). Doctest *execution* stays out of
                 # this sandbox; rustdoc examples are not compile-only here.

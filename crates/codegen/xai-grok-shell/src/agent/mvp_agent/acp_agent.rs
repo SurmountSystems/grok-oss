@@ -2600,8 +2600,11 @@ impl acp::Agent for MvpAgent {
             let want_auto = auto_mode_explicit == Some(true)
                 || permission_mode == "auto";
             let clear_auto = auto_mode_explicit == Some(false)
-                || (matches!(permission_mode, "always-approve" | "ask" | "default")
-                    && !want_auto);
+                || (matches!(
+                    permission_mode,
+                    "always-approve" | "ask" | "default" | "context-only"
+                ) && !want_auto);
+            let want_context_only = permission_mode == "context-only";
             let enable_auto = want_auto && yolo_signal != Some(true);
             if enable_auto || clear_auto {
                 let enabled = enable_auto;
@@ -2637,6 +2640,25 @@ impl acp::Agent for MvpAgent {
                     total_sessions,
                     "Setting auto permission mode for matching sessions"
                 );
+            }
+            if want_context_only || matches!(
+                permission_mode,
+                "always-approve" | "ask" | "default" | "auto"
+            ) {
+                let enabled = want_context_only && yolo_signal != Some(true) && !enable_auto;
+                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
+                    sender_id.is_none()
+                        || h.origin_client.as_ref().map(|c| c.product.as_str())
+                            == sender_id
+                };
+                self.session_registry.for_each_resident_mut(|_, h| {
+                    if !matches_sender(h) {
+                        return;
+                    }
+                    let _ = h.cmd_tx.send(crate::session::SessionCommand::SetContextOnlyMode {
+                        enabled,
+                    });
+                });
             }
         }
         if args.method.as_ref() == "x.ai/permissions/reset" {

@@ -102,17 +102,19 @@ less than product code and tests. Do not invent long essays or git nags.
    never documented. Host dual-pin: `~/.grok/AGENTS.md` §
    *Document every live task on disk*. Remaining-work pointer this
    session: `~/.agents/reports/remaining-2026-08-17.md`.
-3f. **L1 stays lean so we do not compact (pinned 2026-08-17).** Past
-   ~200k parent tokens costs about double. Compaction is also
-   expensive and slow. Avoid both by keeping L1 memory small: board
-   pointers, spawn, wait, read the asked-for report. Do not load
-   inventories, closed todos, or session history into L1. When the
-   operator names work, record a pointer and implement. Do **not**
-   lock that work behind a plan rewrite / present / approve cycle
-   while implementation is already running. After Approve, mentioned
-   work is implemented (board + spawn). See § *After Approve, implement
-   mentioned work*. Plan mode is for unclear or large new design only.
-   Host dual-pin: `~/.grok/AGENTS.md` §
+3f. **L1 stays lean so we do not compact (pinned 2026-08-17; L1 500k
+   2026-08-20).** The main (L1) session may use the catalog 500k
+   sampling window. Nested L2 and L3 sessions never exceed 200k. Keep
+   L1 near about 40% of that 500k window, and keep nested sessions near
+   40% of their 200k window. Compaction is expensive and slow. Avoid
+   filling L1: board pointers, spawn, wait, read the asked-for report.
+   Do not load inventories, closed todos, or session history into L1.
+   When the operator names work, record a pointer and implement. Do
+   **not** lock that work behind a plan rewrite / present / approve
+   cycle while implementation is already running. After Approve,
+   mentioned work is implemented (board + spawn). See § *After Approve,
+   implement mentioned work*. Plan mode is for unclear or large new
+   design only. Host dual-pin: `~/.grok/AGENTS.md` §
    *L1 stays lean so we do not compact*.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
@@ -199,6 +201,11 @@ less than product code and tests. Do not invent long essays or git nags.
    clauses (not "room/headroom"). Config and wire names may follow the plain
    thought in parentheses. Operator corrections about incomplete phrasing are
    permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Job / State / You / Next, with evidence for You (pinned 2026-08-21):**
+   Keep the four-line restatement. On **You**, always say why the
+   operator must act, or why they need not. Name the evidence. Do not
+   use an unexplained heuristic. Maximally truthseeking. Host dual-pin:
+   `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
    **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
    minute or more to the operator, write minutes (or hours and leftover
    minutes). Do not write 943 seconds or 943s. Compact chrome is `15m43s`
@@ -221,6 +228,11 @@ less than product code and tests. Do not invent long essays or git nags.
    job in ordinary English (right: "failing tests that the shell tool must
    refuse crate-wide cargo"). The spawn description is what the Subagents
    list shows. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Acknowledge merit, not sycophancy (pinned 2026-08-20):** The operator
+   likes explicit acknowledgment when an idea has merit. That is not
+   sycophancy. When an idea is actually good, say so in plain English and
+   say why (what it solves). Do not flatter, inflate, agree by default, or
+   pad empty praise. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
    "always remember", "please remember", "I hate repeating myself" (and close
    variants) mean same-turn standing pin (project `AGENTS.md` / residual when
@@ -375,43 +387,45 @@ joins were leftover reports and live under `~/.agents/reports/`. New work
 uses **reports** under `~/.agents/reports/`. Do not keep live leftover
 joins under project `.agents/joins/`.
 
-### Agent depth L1 / L2 / L3 (pinned 2026-07-29; three layers always 2026-08-15; Hierarchical fast path 2026-08-16)
+### Agent depth L1 / L2 / L3 (pinned 2026-07-29; Hierarchical fast path 2026-08-16; L2 decides L3 2026-08-20)
+
+**Supersedes 2026-08-15 "L2 MUST always spawn L3 / always three layers."** Operator contract 2026-08-20 (survives compaction): `~/.agents/reports/feat-l1-500k-nested-200k-CONTRACT.md`
+
+- **L1 context** matches upstream Grok Build: full catalog 500k. No 40% throttle. Do not auto-compact the main window at 200k sampling while catalog is 500k. Cancelled compact must not re-arm.
+- **L2 and L3 context** is 40% of that catalog = 200k. Nested agents never exceed 200k.
+- **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path.
+- **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2.
+- **L3** has about as much agency as L2 except no spawn (no L4).
+- **No worktrees** on this tree (`allow_worktree = false`). Do not invent a worktree workflow.
+- Big already-named work runs as **parallel streams**. Explicit plan/implement is for tricky problems and new projects. After Approve, implement. Present is not Approve.
 
 **Not** the session-board L0/L1/L2 table below (residual / todos / reports).
-Whenever implement work, multi-file diagnosis, CI, or a regression needs
-tools, agents are **three layers deep.** Including implement loops. A
-"simple" implement job is not an exception. Implement loops are not an
-exception.
-
-The old softer law (L2 must spawn L3 when the job is many greps, or when L2
-crosses about half the window) is **too weak**. Do not teach it. Work on L2
-fills L2 and causes compaction. That is how restack and skills work was lost.
 L1 stays cheap for HITL. L2 exists so context can be discarded after a report
-goes up.
+goes up. Do not go deeper than L3.
 
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. **MUST spawn L3**. Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Fill itself with product tool work (that is L3's job). Do not inject operator text into a live L3. |
+| **L2 subagent** | Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
 | **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
 
-L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools. L2 still **MUST spawn L3** for tool work so L2 does not fill and compact. That is L2's job, not a claim that L3 is weaker.
+L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools when spawned. Easy work can stay on L2.
 
 Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2.
 
 L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 
-**Hierarchical fast path (pinned 2026-08-16).** The main thread may do
-these three things without spawning L2:
+**Hierarchical fast path (pinned 2026-08-16; trivial named edit 2026-08-20).** The main thread may do
+these things without spawning L2:
 
 1. A one-command host question (for example `journalctl` or `last`).
 2. A single known-path read that the operator or the prompt already named.
 3. Read and quote the short on-disk report that this thread asked for.
+4. A single already-named one-line file edit (one number, one string, one known path). Example: `just serve` bind `8000` to `8001`. Do **not** spawn L2 or L3 for that. Do **not** invent a TDD implementer. The session that owns that tree edits the file. A minute-long wait on a nested implementer for one number is process failure.
 
 That is the **Hierarchical fast path**. It is not a license to diagnose,
-implement, or walk many files in the main thread. Still three layers for
-implement work, multi-file diagnosis, CI, and regressions. L2 still
-always **MUST spawn L3** for tool work. **Do not compact-and-continue**
+implement, or walk many files in the main thread. L2 still decides whether
+to spawn L3 when the problem is actually hard. **Do not compact-and-continue**
 a product restore on L2.
 
 L1 and L2 may still use `spawn_subagent`, `todo_write`,
@@ -593,9 +607,11 @@ cannot fail a deleted catalog test. Catalog:
   it. `--option system-features` that omit `big-parallel` does not stop local
   nixbld: the daemon still advertises `big-parallel`. Force-remote nix also
   passes `--cores 64` so workspace rustc can use the builder's cores. Cargo
-  on that derivation passes `--jobs` from those cores, capped at 32, and
-  uses the same **dev** profile as local `just test-clippy` (not crane
-  `--release` check/clippy).
+  on that derivation passes `--jobs` from those cores, capped at 32
+  (`cargo clippy --jobs`, never global `cargo --jobs`; cargo 1.97 has no
+  global `--jobs`. MAKEFLAGS/CARGO_MAKEFLAGS dropped so a 1-token jobserver
+  cannot ignore `--jobs`), and uses the same **dev** profile as local `just test-clippy`
+  (not crane `--release` check/clippy).
   **Nix jobs are not cargo/rustc workers (pinned 2026-08-18).** Nix jobs
   are how many derivations a builder may take at once (machines-file
   `max-jobs`, nix-daemon `max-jobs`). Workers are cargo/rustc parallelism

@@ -47,6 +47,8 @@ pub enum PermissionMode {
     AlwaysApprove,
     /// LLM transcript classifier reviews non-fast-path tool calls.
     Auto,
+    /// Advertise no tools; refuse any tool call that still arrives.
+    ContextOnly,
 }
 
 impl PermissionMode {
@@ -56,6 +58,10 @@ impl PermissionMode {
 
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
+    }
+
+    pub fn is_context_only(self) -> bool {
+        matches!(self, Self::ContextOnly)
     }
 
     pub fn from_yolo(yolo: bool) -> Self {

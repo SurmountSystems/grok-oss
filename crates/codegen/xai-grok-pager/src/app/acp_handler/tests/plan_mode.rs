@@ -56,15 +56,20 @@
                 agent.line_viewer.is_none(),
                 "restore must not auto-dock the plan side panel"
             );
-            assert_eq!(
+            assert_ne!(
                 agent.plan_loop_status_label(),
                 Some(PLAN_READY_STATUS),
-                "restore status is Plan ready, not Side panel open"
+                "restore must not paint Plan ready while the pane is shut"
             );
             assert_ne!(
                 agent.plan_loop_status_label(),
                 Some(PLAN_IDLE_REVIEW_STATUS),
                 "restore must not idle as Plan written. Click or /view-plan"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "restore must not claim the side panel is open"
             );
         }
 
@@ -90,6 +95,39 @@
         let raw = response.expect("waiter response Ok");
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
         assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Restore after Approve/Quit must not re-arm Plan ready chrome.
+    #[test]
+    fn resume_restore_skips_when_plan_decision_resolved() {
+        use crate::views::plan_approval_view::PLAN_READY_STATUS;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.plan_decision_resolved = true;
+            agent.prompt.set_text("btcdragonlord.com is not mine either btw");
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Leftover after Approve"),
+        );
+        let _ = handle_exit_plan_mode(ext, &mut app);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "restore must not re-park after Approve/Quit"
+        );
+        assert!(agent.plan_decision_resolved);
+        assert!(agent.line_viewer.is_none());
+        assert_ne!(agent.plan_loop_status_label(), Some(PLAN_READY_STATUS));
+        assert_eq!(
+            agent.prompt.text(),
+            "btcdragonlord.com is not mine either btw",
+            "restore skip must keep the mid-type draft"
+        );
     }
 
     #[test]
@@ -880,6 +918,49 @@
         assert_exit_plan_approved(rx);
     }
 
+    /// Resume / rebuild with a live waiter and a mid-type draft must not
+    /// paint Plan ready while the pane is shut and Enter is send.
+    #[test]
+    fn resume_restore_does_not_paint_plan_ready_while_composer_is_send_armed() {
+        use crate::app::agent::AgentState;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
+
+        const DRAFT: &str = "btcdragonlord.com is not mine either btw";
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.session.state = AgentState::Idle;
+            agent.prompt.set_text(DRAFT);
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(agent.prompt.text(), DRAFT, "restore must keep the mid-type draft");
+        assert!(
+            agent.line_viewer.is_none(),
+            "restore must not auto-dock the plan side panel"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "shut pane + Enter:send must not paint Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "restore must not idle as Plan written. Click or /view-plan"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+        );
+    }
+
     /// Resume / rebuild re-park must not dock the pane when they were typing.
     #[test]
     fn resume_restore_does_not_open_pane_when_composer_has_draft() {
@@ -905,9 +986,10 @@
             agent.line_viewer.is_none(),
             "resume must not auto-open the plan pane while they are typing"
         );
-        assert_eq!(
+        assert_ne!(
             agent.plan_loop_status_label(),
             Some(crate::views::plan_approval_view::PLAN_READY_STATUS),
+            "resume must not paint Plan ready while the pane is shut"
         );
         assert_ne!(
             agent.plan_loop_status_label(),
@@ -1359,7 +1441,8 @@
     }
 
     /// Iso 2026-08-19: idle cue must not be Plan written. Click or /view-plan
-    /// while the side panel is shut. Shut-panel cue is Plan ready.
+    /// while the side panel is shut. Shut panel + Enter:send must not paint
+    /// Plan ready either.
     #[test]
     fn plan_present_closed_panel_idle_cue_is_not_plan_written_click() {
         use crate::actions::ActionRegistry;
@@ -1383,9 +1466,14 @@
         );
         assert!(agent.line_viewer.is_none(), "fixture: panel is shut");
         assert_eq!(
+            agent.prompt.text(),
+            "draft stays",
+            "Esc dismiss must keep the composer draft"
+        );
+        assert_ne!(
             agent.plan_loop_status_label(),
             Some(PLAN_READY_STATUS),
-            "shut panel idle cue must be Plan ready"
+            "shut panel + send-armed composer must not paint Plan ready"
         );
         assert_ne!(
             agent.plan_loop_status_label(),
@@ -1396,6 +1484,10 @@
         assert!(
             !label.contains("Click or /view-plan"),
             "shut-panel status must not be the exclusive click cue, got {label:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc dismisses the viewer, not the waiter"
         );
     }
 

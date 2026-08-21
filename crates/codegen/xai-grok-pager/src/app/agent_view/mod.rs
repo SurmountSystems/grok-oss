@@ -27,8 +27,8 @@
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
+//!         `[ui].vim_mode` off) → ArmPending CancelTurn (2× within 800ms,
+//!         "press again to cancel"; draft preserved, unlike Ctrl+C)
 //!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
 //!       turn cancelling → CancelTurn in every mode (retry lost ack;
 //!         Ctrl+C escalates to Quit)
@@ -2619,6 +2619,7 @@ pub(crate) mod test_fixtures {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2683,6 +2684,7 @@ pub(crate) mod test_fixtures {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -3505,6 +3507,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

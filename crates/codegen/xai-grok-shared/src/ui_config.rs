@@ -57,6 +57,11 @@ pub struct UiConfig {
     /// (ops kill-switch; see `xai_grok_tools::util::ascii_scrub`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrub_ascii_punct: Option<bool>,
+    /// Use ULIDs as the primary session id in grok-oss. `None` = on (default).
+    /// Turn off to show the Grok Build UUID as the primary id. The ULID map
+    /// still exists either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulid_session_ids: Option<bool>,
     /// Confirm before `/rewind` applies. `None` = on (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
@@ -339,6 +344,7 @@ impl Default for UiConfig {
             show_timeline: None,
             page_flip_on_send: None,
             scrub_ascii_punct: None,
+            ulid_session_ids: None,
             confirm_before_rewind: None,
             auto_dark_theme: None,
             auto_light_theme: None,
@@ -431,6 +437,16 @@ impl UiConfig {
             .unwrap_or(Self::SCRUB_ASCII_PUNCT_DEFAULT)
     }
 
+    /// Default for [`Self::ulid_session_ids`] when unset (ULID-primary ON).
+    pub const ULID_SESSION_IDS_DEFAULT: bool = true;
+
+    /// Resolved ULID-primary session ids: configured value, or
+    /// [`Self::ULID_SESSION_IDS_DEFAULT`] when unset.
+    pub fn ulid_session_ids_enabled(&self) -> bool {
+        self.ulid_session_ids
+            .unwrap_or(Self::ULID_SESSION_IDS_DEFAULT)
+    }
+
     /// True when the highlight should not timer-dismiss (`hold` / `word_select`,
     /// or legacy duration 0).
     pub fn keep_text_selection_enabled(&self) -> bool {
@@ -485,6 +501,22 @@ mod tests {
         let missing: UiConfig =
             serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
         assert!(missing.scrub_ascii_punct_enabled());
+    }
+
+    #[test]
+    fn ulid_session_ids_defaults_on() {
+        assert!(UiConfig::default().ulid_session_ids_enabled());
+        let off = UiConfig {
+            ulid_session_ids: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.ulid_session_ids_enabled());
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "ulid_session_ids": true }))
+            .expect("deserializes ulid_session_ids true");
+        assert!(on.ulid_session_ids_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.ulid_session_ids_enabled());
     }
 
     #[test]

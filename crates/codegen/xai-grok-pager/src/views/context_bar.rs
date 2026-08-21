@@ -237,20 +237,18 @@ pub fn context_chip_token_text(
 
 /// Sampling window the footer chip should paint.
 ///
-/// Live session sampling wins over the pager economic-mode cache so a 200k
-/// session window still names sampling when catalog is 500k and the cache is
-/// off.
+/// Live session sampling wins. When that field is empty, L1 falls back to the
+/// catalog window and nested L2/L3 fall back to the 200k nested budget.
 pub fn footer_sampling_window(
     session_sampling_window: Option<u64>,
     catalog_window: Option<u64>,
-    economic_cache_on: bool,
+    is_nested: bool,
 ) -> Option<u64> {
     if let Some(window) = session_sampling_window.filter(|&w| w > 0) {
         return Some(window);
     }
-    catalog_window.map(|catalog| {
-        xai_grok_shell::util::config::apply_economic_context_cap(catalog, economic_cache_on)
-    })
+    catalog_window
+        .map(|catalog| xai_grok_shell::util::config::session_sampling_window(catalog, is_nested))
 }
 
 /// Window AUTO compact actually gates on when both sizes are known.
@@ -590,8 +588,8 @@ mod tests {
         assert_eq!(line_text(&line), "207K / 500K");
     }
 
-    /// Session sampling stays the AUTO gate even when the pager economic cache
-    /// is off. Catalog 500K must not paint as the unlabeled total.
+    /// Session sampling stays the AUTO gate. Catalog 500K must not paint as
+    /// the unlabeled total when the session window is the nested 200k budget.
     #[test]
     fn footer_chip_uses_session_sampling_window_when_economic_cache_is_off() {
         let sampling = footer_sampling_window(Some(200_000), Some(500_000), false);
@@ -612,6 +610,61 @@ mod tests {
         assert!(
             !text.starts_with("201K / 500K"),
             "must not imply unlabeled catalog 500K is the AUTO gate: {text}"
+        );
+    }
+
+    /// L1 session sampling is the catalog 500k window. The chip must not paint
+    /// that session as a 200k AUTO gate.
+    #[test]
+    fn l1_context_chip_uses_session_500k_sampling_window() {
+        let theme = Theme::default();
+        assert_eq!(
+            footer_sampling_window(None, Some(500_000), false),
+            Some(500_000),
+            "L1 empty session sampling falls back to catalog 500k, not nested 200k"
+        );
+        let line = context_bar_line_with_windows(
+            Some(201_000),
+            Some(500_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("token data");
+        let text = line_text(&line);
+        assert_eq!(
+            text, "201K / 500K",
+            "L1 sampling 500k matches catalog, so the chip is unlabeled used/total: {text}"
+        );
+        assert!(
+            !text.contains("200K"),
+            "L1 500k sampling must not paint a 200k nested gate: {text}"
+        );
+    }
+
+    /// Nested L2/L3 chrome stays on the 200k sampling window when catalog is 500k.
+    #[test]
+    fn nested_context_chip_uses_200k_sampling_window_when_catalog_is_500k() {
+        assert_eq!(
+            footer_sampling_window(None, Some(500_000), true),
+            Some(200_000),
+            "nested empty session sampling falls back to 200k, not catalog 500k"
+        );
+        let sampling = footer_sampling_window(Some(200_000), Some(500_000), true);
+        assert_eq!(
+            sampling,
+            Some(200_000),
+            "nested session sampling stays 200k even if catalog is 500k"
+        );
+        let text = context_chip_token_text(160_000, sampling, Some(500_000)).expect("token data");
+        assert!(
+            text.contains("200K") && text.contains("sampling"),
+            "nested chip must name the 200k sampling window: {text}"
+        );
+        assert!(
+            !text.starts_with("160K / 500K"),
+            "nested chrome must not paint unlabeled catalog 500K: {text}"
         );
     }
 }

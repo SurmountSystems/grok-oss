@@ -467,6 +467,7 @@ pub(super) fn dispatch_send_prompt_inner(
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
+    let mut skip_drain = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
@@ -564,6 +565,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
+                    context_only_mode: agent.session.is_context_only(),
                     current_model_name: agent.session.models.current_model_name(),
                     available_models: agent
                         .session
@@ -700,6 +702,33 @@ pub(super) fn dispatch_send_prompt_inner(
             }
             CommandResult::QueueCommand(cmd_text) => {
                 agent.session.enqueue_command(cmd_text);
+            }
+            CommandResult::QueueLater {
+                text: held,
+                as_command,
+                wire_blocks,
+                display_as_skill,
+            } => {
+                if as_command {
+                    agent.session.enqueue_command(held);
+                } else {
+                    let qid = agent.session.next_queue_id;
+                    agent.session.next_queue_id += 1;
+                    agent.start_pending_live_prompt_task(&held);
+                    agent
+                        .session
+                        .pending_prompts
+                        .push_back(crate::app::agent::QueuedPrompt {
+                            wire_blocks,
+                            display_as_skill,
+                            ..crate::app::agent::QueuedPrompt::plain(
+                                qid,
+                                held,
+                                crate::app::agent::QueueEntryKind::Prompt,
+                            )
+                        });
+                }
+                skip_drain = true;
             }
             CommandResult::InjectSkill {
                 display_text,
@@ -945,6 +974,26 @@ pub(super) fn dispatch_send_prompt_inner(
         if let Some(agent) = app.agents.get_mut(&id) {
             agent.maybe_toast_plan_feedback_queue();
         }
+    }
+
+    if skip_drain {
+        if let Some(agent) = app.agents.get_mut(&id)
+            && consume_input
+        {
+            let trimmed_key = text.trim().to_string();
+            if !trimmed_key.is_empty() {
+                agent
+                    .session
+                    .prompt_history
+                    .retain(|p| p.trim() != trimmed_key);
+                agent.session.prompt_history.insert(0, text.clone());
+                if agent.session.prompt_history.len() > 200 {
+                    agent.session.prompt_history.truncate(200);
+                }
+            }
+        }
+        app.show_toast("Queued on the prompt queue. It will not run this turn.");
+        return vec![];
     }
 
     let drain = {

@@ -85,6 +85,37 @@ impl AgentView {
     pub(super) fn auto_flag_visible(&self, effective_plan: bool) -> bool {
         self.session.is_auto() && !self.session.is_yolo() && !effective_plan
     }
+
+    /// Whether the prompt "context-only" flag should render. Diagnostic: no
+    /// tools. Hidden under plan, always-approve, or auto (those win).
+    pub(super) fn context_only_flag_visible(&self, effective_plan: bool) -> bool {
+        self.session.is_context_only() && !effective_plan
+    }
+
+    /// Labels the composer paints for permission/session mode. Plan wins over
+    /// always-approve, auto, and context-only. Always-approve and auto win over
+    /// context-only.
+    #[cfg(test)]
+    pub(super) fn composer_permission_flag_labels(
+        &self,
+        effective_plan: bool,
+    ) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if effective_plan {
+            labels.push("plan");
+        }
+        if self.session.is_yolo() && !effective_plan {
+            labels.push("always-approve");
+        }
+        if self.auto_flag_visible(effective_plan) {
+            labels.push("auto");
+        }
+        if self.context_only_flag_visible(effective_plan) {
+            labels.push("context-only");
+        }
+        labels
+    }
+
     /// Whether plan content is available for preview.
     fn plan_preview_available(&self) -> bool {
         self.plan_body_for_preview().is_some()
@@ -154,33 +185,105 @@ impl AgentView {
         xai_grok_shell::session::plan_mode::persist_plan_decision_resolved(&cwd, &sid, resolved);
     }
 
+    fn grok_oss_store_for_plan_choice(&self) -> Option<xai_grok_shell::grok_oss::GrokOssStore> {
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
+    }
+
+    fn record_explicit_plan_choice(
+        &self,
+        choice: crate::views::file_search::line_viewer::RecordedPlanChoice,
+    ) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        let db_choice = match choice {
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Approve => {
+                xai_grok_shell::grok_oss::PlanRecordedChoice::Approve
+            }
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Comment => {
+                xai_grok_shell::grok_oss::PlanRecordedChoice::Comment
+            }
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Revise => {
+                xai_grok_shell::grok_oss::PlanRecordedChoice::Revise
+            }
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Exit => {
+                xai_grok_shell::grok_oss::PlanRecordedChoice::Exit
+            }
+        };
+        if let Err(e) = store.insert_plan_recorded_choice(
+            &sid,
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+            db_choice,
+        ) {
+            tracing::debug!(error = %e, "plan_recorded_choice insert failed (fail-open)");
+        }
+    }
+
+    fn recorded_plan_choice_for_paint(
+        &self,
+    ) -> Option<crate::views::file_search::line_viewer::RecordedPlanChoice> {
+        let sid = self.session.session_id.as_ref().map(|s| s.0.to_string())?;
+        let store = self.grok_oss_store_for_plan_choice()?;
+        let row = match store
+            .latest_plan_recorded_choice(&sid, xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY)
+        {
+            Ok(row) => row?,
+            Err(e) => {
+                tracing::debug!(error = %e, "plan_recorded_choice load failed (fail-open)");
+                return None;
+            }
+        };
+        let paint = match row.choice {
+            xai_grok_shell::grok_oss::PlanRecordedChoice::Approve => {
+                crate::views::file_search::line_viewer::RecordedPlanChoice::Approve
+            }
+            xai_grok_shell::grok_oss::PlanRecordedChoice::Comment => {
+                crate::views::file_search::line_viewer::RecordedPlanChoice::Comment
+            }
+            xai_grok_shell::grok_oss::PlanRecordedChoice::Revise => {
+                crate::views::file_search::line_viewer::RecordedPlanChoice::Revise
+            }
+            xai_grok_shell::grok_oss::PlanRecordedChoice::Exit => {
+                crate::views::file_search::line_viewer::RecordedPlanChoice::Exit
+            }
+        };
+        match paint {
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Approve
+            | crate::views::file_search::line_viewer::RecordedPlanChoice::Exit => {
+                self.plan_decision_resolved.then_some(paint)
+            }
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Comment
+            | crate::views::file_search::line_viewer::RecordedPlanChoice::Revise => Some(paint),
+        }
+    }
+
     /// Status chrome for the plan decision loop.
     ///
-    /// Open side panel uses `plan_approval_status_label`. Shut panel uses
-    /// `PLAN_READY_STATUS` (not `PLAN_IDLE_REVIEW_STATUS`). Idle Revise/Clarify
-    /// wait uses `PLAN_REVISING_STATUS` / `PLAN_WAITING_UPDATED_STATUS`.
-    /// Busy rewrite yields `None` so real turn status can paint. Never returns
-    /// `PLAN_IDLE_REVIEW_STATUS` while the panel is shut or feedback is in flight.
+    /// Open side panel uses `plan_approval_status_label`. Shut panel does not
+    /// paint `PLAN_READY_STATUS`: the composer is send-armed, and Plan ready
+    /// would look like a review park that is not on screen. Idle leftover
+    /// `plan.md` is view-only until `/view-plan` or a live present docks.
+    /// Idle Revise/Clarify wait uses `PLAN_REVISING_STATUS` /
+    /// `PLAN_WAITING_UPDATED_STATUS`. Busy rewrite yields `None` so real turn
+    /// status can paint. Never returns `PLAN_IDLE_REVIEW_STATUS` while the
+    /// panel is shut or feedback is in flight.
     pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
-        use crate::views::plan_approval_view::{PLAN_READY_STATUS, plan_approval_status_label};
+        use crate::views::plan_approval_view::plan_approval_status_label;
         if let Some(ref pav) = self.plan_approval_view {
             if self.line_viewer.is_some() {
                 return Some(plan_approval_status_label(pav.has_plan));
             }
-            return Some(if pav.has_plan {
-                PLAN_READY_STATUS
-            } else {
-                "No plan written"
-            });
+            return None;
         }
         if let Some(in_flight) = self.plan_feedback_in_flight {
             if self.session.state.is_turn_running() {
                 return None;
             }
             return Some(in_flight.status_label());
-        }
-        if self.should_arm_plan_decision_chrome() && self.plan_preview_available() {
-            return Some(PLAN_READY_STATUS);
         }
         None
     }
@@ -284,10 +387,13 @@ impl AgentView {
         });
         viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
         {
+            let recorded = self.recorded_plan_choice_for_paint();
             let plan = viewer.plan_mut();
-            plan.show_action_buttons = self.plan_approval_view.is_none();
-            // Live park owns approval CTAs. After Approve/Quit or while
-            // Revising/Clarify is in flight, `/view-plan` stays view-only.
+            plan.show_action_buttons = true;
+            plan.recorded_choice = recorded;
+            // Live park still owns ACP Approve. After Approve/Quit, the four
+            // idle CTAs still paint; feedback_active stays false so we do
+            // not re-arm Plan ready.
             if self.plan_approval_view.is_none() && !self.should_arm_plan_decision_chrome() {
                 plan.feedback_active = false;
             } else {
@@ -318,8 +424,11 @@ impl AgentView {
             return;
         }
         let body = self.plan_body_for_preview();
-        self.plan_approval_view =
-            Some(crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(body));
+        let stashed = self.prompt.stash();
+        let mut pav =
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(body);
+        pav.stashed_prompt = stashed;
+        self.plan_approval_view = Some(pav);
     }
 
     /// Drop leftover plan-approval chrome after a turn ends, but never
@@ -343,28 +452,29 @@ impl AgentView {
         if let Some(mut pav) = self.plan_approval_view.take() {
             let _ = pav.send_stale_cancel();
             self.plan_next_comment_id = pav.next_comment_id;
-            self.prompt.restore(pav.stashed_prompt);
+            self.restore_stashed_prompt_unless_composer_has_text(pav.stashed_prompt);
             self.line_viewer = None;
         }
     }
 
-    /// After a turn ends in plan mode with no live reverse-request chrome,
-    /// park a waiter and the idle click cue. Do not auto-dock the side panel
-    /// (resume / rebuild / first paint). Live `exit_plan_mode` still docks.
+    /// Keep a visible mid-type draft. Park-time stash is a backup for an
+    /// empty composer, not a license to wipe later typing.
+    fn restore_stashed_prompt_unless_composer_has_text(
+        &mut self,
+        stashed: crate::views::prompt_widget::StashedPrompt,
+    ) {
+        if self.prompt.text().trim().is_empty() {
+            self.prompt.restore(stashed);
+        }
+    }
+
+    /// After a turn ends, leftover `plan.md` is view-only. Do not invent a
+    /// local idle park that paints Plan ready while the composer is
+    /// Enter:send. `/view-plan` still parks via `show_plan_preview`. Live
+    /// `exit_plan_mode` still docks. Resume restore parks a waiter without
+    /// docking and without Plan ready chrome.
     pub(crate) fn surface_idle_plan_review_if_needed(&mut self) {
-        if self.plan_approval_view.is_some() {
-            return;
-        }
-        if self.session.state.is_turn_running() {
-            return;
-        }
-        if !self.should_arm_plan_decision_chrome() {
-            return;
-        }
-        if !self.plan_preview_available() {
-            return;
-        }
-        self.park_local_idle_plan_decision_if_needed();
+        let _ = self;
     }
 
     /// Honest toast when a follow-up is queued while Revise/Clarify is in flight.
@@ -404,6 +514,9 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
+        self.record_explicit_plan_choice(
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Approve,
+        );
         let review_comments = if !pav.comments.is_empty() || !notes.is_empty() {
             let formatted = pav.format_feedback((!notes.is_empty()).then_some(notes));
             if formatted.trim().is_empty() {
@@ -438,6 +551,9 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
+        self.record_explicit_plan_choice(
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Exit,
+        );
         pav.send_abandoned();
         self.close_plan_review(pav, "abandon");
         InputOutcome::Changed
@@ -461,7 +577,7 @@ impl AgentView {
         self.persist_plan_decision_resolved_flag(true);
         self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
-        self.prompt.restore(pav.stashed_prompt);
+        self.restore_stashed_prompt_unless_composer_has_text(pav.stashed_prompt);
         self.line_viewer = None;
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
@@ -473,6 +589,9 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
+        self.record_explicit_plan_choice(
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Revise,
+        );
         let formatted = pav.format_feedback(feedback.as_deref());
         let to_send = if formatted.trim().is_empty() {
             feedback
@@ -577,9 +696,24 @@ impl AgentView {
 
     /// Focus the plan-approval prompt with a specific freeform intent.
     pub(crate) fn focus_plan_prompt(&mut self, intent: PlanPromptIntent) -> InputOutcome {
+        if self.plan_approval_view.is_none() {
+            return InputOutcome::Changed;
+        }
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.focus = PlanApprovalFocus::Prompt;
             pav.prompt_intent = intent;
+        }
+        let recorded = match intent {
+            PlanPromptIntent::Comment => {
+                Some(crate::views::file_search::line_viewer::RecordedPlanChoice::Comment)
+            }
+            PlanPromptIntent::Revise => {
+                Some(crate::views::file_search::line_viewer::RecordedPlanChoice::Revise)
+            }
+            PlanPromptIntent::Questions | PlanPromptIntent::ApproveNotes => None,
+        };
+        if let Some(choice) = recorded {
+            self.record_explicit_plan_choice(choice);
         }
         InputOutcome::Changed
     }
@@ -1091,6 +1225,43 @@ mod prompt_flag_tests {
         agent.session.yolo_mode = false;
         assert!(agent.auto_flag_visible(false));
     }
+
+    /// Composer chrome must show `context-only` when that mode is on (yolo and
+    /// auto off, not plan). Switch-in is otherwise toast-only.
+    #[test]
+    fn composer_permission_flags_include_context_only() {
+        let mut agent = make_agent();
+        agent.session.context_only_mode = true;
+        let labels = agent.composer_permission_flag_labels(false);
+        assert!(
+            labels.contains(&"context-only"),
+            "composer flags must include context-only when that mode is on, got {labels:?}"
+        );
+        assert!(!labels.contains(&"plan"));
+        assert!(!labels.contains(&"always-approve"));
+        assert!(!labels.contains(&"auto"));
+        assert!(
+            !agent
+                .composer_permission_flag_labels(true)
+                .contains(&"context-only"),
+            "plan chrome wins; do not stack context-only under plan"
+        );
+        agent.session.yolo_mode = true;
+        assert!(
+            !agent
+                .composer_permission_flag_labels(false)
+                .contains(&"context-only"),
+            "always-approve wins over context-only"
+        );
+        agent.session.yolo_mode = false;
+        agent.session.auto_mode = true;
+        assert!(
+            !agent
+                .composer_permission_flag_labels(false)
+                .contains(&"context-only"),
+            "auto wins over context-only"
+        );
+    }
 }
 #[cfg(test)]
 mod plan_chip_tests {
@@ -1116,6 +1287,7 @@ mod plan_chip_tests {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -2364,8 +2536,8 @@ mod plan_sticky_and_revising_chrome_tests {
     use super::*;
     use crate::app::agent::AgentState;
     use crate::views::plan_approval_view::{
-        PLAN_IDLE_REVIEW_STATUS, PLAN_REVISING_STATUS, PLAN_WAITING_UPDATED_STATUS,
-        PlanFeedbackInFlight,
+        PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS, PLAN_REVISING_STATUS,
+        PLAN_WAITING_UPDATED_STATUS, PlanFeedbackInFlight,
     };
 
     fn park_exit_plan_mode(agent: &mut AgentView, body: &str) {
@@ -2425,6 +2597,11 @@ mod plan_sticky_and_revising_chrome_tests {
             agent.plan_loop_status_label(),
             Some(PLAN_IDLE_REVIEW_STATUS),
             "must not re-arm idle Plan written. Click or /view-plan after Approve"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "must not re-arm Plan ready after Approve"
         );
     }
 
@@ -2642,6 +2819,146 @@ mod plan_sticky_and_revising_chrome_tests {
             Some("Plan ready. Side panel open"),
             "must not say the side panel is open when the pane is closed"
         );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "shut pane must not paint Plan ready while the composer is send-armed"
+        );
+    }
+
+    /// `/view-plan` after Approve still paints Approve / Comment / Revise / Exit.
+    #[test]
+    fn view_plan_after_resolved_still_paints_four_idle_ctas() {
+        let mut agent = make_agent();
+        park_exit_plan_mode(&mut agent, "# Done\n\nAlready approved\n");
+        let _ = agent.approve_plan();
+        assert!(agent.plan_decision_resolved);
+        assert!(agent.plan_approval_view.is_none());
+        agent.latest_inline_plan_content = Some("# Done\n\nAlready approved\n".into());
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+
+        agent.open_plan_from_view_plan_or_status();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "/view-plan after decide must not invent a third park"
+        );
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "/view-plan after decide must not re-arm Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "/view-plan after decide must not paint shut-pane Plan ready"
+        );
+
+        let viewer = agent
+            .line_viewer
+            .as_mut()
+            .expect("/view-plan must open the pane");
+        let full = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let mut buf = ratatui::buffer::Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        crate::views::file_search::line_viewer::render_line_viewer(
+            &mut buf,
+            full,
+            viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+        let modal = viewer.last_modal_area.expect("view-plan footer");
+        let mut footer = String::new();
+        for x in modal.x..modal.x + modal.width {
+            footer.push_str(buf[(x, modal.y + modal.height.saturating_sub(1))].symbol());
+        }
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "/view-plan after resolved must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("c comment") && !lower.contains("y copy plan"),
+            "/view-plan after resolved must not stay casual comment+copy; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(plan.approve_button_area.is_some());
+        assert!(plan.comment_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// Clicking Approve on view-plan after a recorded Approve must not
+    /// re-park Plan ready and must not send a second `approved`.
+    #[test]
+    fn view_plan_approve_click_when_already_decided_does_not_repark() {
+        let mut agent = make_agent();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-already-decided".into(),
+            plan_content: Some("# Done\n\nBody\n".into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            agent.prompt.stash(),
+            tx,
+        ));
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+        let first = agent.approve_plan();
+        let resp = rx
+            .try_recv()
+            .expect("first Approve must complete the waiter");
+        let raw = resp.expect("Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+        assert!(
+            !matches!(first, crate::app::app_view::InputOutcome::Action(_)),
+            "live-waiter Approve must not Interject a second implement turn; got {first:?}"
+        );
+
+        agent.latest_inline_plan_content = Some("# Done\n\nBody\n".into());
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.open_plan_from_view_plan_or_status();
+        assert!(agent.plan_decision_resolved);
+        assert!(agent.plan_approval_view.is_none());
+
+        {
+            let viewer = agent.line_viewer.as_mut().expect("pane open");
+            viewer.plan_mut().approve_button_area = Some(ratatui::layout::Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
+        }
+        let click = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let outcome = agent.handle_line_viewer_mouse(&click);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "second Approve must not invent a park"
+        );
+        assert!(agent.plan_decision_resolved);
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "second Approve must not re-arm Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "second Approve must not paint Plan ready"
+        );
+        assert!(
+            !matches!(outcome, crate::app::app_view::InputOutcome::Action(_)),
+            "already-decided Approve must not Interject or send a second approved; got {outcome:?}"
+        );
+        assert!(agent.line_viewer.is_some(), "view-plan pane stays open");
     }
 }
 
@@ -2919,15 +3236,20 @@ mod plan_rebuild_resume_and_esc_dismiss_tests {
             rx.try_recv().is_err(),
             "Esc must not send an ACP plan outcome"
         );
-        assert_eq!(
+        assert_ne!(
             agent.plan_loop_status_label(),
             Some(PLAN_READY_STATUS),
-            "closed pane keeps Plan ready; it must not idle as Plan written. Click or /view-plan"
+            "closed pane + send-armed composer must not paint Plan ready"
         );
         assert_ne!(
             agent.plan_loop_status_label(),
             Some(PLAN_IDLE_REVIEW_STATUS),
             "shut panel must not use the exclusive click cue"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "must not say the side panel is open when the pane is closed"
         );
     }
 

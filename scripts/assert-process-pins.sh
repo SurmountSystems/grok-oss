@@ -59,7 +59,8 @@ REQUIRED_DIRS=(
   crates/codegen/grok-rate-limit
   doc/dev
   docs/dev
-  .grok/workflows   # Rhai process workflows; in FORK_PATHS — must not silent-drop
+  .grok/workflows   # Rhai process workflows; in FORK_PATHS. Must not silent-drop.
+  .agents/skills    # product project skills (slash /what); in FORK_PATHS
 )
 
 missing=()

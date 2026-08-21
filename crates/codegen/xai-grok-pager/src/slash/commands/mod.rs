@@ -13,6 +13,7 @@ pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
 pub mod context;
+pub mod context_only;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
@@ -28,6 +29,7 @@ pub mod expand;
 pub mod export;
 pub mod feedback;
 pub mod find;
+pub mod finish;
 pub mod fork;
 pub mod gboom;
 pub mod help;
@@ -42,6 +44,7 @@ pub mod login;
 pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
+pub mod metadata;
 pub mod model;
 pub mod multiline;
 pub mod new;
@@ -56,6 +59,7 @@ pub mod recap;
 pub mod release_notes;
 pub mod remember;
 pub mod rename;
+pub mod reports;
 pub mod resume;
 pub mod rewind;
 pub mod running;
@@ -78,6 +82,7 @@ pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
+pub mod what;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
@@ -111,6 +116,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(effort::EffortCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
         Arc::new(auto::AutoCommand),
+        Arc::new(context_only::ContextOnlyCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
         Arc::new(economic_mode::EconomicModeCommand),
@@ -121,6 +127,10 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::SkillsCommand),
         Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
+        Arc::new(finish::FinishCommand),
+        Arc::new(reports::ReportsCommand),
+        Arc::new(what::WhatCommand),
+        Arc::new(metadata::MetadataCommand),
         Arc::new(rename::RenameCommand),
         Arc::new(dashboard::DashboardCommand),
         Arc::new(cd::CdCommand),
@@ -654,6 +664,22 @@ mod tests {
         assert!(
             reg.get("queue").is_some(),
             "/queue should be registered in builtins"
+        );
+    }
+    #[test]
+    fn reports_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("reports").is_some(),
+            "/reports should be registered in builtins"
+        );
+    }
+    #[test]
+    fn what_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("what").is_some(),
+            "/what should be registered in builtins"
         );
     }
     #[test]

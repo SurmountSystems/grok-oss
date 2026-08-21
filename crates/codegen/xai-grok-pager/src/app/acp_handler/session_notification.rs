@@ -461,6 +461,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 next_queue_id: 0,
                 yolo_mode: true,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,

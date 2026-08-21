@@ -201,10 +201,10 @@ pub(crate) struct CompactionConfig {
     pub last_auto_compact_saved_too_little: AtomicBool,
     /// Locks the context window when `GROK_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
-    /// Soft-cap effective context at 200K for pricing (see
-    /// [`crate::util::config::ECONOMIC_CONTEXT_CAP`]). Seeded from
-    /// `[ui].economic_mode` at session spawn; toggled per conversation with
-    /// `/economic-mode`. `Cell` so slash handlers can flip without `&mut self`.
+    /// Economic-mode Cell (implement-effort / Token Economy). Nested L2/L3
+    /// sampling is capped at 200k via [`crate::util::config::session_sampling_window`];
+    /// L1 uses the catalog window. Seeded from `[ui].economic_mode` at session
+    /// spawn. `Cell` so slash handlers can flip without `&mut self`.
     pub economic_mode: Cell<bool>,
     /// Uncapped catalog context window for the active model (before economic
     /// cap). Updated on model switch / metadata refresh so disabling economic

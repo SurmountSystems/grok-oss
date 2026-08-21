@@ -282,6 +282,12 @@ impl MvpAgent {
             self.default_auto_mode,
             session_yolo_mode,
         );
+        let session_context_only = resolve_session_context_only(
+            arguments.meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
+        );
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s).map_err(|e| {
@@ -294,6 +300,8 @@ impl MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        // Fail-open grok-oss UUID ↔ ULID map. Wire session id stays UUID.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         #[cfg(all(feature = "local-workspace", unix))]
         let mut local_ws_reap_guard =
             self.new_local_workspace_reap_guard(session_id.clone(), false);
@@ -481,6 +489,7 @@ impl MvpAgent {
                     session_model_id,
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
                     prompt_display_cwd: None,
                     is_chat_kind: false,
                 }
@@ -515,6 +524,8 @@ impl MvpAgent {
                 && crate::util::config::auto_permission_mode_enabled_from_disk()
             {
                 xai_grok_telemetry::enums::PermissionMode::Auto
+            } else if session_context_only {
+                xai_grok_telemetry::enums::PermissionMode::ContextOnly
             } else {
                 xai_grok_telemetry::enums::PermissionMode::Ask
             };
@@ -672,6 +683,8 @@ impl MvpAgent {
             meta: request_meta,
             ..
         } = arguments;
+        // Fail-open grok-oss UUID ↔ ULID map. Resume/load wire id stays UUID.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         let policy = AttachPolicy::resolve(op, request_meta.as_ref(), self.restore_code);
         let SessionWorkspace {
             cwd,
@@ -784,6 +797,12 @@ impl MvpAgent {
             self.default_auto_mode,
             session_yolo_mode,
         );
+        let session_context_only = resolve_session_context_only(
+            request_meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
+        );
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(request_meta.as_ref())?;
         let code_restore_info = self
@@ -880,6 +899,7 @@ impl MvpAgent {
                     session_model_id: summary.current_model_id.clone(),
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
                     prompt_display_cwd,
                     is_chat_kind: false,
                 },
@@ -941,6 +961,7 @@ impl MvpAgent {
             client_code_nav_enabled,
             session_yolo_mode,
             session_auto_mode,
+            session_context_only,
         );
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
@@ -976,6 +997,8 @@ impl MvpAgent {
                     && crate::util::config::auto_permission_mode_enabled_from_disk()
                 {
                     xai_grok_telemetry::enums::PermissionMode::Auto
+                } else if session_context_only {
+                    xai_grok_telemetry::enums::PermissionMode::ContextOnly
                 } else {
                     xai_grok_telemetry::enums::PermissionMode::Ask
                 },
@@ -1139,6 +1162,7 @@ impl MvpAgent {
         client_code_nav_enabled: bool,
         session_yolo_mode: bool,
         session_auto_mode: bool,
+        session_context_only: bool,
     ) {
         let session_id = session_id.clone();
         self.with_resident_mut(&session_id, |handle| {
@@ -1165,6 +1189,15 @@ impl MvpAgent {
                 let _ = handle
                     .cmd_tx
                     .send(SessionCommand::SetAutoMode { enabled: true });
+            }
+            if session_context_only && !session_yolo_mode && !session_auto_mode {
+                tracing::debug!(
+                    session_id = %session_id.0,
+                    "Setting context-only on reconnect from load_session request metadata"
+                );
+                let _ = handle
+                    .cmd_tx
+                    .send(SessionCommand::SetContextOnlyMode { enabled: true });
             }
         });
     }

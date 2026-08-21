@@ -2453,6 +2453,41 @@ impl AppView {
     }
 }
 impl AppView {
+    /// Stamp Esc as the cancel gesture when the double-press arm fires.
+    /// Overlay cancel targets the nested child; otherwise the parent.
+    fn stamp_esc_cancel_trigger_hint(&mut self) {
+        let ActiveView::Agent(id) = self.active_view else {
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        if let Some(child_sid) = agent.active_subagent.clone()
+            && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        {
+            child.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+            return;
+        }
+        agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+    }
+
+    /// Nested L2/L3 overlay Esc closes the view. It is not cancel confirm.
+    fn nested_overlay_esc_would_dismiss(&self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        let Some(agent) = self.agents.get(&id) else {
+            return false;
+        };
+        let Some(child_sid) = agent.active_subagent.as_ref() else {
+            return false;
+        };
+        agent
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|child| child.nested_overlay_esc_dismisses())
+    }
+
     /// Handle a terminal event. Routes through the input layer stack:
     ///
     /// 1. Pending action check (double-press confirmation)
@@ -2505,10 +2540,20 @@ impl AppView {
                 })
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
-                let action = self.pending_action.take().unwrap().action;
-                return InputOutcome::Action(action);
+                if matches!(pending.action, Action::CancelTurn)
+                    && self.nested_overlay_esc_would_dismiss()
+                {
+                    self.pending_action = None;
+                } else {
+                    let action = self.pending_action.take().unwrap().action;
+                    if matches!(action, Action::CancelTurn) {
+                        self.stamp_esc_cancel_trigger_hint();
+                    }
+                    return InputOutcome::Action(action);
+                }
+            } else {
+                self.pending_action = None;
             }
-            self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
         if let Event::Mouse(mouse) = ev

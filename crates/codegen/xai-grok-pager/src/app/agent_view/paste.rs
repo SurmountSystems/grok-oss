@@ -481,6 +481,7 @@ pub(super) mod paste_key_tests {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -1292,6 +1293,119 @@ pub(super) mod paste_key_tests {
             ctx.target,
             crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
         ));
+    }
+
+    /// Idle composer with draft text (Enter:send) must still probe a
+    /// screenshot-only clipboard. Empty-prompt coverage is not enough:
+    /// Linux image-only paste arrives as empty `Event::Paste`.
+    #[test]
+    fn agent_draft_bracketed_paste_defers_probe_for_clipboard_image() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.prompt.textarea.insert_str("already typed");
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect(
+            "idle composer with draft text plus empty Event::Paste and a raster must defer a probe",
+        );
+        assert!(
+            ctx.source.is_bracketed(),
+            "agent Event::Paste must stamp a bracketed probe context"
+        );
+        assert!(matches!(
+            ctx.target,
+            crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+        ));
+        assert_eq!(agent.prompt.text(), "already typed");
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(
+            agent.prompt.text().contains("already typed"),
+            "screenshot paste must keep the draft; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "screenshot paste must attach a chip next to the draft; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Unchanged),
+            "empty paste may be Unchanged on text insert but must still enqueue; got {outcome:?}"
+        );
+    }
+
+    /// Linux screenshot paste is often Ctrl+Shift+V (inline paste). Image-only
+    /// clipboard must not die as a text-only ignore when the composer already
+    /// has a draft.
+    #[test]
+    fn agent_draft_ctrl_shift_v_defers_probe_for_clipboard_image() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.prompt.textarea.insert_str("already typed");
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_shift_v_key());
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect(
+            "idle composer with draft text plus Ctrl+Shift+V and a raster must defer a probe",
+        );
+        assert!(
+            ctx.source.is_clipboard_key(),
+            "Ctrl+Shift+V image-only paste must use the clipboard-key probe, not text-only ignore"
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), "already typed");
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(agent.prompt.text().contains("already typed"));
+        assert!(agent.prompt.text().contains("[Image #1]"));
+    }
+
+    /// Ctrl+Shift+V with real clipboard text stays inline text paste. It must
+    /// not steal a screenshot-only probe path and wrap the text as a chip.
+    #[test]
+    fn agent_draft_ctrl_shift_v_with_text_stays_inline() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.prompt.textarea.insert_str("already typed ");
+        crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+            text: Some("pasted".to_owned()),
+            snapshot_supported: Some(true),
+            snapshot: Some((Some(1), false)),
+            ..Default::default()
+        });
+        let outcome = agent.handle_prompt_key_for_test(&ctrl_shift_v_key());
+        let deferred = deferred_probe_ctx(&agent).is_some();
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            !deferred,
+            "Ctrl+Shift+V with UTF-8 text must not enqueue an image probe"
+        );
+        assert!(agent.prompt.images.is_empty());
+        assert_eq!(agent.prompt.text(), "already typed pasted");
+        assert!(
+            agent.prompt.textarea().elements().is_empty(),
+            "inline paste must not wrap short text as a paste element"
+        );
     }
 
     /// Plan composer with a chip: Approve / Revise send those bytes, not
@@ -2414,6 +2528,9 @@ pub(super) mod paste_key_tests {
     }
     fn ctrl_v_key() -> KeyEvent {
         key!('v', CONTROL).to_key_event()
+    }
+    fn ctrl_shift_v_key() -> KeyEvent {
+        key!('v', CONTROL | SHIFT).to_key_event()
     }
     /// Target of the enqueued deferred-probe effect, if any.
     fn deferred_probe_target(

@@ -885,20 +885,30 @@
             "must not copy catalog 500k into session_sampling_window"
         );
 
-        let sampling = crate::views::context_bar::footer_sampling_window(
+        let nested_sampling = crate::views::context_bar::footer_sampling_window(
             window,
             Some(500_000),
             true,
         );
-        let text = crate::views::context_bar::context_chip_token_text(
+        let nested_text = crate::views::context_bar::context_chip_token_text(
             201_000,
-            sampling,
+            nested_sampling,
             Some(500_000),
         )
         .expect("token data");
         assert!(
-            !text.starts_with("201K / 500K"),
-            "economic-on chip must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {text}"
+            !nested_text.starts_with("201K / 500K"),
+            "nested chrome must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {nested_text}"
+        );
+        let l1_sampling = crate::views::context_bar::footer_sampling_window(
+            window,
+            Some(500_000),
+            false,
+        );
+        assert_eq!(
+            l1_sampling,
+            Some(500_000),
+            "L1 fallback uses catalog 500k when session sampling is empty"
         );
     }
 

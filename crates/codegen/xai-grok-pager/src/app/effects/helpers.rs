@@ -335,6 +335,8 @@ pub(crate) struct SessionFlags {
     /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
     /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
     pub auto_mode: bool,
+    /// Diagnostic context-only (`_meta.contextOnly`). Yolo and auto win.
+    pub context_only_mode: bool,
     /// Gateway light-frontend (`kind: "chat"`) — `--chat` / `/chat`.
     /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
     /// warn is logged when plan flags are also set (K12).
@@ -413,6 +415,11 @@ impl SessionFlags {
                 self.yolo_mode,
                 self.auto_mode
             )),
+        );
+        let auto = super::dispatch::effective_auto(self.yolo_mode, self.auto_mode);
+        meta.insert(
+            "contextOnly".into(),
+            serde_json::json!(self.context_only_mode && !self.yolo_mode && !auto),
         );
         if meta.is_empty() { None } else { Some(meta) }
     }
@@ -1344,6 +1351,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "ulid_session_ids" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("ulid_session_ids", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_ulid_session_ids(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "plan_approval_park" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("plan_approval_park", "Enum", &value));
@@ -1730,6 +1745,16 @@ pub(crate) async fn notify_auto_compact_threshold_changed(
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
+/// ACP `x.ai/yolo_mode_changed` body for a persisted canonical permission mode.
+pub(crate) fn permission_mode_changed_params(canonical: &str) -> serde_json::Value {
+    serde_json::json!({
+        "yolo_mode": canonical == "always-approve",
+        "auto_mode": canonical == "auto",
+        "context_only": canonical == "context-only",
+        "permission_mode": canonical,
+    })
+}
+
 /// 1. Persist `ui.permission_mode` to disk.
 /// 2. Fire ACP `x.ai/yolo_mode_changed` (gated on disk success for
 ///    `WithRollback`; always for `BestEffort`).
@@ -1740,8 +1765,6 @@ pub(crate) async fn persist_permission_mode_and_notify(
     persist: PermissionModePersist,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let enabled = canonical == "always-approve";
-    let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
     let disk_result = xai_grok_shell::util::config::update_config(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
@@ -1750,11 +1773,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
     if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
     {
-        let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
-            "permission_mode": config_str,
-        });
+        let params = permission_mode_changed_params(canonical);
         let notification = acp::ExtNotification::new(
             "x.ai/yolo_mode_changed",
             serde_json::value::to_raw_value(&params)

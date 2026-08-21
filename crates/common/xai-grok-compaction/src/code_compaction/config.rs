@@ -28,6 +28,32 @@ pub const GROK_45_CONTEXT_WINDOW_TOKENS: u64 = 500_000;
 /// this cliff keeps short-context pricing.
 pub const GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS: u64 = 200_000;
 
+/// Nested L2/L3 sessions never exceed this sampling/compaction window, even
+/// when the model catalog is larger (500k on Grok 4.5). Same token count as
+/// the long-context price cliff. The main (L1) session does not use this cap.
+pub const NESTED_SESSION_CONTEXT_CAP: u64 = GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS;
+
+/// Keep-near attention target as a percent of this session's sampling window.
+/// Main session: 40% of 500k = 200k. Nested: 40% of 200k = 80k.
+pub const SESSION_ATTENTION_TARGET_PERCENT: u8 = 40;
+
+/// Sampling/compaction window for the session that is running.
+///
+/// L1 (parent TUI) uses the catalog window. Nested L2/L3 never exceed
+/// [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
+    if is_nested {
+        catalog.min(NESTED_SESSION_CONTEXT_CAP)
+    } else {
+        catalog
+    }
+}
+
+/// 40% of `sampling_window` (attention target for the running session).
+pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
+    sampling_window.saturating_mul(u64::from(SESSION_ATTENTION_TARGET_PERCENT)) / 100
+}
+
 /// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`] — the token equivalent of the
 /// default percent threshold on the Grok 4.5 card.
 pub const GROK_45_DEFAULT_AUTO_COMPACT_TOKENS: u64 =
@@ -136,6 +162,51 @@ mod auto_compact_threshold_tests {
         assert_eq!(t.absolute_tokens(100_000), 90_000);
         assert_eq!(t.absolute_tokens(500_000), 450_000);
         assert_eq!(t.as_percent_of(500_000), 90);
+    }
+
+    /// L1 uses the catalog window. Nested L2/L3 never exceed 200k even when
+    /// the catalog is 500k.
+    #[test]
+    fn session_sampling_window_is_catalog_on_l1_and_200k_when_nested() {
+        assert_eq!(session_sampling_window(500_000, false), 500_000);
+        assert_eq!(session_sampling_window(500_000, true), 200_000);
+        assert_eq!(session_sampling_window(128_000, true), 128_000);
+        assert_eq!(
+            session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, false),
+            GROK_45_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, true),
+            NESTED_SESSION_CONTEXT_CAP
+        );
+    }
+
+    #[test]
+    fn attention_target_is_forty_percent_of_the_running_session_window() {
+        assert_eq!(SESSION_ATTENTION_TARGET_PERCENT, 40);
+        assert_eq!(session_attention_target_tokens(500_000), 200_000);
+        assert_eq!(session_attention_target_tokens(200_000), 80_000);
+    }
+
+    /// AUTO compact on L1 is 95% of 500k (475k), not the old 200k nested cap.
+    #[test]
+    fn main_session_auto_compact_knee_is_not_the_old_200k_l1_cap() {
+        let window = session_sampling_window(500_000, false);
+        assert_eq!(window, 500_000);
+        assert_eq!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(window),
+            475_000
+        );
+        assert!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(window) > 200_000,
+            "L1 auto-compact must not fire at the old 200k nested cap"
+        );
+        let nested = session_sampling_window(500_000, true);
+        assert_eq!(nested, 200_000);
+        assert_eq!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(nested),
+            190_000
+        );
     }
 }
 

@@ -1114,6 +1114,26 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        if should_refuse_tool_in_context_only(
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        ) {
+            tracing::info_span!(
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "context_only",
+                wait_ms = 0_i64,
+            )
+            .in_scope(|| {});
+            self.handle_tool_not_executed(
+                &call.id,
+                &tool_call_id,
+                context_only_tool_refusal_message().to_string(),
+            )
+            .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         let plan_active = self.plan_mode.lock().is_active();
         if plan_active
             && super::session_mode::is_plan_mode_blocked_ask_user_tool_name(
@@ -1698,6 +1718,12 @@ impl SessionActor {
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        if self.plan_mode.lock().is_plan_decision_resolved() {
+            tracing::info!("[exit_plan_mode] resume: plan already decided; skip re-park");
+            self.plan_mode.lock().set_awaiting_plan_approval(false);
+            self.persist_plan_mode_state();
             return;
         }
         if crate::session::pending_interaction::has_parked_plan_approval(&self.pending_interactions)

@@ -158,6 +158,8 @@ FORK_PATHS=(
   # Rhai Grok workflows (team recon status, etc.). Not GitHub Actions YAML.
   # Without this path, import drops Surmount-only .grok/workflows/*.rhai.
   .grok/workflows
+  # Product project skills (slash /what). Host ~/.agents/skills is operator overlay.
+  .agents/skills
   crates/codegen/grok-rate-limit
 )
 

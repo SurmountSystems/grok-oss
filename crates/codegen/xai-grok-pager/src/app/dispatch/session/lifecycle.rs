@@ -11,7 +11,7 @@ use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
 };
-use crate::app::dispatch::modes::inherit_auto_mode;
+use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
 use crate::app::dispatch::queue::{QueueDrain, maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
@@ -380,6 +380,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -896,6 +897,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

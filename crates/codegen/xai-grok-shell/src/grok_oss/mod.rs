@@ -4,8 +4,10 @@
 //! Token Economy ledger tables are schema v1. Prompt-task drafts, templates,
 //! and prompt-as-task rows are additive schema v2. Prompt-task exec metrics
 //! (tokens, honest wall, model, estimates, Token Economy cost ticks) are
-//! additive schema v3. Later Surmount-only durable state can keep adding
-//! tables via additive migrations.
+//! additive schema v3. Explicit plan-review choices (Approve, Comment, Revise,
+//! Exit) are additive schema v4. ACP session UUID ↔ grok-oss session ULID
+//! pairs are additive schema v5. Later Surmount-only durable state can keep
+//! adding tables via additive migrations.
 //!
 //! Open is multiproc-safe (busy timeout via journal helper) and **fail-open**
 //! for callers that treat open/write errors as non-fatal.
@@ -16,9 +18,12 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use xai_sqlite_journal::JournalMode;
 
+mod plan_choice;
 mod prompt_exec;
 mod prompt_task_metrics;
 mod prompt_tasks;
+mod session_ids;
+pub use plan_choice::{PlanRecordedChoice, PlanRecordedChoiceRow, SESSION_PLAN_IDENTITY};
 pub use prompt_exec::{
     HonestWorkClock, LivePromptTask, PromptExecMetrics, PromptExecRecord, tokens_per_dollar,
 };
@@ -26,9 +31,10 @@ pub use prompt_tasks::{
     PromptTask, PromptTaskDraft, PromptTemplate, STORED_PROMPT_SUGGEST_MIN_CHARS, StoredPromptKind,
     StoredPromptSuggestion, accept_stored_prompt_suggestion, suggest_most_complete_stored_prompt,
 };
+pub use session_ids::{SessionIdPair, ensure_session_ids_fail_open};
 
 /// Current schema version stamped in `meta`.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Default filename under `$GROK_HOME`.
 pub const GROK_OSS_DB_FILE: &str = "grok_oss.db";
@@ -155,6 +161,16 @@ CREATE TABLE IF NOT EXISTS meta (
                 .execute_batch(SCHEMA_V3)
                 .context("apply schema v3")?;
         }
+        if version < 4 {
+            self.conn
+                .execute_batch(SCHEMA_V4)
+                .context("apply schema v4")?;
+        }
+        if version < 5 {
+            self.conn
+                .execute_batch(SCHEMA_V5)
+                .context("apply schema v5")?;
+        }
         if version < SCHEMA_VERSION {
             self.conn
                 .execute(
@@ -274,6 +290,36 @@ CREATE INDEX IF NOT EXISTS idx_prompt_exec_metrics_task
   ON prompt_exec_metrics(prompt_task_id);
 "#;
 
+/// Explicit plan-review choices (schema version 4). Additive only.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS plan_recorded_choice (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  plan_identity TEXT NOT NULL,
+  choice TEXT NOT NULL,
+  chosen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_recorded_choice_session_plan
+  ON plan_recorded_choice(session_id, plan_identity, chosen_at);
+"#;
+
+/// ACP session UUID ↔ grok-oss session ULID map (schema version 5). Additive only.
+/// Not `{session_dir}/work_ulid`. Wire session id stays UUID.
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS session_id_map (
+  session_uuid TEXT NOT NULL UNIQUE,
+  session_ulid TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (session_uuid)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_id_map_uuid
+  ON session_id_map(session_uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_id_map_ulid
+  ON session_id_map(session_ulid);
+"#;
+
 /// Helper: query_row optional without pulling rusqlite OptionalExtension everywhere.
 trait OptionalContext<T> {
     fn optional_context(self) -> Result<Option<T>>;
@@ -324,6 +370,8 @@ mod tests {
             "prompt_task_drafts",
             "prompt_templates",
             "prompt_exec_metrics",
+            "plan_recorded_choice",
+            "session_id_map",
         ] {
             let n: i64 = store
                 .connection()
@@ -333,8 +381,9 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "fresh open must apply v2/v3 table {name}");
+            assert_eq!(n, 1, "fresh open must apply v2/v3/v4/v5 table {name}");
         }
+        assert_eq!(SCHEMA_VERSION, 5, "session UUID to ULID map is schema v5");
     }
 
     #[test]
@@ -352,6 +401,8 @@ mod tests {
             "prompt_task_drafts",
             "prompt_templates",
             "prompt_exec_metrics",
+            "plan_recorded_choice",
+            "session_id_map",
         ] {
             let n: i64 = s2
                 .connection()
@@ -440,7 +491,7 @@ CREATE TABLE IF NOT EXISTS meta (
             .unwrap();
         }
         let store = open_at(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         let n: i64 = store
             .connection()
             .query_row(
@@ -462,7 +513,7 @@ CREATE TABLE IF NOT EXISTS meta (
             assert_eq!(n, 1, "prior tables must stay ({name})");
         }
         let store2 = open_at(&path).unwrap();
-        assert_eq!(store2.schema_version().unwrap(), 3);
+        assert_eq!(store2.schema_version().unwrap(), SCHEMA_VERSION);
         let n2: i64 = store2
             .connection()
             .query_row(
@@ -472,6 +523,71 @@ CREATE TABLE IF NOT EXISTS meta (
             )
             .unwrap();
         assert_eq!(n2, 1, "v3 migrate must be idempotent on reopen");
+    }
+
+    #[test]
+    fn migrate_v4_file_to_v5_adds_session_id_map() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("grok_oss.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"#,
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute_batch(SCHEMA_V3).unwrap();
+            conn.execute_batch(SCHEMA_V4).unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '4')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = open_at(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let n: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_id_map'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected session_id_map after v4-to-v5 migrate");
+        for name in [
+            "local_usage_event",
+            "prompt_tasks",
+            "prompt_exec_metrics",
+            "plan_recorded_choice",
+        ] {
+            let n: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "v1–v4 tables must stay ({name})");
+        }
+        let store2 = open_at(&path).unwrap();
+        assert_eq!(store2.schema_version().unwrap(), SCHEMA_VERSION);
+        let n2: i64 = store2
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_id_map'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n2, 1, "v5 migrate must be idempotent on reopen");
     }
 
     #[test]
@@ -494,7 +610,8 @@ CREATE TABLE IF NOT EXISTS meta (
     #[test]
     fn no_secret_columns_in_schema() {
         // Guard: schema SQL must not mention secret-like columns.
-        let lower = format!("{SCHEMA_V1}\n{SCHEMA_V2}\n{SCHEMA_V3}").to_ascii_lowercase();
+        let lower = format!("{SCHEMA_V1}\n{SCHEMA_V2}\n{SCHEMA_V3}\n{SCHEMA_V4}\n{SCHEMA_V5}")
+            .to_ascii_lowercase();
         for banned in [
             "api_key",
             "jwt",

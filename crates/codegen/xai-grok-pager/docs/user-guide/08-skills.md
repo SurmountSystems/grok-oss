@@ -244,6 +244,6 @@ Do not invent a second helper or read those files by hand.
 
 4. **Keep skills focused.** Write one skill per workflow. A "deploy" skill and a "rollback" skill work better than a single "deploy-and-rollback" skill.
 
-5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared.
+5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared. `/what` is host overlay plus pager slash (four-line restatement: Job, State, You, Next), like `/finish` and `/reports`. Do not ship it as repo `.agents/skills/what`.
 
 6. **Test by running it.** Invoke `/name` and confirm the skill works before you rely on automatic invocation.

@@ -1106,6 +1106,7 @@ pub(crate) async fn run_shell_child(
                 xai_grok_agent::config::PermissionMode::BypassPermissions
             ),
         false,
+        false,
         None,
         ctx.inference_idle_timeout_secs,
         None,

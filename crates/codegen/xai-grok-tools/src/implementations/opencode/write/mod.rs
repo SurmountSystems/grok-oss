@@ -111,6 +111,11 @@ impl xai_tool_runtime::Tool for WriteTool {
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        if let Some(message) =
+            crate::util::compiler_probe_junk::refuse_write_if_compiler_probe_junk(&path, &cwd)
+        {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
         let _write_lock =
             crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
                 &path, &ctx, &resources, "write",
@@ -480,5 +485,71 @@ mod tests {
     fn notification_fields() {
         // Notification verification requires capturing handle.
         // Covered at integration layer.
+    }
+
+    #[tokio::test]
+    async fn write_refuses_rmeta_at_workspace_root_and_does_not_create_the_file() {
+        assert_write_refuses_root_junk("libfixture.rmeta").await;
+    }
+
+    #[tokio::test]
+    async fn write_refuses_a_out_at_workspace_root_and_does_not_create_the_file() {
+        assert_write_refuses_root_junk("a.out").await;
+    }
+
+    #[tokio::test]
+    async fn write_refuses_rust_out_at_workspace_root_and_does_not_create_the_file() {
+        assert_write_refuses_root_junk("rust_out").await;
+    }
+
+    #[tokio::test]
+    async fn write_refuses_long_type_dump_at_workspace_root_and_does_not_create_the_file() {
+        assert_write_refuses_root_junk("xai_grok_pager.long-type-15498221572048715402.txt").await;
+    }
+
+    #[tokio::test]
+    async fn write_allows_ordinary_file_at_workspace_root() {
+        let tmp = TempDir::new().unwrap();
+        let tool = WriteTool;
+        let resources = test_resources(tmp.path());
+        let input = WriteInput {
+            file_path: tmp.path().join("notes.md").to_string_lossy().into_owned(),
+            content: "ok\n".to_string(),
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .expect("ordinary files at the workspace root must still write");
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("notes.md")).unwrap(),
+            "ok\n"
+        );
+    }
+
+    async fn assert_write_refuses_root_junk(name: &str) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(name);
+        let tool = WriteTool;
+        let resources = test_resources(tmp.path());
+        let input = WriteInput {
+            file_path: path.to_string_lossy().into_owned(),
+            content: "probe\n".to_string(),
+        };
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input).await;
+        let err = result.expect_err(&format!(
+            "write must refuse rustc probe junk {name} at the workspace root"
+        ));
+        let message = err.to_string();
+        assert!(
+            message.to_ascii_lowercase().contains("refuse")
+                || message.contains("probe junk")
+                || message.contains("workspace root"),
+            "refuse for {name} should say why: {message}"
+        );
+        assert!(
+            !path.exists(),
+            "refused write must not create {name} at the workspace root"
+        );
     }
 }

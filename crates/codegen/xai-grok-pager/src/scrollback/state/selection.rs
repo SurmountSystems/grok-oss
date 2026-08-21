@@ -519,11 +519,12 @@ impl ScrollbackState {
                 && entry.display_mode == DisplayMode::Collapsed
         });
 
-        let target_mode = if any_collapsed {
-            DisplayMode::Expanded
-        } else {
-            DisplayMode::Collapsed
-        };
+        let target_mode =
+            if crate::appearance::cache::load_always_expand_thinking() || any_collapsed {
+                DisplayMode::Expanded
+            } else {
+                DisplayMode::Collapsed
+            };
 
         self.thinking_display_mode = target_mode;
 

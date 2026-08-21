@@ -339,6 +339,10 @@ nix_retry +cmd:
         echo "==> nix_retry: cargo fmt / rustfmt check failed (Diff in). That is a quality fail, not a flake 502/503. Format the listed files and retry. Not retrying this hard quality miss." >&2
         exit "${status}"
       fi
+      if grep -qE 'error: could not compile|clippy::' "${attempt_log}"; then
+        echo "==> nix_retry: cargo clippy / rustc quality failed (could not compile). That is a quality fail, not a flake 502/503. Fix the listed errors and retry. Not retrying this hard quality miss." >&2
+        exit "${status}"
+      fi
       if [[ "${status}" -eq 127 ]] && grep -qE 'ssh-ng://.*No such file or directory' "${attempt_log}"; then
         echo "==> nix_retry: the command was a machines-file line (exit 127). Force-remote builders belong in --option builders @file after nix. Not retrying this hard recipe miss." >&2
         exit "${status}"
@@ -551,7 +555,7 @@ test: test-fmt test-clippy test-unit test-doc test-mem-guard
     @echo "just test passed"
 
 # Local-only extras CI does not run.
-test-extra: test-clippy-targets test-nix-retry-smoke test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-quotes-quality-attr test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-exports-nix-sshopts test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features
+test-extra: test-clippy-targets test-nix-retry-smoke test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-quotes-quality-attr test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-exports-nix-sshopts test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features
     @echo "just test-extra passed"
 
 test-fmt:
@@ -796,10 +800,13 @@ test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
 # low-memory package sandbox. Force-remote nix must pass --cores 64 so
 # NIX_BUILD_CORES follows the builder, and workspace-cargo-quality must set
 # CARGO_BUILD_JOBS to 32 (OOM hedge vs 64 rustc processes). Cargo clippy
-# and test compile must pass --jobs on argv from those cores (capped), and
-# must use the dev profile like local `just test-clippy`, not crane's
-# default --release check (one rustc thread at opt-level 3). Host machines
-# max-jobs lives outside this tree. Does not realize the derivation.
+# and test compile must pass --jobs on argv from those cores (capped),
+# after the subcommand (`cargo clippy --jobs N`; cargo 1.97 has no global
+# `cargo --jobs`), and must drop MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token
+# jobserver cannot ignore --jobs. Must use the dev profile like local `just test-clippy`,
+# not crane's default --release check (one rustc thread at opt-level 3).
+# Host machines max-jobs lives outside this tree. Does not realize the
+# derivation.
 test-check-remote-uses-builder-cores:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -868,6 +875,22 @@ test-check-remote-uses-builder-cores:
       echo "${quality}" >&2
       exit 1
     fi
+    if grep -qE -- 'cargo --jobs' <<<"${quality}${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: cargo 1.97 has no global --jobs; put --jobs after the subcommand (cargo clippy --jobs, cargo check --jobs)." >&2
+      echo "${quality}" >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'clippy --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: clippy must pass --jobs after the subcommand (cargo clippy --jobs)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: artifacts check must pass --jobs after the subcommand (cargo check --jobs)." >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
     if ! grep -q -- '--jobs' <<<"${artifacts}"; then
       echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must pass cargo --jobs on argv." >&2
       echo "${artifacts}" >&2
@@ -875,6 +898,11 @@ test-check-remote-uses-builder-cores:
     fi
     if ! grep -q 'NIX_BUILD_CORES' <<<"${jobs_helper}"; then
       echo "test-check-remote-uses-builder-cores: cargo --jobs must be taken from NIX_BUILD_CORES (then capped at 32)." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'unset MAKEFLAGS' <<<"${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: must unset MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token GNU jobserver cannot ignore cargo --jobs." >&2
       echo "${jobs_helper}" >&2
       exit 1
     fi
@@ -896,6 +924,82 @@ test-check-remote-uses-builder-cores:
       exit 1
     fi
     echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 32 from cores on argv; CARGO_PROFILE=dev; package sandbox still 2)"
+
+# Dummy workspace deps stubs do not need the pager build-id. GROK_GIT_SHA
+# from dirtyShortRev must not be on workspace-cargo-quality-deps or a dirty
+# tree (even files cargo filter drops) busts the remote crates.io cache.
+# grok-oss and quality still inject GROK_GIT_SHA (pager-bin build.rs).
+# Instantiates .drv files only. Does not realize rustc or run check-remote.
+test-check-remote-deps-omit-git-sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    flake="${root}/flake.nix"
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    artifacts="$(awk '
+      $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { p=1 }
+      p && $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { exit }
+      p { print }
+    ' "${flake}")"
+    quality="$(awk '
+      $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /openrouter-credentials/ { exit }
+      p { print }
+    ' "${flake}")"
+    grok_oss="$(awk '
+      $0 ~ /grok-oss = craneLib.buildPackage/ { p=1 }
+      p && $0 ~ /cargoCheck = craneLib.mkCargoDerivation/ { exit }
+      p { print }
+    ' "${flake}")"
+    if ! grep -q 'GROK_GIT_SHA = self.shortRev or self.dirtyShortRev or "unknown"' "${flake}"; then
+      echo "test-check-remote-deps-omit-git-sha: grok-oss still needs GROK_GIT_SHA from shortRev/dirtyShortRev (pager-bin build.rs)." >&2
+      exit 1
+    fi
+    if ! grep -q 'commonArgs' <<<"${grok_oss}"; then
+      echo "test-check-remote-deps-omit-git-sha: grok-oss must keep commonArgs (GROK_GIT_SHA for pager-bin)." >&2
+      echo "${grok_oss}" >&2
+      exit 1
+    fi
+    if ! grep -q 'removeAttrs commonArgs' <<<"${artifacts}" || ! grep -q 'GROK_GIT_SHA' <<<"${artifacts}"; then
+      echo "test-check-remote-deps-omit-git-sha: workspaceCargoArtifacts must drop GROK_GIT_SHA via removeAttrs commonArgs so dirtyShortRev cannot bust the deps drv." >&2
+      echo "${artifacts}" >&2
+      exit 1
+    fi
+    if grep -q 'removeAttrs commonArgs' <<<"${quality}"; then
+      echo "test-check-remote-deps-omit-git-sha: workspace-cargo-quality compiles pager-bin and must keep GROK_GIT_SHA (do not removeAttrs it)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'commonArgs' <<<"${quality}"; then
+      echo "test-check-remote-deps-omit-git-sha: workspace-cargo-quality must keep commonArgs (GROK_GIT_SHA for pager-bin build.rs)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    grok_sha="$(nix eval --raw ".#packages.${sys}.grok-oss.GROK_GIT_SHA")"
+    if [[ -z "${grok_sha}" ]]; then
+      echo "test-check-remote-deps-omit-git-sha: expected grok-oss.GROK_GIT_SHA to be set, got empty." >&2
+      exit 1
+    fi
+    quality_sha="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.GROK_GIT_SHA")"
+    if [[ -z "${quality_sha}" ]]; then
+      echo "test-check-remote-deps-omit-git-sha: expected workspace-cargo-quality.GROK_GIT_SHA to be set (clippy compiles pager-bin), got empty." >&2
+      exit 1
+    fi
+    quality_drv="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.drvPath")"
+    deps_drv="$(rg -o '/nix/store/[0-9a-z]+-workspace-cargo-quality-deps-[^"]+\.drv' "${quality_drv}" | head -n1)"
+    if [[ -z "${deps_drv}" || ! -e "${deps_drv}" ]]; then
+      echo "test-check-remote-deps-omit-git-sha: expected workspace-cargo-quality-deps.drv among quality inputs" >&2
+      exit 1
+    fi
+    if rg -q 'GROK_GIT_SHA' "${deps_drv}"; then
+      echo "test-check-remote-deps-omit-git-sha: workspace-cargo-quality-deps.drv must not set GROK_GIT_SHA (dirtyShortRev must not bust crates.io deps)." >&2
+      exit 1
+    fi
+    if ! rg -q 'GROK_GIT_SHA' "${quality_drv}"; then
+      echo "test-check-remote-deps-omit-git-sha: workspace-cargo-quality.drv must still set GROK_GIT_SHA." >&2
+      exit 1
+    fi
+    echo "test-check-remote-deps-omit-git-sha: ok (deps omit GROK_GIT_SHA; grok-oss and quality keep it)"
 
 # requiredSystemFeatures=big-parallel only keeps rustc off this machine when
 # local Nix does not advertise that feature. This host's user config does
@@ -1480,6 +1584,71 @@ test-nix-retry-rustfmt-diff-fail-fast:
       exit 1
     fi
     echo "test-nix-retry-rustfmt-diff-fail-fast: ok (Diff in rustfmt check exited on attempt 1)"
+
+# cargo clippy -D warnings / rustc prints "error: could not compile". That is
+# a quality fail, not a flake 502/503. nix_retry must exit on attempt 1 and
+# must not sleep 5s/15s/45s. Does not run check-remote or realize a derivation.
+test-nix-retry-clippy-compile-fail-fast:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export NIX_RETRY_ATTEMPTS=4
+    needle="error: could not compile \`xai-grok-pager\` (lib) due to 5 previous errors"
+    start="$(date +%s)"
+    set +e
+    out="$(timeout 8 just nix_retry sh -c "printf '%s\\n' '${needle}'; exit 19" 2>&1)"
+    status=$?
+    set -e
+    elapsed="$(($(date +%s) - start))"
+    if [[ "${status}" -eq 124 ]]; then
+      echo "test-nix-retry-clippy-compile-fail-fast: still running after 8s; fail-fast should exit on attempt 1 (retries sleep 65s+)." >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${status}" -ne 19 ]]; then
+      echo "test-nix-retry-clippy-compile-fail-fast: expected exit 19, got ${status}" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -q 'retrying in' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: must not sleep or retry a clippy / rustc could-not-compile fail:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'attempt 2/|FAILED after [2-9]' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: must stop on attempt 1:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'attempt 1/4' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: expected attempt 1/4:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if [[ "${elapsed}" -ge 8 ]]; then
+      echo "test-nix-retry-clippy-compile-fail-fast: took ${elapsed}s; fail-fast should finish in a few seconds." >&2
+      exit 1
+    fi
+    if ! grep -qE 'clippy|rustc' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: expected an operator sentence that names cargo clippy / rustc:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if ! grep -q 'could not compile' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: expected an operator sentence that names could not compile:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'SSH did not start|missing system features|Diff in' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: this class is a clippy/rustc quality fail, not an SSH, daemon-feature, or rustfmt miss:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    if grep -qE 'ssh-ng://|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|known_hosts|/id_|machines URI' <<<"${out}"; then
+      echo "test-nix-retry-clippy-compile-fail-fast: must not print IP, machines URI, or key paths:" >&2
+      echo "${out}" >&2
+      exit 1
+    fi
+    echo "test-nix-retry-clippy-compile-fail-fast: ok (could not compile exited on attempt 1)"
 
 # GROK_NIX_FORCE_REMOTE must keep the caller command as argv0 (nix, or the
 # fake first word this smoke supplies). Copying known_hosts into builders

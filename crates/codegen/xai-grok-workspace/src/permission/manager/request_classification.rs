@@ -131,6 +131,7 @@ pub(super) fn permission_mode_artifact_str(
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",
+        PermissionMode::ContextOnly => "context-only",
         PermissionMode::Ask => "ask",
     }
 }

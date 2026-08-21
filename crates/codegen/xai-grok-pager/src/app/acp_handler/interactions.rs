@@ -172,6 +172,15 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
 
+    let is_restore = params.tool_call_id.starts_with("exit-plan-mode-resume-");
+    if is_restore && agent.plan_decision_resolved {
+        tracing::info!(
+            "exit_plan_mode restore skipped: plan already decided; do not re-arm Plan ready"
+        );
+        drop(ext.response_tx);
+        return is_active;
+    }
+
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,
@@ -180,7 +189,9 @@ pub(super) fn handle_exit_plan_mode(
         );
         old.send_stale_cancel();
         agent.plan_next_comment_id = old.next_comment_id;
-        agent.prompt.restore(old.stashed_prompt);
+        if agent.prompt.text().trim().is_empty() {
+            agent.prompt.restore(old.stashed_prompt);
+        }
         agent.line_viewer = None;
     }
 
@@ -209,7 +220,6 @@ pub(super) fn handle_exit_plan_mode(
     let stashed = agent.prompt.stash();
     // Live mid-turn present auto-opens. Resume / restore re-park keeps the
     // waiter and does not dock the side panel.
-    let is_restore = params.tool_call_id.starts_with("exit-plan-mode-resume-");
     let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
 
     agent.plan_comments.clear();
@@ -220,9 +230,12 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.latest_inline_plan_content = None;
     }
-    // New present re-arms decision CTAs after a prior Approve/Quit and
-    // clears Revise/Clarify in-flight so CTAs arm once.
-    agent.clear_plan_loop_flags_for_new_present();
+    // Live present re-arms decision CTAs after a prior Approve/Quit and
+    // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
+    // clear sticky resolved (leftover/approved plan.md stays decided).
+    if !is_restore {
+        agent.clear_plan_loop_flags_for_new_present();
+    }
     agent.plan_approval_view = Some(state);
     // Keep a mid-compose draft visible. stash() copies text and does not
     // clear it; only wipe when the composer was already empty so empty-prompt

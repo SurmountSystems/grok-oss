@@ -23,6 +23,7 @@ mod global_pause;
 mod import_claude;
 mod interject;
 mod jump;
+mod metadata;
 mod modes;
 mod notes;
 mod permissions;

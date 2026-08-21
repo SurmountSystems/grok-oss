@@ -91,8 +91,8 @@ use super::settings::setters::{
     set_resume_canceled_turn_on_restart, set_screen_mode, set_scroll_lines, set_scroll_mode,
     set_scroll_speed, set_scrub_ascii_punct, set_show_thinking_blocks, set_show_tips,
     set_simple_mode, set_theme, set_timeline, set_timestamps, set_token_economy_bool,
-    set_token_economy_int, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
-    set_voice_stt_language,
+    set_token_economy_int, set_ulid_session_ids, set_vim_mode, set_voice_capture_mode,
+    set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1024,6 +1024,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowRunningSessions => super::running::dispatch_show_running_sessions(app),
+        Action::ShowSessionMetadata => super::metadata::dispatch_show_session_metadata(app),
         Action::ShowLimits => super::status::dispatch_show_limits(app),
         Action::ShowSpend => super::status::dispatch_show_spend(app),
         Action::ShowLimitsJson => super::status::dispatch_show_limits_json(app),
@@ -1100,6 +1101,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetPlanApprovalPark(s) => set_plan_approval_park(app, s),
         Action::SetAllowWorktree(v) => set_allow_worktree(app, v),
         Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
+        Action::SetUlidSessionIds(v) => set_ulid_session_ids(app, v),
         Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),

@@ -49,6 +49,62 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         .filter(|d| !is_plan_mode_blocked_ask_user_tool_name(d.function.name.as_str()))
         .collect()
 }
+
+/// Tools advertised on a turn. Context-only sends an empty list so the model
+/// works from instructions only. Plan-mode filtering still applies otherwise.
+pub(super) fn advertise_tools_for_turn(
+    defs: Vec<ToolDefinition>,
+    plan_active: bool,
+    context_only: bool,
+) -> Vec<ToolDefinition> {
+    if context_only {
+        return Vec::new();
+    }
+    filter_cursor_tools_by_plan_mode(defs, plan_active)
+}
+
+/// Hosted tools follow the same context-only strip as function tools.
+pub(super) fn advertise_hosted_tools_for_turn<T>(hosted: Vec<T>, context_only: bool) -> Vec<T> {
+    if context_only { Vec::new() } else { hosted }
+}
+
+/// Context-only refuses every tool call, including bash, spawn, edits, and MCP.
+pub(crate) fn should_refuse_tool_in_context_only(context_only: bool) -> bool {
+    context_only
+}
+
+/// Operator-facing refusal when a tool call still arrives in context-only.
+pub(crate) fn context_only_tool_refusal_message() -> &'static str {
+    "Rejected: context-only mode advertises no tools. Chat stays a conversation. \
+     Switch out of context-only (settings or /context-only) to use tools."
+}
+
+/// Synthetic JSON-schema tool on backends that cannot constrain output natively.
+pub(super) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+
+/// Tools sent on a turn after context-only and optional structured-output.
+/// Context-only must stay empty even when a JSON schema is present.
+pub(super) fn effective_tools_for_turn(
+    mut base: Vec<ToolSpec>,
+    context_only: bool,
+    structured_output_schema: Option<serde_json::Value>,
+) -> Vec<ToolSpec> {
+    if context_only {
+        return Vec::new();
+    }
+    if let Some(schema) = structured_output_schema {
+        base.push(ToolSpec {
+            name: STRUCTURED_OUTPUT_TOOL.to_string(),
+            description: Some(
+                "Return your final answer as JSON matching the required schema. \
+                 Call this exactly once, at the end."
+                    .to_string(),
+            ),
+            parameters: schema,
+        });
+    }
+    base
+}
 impl SessionActor {
     pub(super) fn apply_prompt_modes_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
         snapshot.start_prompt_mode = Some(self.turn_start_prompt_mode.lock().to_string());
