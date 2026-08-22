@@ -275,10 +275,14 @@ identifier that has no matching `fn`.
   OpenRouter login require a secure backend. Only if all secure backends fail:
   clear error, no silent `provider_credentials.json` secret dump. FORK claims;
   not a land class. Diagnose with in-tree tests, not host D-Bus probes.
-- [x] **Economic mode (cap shipped; slash leftover)**: nested L2/L3
+- [x] **Economic mode (cap shipped; slash leftover)**: nested L2 and L3
   sampling stays at the Grok 4.5 long-context price cliff (~200k) at
   spawn, model switch, and header. The main (L1) session uses the catalog
-  500k window so AUTO compact does not fire at the old 200k L1 knee.
+  500k window. AUTO compact on L1 uses that catalog window, not the old
+  200k L1 knee. L2 may compact on the nested 200k window. L3 never
+  compact. An L3 is disposable. If it stalls or spirals, kill it. When
+  an L3 is near 200k, it summarizes, reports to L2, and stops. Do not
+  compact-and-continue on L3.
   `[ui] economic_mode` still seeds implement-effort / Token Economy.
   The Settings setter applies to new sessions. `/economic-mode` is a
   pager command that queues that text only. The shell has no
@@ -310,10 +314,11 @@ identifier that has no matching `fn`.
   `docs/dev/research/rca-auto-compact-early-fire.md`
 - [x] **Footer context chip names sampling vs catalog when they differ**:
   AUTO compact gates on the sampling window. L1 sampling is the catalog
-  500k window. Nested L2/L3 sampling stays 200k. When those windows
-  differ, the chip must not paint unlabeled `207K / 500K` as if catalog
-  500k were the nested gate. Same honesty as the CompactionStarted
-  banner. Test:
+  500k window. AUTO compact on L1 uses that window, not 200k. Nested L2
+  and L3 sampling stays 200k. L2 may compact. L3 never AUTO compact.
+  When those windows differ, the chip must not paint unlabeled
+  `207K / 500K` as if catalog 500k were the nested gate. Same honesty as
+  the CompactionStarted banner. Test:
   `context_chip_names_sampling_window_when_catalog_differs`
   (`xai-grok-pager` `views/context_bar.rs`).
 - [x] **Session sampling must not copy catalog 500k into a nested field**:
@@ -322,6 +327,8 @@ identifier that has no matching `fn`.
   `refresh_context_used` must not copy catalog into that field. Spawn
   seeds L1 at catalog 500k and nested sessions at 200k. Nested fallback
   is 200k when the session field is empty; L1 fallback is catalog 500k.
+  Sampling is the same 200k cap for L2 and L3. Compact is not: L2 may
+  compact, and L3 must not.
   Tests:
   `footer_chip_uses_session_sampling_window_when_economic_cache_is_off`
   (`views/context_bar.rs`),
@@ -787,6 +794,13 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   no L4. Operator clarify stays in the L2 nested view. L3 stays unbothered.
   Nesting chrome stays L2-only plus an L3 count. The older weaker law (L2
   must spawn L3 only when many greps / half the window) is replaced.
+  L1 AUTO compact uses the catalog 500k window. L2 nested stays 200k and
+  may compact. L3 never compact and must not compact-and-continue. A
+  Grok OSS screenshot from any current working directory is this
+  product. Do not assume another grok-oss window is out of scope.
+  After Approve, do not block on another plan present. Track the work,
+  write a size estimate, implement the groups in parallel, then
+  reconcile the estimate against what landed.
   Product cargo pins for the prompt contract are under Product
   (`CHILD_TASK_DESCRIPTION`). Assert sniffs that AGENTS still contains the
   coordinator sentence; that is not the crate seam. Write new short reports
@@ -1006,7 +1020,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/what` is host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `what_empty_args_injects_what_skill` |
-| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
+| [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |

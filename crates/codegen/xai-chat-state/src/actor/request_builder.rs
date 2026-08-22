@@ -108,6 +108,7 @@ impl ChatStateActor {
             prompt_cache_key: None,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,
+            estimated_input_tokens: Some(self.state.total_tokens),
         }
     }
 }

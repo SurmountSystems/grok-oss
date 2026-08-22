@@ -5535,3 +5535,72 @@
         assert_eq!(pw.cursor(), last_line_start);
         assert_ne!(pw.cursor(), 0, "bare Home is not whole-buffer");
     }
+
+    fn empty_unfocused_style() -> PromptStyle {
+        PromptStyle {
+            focused: false,
+            show_prefix: false,
+            vpad_top: 0,
+            chrome: false,
+            ..Default::default()
+        }
+    }
+
+    fn draw_composer_row(pw: &mut PromptWidget, style: &PromptStyle, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, style, None, None);
+        buf_text_at(&buf, 0, width, 0)
+    }
+
+    #[test]
+    fn unfocused_empty_composer_paints_idle_build_anything() {
+        let mut pw = PromptWidget::new();
+        let text = draw_composer_row(&mut pw, &empty_unfocused_style(), 40);
+        assert!(
+            text.contains("Build anything"),
+            "idle unfocused composer must invite, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn running_or_retrying_hides_idle_build_anything_placeholder() {
+        let mut pw = PromptWidget::new();
+        let mut style = empty_unfocused_style();
+        style.hide_idle_placeholder = true;
+        let text = draw_composer_row(&mut pw, &style, 40);
+        assert!(
+            !text.contains("Build anything"),
+            "a running or retrying turn must not invite Build anything, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn hide_idle_placeholder_keeps_typed_buffer() {
+        let mut pw = PromptWidget::new();
+        pw.textarea.insert_str("steer the retry");
+        let mut style = empty_unfocused_style();
+        style.hide_idle_placeholder = true;
+        let text = draw_composer_row(&mut pw, &style, 40);
+        assert!(
+            text.contains("steer the retry"),
+            "typed draft must stay, got {text:?}"
+        );
+        assert!(
+            !text.contains("Build anything"),
+            "typed draft must not mix idle invitation, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn hide_idle_placeholder_still_paints_override() {
+        let mut pw = PromptWidget::new();
+        let mut style = empty_unfocused_style();
+        style.hide_idle_placeholder = true;
+        style.placeholder_override = Some("Save a memory note...");
+        let text = draw_composer_row(&mut pw, &style, 40);
+        assert!(
+            text.contains("Save a memory note"),
+            "mode override must still paint, got {text:?}"
+        );
+    }

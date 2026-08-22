@@ -1520,6 +1520,9 @@ pub struct AgentView {
     pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
     /// Console team prepaid remaining (USD cents) for this agent.
     pub console_team_prepaid_cents: Option<i64>,
+    /// True after a billing fetch for this agent finished (success or empty
+    /// config). Compact footer then uses after-fetch gaps instead of loading.
+    pub console_prepaid_billing_settled: bool,
     /// Live `/rebuild` progress bar.
     pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Input flight recorder — rolling buffer of recent key events.

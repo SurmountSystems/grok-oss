@@ -174,6 +174,41 @@ pub enum RetryDecision {
     Fatal(SamplingError),
 }
 
+/// True when used tokens are at or over this session's sampling window.
+///
+/// The same oversized payload cannot recover by retrying. Session compact
+/// (L1/L2) or fail honestly. L3 never compact.
+pub fn over_window_blocks_retry(used_tokens: Option<u64>, sampling_window: u64) -> bool {
+    sampling_window > 0 && used_tokens.is_some_and(|used| used >= sampling_window)
+}
+
+/// Classify a sampling error, refusing retries when the request is already
+/// at or over the session sampling window.
+///
+/// Auth and encrypted-content errors still emit to the session. Image-strip
+/// recovery may still change the payload. Doom-loop resample is not a size
+/// overflow.
+pub fn classify_error_with_window(
+    err: &SamplingError,
+    retry_count: u32,
+    max_retries: u32,
+    rate_limit_threshold: u32,
+    estimated_input_tokens: Option<u64>,
+    sampling_window: u64,
+) -> RetryDecision {
+    if over_window_blocks_retry(estimated_input_tokens, sampling_window)
+        && err.is_retryable()
+        && !err.is_payload_too_large()
+        && !err.is_image_processing_error()
+        && !matches!(err, SamplingError::DoomLoopDetected { .. })
+        && !err.is_auth_error()
+        && !err.is_encrypted_content_error()
+    {
+        return RetryDecision::Fatal(clone_error(err));
+    }
+    classify_error(err, retry_count, max_retries, rate_limit_threshold)
+}
+
 /// Classify a sampling error into a [`RetryDecision`].
 ///
 /// `retry_count` is the number of retries already performed (0 on first
@@ -1260,5 +1295,72 @@ mod tests {
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    #[test]
+    fn over_window_blocks_retry_when_used_meets_sampling_window() {
+        assert!(over_window_blocks_retry(Some(411_000), 200_000));
+        assert!(over_window_blocks_retry(Some(200_000), 200_000));
+        assert!(!over_window_blocks_retry(Some(199_999), 200_000));
+        assert!(!over_window_blocks_retry(None, 200_000));
+        assert!(!over_window_blocks_retry(Some(500_000), 0));
+    }
+
+    /// Named contract: over-window model failure does not keep incrementing
+    /// retry attempts. Same oversized payload cannot recover via 5xx retry.
+    #[test]
+    fn over_window_model_failure_does_not_keep_incrementing_retries() {
+        let err = api_err(StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => {
+                panic!("over-window 5xx must be Fatal (compact or honest fail), not {other:?}")
+            }
+        }
+        match classify_error_with_window(
+            &err,
+            1,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => panic!("a later over-window attempt must stay Fatal, got {other:?}"),
+        }
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(100_000),
+            200_000,
+        ) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("under-window 5xx still retries, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn over_window_timeout_is_fatal_not_retry_chrome() {
+        let err = SamplingError::EventStreamError("timed out waiting for response headers".into());
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => panic!("over-window timeout must not Retrying, got {other:?}"),
+        }
     }
 }

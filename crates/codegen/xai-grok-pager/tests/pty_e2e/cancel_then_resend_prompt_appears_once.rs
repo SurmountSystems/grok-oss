@@ -40,7 +40,7 @@ async fn cancel_then_resend_prompt_appears_once() {
         )
         .expect("prompt block committed");
     harness
-        .wait_for_text("Waiting for response", Duration::from_secs(25))
+        .wait_for_text("Waiting for the model", Duration::from_secs(25))
         .expect("turn running pre-first-token");
 
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C rewind");

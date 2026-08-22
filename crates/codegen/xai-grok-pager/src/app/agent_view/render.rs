@@ -1069,6 +1069,7 @@ impl AgentView {
                 None
             },
             placeholder_when_focused: false,
+            hide_idle_placeholder: self.session.state.is_busy(),
             placeholder_override: if let Some(ph) = self
                 .prompt_input_mode
                 .placeholder_override(self.multiline_mode)
@@ -1203,6 +1204,7 @@ impl AgentView {
             prefix_override: None,
             placeholder_when_focused: false,
             placeholder_override: None,
+            hide_idle_placeholder: false,
             compact: false,
             show_accent_line: false,
             show_borders: false,
@@ -1239,6 +1241,7 @@ impl AgentView {
                 prefix_override: None,
                 placeholder_when_focused: false,
                 placeholder_override: None,
+                hide_idle_placeholder: false,
                 compact: false,
                 show_accent_line: false,
                 show_borders: false,
@@ -1368,6 +1371,7 @@ impl AgentView {
             watchers,
             parked,
             self.global_work_paused,
+            !self.is_minimal_mode(),
         ) || plan_loop_label.is_some()
         {
             1
@@ -1622,12 +1626,20 @@ impl AgentView {
             self.sampling_identity,
             self.credit_balance.as_ref(),
         );
+        let (console_prepaid_cents, console_prepaid_gap) =
+            crate::views::credit_bar::compact_footer_console_prepaid(
+                self.console_team_prepaid_cents,
+                xai_grok_shell::auth::cached_console_team_prepaid_cents_default(),
+                self.console_prepaid_billing_settled,
+                xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
+                xai_grok_shell::auth::resolve_management_team_id_default().is_some(),
+            );
         if let Some(credits_line) =
             crate::views::credit_bar::credit_status_line_for_live_session_emphasizing_meter_source(
                 self.credit_balance.as_ref(),
                 compact_identity,
-                self.console_team_prepaid_cents,
-                crate::views::credit_bar::resolve_console_team_prepaid_gap_default(),
+                console_prepaid_cents,
+                console_prepaid_gap,
                 self.hit_credits.hovered,
                 &theme,
                 self.chat_kind,
@@ -2389,12 +2401,16 @@ impl AgentView {
                         activity_started_at: self.activity_started_at,
                         tick,
                         drain_blocked,
-                        buttons: Some(turn_status::MouseButtons {
-                            cancel_hovered: self.hit_cancel_button.hovered,
-                            pause_hovered: self.hit_pause_button.hovered,
-                            bg_hovered: self.hit_bg_button.hovered,
-                            watching_hovered: self.hit_watching_cue.hovered,
-                        }),
+                        buttons: if self.is_minimal_mode() {
+                            None
+                        } else {
+                            Some(turn_status::MouseButtons {
+                                cancel_hovered: self.hit_cancel_button.hovered,
+                                pause_hovered: self.hit_pause_button.hovered,
+                                bg_hovered: self.hit_bg_button.hovered,
+                                watching_hovered: self.hit_watching_cue.hovered,
+                            })
+                        },
                         has_running_execute,
                         total_tokens: self.context_state.as_ref().map(|c| c.used),
                         mcp_init_progress: self.mcp_init_progress.as_ref(),
@@ -2715,6 +2731,7 @@ impl AgentView {
                         prefix_override: None,
                         placeholder_when_focused: false,
                         placeholder_override: None,
+                        hide_idle_placeholder: false,
                         compact: false,
                         show_accent_line: false,
                         show_borders: false,
@@ -5614,6 +5631,79 @@ mod status_credits_meter_tests {
             "stop click must still dispatch CancelTurn, got {outcome:?}"
         );
     }
+
+    /// Keyboard-only / Minimal screen still hides chips. Idle already
+    /// hides via height 0. Parked always has height 1, so the live paint
+    /// site must pass `buttons: None` in Minimal mode.
+    #[test]
+    fn minimal_mode_parked_wait_does_not_paint_pause_or_stop() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        use crate::app::ScreenMode;
+        use crate::app::agent::AgentState;
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        agent.prompt.set_screen_mode(ScreenMode::Minimal);
+        agent.session.state = AgentState::TurnRunning;
+        agent.front_message_committed = true;
+        let meta = NotificationMeta::default();
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("sleep-1")), "Sleep 5s")
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut agent.scrollback,
+        );
+        assert!(
+            matches!(
+                agent.resolve_turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::Sleep))
+            ),
+            "fixture must be a Sleep wait, got {:?}",
+            agent.resolve_turn_activity()
+        );
+        assert!(
+            agent.renders_parked(),
+            "fixture must be a parked sendable wait"
+        );
+        assert_eq!(
+            agent.watchers(),
+            crate::views::turn_status::Watchers::default(),
+            "fixture must have no watchers"
+        );
+
+        let text = draw(&mut agent);
+        assert!(
+            !text.contains("[pause]"),
+            "Minimal parked wait must not paint [pause]:\n{text}"
+        );
+        assert!(
+            !text.contains("[stop]"),
+            "Minimal parked wait must not paint [stop]:\n{text}"
+        );
+        assert!(
+            agent.hit_pause_button.rect.is_none(),
+            "Minimal parked wait must not arm a pause hit"
+        );
+        assert!(
+            agent.hit_cancel_button.rect.is_none(),
+            "Minimal parked wait must not arm a stop hit"
+        );
+        assert!(
+            text.contains("Sleeping"),
+            "parked row must still name Sleeping:\n{text}"
+        );
+        assert!(
+            text.contains("send a message to interrupt"),
+            "parked row must still carry send a message to interrupt:\n{text}"
+        );
+    }
 }
 
 /// Clear finished `[−]` todo-header chrome (open board + finished rows).
@@ -6385,5 +6475,116 @@ mod plan_turn_row_revising_copy_tests {
             "must not re-arm idle Plan written after Approve/Quit:\n{text}"
         );
         let _ = cwd_str;
+    }
+}
+
+/// Idle `"Build anything"` must not paint while a turn is running or retrying.
+#[cfg(test)]
+mod idle_placeholder_during_turn_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::acp::tracker::TurnActivity;
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentState;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::agent::ActivePane;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn idle_unfocused_composer_still_paints_build_anything() {
+        let mut agent = make_agent();
+        agent.active_pane = ActivePane::Scrollback;
+        let text = draw(&mut agent);
+        assert!(
+            text.contains("Build anything"),
+            "idle unfocused composer must still invite:\n{text}"
+        );
+    }
+
+    #[test]
+    fn retrying_empty_composer_does_not_paint_idle_build_anything() {
+        let mut agent = make_agent();
+        agent.active_pane = ActivePane::Scrollback;
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .session
+            .set_retry_activity(Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: "transient error".into(),
+            }));
+        let text = draw(&mut agent);
+        assert!(
+            text.contains("Retrying the model request"),
+            "retry chrome missing:\n{text}"
+        );
+        assert!(
+            !text.contains("Build anything"),
+            "retrying must not invite Build anything as if the prompt was lost:\n{text}"
+        );
+    }
+
+    #[test]
+    fn running_empty_composer_does_not_paint_idle_build_anything() {
+        let mut agent = make_agent();
+        agent.active_pane = ActivePane::Scrollback;
+        agent.session.state = AgentState::TurnRunning;
+        let text = draw(&mut agent);
+        assert!(
+            !text.contains("Build anything"),
+            "a running turn must not invite Build anything:\n{text}"
+        );
+    }
+
+    #[test]
+    fn retrying_keeps_typed_composer_buffer() {
+        let mut agent = make_agent();
+        agent.prompt.set_text("steer the retry");
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .session
+            .set_retry_activity(Some(TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: 3,
+                reason: "timeout".into(),
+            }));
+        let text = draw(&mut agent);
+        assert!(
+            text.contains("steer the retry"),
+            "typed draft must stay while retrying:\n{text}"
+        );
+        assert!(
+            !text.contains("Build anything"),
+            "typed draft must not mix idle invitation:\n{text}"
+        );
     }
 }

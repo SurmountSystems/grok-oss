@@ -665,6 +665,15 @@ impl AgentView {
         } else {
             Some(formatted)
         };
+        let human_line = to_send
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if let Some(line) = human_line {
+            self.scrollback
+                .push_block(crate::scrollback::RenderBlock::user_prompt(line));
+        }
         pav.send_questions(to_send.clone());
         if pav.source == PlanReviewSource::Inline {
             self.latest_inline_plan_content = None;
@@ -854,8 +863,14 @@ impl AgentView {
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => {
+                let panel_open = self.line_viewer.is_some();
                 if is_commenting {
-                    return self.save_plan_comment();
+                    if panel_open {
+                        return self.save_plan_comment();
+                    }
+                    // Line-comment save needs the pane. Shut panel: send
+                    // the buffer as a normal prompt so Enter cannot wipe it.
+                    return self.send_composer_as_normal_prompt();
                 }
                 let text = self.prompt.text().to_string();
                 let has_comments = self
@@ -890,6 +905,9 @@ impl AgentView {
                         self.show_toast(toast);
                         return InputOutcome::Changed;
                     }
+                    if !panel_open && !text.trim().is_empty() {
+                        return self.send_composer_as_normal_prompt();
+                    }
                     let freeform = if text.trim().is_empty() {
                         None
                     } else {
@@ -899,12 +917,7 @@ impl AgentView {
                         PlanPromptIntent::Questions => self.send_plan_questions(freeform),
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
                         PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
-                        PlanPromptIntent::Comment => {
-                            self.show_toast(
-                                "Click Approve to implement, Clarify to ask, or Revise to rewrite.",
-                            );
-                            InputOutcome::Changed
-                        }
+                        PlanPromptIntent::Comment => self.send_composer_as_normal_prompt(),
                     };
                 }
                 return self.send_composer_as_normal_prompt();
@@ -1496,6 +1509,11 @@ mod plan_approval_enter_tests {
     #[test]
     fn enter_with_revision_text_requests_changes() {
         let mut agent = agent_with_revise_prompt();
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: Revise-on-Enter needs the open decision surface"
+        );
         agent.prompt.set_text("please use auth middleware");
         let outcome = agent.handle_plan_feedback_key(&enter_key());
         assert!(matches!(outcome, InputOutcome::Changed));
@@ -1508,6 +1526,7 @@ mod plan_approval_enter_tests {
     #[test]
     fn empty_enter_with_pending_comments_still_requests_changes() {
         let mut agent = agent_with_revise_prompt();
+        agent.show_plan_preview();
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.comments.push(PlanComment {
                 id: 1,
@@ -1603,6 +1622,190 @@ mod plan_approval_enter_tests {
         );
         assert_eq!(agent.prompt.text(), "a");
         assert!(matches!(outcome, InputOutcome::Changed));
+    }
+
+    fn assert_enter_did_not_silently_discard(
+        agent: &AgentView,
+        outcome: &InputOutcome,
+        original: &str,
+    ) {
+        let composer = agent.prompt.text();
+        let comments_have_original = agent
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.comments.iter().any(|c| c.text.contains(original)))
+            || agent
+                .plan_comments
+                .iter()
+                .any(|c| c.text.contains(original));
+        let transcript_has_original = agent.scrollback.iter_entries().any(|(_, e)| {
+            matches!(
+                &e.block,
+                crate::scrollback::RenderBlock::UserPrompt(u) if u.text.contains(original)
+            )
+        });
+        let sent_original = match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => text.contains(original),
+            InputOutcome::Action(Action::Interject { text, .. }) => text.contains(original),
+            InputOutcome::Action(Action::SendPromptNow { text, .. }) => text.contains(original),
+            _ => false,
+        };
+        assert!(
+            sent_original
+                || composer.contains(original)
+                || comments_have_original
+                || transcript_has_original,
+            "Enter must not delete a non-empty plan-mode composer with no transcript line and no plan comment; outcome={outcome:?} composer={composer:?}"
+        );
+        if composer.trim().is_empty() {
+            assert!(
+                sent_original || comments_have_original || transcript_has_original,
+                "empty composer after Enter must leave the prompt visible as a send, a comment, or a transcript line"
+            );
+        }
+    }
+
+    /// Named contract: plan mode + shut panel + non-empty composer + Enter
+    /// must not vanish the buffer. Send like a normal prompt, or keep the
+    /// draft visible. Never silent discard.
+    #[test]
+    fn plan_mode_enter_on_nonempty_composer_does_not_silently_discard() {
+        const DRAFT: &str =
+            "archive Telegram Desktop chats from this tree and keep media filenames";
+        let mut agent = agent_with_revise_prompt();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.line_viewer.is_none(), "fixture: plan panel is shut");
+        agent.prompt.set_text(DRAFT);
+        agent.prompt.set_cursor(DRAFT.len());
+
+        let outcome = agent.handle_input(
+            &crossterm::event::Event::Key(enter_key()),
+            &ActionRegistry::defaults(),
+        );
+        assert_enter_did_not_silently_discard(&agent, &outcome, DRAFT);
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains(DRAFT),
+                    "shut panel Enter must send like a normal prompt, got {text:?}"
+                );
+            }
+            other => {
+                panic!("plan mode with the panel shut must SendPrompt on Enter, got {other:?}")
+            }
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "normal send must not Approve or Revise the parked plan"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "shut panel Enter must not steal the draft as Revise notes"
+        );
+
+        let mut typed = agent_with_revise_prompt();
+        typed.plan_mode_active = true;
+        typed.set_active_pane(ActivePane::Prompt, true);
+        for ch in DRAFT.chars() {
+            let _ = typed.handle_input(
+                &crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &ActionRegistry::defaults(),
+            );
+        }
+        let typed_outcome = typed.handle_input(
+            &crossterm::event::Event::Key(enter_key()),
+            &ActionRegistry::defaults(),
+        );
+        assert_enter_did_not_silently_discard(&typed, &typed_outcome, DRAFT);
+        match typed_outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains(DRAFT),
+                    "typed Enter must SendPrompt, got {text:?}"
+                );
+            }
+            other => panic!("typed Enter with a shut panel must SendPrompt, got {other:?}"),
+        }
+
+        let mut no_park = make_agent();
+        no_park.plan_mode_active = true;
+        no_park.set_active_pane(ActivePane::Prompt, true);
+        no_park.prompt.set_text(DRAFT);
+        let no_park_outcome = no_park.handle_input(
+            &crossterm::event::Event::Key(enter_key()),
+            &ActionRegistry::defaults(),
+        );
+        assert_enter_did_not_silently_discard(&no_park, &no_park_outcome, DRAFT);
+        match no_park_outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(text.contains(DRAFT));
+            }
+            other => panic!("plan mode without a panel must SendPrompt, got {other:?}"),
+        }
+
+        // Direct plan-feedback Enter with the panel shut must not Revise.
+        let mut feedback = agent_with_revise_prompt();
+        feedback.plan_mode_active = true;
+        feedback.set_active_pane(ActivePane::Prompt, true);
+        feedback.prompt.set_text(DRAFT);
+        assert!(feedback.line_viewer.is_none());
+        let feedback_outcome = feedback.handle_plan_feedback_key(&enter_key());
+        assert_enter_did_not_silently_discard(&feedback, &feedback_outcome, DRAFT);
+        match feedback_outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains(DRAFT),
+                    "shut panel plan-feedback Enter must send like a normal prompt, got {text:?}"
+                );
+            }
+            other => panic!(
+                "shut panel plan-feedback Enter must SendPrompt, not Revise; got {other:?} toast={:?}",
+                feedback.toast.as_ref().map(|(m, _)| m.as_str())
+            ),
+        }
+        assert!(
+            feedback.plan_approval_view.is_some(),
+            "shut panel Enter must leave the parked plan"
+        );
+        assert_ne!(
+            feedback.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
+
+    /// Idle Comment hub: a non-empty composer is comment/send, not Approve.
+    #[test]
+    fn idle_plan_comment_intent_nonempty_enter_is_send_not_approve() {
+        const DRAFT: &str = "please keep the join order from the archive index";
+        let mut agent = agent_with_revise_prompt();
+        agent.plan_mode_active = true;
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.prompt_intent = PlanPromptIntent::Comment;
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.prompt.set_text(DRAFT);
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert_enter_did_not_silently_discard(&agent, &outcome, DRAFT);
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Comment Enter must not Approve"
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains(DRAFT),
+                    "Comment Enter must send, got {text:?}"
+                );
+            }
+            InputOutcome::Changed if agent.prompt.text().contains(DRAFT) => {}
+            other => panic!(
+                "Comment Enter must send or keep the draft, got {other:?} composer={:?}",
+                agent.prompt.text()
+            ),
+        }
     }
 }
 /// The mode indicator renders

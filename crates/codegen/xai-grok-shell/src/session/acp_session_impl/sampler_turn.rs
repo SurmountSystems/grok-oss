@@ -875,7 +875,12 @@ impl SessionActor {
             message, STATUS,
         ))
     }
-    fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
+    pub(crate) fn log_terminal_failure(
+        &self,
+        error_type: &str,
+        status_code: Option<u16>,
+        message: &str,
+    ) {
         let auth = self
             .auth_manager
             .as_ref()
@@ -927,22 +932,49 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        if self.should_compact_on_error(&error).await {
-            let cw = error
+        if self.is_l3_session() {
+            if let Some(cw) = error
                 .model_metadata
                 .as_ref()
                 .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+                .filter(|cw| *cw > 0)
+            {
+                let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+                if estimated_total > cw {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        estimated_total,
+                        context_window = cw,
+                        "L3 nested window is full; ending child without compact"
+                    );
+                    return Ok(SamplerFailureRecovery::EndChildWithoutCompact);
+                }
+            }
+        }
+        if self.should_compact_on_error(&error).await {
+            // Compact against the session sampling window already in chat-state
+            // (catalog on L1, nested 200k on L2). Http/timeout errors have
+            // `model_metadata: None`; catalog 500k on a 5xx must not replace
+            // a nested 200k session window.
+            let session_cw = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.context_window.get())
+                .filter(|cw| *cw > 0);
+            let error_cw = error
+                .model_metadata
+                .as_ref()
+                .and_then(|m| m.context_window)
+                .filter(|cw| *cw > 0);
+            let Some(cw) = session_cw.or(error_cw) else {
+                let message = "Context overflow recovery has no sampling window".to_string();
+                self.log_terminal_failure("context_length", error.status_code, &message);
+                return Err(acp::Error::internal_error().data(message));
+            };
             {
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
-                if let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
-                    && let Some(new_cw) = std::num::NonZeroU64::new(cw)
-                    && self.compaction.context_window_override.is_none()
-                {
-                    cfg.context_window = new_cw;
-                    self.chat_state_handle.update_sampling_config(cfg);
-                }
                 let trigger_info = compaction::AutoCompactTriggerInfo {
                     tokens_used: total_tokens,
                     context_window: cw,
@@ -958,6 +990,9 @@ impl SessionActor {
                 }
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
+        }
+        if self.sampling_window_is_full().await {
+            self.refuse_over_window_sample().await?;
         }
         let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
@@ -1278,6 +1313,9 @@ impl SessionActor {
                     }
                     SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                         Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
+                    }
+                    SamplerFailureRecovery::EndChildWithoutCompact => {
+                        Ok(SamplerTurnOutcome::EndChildWithoutCompact)
                     }
                 }
             }

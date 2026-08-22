@@ -908,6 +908,7 @@ fn inline_input_style(theme: &Theme) -> PromptStyle {
         prefix_override: None,
         placeholder_when_focused: false,
         placeholder_override: None,
+        hide_idle_placeholder: false,
         show_accent_line: false,
         show_borders: false,
         title: None,

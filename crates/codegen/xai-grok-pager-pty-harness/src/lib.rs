@@ -518,7 +518,7 @@ impl PtyHarness {
             Duration::from_millis(250),
             |h| {
                 !h.contains_text("Ctrl+c:cancel")
-                    && !h.contains_text("Waiting for response")
+                    && !h.contains_text("Waiting for the model")
                     && !h.contains_text("Responding")
             },
         )

@@ -3,6 +3,7 @@
 //! via `#[path = "messages_tests.rs"] mod tests;` in messages.rs.
 
 use super::*;
+use futures_util::StreamExt;
 use futures_util::stream;
 use std::pin::pin;
 use xai_grok_sampling_types::messages::{

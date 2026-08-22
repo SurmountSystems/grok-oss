@@ -3064,7 +3064,7 @@ fn task_call_with_bg(id: &str, background: bool) -> acp::SessionUpdate {
     )
 }
 /// Shell-stamped foreground (`subagentBackground=false`): the subagent wait
-/// surfaces from frame 1 — no "Waiting for response…" flash.
+/// surfaces from frame 1 — no "Waiting for the model…" flash.
 #[test]
 fn foreground_stamp_waits_on_subagent_from_frame_one() {
     let mut sb = ScrollbackState::new();

@@ -1241,7 +1241,7 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 };
 /// Concise task-tool description for child (L2) sessions. L2 always
 /// spawns L3 for any tools/work. L2 never does greps, edits, or tests.
-/// Three layers always. Do not compact-and-continue a product restore on L2.
+/// Three layers always. L2 may compact. L3 must not compact-and-continue.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
@@ -1252,7 +1252,7 @@ Launch a specialist (L3) for an independent sub-task.\n\
 Whenever work is to be done and tools are to be called, agents are \
 three layers deep. Always. Including implement loops. \
 You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
-Do not compact-and-continue a product restore on L2. \
+L2 may compact. L3 must not compact-and-continue. \
 Give each L3 a distinct description. One reviewer unless the operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\
@@ -1682,8 +1682,16 @@ mod tests {
             "child description must include implement loops in the three-layer rule"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Do not compact-and-continue"),
-            "child description must forbid compact-and-continue on L2"
+            CHILD_TASK_DESCRIPTION.contains("L3 must not compact-and-continue"),
+            "child description must forbid compact-and-continue on L3"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("L2 may compact"),
+            "child description must keep L2 allowed to compact"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("product restore on L2"),
+            "child description must not keep the old L2 compact-and-continue ban"
         );
         assert!(
             !CHILD_TASK_DESCRIPTION.contains("many greps"),

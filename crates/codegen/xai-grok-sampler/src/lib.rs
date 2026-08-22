@@ -66,8 +66,8 @@ pub use prefer_live_primary::{
 };
 pub use retry::{
     DEFAULT_MAX_RETRIES, MAX_BACKOFF_SECS, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision,
-    classify_error, format_sampling_error, is_unlimited_retries, resolve_max_retries,
-    retry_backoff_with_jitter,
+    classify_error, classify_error_with_window, format_sampling_error, is_unlimited_retries,
+    over_window_blocks_retry, resolve_max_retries, retry_backoff_with_jitter,
 };
 pub use sampling_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};

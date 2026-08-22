@@ -4,9 +4,9 @@ use super::common::*;
 
 /// The turn-status spinner names *what* the agent is waiting on. Right after a
 /// prompt is submitted, before the model streams its first token, the spinner
-/// reads "Waiting for response…" — the explicit `WaitingReason::Model` label
-/// that replaced the old opaque "Waiting…". This is the literal feedback that
-/// prompted the change ("what is 'Waiting…' waiting on?").
+/// reads "Waiting for the model…" — the explicit `WaitingReason::Model` label
+/// that names the model request before the first token. Generic
+/// "Waiting for response…" looked idle during that wait.
 ///
 /// Drives the real binary end-to-end: prompt submit → `resolve_turn_activity`
 /// (no streamed activity, not bash, no subagent → `Waiting(Model)`) →
@@ -38,10 +38,10 @@ async fn waiting_for_model_label_shows_before_first_token() {
     // The new explicit label, not the old generic "Waiting…". Match without the
     // trailing ellipsis so terminal width / glyph handling can't flake it.
     harness
-        .wait_for_text("Waiting for response", Duration::from_secs(10))
+        .wait_for_text("Waiting for the model", Duration::from_secs(10))
         .unwrap_or_else(|_| {
             panic!(
-                "expected 'Waiting for response…' spinner before first token\nscreen:\n{}",
+                "expected 'Waiting for the model…' spinner before first token\nscreen:\n{}",
                 harness.screen_contents()
             )
         });

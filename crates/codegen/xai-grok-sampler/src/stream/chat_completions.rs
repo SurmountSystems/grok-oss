@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_sampling_types::{
@@ -27,12 +26,13 @@ use crate::types::RequestId;
 /// consume past the terminal event (the implementation `return`s after
 /// yielding it).
 ///
-/// `idle_timeout` covers two cases:
-/// 1. The transport stops yielding chunks at all (`tokio::time::timeout`).
-/// 2. The transport keeps yielding empty / keepalive chunks but no
-///    meaningful content (separate `last_content_chunk_at` timer).
-///
-/// Both produce `SamplingEvent::Failed { kind: IdleTimeout }`.
+/// Timeouts:
+/// 1. **First token:** until meaningful content, wait at most the headers
+///    budget (`GROK_STREAM_HEADERS_TIMEOUT_SECS`, default 120s). A stall
+///    is a retryable `EventStreamError` so Retrying chrome can show.
+/// 2. **Idle after progress:** `idle_timeout` on a dead transport, or
+///    empty keepalives with no content (`last_content_chunk_at`). Those
+///    produce `SamplingEvent::Failed { kind: IdleTimeout }` (Fatal).
 pub fn stream_chat_completions<'a>(
     raw_stream: BoxStream<'a, Result<ChatCompletionChunk, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -91,13 +91,31 @@ pub fn stream_chat_completions<'a>(
         // timer but make no real progress -- some inference engines
         // do exactly that.
         let mut last_content_chunk_at = Instant::now();
+        let first_token_budget = super::first_token_wait(idle_timeout);
+        let first_token_deadline = Instant::now() + first_token_budget;
+        let mut saw_progress = false;
 
         let mut stream = raw_stream;
         loop {
-            let next = match tokio::time::timeout(idle_timeout, stream.next()).await {
-                Ok(Some(next)) => next,
-                Ok(None) => break, // stream ended normally
-                Err(_elapsed) => {
+            let next = match super::next_or_timeout(
+                &mut stream,
+                saw_progress,
+                first_token_deadline,
+                idle_timeout,
+            )
+            .await
+            {
+                super::ChunkWait::Item(next) => next,
+                super::ChunkWait::Ended => break, // stream ended normally
+                super::ChunkWait::FirstTokenTimeout => {
+                    let err = super::first_token_timeout_error(first_token_budget);
+                    yield SamplingEvent::Failed {
+                        request_id: request_id.clone(),
+                        error: SamplingErrorInfo::from(&err),
+                    };
+                    return;
+                }
+                super::ChunkWait::IdleTimeout => {
                     let err = SamplingError::IdleTimeout {
                         elapsed_secs: idle_timeout.as_secs(),
                     };
@@ -231,8 +249,9 @@ pub fn stream_chat_completions<'a>(
             }
 
             if chunk_has_content {
+                saw_progress = true;
                 last_content_chunk_at = Instant::now();
-            } else if last_content_chunk_at.elapsed() > idle_timeout {
+            } else if saw_progress && last_content_chunk_at.elapsed() > idle_timeout {
                 let err = SamplingError::IdleTimeout {
                     elapsed_secs: idle_timeout.as_secs(),
                 };
@@ -308,6 +327,7 @@ pub fn stream_chat_completions<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use futures_util::stream;
     use std::pin::pin;
     use xai_grok_sampling_types::{
@@ -608,6 +628,77 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SamplingEvent::Completed { .. }))
         );
+    }
+
+    /// Headers can arrive while the SSE body never yields a token.
+    /// That must fail on the first-token budget (retryable), not sit
+    /// on IdleTimeout for the full post-token idle.
+    #[tokio::test(start_paused = true)]
+    async fn first_token_timeout_when_stream_never_yields() {
+        let raw = stream::pending::<Result<ChatCompletionChunk, SamplingError>>().boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(300),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_ne!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::IdleTimeout,
+                    "first-token stall must not wait the full idle then Fatal, got {}",
+                    error.message
+                );
+                assert!(
+                    error.is_retryable,
+                    "first-token timeout must retry with visible Retrying chrome, got {}",
+                    error.message
+                );
+                let lower = error.message.to_ascii_lowercase();
+                assert!(
+                    lower.contains("first token"),
+                    "timeout must name the missing first token, got {}",
+                    error.message
+                );
+            }
+            other => panic!("expected Failed(first token timeout), got {other:?}"),
+        }
+    }
+
+    /// Empty / keepalive chunks must not count as first-token progress.
+    #[tokio::test(start_paused = true)]
+    async fn empty_keepalive_chunks_still_time_out_waiting_for_first_token() {
+        let raw = stream::iter(vec![Ok(make_chunk(vec![ChatChunkDelta::default()]))])
+            .chain(stream::pending())
+            .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(300),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_ne!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::IdleTimeout,
+                    "keepalives must not stretch first-token wait into idle Fatal, got {}",
+                    error.message
+                );
+                assert!(error.is_retryable, "got {}", error.message);
+                assert!(
+                    error.message.to_ascii_lowercase().contains("first token"),
+                    "got {}",
+                    error.message
+                );
+            }
+            other => panic!("expected Failed(first token timeout), got {other:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]

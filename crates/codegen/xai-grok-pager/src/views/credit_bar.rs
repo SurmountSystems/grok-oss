@@ -181,6 +181,30 @@ pub fn resolve_console_team_prepaid_gap_after_billing_fetch() -> ConsoleTeamPrep
     )
 }
 
+/// Compact footer console prepaid cents + gap.
+///
+/// The live TUI used `AgentView.console_team_prepaid_cents` (never filled) plus
+/// the cold [`from_management_config`] gap, so `console · loading team prepaid...`
+/// stuck after Management cents were already in the process cache, and after a
+/// finished fetch that still had no cents.
+pub fn compact_footer_console_prepaid(
+    agent_cents: Option<i64>,
+    cached_cents: Option<i64>,
+    billing_settled: bool,
+    has_management_key: bool,
+    has_management_team_id: bool,
+) -> (Option<i64>, ConsoleTeamPrepaidGap) {
+    let cents = agent_cents.or(cached_cents);
+    let gap = if cents.is_some() {
+        ConsoleTeamPrepaidGap::Loading
+    } else if billing_settled {
+        ConsoleTeamPrepaidGap::after_billing_fetch(has_management_key, has_management_team_id)
+    } else {
+        ConsoleTeamPrepaidGap::from_management_config(has_management_key, has_management_team_id)
+    };
+    (cents, gap)
+}
+
 /// Map a dual-auth hop status/toast reason to the **destination** identity.
 ///
 /// Returns `None` when `reason` is not a known identity-switch string.
@@ -3710,6 +3734,79 @@ mod tests {
         assert_eq!(
             live_console, "console · $340",
             "Design A live console compact chrome stays console · $N when there is no meter pin"
+        );
+    }
+
+    /// Live grok-build footer 2026-08-21 7:03: `console · loading team prepaid...`
+    /// while Management cents can already sit in the process cache. Compact
+    /// must paint the dollars, not a forever-loading gap.
+    #[test]
+    fn live_console_compact_uses_cached_prepaid_cents_not_loading() {
+        let (cents, gap) = compact_footer_console_prepaid(None, Some(22_675), true, true, true);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            15.0,
+            cents,
+            gap,
+            Some(453),
+        );
+        assert!(
+            !text.contains("loading team prepaid"),
+            "must not stick on loading when cache has cents: {text}"
+        );
+        assert!(
+            text.contains("226.75") || text.contains("$226"),
+            "compact must paint cached console team prepaid dollars: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text}"
+        );
+    }
+
+    /// After billing settled with no cents, key+team present: honest
+    /// unavailable, not loading forever.
+    #[test]
+    fn live_console_compact_after_settled_fetch_without_cents_is_unavailable() {
+        let (cents, gap) = compact_footer_console_prepaid(None, None, true, true, true);
+        assert_eq!(cents, None);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::Unavailable);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            15.0,
+            cents,
+            gap,
+            None,
+        );
+        assert!(
+            !text.contains("loading team prepaid"),
+            "settled miss must not stay loading: {text}"
+        );
+        assert!(
+            text.contains("team prepaid unavailable"),
+            "settled miss must name unavailable: {text}"
+        );
+    }
+
+    /// Cold: no cents yet, fetch not settled, key present. Loading is honest.
+    #[test]
+    fn live_console_compact_cold_fetch_may_say_loading() {
+        let (cents, gap) = compact_footer_console_prepaid(None, None, false, true, true);
+        assert_eq!(cents, None);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::Loading);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            15.0,
+            cents,
+            gap,
+            None,
+        );
+        assert!(
+            text.contains("loading team prepaid"),
+            "cold path may still say loading: {text}"
         );
     }
 

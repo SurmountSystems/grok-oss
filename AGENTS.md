@@ -101,21 +101,25 @@ less than product code and tests. Do not invent long essays or git nags.
    After a compaction, disk wins. If a job is only in chat, it was
    never documented. Host dual-pin: `~/.grok/AGENTS.md` §
    *Document every live task on disk*. Remaining-work pointer this
-   session: `~/.agents/reports/remaining-2026-08-17.md`.
+   session: `~/.agents/reports/remaining-2026-08-19-grok-oss.md`.
 3f. **L1 stays lean so we do not compact (pinned 2026-08-17; L1 500k
-   2026-08-20).** The main (L1) session may use the catalog 500k
-   sampling window. Nested L2 and L3 sessions never exceed 200k. Keep
-   L1 near about 40% of that 500k window, and keep nested sessions near
-   40% of their 200k window. Compaction is expensive and slow. Avoid
-   filling L1: board pointers, spawn, wait, read the asked-for report.
-   Do not load inventories, closed todos, or session history into L1.
-   When the operator names work, record a pointer and implement. Do
-   **not** lock that work behind a plan rewrite / present / approve
-   cycle while implementation is already running. After Approve,
-   mentioned work is implemented (board + spawn). See § *After Approve,
-   implement mentioned work*. Plan mode is for unclear or large new
-   design only. Host dual-pin: `~/.grok/AGENTS.md` §
-   *L1 stays lean so we do not compact*.
+   2026-08-20; compact split 2026-08-21).** The main (L1) session uses
+   the catalog 500k sampling window. AUTO compact on L1 uses that
+   window, not the old 200k knee. Nested L2 sampling stays 200k. L2
+   may compact. L3 never compact. An L3 is disposable. If it stalls
+   or spirals, kill it. When an L3 is near 200k, it summarizes,
+   reports to L2, and stops. Do not compact-and-continue on L3.
+   Keep L1 near about 40% of that 500k window, and keep nested
+   sessions near 40% of their 200k window. Compaction is expensive
+   and slow. Avoid filling L1: board pointers, spawn, wait, read the
+   asked-for report. Do not load inventories, closed todos, or session
+   history into L1. When the operator names work, record a pointer
+   and implement. After Approve, do not block on another plan present.
+   Track the work, write a size estimate, implement the groups in
+   parallel, then reconcile the estimate against what landed. See
+   § *After Approve, implement mentioned work*. Plan mode is for
+   unclear or large new design only. Host dual-pin: `~/.grok/AGENTS.md`
+   § *L1 stays lean so we do not compact*.
 4. **Talk to humans in plain language.** No pack of opaque acronyms, false
    either/or menus, or planning jargon (phases, tracks, workstreams) in user
    replies, product docs, tests, or **filenames**. **No bare plan-step codes**
@@ -387,12 +391,13 @@ joins were leftover reports and live under `~/.agents/reports/`. New work
 uses **reports** under `~/.agents/reports/`. Do not keep live leftover
 joins under project `.agents/joins/`.
 
-### Agent depth L1 / L2 / L3 (pinned 2026-07-29; Hierarchical fast path 2026-08-16; L2 decides L3 2026-08-20)
+### Agent depth L1 / L2 / L3 (pinned 2026-07-29; Hierarchical fast path 2026-08-16; L2 decides L3 2026-08-20; compact split 2026-08-21)
 
 **Supersedes 2026-08-15 "L2 MUST always spawn L3 / always three layers."** Operator contract 2026-08-20 (survives compaction): `~/.agents/reports/feat-l1-500k-nested-200k-CONTRACT.md`
 
-- **L1 context** matches upstream Grok Build: full catalog 500k. No 40% throttle. Do not auto-compact the main window at 200k sampling while catalog is 500k. Cancelled compact must not re-arm.
-- **L2 and L3 context** is 40% of that catalog = 200k. Nested agents never exceed 200k.
+- **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
+- **L2 nested** stays 200k. L2 may compact.
+- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path.
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
@@ -425,8 +430,8 @@ these things without spawning L2:
 
 That is the **Hierarchical fast path**. It is not a license to diagnose,
 implement, or walk many files in the main thread. L2 still decides whether
-to spawn L3 when the problem is actually hard. **Do not compact-and-continue**
-a product restore on L2.
+to spawn L3 when the problem is actually hard. L2 may compact. **Do not
+compact-and-continue** on L3.
 
 L1 and L2 may still use `spawn_subagent`, `todo_write`,
 `get_command_or_subagent_output` / wait, and read the short on-disk report they
@@ -485,13 +490,21 @@ This is not a substitute for *Ambiguity → park* when intent is actually
 unclear. A named job is not unclear. Dual-pin: host `~/.grok/AGENTS.md`
 § *Mention is in scope*.
 
-### After Approve, implement mentioned work (pinned 2026-08-19)
+### Grok OSS screenshots are this product (pinned 2026-08-21)
+
+A Grok OSS screenshot from any current working directory is this
+product. Do not assume another grok-oss window is out of scope. Host
+dual-pin: `~/.grok/AGENTS.md` § *Grok OSS screenshots are this product*.
+
+### After Approve, implement mentioned work (pinned 2026-08-19; no plan-block 2026-08-21)
 
 When a plan is already Approved and implement is in flight (or clearly
 next), operator-mentioned work and "let's do that" / continue-the-approved-work
 is in scope: board upsert and spawn (or keep the healthy implementer
-running). Do not lock that work behind another plan rewrite / present /
-approve cycle. After Approve, work starts.
+running). After Approve, do not block on another plan rewrite, present, or
+approve cycle. Track the work, write a size estimate, implement the groups
+in parallel, then reconcile the estimate against what landed. After Approve,
+work starts.
 
 This does not weaken present-is-not-Approve. `exit_plan_mode` tool success
 and soft-park remain present for review, not operator Approve. Empty

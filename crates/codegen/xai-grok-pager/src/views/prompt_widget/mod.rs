@@ -176,6 +176,11 @@ pub struct PromptStyle {
     pub placeholder_override: Option<&'static str>,
     /// The main composer hides the empty-textarea placeholder on focus; the feedback box keeps it visible.
     pub placeholder_when_focused: bool,
+    /// Skip the idle `"Build anything"` invitation even when the composer is
+    /// empty and unfocused. A `placeholder_override` still paints. Set while
+    /// a turn is running or retrying so leftover idle chrome does not look
+    /// like a lost prompt.
+    pub hide_idle_placeholder: bool,
     /// Compact mode (currently unused for info_block sizing).
     pub compact: bool,
     /// Show the accent line (`┃`) on the left edge of the chrome.
@@ -238,6 +243,7 @@ impl Default for PromptStyle {
             prefix_override: None,
             placeholder_when_focused: false,
             placeholder_override: None,
+            hide_idle_placeholder: false,
             compact: false,
             show_accent_line: false,
             show_borders: true,
@@ -273,6 +279,7 @@ impl PromptStyle {
             prefix_override: None,
             placeholder_when_focused: false,
             placeholder_override: None,
+            hide_idle_placeholder: false,
             compact: false,
             show_accent_line: false,
             show_borders: false,
@@ -3342,10 +3349,13 @@ impl PromptWidget {
         };
 
         // Placeholder text when empty (unfocused, or opted in while focused).
+        // A running/retrying turn hides the idle `"Build anything"` invitation
+        // so leftover chrome does not look like a lost prompt.
         if self.textarea.text().is_empty()
             && ta_area.width > 0
             && (!style.focused || style.placeholder_when_focused)
             && !voice_interim_shown
+            && !(style.hide_idle_placeholder && style.placeholder_override.is_none())
         {
             let placeholder = style.placeholder_override.unwrap_or("Build anything");
             // `set_string` clips at the buffer edge, not at the textarea, so a placeholder longer than the box would paint over its border.

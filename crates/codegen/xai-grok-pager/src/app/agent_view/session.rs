@@ -381,6 +381,7 @@ impl AgentView {
             usage_command_visible: true,
             sampling_identity: crate::views::credit_bar::SamplingIdentityKind::default(),
             console_team_prepaid_cents: None,
+            console_prepaid_billing_settled: false,
             rebuild_progress: None,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,

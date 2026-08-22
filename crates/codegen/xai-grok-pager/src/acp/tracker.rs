@@ -55,8 +55,8 @@ fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitingReason {
     /// Waiting for the model to (re)start streaming — the first token after the
-    /// prompt is sent, or the gap after a tool completes before the next
-    /// inference step begins.
+    /// prompt is sent (including `/goal`), or the gap after a tool completes
+    /// before the next inference step begins.
     Model,
     /// Blocked on a running foreground subagent (`task` / `spawn_subagent`).
     /// `display` is the fully composed, pre-budgeted spinner phrase
@@ -130,7 +130,7 @@ impl WaitingReason {
     /// User-facing spinner label.
     pub fn label(&self) -> String {
         match self {
-            Self::Model => "Waiting for response…".to_string(),
+            Self::Model => "Waiting for the model…".to_string(),
             Self::Subagent { display } => match display.as_deref().map(clamp_activity_subject) {
                 Some(display) if !display.is_empty() => format!("{display}…"),
                 _ => "Waiting on subagent…".to_string(),

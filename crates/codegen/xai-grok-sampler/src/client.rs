@@ -273,7 +273,8 @@ fn format_event_stream_error(e: eventsource_stream::EventStreamError<reqwest::Er
 }
 
 /// Await streaming `execute` until response headers, with a first-byte budget.
-/// Does **not** bound the subsequent SSE body read (idle timeout owns that).
+/// First SSE token after headers is the L2 first-token wait (same budget).
+/// Idle timeout owns silence after the model has made progress.
 async fn execute_streaming(
     http: &reqwest::Client,
     built_request: reqwest::Request,

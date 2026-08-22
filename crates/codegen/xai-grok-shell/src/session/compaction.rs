@@ -172,9 +172,40 @@ impl SessionActor {
             }
         }
     }
+    /// L3 is a nested specialist (`is_subagent` at depth 2+). L2 (depth 1)
+    /// stays on the AUTO compact path.
+    pub(crate) fn is_l3_session(&self) -> bool {
+        self.startup_hints.is_subagent && self.tool_context.subagent_depth >= 2
+    }
+
+    /// True when an L3 child has filled its nested sampling window. Callers
+    /// must end the child run, not `run_compact_only`.
+    pub(crate) async fn l3_nested_window_is_full(&self) -> bool {
+        if !self.is_l3_session() {
+            return false;
+        }
+        self.sampling_window_is_full().await
+    }
+
+    /// True when used tokens are at or over this session's sampling window.
+    pub(crate) async fn sampling_window_is_full(&self) -> bool {
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return false;
+        };
+        let cw = cfg.context_window.get();
+        if cw == 0 {
+            return false;
+        }
+        self.chat_state_handle.get_estimated_total_tokens().await >= cw
+    }
+
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
     /// is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return false;
+        }
         let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
         let Some(cw) = sampling_cfg.as_ref().map(|c| c.context_window.get()) else {
             return false;
@@ -1870,10 +1901,9 @@ impl SessionActor {
             None
         }
     }
-    /// Returns true if the error response indicates tokens exceed the
-    /// model's context window. Inspects only the model-metadata
-    /// portion of the [`SamplingErrorInfo`] (the `context_window`
-    /// field) against the session's tracked token estimate.
+    /// Returns true if used tokens are at or over the session sampling
+    /// window (or a smaller catalog window on the error). Catalog 500k
+    /// metadata must not hide an already-over 200k sampling window.
     ///
     /// Called from `handle_sampling_failure` with the
     /// `SamplingErrorInfo` the sampler hands back.
@@ -1881,6 +1911,10 @@ impl SessionActor {
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
+        // L3 never AUTO compact. Do not CompactAndResubmit.
+        if self.is_l3_session() {
+            return false;
+        }
         if self
             .compaction
             .auto_compact_suppressed
@@ -1889,22 +1923,68 @@ impl SessionActor {
         {
             return false;
         }
-        let Some(ref metadata) = err.model_metadata else {
-            return false;
-        };
-        let Some(context_window) = metadata.context_window else {
-            return false;
-        };
-        if context_window == 0 {
-            return false;
-        }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        estimated_total > context_window
+        let session_window = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.context_window.get())
+            .filter(|cw| *cw > 0)
+            .unwrap_or(0);
+        let error_window = err
+            .model_metadata
+            .as_ref()
+            .and_then(|m| m.context_window)
+            .filter(|cw| *cw > 0)
+            .unwrap_or(0);
+        let gate = match (session_window > 0, error_window > 0) {
+            (true, true) => session_window.min(error_window),
+            (true, false) => session_window,
+            (false, true) => error_window,
+            (false, false) => return false,
+        };
+        estimated_total >= gate
+    }
+
+    /// Terminal when used is still over the sampling window after compact
+    /// was skipped, suppressed, or did not save enough. Do not sample.
+    pub(crate) async fn refuse_over_window_sample(&self) -> Result<(), acp::Error> {
+        if self.is_l3_session() {
+            return Ok(());
+        }
+        if self.tool_context.task_output_token_budget.is_some() {
+            return Ok(());
+        }
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return Ok(());
+        };
+        let cw = cfg.context_window.get();
+        let used = self.chat_state_handle.get_estimated_total_tokens().await;
+        if cw == 0 || used < cw {
+            return Ok(());
+        }
+        let message = format!(
+            "Context is over this session's sampling window ({used}/{cw} tokens). \
+             Not retrying the same oversized model request. Compact once or start a new session."
+        );
+        self.log_terminal_failure("context_length", None, &message);
+        self.send_xai_notification(crate::extensions::notification::SessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: "context_length".to_string(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        Err(acp::Error::internal_error().data(message))
     }
     /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`
     /// (exact prior count + byte-estimate of items since last response) so
     /// tool results are accounted for. Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return None;
+        }
         if self
             .memory
             .is_flushing
@@ -1980,6 +2060,10 @@ impl SessionActor {
     /// Returns `Some` when tool call outputs have pushed the estimated token
     /// count past the context window, indicating pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return None;
+        }
         if self
             .compaction
             .auto_compact_suppressed
@@ -2014,6 +2098,10 @@ impl SessionActor {
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return Ok(());
+        }
         self.refresh_token_if_expired().await;
         let Some(prev) = self.compaction.previous_model.take() else {
             return Ok(());

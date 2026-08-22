@@ -1772,10 +1772,11 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
         })
         .await;
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Used tokens over the session sampling window compact even when error
+/// metadata is missing. Catalog/proxy metadata must not be required to
+/// stop an over-window retry storm.
 #[tokio::test(flavor = "current_thread")]
-async fn test_compact_on_error_noop_without_model_metadata() {
+async fn test_compact_on_error_uses_session_window_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1796,7 +1797,10 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 doom_loop_aborted_at_chunk: None,
                 credential: xai_grok_sampling_types::SentCredential::Unknown,
             };
-            assert!(!actor.should_compact_on_error(&err).await);
+            assert!(
+                actor.should_compact_on_error(&err).await,
+                "500k used over a 200k session sampling window must compact without error metadata"
+            );
         })
         .await;
 }

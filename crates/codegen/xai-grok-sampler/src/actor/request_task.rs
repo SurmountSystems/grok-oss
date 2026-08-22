@@ -26,9 +26,7 @@ use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
 use crate::metrics::InferenceLatencyStats;
-use crate::retry::{
-    self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
-};
+use crate::retry::{self as retry_mod, RetryDecision, clone_error, resolve_max_retries};
 use crate::stream::responses::stream_responses_tracked;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
@@ -602,7 +600,14 @@ async fn apply_retry_decision(
     } else {
         retry_policy.rate_limit_retry_threshold
     };
-    let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
+    let decision = retry_mod::classify_error_with_window(
+        err,
+        *retry_count,
+        max_retries,
+        rate_limit_threshold,
+        request.estimated_input_tokens,
+        config.context_window,
+    );
 
     // Connection-reset / broken-pipe on body upload often means nginx
     // rejected an oversized payload before responding 413. Strip
@@ -1157,6 +1162,11 @@ fn retry_footer_reason(err: &SamplingError) -> String {
         {
             "response headers timed out".into()
         }
+        SamplingError::EventStreamError(msg)
+            if msg.to_ascii_lowercase().contains("first token") =>
+        {
+            "first token timed out".into()
+        }
         SamplingError::EventStreamError(_) | SamplingError::StreamError { .. } => {
             "connection interrupted".into()
         }
@@ -1540,6 +1550,10 @@ mod tests {
             "timed out waiting for response headers after 120s".into(),
         );
         assert_eq!(retry_footer_reason(&headers), "response headers timed out");
+        let first_token = SamplingError::EventStreamError(
+            "timed out waiting for the first token after 2m0s".into(),
+        );
+        assert_eq!(retry_footer_reason(&first_token), "first token timed out");
     }
 
     /// Contract: transport retries append a plain backoff hint so the status

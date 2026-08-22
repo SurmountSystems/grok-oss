@@ -709,6 +709,21 @@ fn billing_fetched_updates_app_credit_balance() {
 }
 
 #[test]
+fn billing_fetched_settles_console_prepaid_gap_so_footer_does_not_stay_loading() {
+    let mut app = test_app_with_agent();
+    assert!(
+        !app.agents[&AgentId(0)].console_prepaid_billing_settled,
+        "cold agent must still be allowed to say loading"
+    );
+    dispatch_billing(&mut app, Some(test_bal(42.0)), true, None);
+    let agent = &app.agents[&AgentId(0)];
+    assert!(
+        agent.console_prepaid_billing_settled,
+        "after FetchBilling, compact footer must use after-fetch gaps, not loading forever"
+    );
+}
+
+#[test]
 fn billing_fetched_updates_subscription_tier() {
     let mut app = test_app_with_agent();
     dispatch_billing(&mut app, None, true, Some("supergrok_heavy".into()));

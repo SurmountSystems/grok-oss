@@ -374,6 +374,11 @@ pub(super) fn handle_billing_fetched(
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
         agent.apply_credit_balance(balance.clone(), topup);
+        agent.console_team_prepaid_cents = agent
+            .console_team_prepaid_cents
+            .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+        app.console_team_prepaid_cents = agent.console_team_prepaid_cents;
+        agent.console_prepaid_billing_settled = true;
         // The open usage modal renders from the mirrors updated above; only
         // its own fetch generation may settle the loading/error flags
         // (background refreshes carry nonce 0).
