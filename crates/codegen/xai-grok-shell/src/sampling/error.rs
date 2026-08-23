@@ -573,10 +573,12 @@ mod tests {
         let data = acp_err.data.expect("credit 403 must carry operator copy");
         match data {
             serde_json::Value::String(s) => {
+                let lower = s.to_ascii_lowercase();
                 assert!(
-                    s.contains("used all available credits")
+                    lower.contains("console team prepaid")
+                        || s.contains("used all available credits")
                         || s.contains("monthly spending limit"),
-                    "plain team sentence: {s}"
+                    "plain English team/credits copy: {s}"
                 );
                 assert!(!s.contains("API error (status"), "{s}");
             }
@@ -600,6 +602,46 @@ mod tests {
                 "Content violates usage guidelines.".into()
             ))
         );
+    }
+
+    /// Sibling: ACP data must not be TEAM_CREDIT_FALLBACK / purchase-more-credits
+    /// while included SuperGrok period limits still have room.
+    #[test]
+    fn terminal_credit_exhausted_403_must_not_be_team_credit_fallback_while_included_has_room() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit. \
+            To continue making API requests, please purchase more credits.";
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        let acp_err = map_sampling_err_to_acp(err);
+        let data = acp_err.data.expect("credit 403 must carry operator copy");
+        let s = match data {
+            serde_json::Value::String(s) => s,
+            other => panic!("credit 403 data must be plain string, got {other}"),
+        };
+        let lower = s.to_ascii_lowercase();
+        assert!(
+            lower.contains("console team prepaid") && lower.contains("console api credits"),
+            "ACP data must name console team prepaid / console API credits: {s}"
+        );
+        assert!(
+            lower.contains("stay on supergrok"),
+            "ACP data must say stay on SuperGrok: {s}"
+        );
+        assert!(
+            !lower.contains("purchase more")
+                && !lower.contains("add credits")
+                && !lower.contains("used all available credits"),
+            "must not be TEAM_CREDIT_FALLBACK / purchase-more-credits: {s}"
+        );
+        assert!(!lower.contains("used up"), "must not say used up: {s}");
+        assert!(!s.contains("API error (status"), "{s}");
     }
 
     #[test]

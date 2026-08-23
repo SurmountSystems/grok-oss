@@ -478,7 +478,7 @@ async fn team_login_then_personal_keeps_both_principals() {
 }
 
 /// Dual SuperGrok sticky Team base (last business login) for included SuperGrok
-/// period rank tests. Rank now prefers Business included while both have remaining.
+/// period rank tests. Rank prefers the personal SuperGrok JWT while both have remaining.
 fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, AuthStore) {
     let personal = GrokAuth {
         key: "tok-personal-free-period".into(),
@@ -504,9 +504,9 @@ fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, Au
     (personal, team, map)
 }
 
-/// Named contract: sticky personal base must align to Business included SuperGrok
-/// period limits when both stored logins still have remaining. Operator 2026-08-14:
-/// Team/Business class wins while it still has included remaining (not lex personal).
+/// Named contract: sticky personal base stays on the personal SuperGrok JWT
+/// when both stored logins still have remaining. Team JWT is not the paying
+/// source (Billing Credits / team OAuth settlement).
 #[test]
 fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let dir = tempfile::tempdir().unwrap();
@@ -529,32 +529,35 @@ fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
 
     let switched = mgr.align_to_ranked_free_period_primary();
     assert!(
-        switched,
-        "both logins with included remaining must realign sticky personal to Business"
+        !switched,
+        "already on personal SuperGrok paying JWT; Team JWT must not become primary"
     );
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-business-team-base".into()),
-        "SessionToken bearer must be ranked Business included SuperGrok period primary"
+        Some("tok-personal-free-period".into()),
+        "SessionToken bearer must stay ranked personal SuperGrok included paying primary"
     );
     let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
     assert_eq!(
         store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-business-team-base"),
-        "disk base scope must match ranked Business included SuperGrok period primary"
+        Some("tok-personal-free-period"),
+        "disk base scope must stay ranked personal SuperGrok included paying primary"
     );
     // No-op when already aligned.
     assert!(!mgr.align_to_ranked_free_period_primary());
     let trace = mgr
         .session_wire_bearer_trace()
         .expect("wire bearer after align");
-    assert_eq!(trace["principal_type"], "Team");
-    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
+    assert_ne!(trace["principal_type"], "Team");
+    assert_eq!(
+        mgr.current_wire_valid().map(|a| a.key),
+        Some("tok-personal-free-period".into())
+    );
 }
 
 /// Named contract: with `[auth] auto_use_included_limits = true` (default),
-/// AuthManager::new must load ranked included SuperGrok period primary (Business
-/// when both stored logins still have remaining), not leave sticky personal.
+/// AuthManager::new must load ranked included SuperGrok period primary (personal
+/// SuperGrok JWT when both stored logins still have remaining), not Team JWT.
 #[test]
 fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_primary() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,27 +576,28 @@ fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_prima
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg).with_proxy_base_url("http://127.0.0.1:1"));
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-business-team-base".into()),
-        "AuthManager::new with auto_use must wire ranked Business included SuperGrok period primary, not sticky personal"
+        Some("tok-personal-free-period".into()),
+        "AuthManager::new with auto_use must wire ranked personal SuperGrok included paying primary, not Team JWT"
     );
     let store = read_auth_json(&dir.path().join("auth.json")).unwrap();
     assert_eq!(
         store.get(&base_scope).map(|a| a.key.as_str()),
-        Some("tok-business-team-base"),
-        "disk base after new must match ranked Business included SuperGrok period primary"
+        Some("tok-personal-free-period"),
+        "disk base after new must match ranked personal SuperGrok included paying primary"
     );
     let trace = mgr
         .session_wire_bearer_trace()
         .expect("wire bearer after new");
-    assert_eq!(trace["principal_type"], "Team");
-    assert_eq!(trace["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");
+    assert_ne!(
+        trace["principal_type"], "Team",
+        "must not wire Team JWT while a personal SuperGrok login exists: {trace:?}"
+    );
 }
 
 /// Named contract: after a billing refresh that shows personal included
-/// SuperGrok period limits full (with SuperGrok dollar credits) and Business
-/// included remaining, align the sticky personal SessionToken bearer to the
-/// Business JWT. Hermetic: no network. Align is what handle_get_billing must
-/// call after remember.
+/// SuperGrok period used 100% (without SuperGrok Heavy, so remaining is not
+/// flattened) plus SuperGrok dollar credits, and Team used 40%, keep the
+/// personal SuperGrok JWT. Team JWT is not the paying source.
 #[test]
 fn align_after_billing_switches_sticky_personal_full_to_business_included() {
     use crate::auth::{
@@ -621,8 +625,8 @@ fn align_after_billing_switches_sticky_personal_full_to_business_included() {
         "precondition: sticky base is personal"
     );
 
-    // Personal included SuperGrok period limits full + SuperGrok dollar credits.
-    // Business sibling still has included remaining.
+    // Personal included SuperGrok period used 100% + SuperGrok dollar credits.
+    // 100% without SuperGrok Heavy is not exhaust. Team sibling 40% used.
     remember_supergrok_included_billing(
         "58c5f686-4270-4d6d-9c3b-df44559f8457",
         100.0,
@@ -639,13 +643,13 @@ fn align_after_billing_switches_sticky_personal_full_to_business_included() {
 
     let switched = mgr.align_to_ranked_free_period_primary();
     assert!(
-        switched,
-        "billing that fills personal included and leaves Business included must realign"
+        !switched,
+        "must not hop sticky personal SuperGrok JWT to Team JWT (Billing Credits settlement)"
     );
     assert_eq!(
         mgr.current_wire_valid().map(|a| a.key),
-        Some("tok-business-team-base".into()),
-        "SessionToken bearer must hop to the Business sibling that still has included SuperGrok period limits"
+        Some("tok-personal-free-period".into()),
+        "SessionToken bearer must stay on the personal SuperGrok paying JWT"
     );
     clear_included_billing_cache();
 }

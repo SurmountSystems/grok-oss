@@ -45,7 +45,7 @@ impl MeterSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LimitsPins {
-    /// When true, G3 will keep SuperGrok as sampler. Missing file or key = false.
+    /// When true, reconstruct keeps SuperGrok as sampler. Missing file or key = false.
     #[serde(default)]
     pub stay_supergrok: bool,
     /// When true, the operator asked for the console key (sidecar, not `[auth]`).

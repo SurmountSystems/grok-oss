@@ -1,4 +1,4 @@
-//! Interactive playground for the Ctrl+T todo pane (hide-done empty state).
+//! Interactive playground for the Ctrl+Shift+T todo pane (hide-done empty state).
 //!
 //! ```text
 //! cargo run -p xai-grok-pager --bin todo-pane-playground
@@ -219,7 +219,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     if todo_area.height > 0 && todo_area.width > 0 {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title("todo pane (Ctrl+T)");
+            .title("todo pane (Ctrl+Shift+T)");
         let inner = block.inner(todo_area);
         f.render_widget(block, todo_area);
         app.pane.render(inner, f.buffer_mut(), true, &app.layout);

@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
-use crate::implementations::editor_infra::per_path_write_lock::try_acquire_write;
+use crate::implementations::editor_infra::per_path_write_lock::{
+    release_holder, try_acquire_write, try_reserve_writes,
+};
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
 use crate::implementations::grok_build_hashline::edit::{
     HashlineEditInput, HashlineEditTool, HashlineOp,
@@ -267,6 +269,37 @@ async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() 
     assert!(err.detail.contains("conflict.txt"), "{}", err.detail);
     assert_no_human_lock_menu(&err.detail);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+}
+
+#[tokio::test]
+async fn search_replace_refuses_a_path_reserved_by_another_agent() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("reserved.txt");
+    std::fs::write(&path, "keep\n").unwrap();
+    let holder = format!("spawn-claim-{}", path.display());
+    try_reserve_writes([&path], &holder).unwrap();
+
+    let err = xai_tool_runtime::Tool::run(
+        &SearchReplaceTool,
+        test_ctx(search_replace_resources(tmp.path(), "other-writer")),
+        search_replace_input("reserved.txt", "keep\n", "overwrite\n"),
+    )
+    .await
+    .expect_err("a spawn-time claim must block another agent's edit");
+
+    assert!(
+        err.detail.contains(&holder),
+        "error must name the holder: {}",
+        err.detail
+    );
+    assert!(
+        err.detail.contains("reserved.txt"),
+        "error must name the file: {}",
+        err.detail
+    );
+    assert_no_human_lock_menu(&err.detail);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+    release_holder(&holder);
 }
 
 fn hashline_write_input(file_path: &str, content: &str) -> HashlineEditInput {

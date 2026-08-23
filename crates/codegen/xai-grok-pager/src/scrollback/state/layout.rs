@@ -865,6 +865,11 @@ impl ScrollbackState {
         }
         let max_iters = self.entries.len().saturating_add(2);
         for _ in 0..max_iters {
+            // Capture before measure: the first visible entry can itself shrink
+            // when its estimate becomes exact. Clamp-only then pulls the
+            // viewport back to the new bottom (an in-chat image the user just
+            // scrolled off). Case 2 already re-pins this way.
+            let top_anchor = self.viewport_top_anchor_point();
             let Some((start, end)) = self.measurement_window() else {
                 return;
             };
@@ -879,10 +884,9 @@ impl ScrollbackState {
             if self.follow_mode {
                 // Bottom-anchored: re-pin to the (now exact) bottom.
                 self.follow_scroll_to_bottom();
+            } else if let Some((entry_idx, rows_into_span)) = top_anchor {
+                self.repin_viewport_top_to_entry(entry_idx, rows_into_span);
             } else {
-                // Top-anchored: the first visible entry's offset is unchanged
-                // (nothing above it was measured), so scroll stays put. Only
-                // clamp if the content shrank past the end.
                 let max_offset = self
                     .total_height
                     .saturating_sub(self.viewport_height as usize);

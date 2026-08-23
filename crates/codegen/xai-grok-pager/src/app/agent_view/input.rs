@@ -486,7 +486,17 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
+                let kill_idle_listed = self.subagent_sessions.get(child_sid).and_then(|info| {
+                    let idle = self
+                        .subagent_views
+                        .get(child_sid)
+                        .is_some_and(|child| !child.session.state.is_busy());
+                    (info.is_running() && idle).then(|| info.subagent_id.to_string())
+                });
                 self.active_subagent = None;
+                if let Some(subagent_id) = kill_idle_listed {
+                    return InputOutcome::Action(Action::KillSubagent(subagent_id));
+                }
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
@@ -1211,7 +1221,7 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('t', CONTROL).matches(key)
+            && registry.matches_id(ActionId::ToggleTodos, key)
         {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
@@ -2133,30 +2143,57 @@ mod background_and_tasks_shortcut_tests {
     }
 
     #[test]
-    fn ctrl_t_from_focused_prompt_toggles_todo_overlay() {
+    fn ctrl_t_from_focused_prompt_toggles_thinking_not_todos_or_draft() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        agent.prompt.set_text("draft");
+        agent.prompt.set_text("Also,");
         let draft_len = agent.prompt.text().len();
         agent.prompt.set_cursor(draft_len);
         agent.set_active_pane(AgentPane::Prompt, true);
         assert!(!agent.todo.overlay.visible, "todo overlay starts hidden");
         let first = agent.handle_input(&ctrl('t'), &registry);
         assert!(
-            matches!(first, InputOutcome::Changed),
-            "Ctrl+T from the focused prompt must toggle the todos pane, got {first:?}"
+            matches!(first, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T from the focused composer must expand or collapse thinking, got {first:?}"
         );
         assert!(
-            agent.todo.overlay.visible,
-            "Ctrl+T must show the todo overlay"
+            !agent.todo.overlay.visible,
+            "Ctrl+T must not open the todo overlay"
         );
-        assert!(
-            agent.todo.overlay.focused,
-            "Ctrl+T must focus the todo overlay"
-        );
-        assert_eq!(agent.active_pane, AgentPane::Todo);
-        assert_eq!(agent.prompt.text(), "draft");
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "Also,");
         assert_eq!(agent.prompt.cursor(), draft_len);
+    }
+
+    #[test]
+    fn ctrl_t_in_nested_overlay_toggles_thinking_not_parent_todos() {
+        let registry = ActionRegistry::defaults();
+        let mut parent = make_agent();
+        let mut child = make_agent();
+        child.set_active_pane(AgentPane::Prompt, true);
+        child.prompt.set_text("Also,");
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(child));
+        parent.active_subagent = Some("l2-coord".into());
+        let outcome = parent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T in a nested overlay must expand or collapse that overlay's thinking, got {outcome:?}"
+        );
+        let child = parent
+            .subagent_views
+            .get("l2-coord")
+            .expect("nested overlay");
+        assert!(
+            !child.todo.overlay.visible,
+            "Ctrl+T must not open the nested todo board"
+        );
+        assert!(
+            !parent.todo.overlay.visible,
+            "Ctrl+T in nested overlay must not toggle the parent todo board"
+        );
+        assert_eq!(child.prompt.text(), "Also,");
     }
 }
 #[cfg(test)]

@@ -148,6 +148,30 @@ Immediate `/reports` injects that skill now. To hold it on the existing composer
 /queue /reports
 ```
 
+### `/polish`
+
+Run a polish pass: make the product work well. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/polish/`) into `~/.grok/bundled/skills/polish/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/polish/`.
+
+This is **not** `/finish` (session post-mortem) and **not** `/reports` (a checkpoint while work continues). Type `/polish` to load the skill. Optional focus text is passed through.
+
+```
+/polish
+/polish compact occupancy
+```
+
+### `/subagent`
+
+Spawn one L2 coordinator for this job. The L1 main thread does not do the job. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/subagent/`) into `~/.grok/bundled/skills/subagent/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/subagent/`.
+
+Type `/subagent this ...` or `/subagent ...`. The rest of the line is the job passed to that L2 as a self-contained prompt.
+
+This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff). It is not the Hierarchical fast path on L1.
+
+```
+/subagent this diagnose the compact occupancy
+/subagent implement the remaining-work pointer
+```
+
 ### `/what`
 
 Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled lines only: **Job** (what this session is trying to do), **State** (what is actually happening), **You** (what you must do, or `nothing`), **Next** (the next concrete step the agent will take). Optional focus text is passed through.
@@ -621,7 +645,7 @@ Keeps each meter distinct:
 
 When two SuperGrok principals are stored, `/limits` stacks a section per principal. The live sampling line names which principal (or console key) is active when known. A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
 
-Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
+Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
 
 Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME`. There is no extra daemon. Rebuild SIGUSR1 is not this.
 

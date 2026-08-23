@@ -32,6 +32,16 @@ pub struct PromptExecRecord {
     pub prefix_cost_hint_ticks: Option<i64>,
 }
 
+/// Mean of recorded actuals for a model. Used to fill empty estimate columns
+/// when new work is recorded. Not a billing meter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptExecEstimate {
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub wall_ms: i64,
+    pub sample_count: i64,
+}
+
 /// Stored exec-metrics row for a `prompt_tasks` ULID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptExecMetrics {
@@ -235,7 +245,47 @@ impl LivePromptTask {
 }
 
 impl GrokOssStore {
+    /// Mean of recorded tokens and honest wall time for `model`.
+    ///
+    /// When `reasoning_effort` is Some, only those rows. None when no rows
+    /// match. Does not invent included SuperGrok remaining.
+    pub fn average_prompt_exec_metrics_for_model(
+        &self,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Option<PromptExecEstimate>> {
+        let (sample_count, avg_in, avg_out, avg_wall): (
+            i64,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ) = self
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), AVG(tokens_in), AVG(tokens_out), AVG(wall_ms)
+                 FROM prompt_exec_metrics
+                 WHERE model = ?1 AND (?2 IS NULL OR reasoning_effort = ?2)",
+                rusqlite::params![model, reasoning_effort],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .context("average prompt_exec_metrics for model")?;
+        if sample_count <= 0 {
+            return Ok(None);
+        }
+        let (Some(avg_in), Some(avg_out), Some(avg_wall)) = (avg_in, avg_out, avg_wall) else {
+            return Ok(None);
+        };
+        Ok(Some(PromptExecEstimate {
+            tokens_in: avg_in.round() as i64,
+            tokens_out: avg_out.round() as i64,
+            wall_ms: avg_wall.round() as i64,
+            sample_count,
+        }))
+    }
+
     /// Insert one exec-metrics row for a prompt-task ULID. Mints a ULID.
+    /// Empty estimate columns are filled from the mean of prior recorded
+    /// actuals for the same model (and reasoning effort when set).
     pub fn insert_prompt_exec_metrics(
         &self,
         prompt_task_id: &str,
@@ -244,6 +294,28 @@ impl GrokOssStore {
         let id = xai_grok_tools::util::ulid::mint();
         let now = Utc::now().to_rfc3339();
         let cost_missing = record.cost_usd_ticks.is_none();
+        let mut estimated_tokens_in = record.estimated_tokens_in;
+        let mut estimated_tokens_out = record.estimated_tokens_out;
+        let mut estimated_wall_ms = record.estimated_wall_ms;
+        if estimated_tokens_in.is_none()
+            || estimated_tokens_out.is_none()
+            || estimated_wall_ms.is_none()
+        {
+            if let Some(estimate) = self.average_prompt_exec_metrics_for_model(
+                &record.model,
+                record.reasoning_effort.as_deref(),
+            )? {
+                if estimated_tokens_in.is_none() {
+                    estimated_tokens_in = Some(estimate.tokens_in);
+                }
+                if estimated_tokens_out.is_none() {
+                    estimated_tokens_out = Some(estimate.tokens_out);
+                }
+                if estimated_wall_ms.is_none() {
+                    estimated_wall_ms = Some(estimate.wall_ms);
+                }
+            }
+        }
         self.connection()
             .execute(
                 "INSERT INTO prompt_exec_metrics (
@@ -265,9 +337,9 @@ impl GrokOssStore {
                     record.model,
                     record.reasoning_effort,
                     record.wall_ms,
-                    record.estimated_tokens_in,
-                    record.estimated_tokens_out,
-                    record.estimated_wall_ms,
+                    estimated_tokens_in,
+                    estimated_tokens_out,
+                    estimated_wall_ms,
                     record.cost_usd_ticks,
                     i64::from(cost_missing),
                     record.first_reasoning_token_ms,
@@ -286,9 +358,9 @@ impl GrokOssStore {
             model: record.model.clone(),
             reasoning_effort: record.reasoning_effort.clone(),
             wall_ms: record.wall_ms,
-            estimated_tokens_in: record.estimated_tokens_in,
-            estimated_tokens_out: record.estimated_tokens_out,
-            estimated_wall_ms: record.estimated_wall_ms,
+            estimated_tokens_in,
+            estimated_tokens_out,
+            estimated_wall_ms,
             cost_usd_ticks: record.cost_usd_ticks,
             cost_missing,
             first_reasoning_token_ms: record.first_reasoning_token_ms,
@@ -556,5 +628,189 @@ mod tests {
             "3s reconnect while awake must not count in wall_ms"
         );
         assert_eq!(honest_work_ms(start, done, 3_000), 7_000);
+    }
+
+    fn recorded_actuals(
+        tokens_in: i64,
+        tokens_out: i64,
+        wall_ms: i64,
+        estimated_tokens_in: Option<i64>,
+        estimated_tokens_out: Option<i64>,
+        estimated_wall_ms: Option<i64>,
+    ) -> PromptExecRecord {
+        PromptExecRecord {
+            tokens_in,
+            tokens_out,
+            model: "grok-4.6".into(),
+            reasoning_effort: Some("medium".into()),
+            wall_ms,
+            estimated_tokens_in,
+            estimated_tokens_out,
+            estimated_wall_ms,
+            cost_usd_ticks: Some(1_000_000_000),
+            first_reasoning_token_ms: None,
+            tool_call_ms: None,
+            thinking_ms: None,
+            prefix_cost_hint_ticks: None,
+        }
+    }
+
+    /// First recorded row for a model has no prior actuals, so estimates stay
+    /// missing.
+    #[test]
+    fn first_recorded_work_for_a_model_leaves_estimates_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        let task = store
+            .insert_prompt_task("first recorded work", "done", None, None)
+            .unwrap();
+        let inserted = store
+            .insert_prompt_exec_metrics(
+                &task.id,
+                &recorded_actuals(1_000, 400, 10_000, None, None, None),
+            )
+            .unwrap();
+        assert_eq!(inserted.estimated_tokens_in, None);
+        assert_eq!(inserted.estimated_tokens_out, None);
+        assert_eq!(inserted.estimated_wall_ms, None);
+        assert!(
+            store
+                .average_prompt_exec_metrics_for_model("grok-4.6", Some("medium"))
+                .unwrap()
+                .is_some(),
+            "after one recorded row the average query must see that row"
+        );
+    }
+
+    /// Recording work writes estimates from the mean of prior recorded actuals
+    /// for the same model when the insert left estimate columns empty.
+    #[test]
+    fn recording_work_writes_estimates_from_prior_recorded_actuals() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        let first = store
+            .insert_prompt_task("prior recorded work", "done", None, None)
+            .unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &first.id,
+                &recorded_actuals(1_000, 400, 10_000, None, None, None),
+            )
+            .unwrap();
+        let second_prior = store
+            .insert_prompt_task("second prior recorded work", "done", None, None)
+            .unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &second_prior.id,
+                &recorded_actuals(2_000, 600, 20_000, None, None, None),
+            )
+            .unwrap();
+
+        let next = store
+            .insert_prompt_task("new recorded work", "done", None, None)
+            .unwrap();
+        let inserted = store
+            .insert_prompt_exec_metrics(
+                &next.id,
+                &recorded_actuals(1_800, 500, 16_000, None, None, None),
+            )
+            .unwrap();
+        assert_eq!(
+            inserted.estimated_tokens_in,
+            Some(1_500),
+            "estimate in must be the mean of prior recorded tokens_in"
+        );
+        assert_eq!(
+            inserted.estimated_tokens_out,
+            Some(500),
+            "estimate out must be the mean of prior recorded tokens_out"
+        );
+        assert_eq!(
+            inserted.estimated_wall_ms,
+            Some(15_000),
+            "estimate wall must be the mean of prior recorded wall_ms"
+        );
+        let loaded = store
+            .load_prompt_exec_metrics(&inserted.id)
+            .unwrap()
+            .expect("exec metrics row");
+        assert_eq!(loaded.estimated_tokens_in, Some(1_500));
+        assert_eq!(loaded.estimated_tokens_out, Some(500));
+        assert_eq!(loaded.estimated_wall_ms, Some(15_000));
+        assert_eq!(loaded.tokens_in, 1_800);
+        assert_eq!(loaded.tokens_out, 500);
+        assert_eq!(loaded.wall_ms, 16_000);
+    }
+
+    /// Explicit estimates on the insert payload are kept. Recorded history
+    /// does not overwrite them.
+    #[test]
+    fn recording_work_does_not_overwrite_explicit_estimates() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        let first = store
+            .insert_prompt_task("prior recorded work", "done", None, None)
+            .unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &first.id,
+                &recorded_actuals(1_000, 400, 10_000, None, None, None),
+            )
+            .unwrap();
+        let next = store
+            .insert_prompt_task("planned estimate", "done", None, None)
+            .unwrap();
+        let inserted = store
+            .insert_prompt_exec_metrics(
+                &next.id,
+                &recorded_actuals(1_200, 400, 12_500, Some(99), Some(88), Some(77)),
+            )
+            .unwrap();
+        assert_eq!(inserted.estimated_tokens_in, Some(99));
+        assert_eq!(inserted.estimated_tokens_out, Some(88));
+        assert_eq!(inserted.estimated_wall_ms, Some(77));
+    }
+
+    /// Average query is the mean of recorded actuals for that model.
+    #[test]
+    fn average_prompt_exec_metrics_for_model_is_mean_of_recorded_actuals() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(
+            store
+                .average_prompt_exec_metrics_for_model("grok-4.6", Some("medium"))
+                .unwrap()
+                .is_none()
+        );
+        let first = store.insert_prompt_task("one", "done", None, None).unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &first.id,
+                &recorded_actuals(1_000, 400, 10_000, None, None, None),
+            )
+            .unwrap();
+        let second = store.insert_prompt_task("two", "done", None, None).unwrap();
+        store
+            .insert_prompt_exec_metrics(
+                &second.id,
+                &recorded_actuals(2_000, 600, 20_000, None, None, None),
+            )
+            .unwrap();
+        let avg = store
+            .average_prompt_exec_metrics_for_model("grok-4.6", Some("medium"))
+            .unwrap()
+            .expect("two recorded rows");
+        assert_eq!(avg.tokens_in, 1_500);
+        assert_eq!(avg.tokens_out, 500);
+        assert_eq!(avg.wall_ms, 15_000);
+        assert_eq!(avg.sample_count, 2);
+        assert!(
+            store
+                .average_prompt_exec_metrics_for_model("other-model", Some("medium"))
+                .unwrap()
+                .is_none(),
+            "a different model must not inherit this average"
+        );
     }
 }

@@ -149,7 +149,7 @@ pub struct UiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_blocks: Option<bool>,
     /// Keep thinking blocks fully expanded (no collapsed one-liner by default).
-    /// When on, the footer also hides the Ctrl+E expand-thinking affordance.
+    /// When on, the footer also hides the Ctrl+T expand-thinking affordance.
     /// `None` = off (client default). Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_expand_thinking: Option<bool>,

@@ -1,8 +1,10 @@
-//! Prefer a live failover identity after a memoized-dead console primary.
+//! Prefer a live failover identity after a memoized-dead primary.
 //!
-//! Fail-open SuperGrok: a leftover HTTP 402 memo does not hop reconstruct.
-//! Stay reconstruct already restores SuperGrok when the stay sidecar is set.
-//! This request hops after SuperGrok HTTP 402.
+//! Leftover SuperGrok HTTP 402 hops the next request to the next spend-order
+//! source. A client printout of included SuperGrok period limits at 100% /
+//! remaining 0 / SuperGrok dollar credits $0 still must not hop. Stay
+//! reconstruct that cleared the memo keeps SuperGrok. This request hops after
+//! SuperGrok HTTP 402 (`apply_retry_decision`).
 //!
 //! When a console primary is memoized out of allowance and a live failover
 //! remains, reorder [`SamplerConfig`] so the first HTTP attempt already uses
@@ -341,16 +343,17 @@ pub fn prefer_supergrok_identity_for_stay_pin(config: &mut SamplerConfig) -> boo
     true
 }
 
-/// If primary is a memoized-dead **console** key and a live failover remains,
+/// If primary is memoized empty (real HTTP 402) and a live failover remains,
 /// rotate config to that failover before any HTTP (silent preference).
 ///
 /// Always prunes memoized-dead failover candidates first (even when primary is
 /// already a live console key).
 ///
-/// Fail-open SuperGrok: a leftover HTTP 402 memo from an earlier request must
-/// not hop reconstruct between turns. Stay reconstruct already restores
-/// SuperGrok on the next rebuild when the stay sidecar is set. This request
-/// hops after SuperGrok HTTP 402 (`apply_retry_decision`).
+/// A leftover real SuperGrok HTTP 402 mark hops the next request to the next
+/// source in spend order. Fail-open: a client remaining 0 / SuperGrok dollar
+/// credits $0 printout does not mark and must not hop. Stay reconstruct that
+/// cleared the memo keeps SuperGrok. This request still hops after SuperGrok
+/// HTTP 402 (`apply_retry_decision`).
 ///
 /// Returns switch reason when rotation applied (callers may log; UI chrome for
 /// already-memoized apply is optional, prefer silence so turns do not look
@@ -365,9 +368,6 @@ pub fn prefer_live_identity_after_credit_exhaust(config: &mut SamplerConfig) -> 
         return None;
     }
     let active = config.api_key.as_deref().unwrap_or("").trim();
-    if is_session_identity(config, active) || config.bearer_resolver.is_some() {
-        return None;
-    }
     let has_live = config.failover_api_keys.iter().any(|k| {
         let t = k.trim();
         !t.is_empty() && t != active && !exhausted_identity::is_exhausted(&fingerprint_secret(t))
@@ -378,6 +378,31 @@ pub fn prefer_live_identity_after_credit_exhaust(config: &mut SamplerConfig) -> 
     rotate_identity_config(config, HopCause::CreditExhausted)
 }
 
+/// Compact uses a one-shot [`crate::SamplingClient`] (not the sampler actor
+/// retry loop). After a real compact HTTP 402 / credit response, hop the same
+/// way turns hop in `apply_retry_decision`. Do not call this from a client
+/// remaining printout: fail-open SuperGrok stays until this request 402s.
+pub fn rotate_sampling_client_after_credit_exhaust(
+    config: &mut SamplerConfig,
+    client: &mut crate::SamplingClient,
+) -> Option<String> {
+    ensure_supergrok_recovery_after_console_credit_exhaust(config);
+    let hop_reason = rotate_identity_config(config, HopCause::CreditExhausted)?;
+    match crate::SamplingClient::new(config.clone()) {
+        Ok(fresh) => {
+            *client = fresh;
+            Some(hop_reason)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to rebuild sampling client after compact credit hop"
+            );
+            None
+        }
+    }
+}
+
 /// After a **console** credit/spend death, make SuperGrok recovery hoppable once.
 ///
 /// Free-period-first ExhaustedAll marks SuperGrok out of allowance so the next
@@ -385,7 +410,9 @@ pub fn prefer_live_identity_after_credit_exhaust(config: &mut SamplerConfig) -> 
 /// SuperGrok from failover, so a console team 403 had nowhere to go. On credit
 /// exhaust while active is console and `session_identity_key` is set:
 /// clear the SuperGrok memo once and put that JWT first in failover so rotate
-/// can hop to free SuperGrok period (wire re-marks if SuperGrok is still dead).
+/// can hop to SuperGrok. Console team prepaid 403 on SuperGrok-live is not
+/// included SuperGrok period limits empty; `apply_retry_decision` must not
+/// mark SuperGrok exhausted from that body.
 ///
 /// No-op when active is already SuperGrok session, or no session identity key.
 pub fn ensure_supergrok_recovery_after_console_credit_exhaust(config: &mut SamplerConfig) {
@@ -425,8 +452,45 @@ mod tests {
     use super::*;
     use crate::config::SamplerConfig;
 
+    /// After a real SuperGrok HTTP 402 mark, the next reconstruct hops to the
+    /// next source in spend order before HTTP. A client remaining 0 / SuperGrok
+    /// dollar credits $0 printout does not mark and must not use this path.
+    #[test]
+    fn prefer_live_next_request_uses_next_source_after_real_supergrok_http_402() {
+        exhausted_identity::with_memo_lock(|| {
+            let session = "prefer-live-next-after-402-session";
+            let console = "prefer-live-next-after-402-console";
+            exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+
+            let mut config = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            let reason = prefer_live_identity_after_credit_exhaust(&mut config)
+                .expect("next request after real SuperGrok HTTP 402 must hop");
+            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert!(
+                config.base_url.contains("api.x.ai"),
+                "must switch to console host: {}",
+                config.base_url
+            );
+            assert!(config.bearer_resolver.is_none());
+            assert!(exhausted_identity::is_credential_hop_reason(&reason));
+            assert!(
+                reason.contains("console key"),
+                "hop reason must name the console key: {reason}"
+            );
+        });
+    }
+
     /// Named contract: memoized-dead console primary + live failover hops before
-    /// HTTP. SuperGrok leftover HTTP 402 does not use this path.
+    /// HTTP. Leftover SuperGrok HTTP 402 uses the same reconstruct hop.
     #[test]
     fn prefer_live_dead_console_hops_to_next_console_before_request() {
         exhausted_identity::with_memo_lock(|| {
@@ -457,10 +521,10 @@ mod tests {
     }
 
     /// OIDC refresh: leftover SuperGrok HTTP 402 memo on session_identity_key
-    /// must not hop reconstruct when the live api_key is a rotated jwt and a
-    /// bearer_resolver is present.
+    /// hops the next request to the next source even when the live api_key is a
+    /// rotated jwt with a bearer resolver. Same empty wallet after refresh.
     #[test]
-    fn leftover_supergrok_http_402_memo_bearer_only_does_not_hop_prefer_live_between_turns() {
+    fn leftover_supergrok_http_402_memo_bearer_only_hops_prefer_live_on_next_request() {
         exhausted_identity::with_memo_lock(|| {
             let old_sess = "session-jwt-before-refresh";
             let new_sess = "session-jwt-after-refresh";
@@ -488,24 +552,15 @@ mod tests {
                 ..Default::default()
             };
             assert!(primary_is_memoized_credit_exhausted(&config));
+            let reason = prefer_live_identity_after_credit_exhaust(&mut config)
+                .expect("bearer-only SuperGrok leftover HTTP 402 memo must hop next request");
+            assert_eq!(config.api_key.as_deref(), Some(console));
             assert!(
-                prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
-                "bearer-only SuperGrok leftover HTTP 402 memo must not hop reconstruct"
-            );
-            assert_eq!(config.api_key.as_deref(), Some(new_sess));
-            assert!(
-                config.bearer_resolver.is_some(),
-                "live SuperGrok bearer must remain"
-            );
-            assert!(
-                config.base_url.contains("cli-chat-proxy"),
-                "must stay on SuperGrok host: {}",
+                config.base_url.contains("api.x.ai"),
+                "must switch to console host: {}",
                 config.base_url
             );
-            assert!(
-                !exhausted_identity::is_exhausted(&fingerprint_secret(new_sess)),
-                "rotated SuperGrok jwt must not be marked by reconstruct leftover 402"
-            );
+            assert!(exhausted_identity::is_credential_hop_reason(&reason));
         });
     }
 
@@ -525,12 +580,11 @@ mod tests {
         });
     }
 
-    /// Leftover SuperGrok HTTP 402 memo from an earlier request must not hop
-    /// reconstruct prefer_live between turns. Stay reconstruct already restores
-    /// SuperGrok on the next rebuild when the stay sidecar is set. This request
-    /// still hops after SuperGrok HTTP 402 (`apply_retry_decision`).
+    /// Leftover SuperGrok HTTP 402 memo hops prefer_live on the next request.
+    /// Stay reconstruct that cleared the memo keeps SuperGrok. Fail-open
+    /// printout does not mark.
     #[test]
-    fn leftover_supergrok_http_402_memo_does_not_hop_prefer_live_between_turns() {
+    fn leftover_supergrok_http_402_memo_hops_prefer_live_on_next_request() {
         exhausted_identity::with_memo_lock(|| {
             let session = "reconstruct-leftover-402-session-jwt";
             let console = "reconstruct-leftover-402-console-key";
@@ -539,7 +593,6 @@ mod tests {
                 session
             )));
 
-            // Stay reconstruct already put SuperGrok back as primary.
             let mut config = SamplerConfig {
                 api_key: Some(session.into()),
                 failover_api_keys: vec![console.into()],
@@ -550,20 +603,15 @@ mod tests {
                 session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 ..Default::default()
             };
+            let reason = prefer_live_identity_after_credit_exhaust(&mut config)
+                .expect("leftover SuperGrok HTTP 402 memo must hop reconstruct");
+            assert_eq!(config.api_key.as_deref(), Some(console));
             assert!(
-                prefer_live_identity_after_credit_exhaust(&mut config).is_none(),
-                "leftover SuperGrok HTTP 402 memo must not hop reconstruct between turns"
-            );
-            assert_eq!(
-                config.api_key.as_deref(),
-                Some(session),
-                "SuperGrok must stay primary until this request fails with HTTP 402"
-            );
-            assert!(
-                config.base_url.contains("cli-chat-proxy"),
-                "must stay on SuperGrok host: {}",
+                config.base_url.contains("api.x.ai"),
+                "must switch to console host: {}",
                 config.base_url
             );
+            assert!(exhausted_identity::is_credential_hop_reason(&reason));
         });
     }
 
@@ -774,6 +822,64 @@ mod tests {
             ensure_supergrok_recovery_after_console_credit_exhaust(&mut config);
             assert!(config.failover_api_keys.is_empty());
             assert!(rotate_identity_config(&mut config, HopCause::CreditExhausted).is_none());
+        });
+    }
+
+    /// Compact's one-shot client hops SuperGrok to console after a real
+    /// HTTP 402 wrap (`is_credit_exhausted_compact_wrap`, same gate as shell
+    /// `compact_failure_is_credit`). HTTP 502 and bare Payment Required
+    /// without status must not pass that gate. The helper then hops the
+    /// client the same way turns hop after send.
+    #[test]
+    fn compact_client_hops_supergrok_to_console_after_real_http_402() {
+        exhausted_identity::with_memo_lock(|| {
+            let wrap_402 =
+                "compact failed: API error (status 402 Payment Required): Payment Required";
+            assert!(
+                xai_grok_sampling_types::is_credit_exhausted_compact_wrap(wrap_402),
+                "compact HTTP 402 wrap must be hop eligible"
+            );
+            let wrap_502 = "compact failed: API error (status 502 Bad Gateway): Payment Required";
+            assert!(
+                !xai_grok_sampling_types::is_credit_exhausted_compact_wrap(wrap_502),
+                "HTTP 502 must not hop compact as an empty wallet"
+            );
+            let wrap_bare = "compact failed: Payment Required";
+            assert!(
+                !xai_grok_sampling_types::is_credit_exhausted_compact_wrap(wrap_bare),
+                "bare Payment Required without HTTP 402 must not hop compact"
+            );
+
+            let session = "compact-hop-session-jwt";
+            let console = "compact-hop-console-key";
+            let mut config = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            let mut client =
+                crate::SamplingClient::new(config.clone()).expect("build compact client");
+            let reason = rotate_sampling_client_after_credit_exhaust(&mut config, &mut client)
+                .expect("compact 402 must hop to console failover");
+            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert!(
+                config.base_url.contains("api.x.ai"),
+                "must switch host to console API: {}",
+                config.base_url
+            );
+            assert!(
+                reason.contains("console") || reason.contains("out of allowance"),
+                "{reason}"
+            );
+            assert!(
+                crate::exhausted_identity::is_credential_exhausted(session),
+                "real compact HTTP 402 may leave SuperGrok; printout must not be why"
+            );
         });
     }
 }

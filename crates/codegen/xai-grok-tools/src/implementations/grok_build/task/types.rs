@@ -132,6 +132,11 @@ pub struct SubagentSpawnRequest {
     pub request: Box<SubagentRequest>,
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<SubagentResult>,
+    /// Fired when the coordinator has admitted the child (pending, queued,
+    /// or started) or rejected spawn. Background `TaskTool` waits on this
+    /// so the returned id is already visible to wait.
+    #[educe(Debug(ignore))]
+    pub admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 impl std::ops::Deref for SubagentSpawnRequest {
@@ -152,6 +157,17 @@ impl SubagentSpawnRequest {
         build: impl FnOnce(&SubagentRequest) -> SubagentResult,
     ) -> Result<(), SubagentResult> {
         let result = build(&self.request);
+        if let Some(admitted_tx) = self.admitted_tx {
+            let admission = if result.success {
+                Ok(())
+            } else {
+                Err(result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "spawn rejected".to_owned()))
+            };
+            let _ = admitted_tx.send(admission);
+        }
         self.result_tx.send(result)
     }
 }

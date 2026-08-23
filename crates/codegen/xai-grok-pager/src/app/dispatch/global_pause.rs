@@ -5,10 +5,20 @@ use super::queue::maybe_drain_queue_and_note_peek;
 use super::turn::do_cancel_turn_for;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
-use crate::app::app_view::AppView;
+use crate::app::agent_view::AgentView;
+use crate::app::app_view::{ActiveView, AppView};
 use crate::app::global_work_pause::{GlobalWorkPause, PausedSessionSnapshot};
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::blocks::SessionEvent;
+use crate::scrollback::state::ScrollbackState;
 use std::time::Instant;
+
+/// Idle `[pause]` after AUTO compact failed over the sampling window retries
+/// manual `/compact` (AUTO suppress does not apply) and continues the last
+/// real prompt. Stay on SuperGrok if that is the live identity. Do not tell
+/// the operator to add credits from a client remaining printout.
+const OVER_WINDOW_COMPACT_RETRY_TOAST: &str = "Retrying compact so this session can continue. \
+     Stay on SuperGrok if that is the live identity.";
 
 /// Toggle fearless global pause across every agent session in this process.
 pub(super) fn dispatch_toggle_global_pause(app: &mut AppView) -> Vec<Effect> {
@@ -42,6 +52,9 @@ fn capture_snapshots(app: &AppView) -> Vec<PausedSessionSnapshot> {
 }
 
 fn dispatch_engage_global_pause(app: &mut AppView) -> Vec<Effect> {
+    if let Some(effects) = try_unstick_idle_over_window_compact_fail(app) {
+        return effects;
+    }
     let snapshots = capture_snapshots(app);
     // Collect agent ids that need a turn cancel before we mutably borrow app.
     let to_cancel: Vec<AgentId> = snapshots
@@ -94,9 +107,183 @@ fn pause_cancel_resume_prompt(agent: &crate::app::agent_view::AgentView) -> Opti
     last_user_prompt_full_text(&agent.scrollback)
 }
 
-fn last_user_prompt_full_text(
-    scrollback: &crate::scrollback::state::ScrollbackState,
-) -> Option<String> {
+/// Idle `[pause]` on a session already over the sampling window after compact
+/// failed or AUTO skipped must unstick: retry `/compact`, then continue the
+/// last user prompt. Empty global pause is a no-op here (`Resumed · nothing
+/// pending`) and leaves 507K/500K stuck.
+fn idle_session_needs_over_window_compact_unstick(app: &AppView) -> bool {
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return false;
+    };
+    agent.session.state.is_idle()
+        && agent.session.pending_prompts.is_empty()
+        && session_is_over_sampling_window(agent)
+        && last_compact_stuck_index(&agent.scrollback).is_some()
+}
+
+fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Effect>> {
+    if !idle_session_needs_over_window_compact_unstick(app) {
+        return None;
+    }
+    let ActiveView::Agent(id) = app.active_view else {
+        return None;
+    };
+    let continue_text = {
+        let agent = app.agents.get(&id)?;
+        continue_prompt_after_compact(agent)
+    };
+    let agent = app.agents.get_mut(&id)?;
+    agent.session.enqueue_command("/compact".into());
+    if let Some(text) = continue_text {
+        agent.session.enqueue_prompt(text);
+    }
+    app.show_toast(OVER_WINDOW_COMPACT_RETRY_TOAST);
+    Some(maybe_drain_queue_and_note_peek(app, id))
+}
+
+fn session_is_over_sampling_window(agent: &AgentView) -> bool {
+    let Some(used) = agent.context_state.as_ref().map(|c| c.used) else {
+        return false;
+    };
+    let window = agent
+        .session_sampling_window
+        .or_else(|| {
+            agent
+                .context_state
+                .as_ref()
+                .map(|c| c.total)
+                .filter(|t| *t > 0)
+        })
+        .unwrap_or(0);
+    window > 0 && used >= window
+}
+
+fn last_compact_stuck_index(scrollback: &ScrollbackState) -> Option<usize> {
+    for idx in (0..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => {
+                if matches!(
+                    ev.event,
+                    SessionEvent::CompactionFailed { .. }
+                        | SessionEvent::CompactionSkippedTinySavings
+                        | SessionEvent::ContextTooLarge
+                ) {
+                    return Some(idx);
+                }
+                if compact_stuck_scan_skips_session_event(&ev.event) {
+                    continue;
+                }
+                return None;
+            }
+            Some(RenderBlock::System(_)) | Some(RenderBlock::UserPrompt(_)) => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn compact_stuck_scan_skips_session_event(ev: &SessionEvent) -> bool {
+    matches!(
+        ev,
+        SessionEvent::TurnFailed { .. }
+            | SessionEvent::TurnCompleted { .. }
+            | SessionEvent::TurnCancelled { .. }
+            | SessionEvent::TurnHalted { .. }
+            | SessionEvent::RetryFailed { .. }
+            | SessionEvent::RequestFailed { .. }
+            | SessionEvent::CompactionStarted { .. }
+            | SessionEvent::CompactionCancelled
+    )
+}
+
+fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
+    if let Some(held) = agent.session.compact_held_prompt.as_ref() {
+        let t = held.text.trim();
+        if !t.is_empty() && !is_compact_slash(t) {
+            return Some(held.text.clone());
+        }
+    }
+    last_real_user_prompt_for_compact_continue(&agent.scrollback)
+}
+
+fn last_real_user_prompt_for_compact_continue(scrollback: &ScrollbackState) -> Option<String> {
+    let compact_idx = last_compact_stuck_index(scrollback);
+    let len = scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::UserPrompt(block) = &entry.block else {
+            continue;
+        };
+        if block.is_bash || block.is_cron {
+            continue;
+        }
+        let text = block.text.trim();
+        if text.is_empty() || is_compact_slash(text) {
+            continue;
+        }
+        // Leftover `/implement` (or other slash replay) painted after compact
+        // fail is a cancel-resume / compact-held artifact, not a new typed turn.
+        // HTTP 502 after that compact fail is not this skip: leftover
+        // `/implement` is the work that hit 502 and should continue once the
+        // session can sample again.
+        if compact_idx.is_some_and(|c| idx > c)
+            && is_slash_resume_artifact(text)
+            && !http_502_after_compact_fail(scrollback, compact_idx)
+        {
+            continue;
+        }
+        return Some(text.to_string());
+    }
+    None
+}
+
+fn is_compact_slash(text: &str) -> bool {
+    let t = text.trim();
+    t == "/compact"
+        || t == "/compaction"
+        || t.starts_with("/compact ")
+        || t.starts_with("/compaction ")
+}
+
+fn is_slash_resume_artifact(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with('/') && !t.starts_with("//")
+}
+
+fn session_event_is_http_502(ev: &SessionEvent) -> bool {
+    match ev {
+        SessionEvent::RequestFailed {
+            status: Some(502), ..
+        } => true,
+        SessionEvent::RequestFailed {
+            headline, detail, ..
+        } if headline.contains("502") || detail.contains("502") => true,
+        SessionEvent::RetryFailed { error, .. } if error.contains("502") => true,
+        _ => false,
+    }
+}
+
+fn http_502_after_compact_fail(scrollback: &ScrollbackState, compact_idx: Option<usize>) -> bool {
+    let Some(compact_idx) = compact_idx else {
+        return false;
+    };
+    for idx in (compact_idx + 1..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) if session_event_is_http_502(&ev.event) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn last_user_prompt_full_text(scrollback: &ScrollbackState) -> Option<String> {
     let len = scrollback.len();
     for idx in (0..len).rev() {
         let Some(entry) = scrollback.entry(idx) else {
@@ -140,6 +327,16 @@ fn persist_canceled_turn_resume_for_pause(app: &AppView, id: AgentId) {
 }
 
 pub(super) fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {
+    if idle_session_needs_over_window_compact_unstick(app) {
+        let _ = app.global_work_pause.disengage();
+        crate::app::active_session_heartbeat::set_global_work_paused(false);
+        for agent in app.agents.values() {
+            crate::app::active_session_heartbeat::write_from_agent(agent);
+        }
+        if let Some(effects) = try_unstick_idle_over_window_compact_fail(app) {
+            return effects;
+        }
+    }
     let snaps = app.global_work_pause.disengage();
     crate::app::active_session_heartbeat::set_global_work_paused(false);
     for agent in app.agents.values() {

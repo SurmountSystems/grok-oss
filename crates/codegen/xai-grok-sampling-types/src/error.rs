@@ -509,8 +509,9 @@ impl SamplingError {
             SamplingError::Api {
                 status, message, ..
             } => is_credit_exhausted_status_and_message(status.as_u16(), message),
-            SamplingError::StreamError { message, .. } => is_credit_exhausted_message(message),
-            SamplingError::Auth { message, .. } => is_credit_exhausted_message(message),
+            SamplingError::StreamError { message, .. } | SamplingError::Auth { message, .. } => {
+                is_credit_exhausted_statusless_message_allow_bare_credit_wording(message)
+            }
             _ => false,
         }
     }
@@ -865,12 +866,120 @@ fn is_credit_exhausted_status_and_message(status: u16, message: &str) -> bool {
     if status == 402 {
         return true;
     }
+    // HTTP 5xx / gateway outage is not billing empty. A 502 HTML or JSON body
+    // that mentions payment / usage limit / add credits must not hop, mark
+    // SuperGrok used up, or recode as HTTP 402.
+    if is_server_or_gateway_outage_status(status) {
+        return false;
+    }
     // 403 is overloaded (policy, ZDR, credits). Only treat as credits when the
-    // body says so — never promote bare 403 into failover.
+    // body says so — never promote bare 403 into failover. Credit-worded 429
+    // and 400 stay on this list. 401 stays auth even if the body mentions credits.
     if matches!(status, 403 | 429 | 400) && is_credit_exhausted_message(message) {
         return true;
     }
-    is_credit_exhausted_message(message) && status != 401
+    false
+}
+
+/// True when the HTTP status is a server or gateway outage (5xx), not a
+/// billing-empty 402. Fail-open: these must not recode as used-up or hop.
+pub fn is_server_or_gateway_outage_status(status: u16) -> bool {
+    (500..600).contains(&status)
+}
+
+/// True when an error string names HTTP 5xx / Bad Gateway (compact ACP wrap,
+/// Display prefix). Used so compact hop and compact copy do not recode 502 as
+/// HTTP 402 when the body also says Payment Required.
+pub fn message_names_server_or_gateway_outage(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("status 502")
+        || lower.contains("http 502")
+        || lower.contains("bad gateway")
+        || lower.contains("status 503")
+        || lower.contains("http 503")
+        || lower.contains("status 504")
+        || lower.contains("http 504")
+        || lower.contains("status 500")
+        || lower.contains("http 500")
+        || lower.contains("(http 502)")
+        || lower.contains("(http 503)")
+        || lower.contains("(http 504)")
+        || lower.contains("(http 500)")
+}
+
+/// True when the string names HTTP 402 (compact ACP wrap / Display prefix).
+pub fn message_names_http_402(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("status 402") || lower.contains("http 402") || lower.contains("402 payment")
+}
+
+fn message_names_http_400_403_or_429(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("status 400")
+        || lower.contains("http 400")
+        || lower.contains("status 403")
+        || lower.contains("http 403")
+        || lower.contains("status 429")
+        || lower.contains("http 429")
+}
+
+/// StreamError / Auth have no numeric status. A 5xx / Bad Gateway wrap is
+/// not billing empty even if the body says Payment Required. Bare credit
+/// wording (mid-stream JSON `Payment Required` with no status) still hops;
+/// that is a stream credit event, not a gateway outage. Real `status 402`
+/// still hops.
+fn is_credit_exhausted_statusless_message_allow_bare_credit_wording(message: &str) -> bool {
+    if message_names_server_or_gateway_outage(message) {
+        return false;
+    }
+    message_names_http_402(message) || is_credit_exhausted_message(message)
+}
+
+/// Compact ACP wrap hop. Fail-open: bare "Payment Required" / "out of credits"
+/// without HTTP 402 (or 400/403/429 plus credit wording) must not hop. A wrap
+/// that names 5xx must not hop even with Payment Required. A wrap that names
+/// `status 402` still hops.
+pub fn is_credit_exhausted_compact_wrap(message: &str) -> bool {
+    if message_names_server_or_gateway_outage(message) {
+        return false;
+    }
+    if message_names_http_402(message) {
+        return true;
+    }
+    message_names_http_400_403_or_429(message) && is_credit_exhausted_message(message)
+}
+
+/// True when the body is console team prepaid / console API credits copy
+/// (team plus used-all-credits or monthly spending limit), not included
+/// SuperGrok period limits empty and not SuperGrok dollar credits.
+pub fn is_console_team_prepaid_message(message: &str) -> bool {
+    let m = strip_api_error_status_prefix(message).to_ascii_lowercase();
+    let names_team = m.contains("your team")
+        || (m.contains("team") && (m.contains("credit") || m.contains("spending limit")));
+    let names_team_prepaid = m.contains("used all available credits")
+        || m.contains("monthly spending limit")
+        || m.contains("purchase more credits");
+    names_team && names_team_prepaid
+}
+
+/// Operator copy when a console team prepaid / console API credits 403 must
+/// not be painted as included SuperGrok period limits empty.
+pub fn console_team_prepaid_stay_on_supergrok_user_message() -> &'static str {
+    CONSOLE_TEAM_PREPAID_STAY_ON_SUPERGROK
+}
+
+/// Same as [`credit_exhausted_user_message`], with a known included SuperGrok
+/// period used percent from grok-oss (client printout, not xAI billing truth).
+///
+/// Fail-open: a client 100 printout must not recode this console team 403 as
+/// SuperGrok included empty. `included_used_percent` documents the compact
+/// chip; it is not xAI billing truth.
+pub fn credit_exhausted_user_message_for_included_period(
+    raw: &str,
+    included_used_percent: Option<f64>,
+) -> String {
+    let _ = included_used_percent;
+    credit_exhausted_user_message(raw)
 }
 
 /// Strip the [`SamplingError::Api`] Display wrap
@@ -885,33 +994,94 @@ pub fn strip_api_error_status_prefix(raw: &str) -> &str {
     s
 }
 
-/// Plain American English for team credit / monthly spending-limit failures.
+/// Plain American English for credit / spending-limit failures.
 ///
-/// Prefer the upstream team sentence when present. Never invent Internal error
-/// JSON. Operators get admin guidance (add credits / raise monthly spend limit)
-/// without confusing free SuperGrok period with console team credits.
+/// Console team prepaid / console API credits 403 is not included SuperGrok
+/// period limits empty. Stay on SuperGrok. Never invent Internal error JSON.
+/// grok-oss remaining is a client printout, not xAI billing truth.
 pub fn credit_exhausted_user_message(raw: &str) -> String {
     let body = strip_api_error_status_prefix(raw).trim();
+    if is_console_team_prepaid_message(raw) || is_console_team_prepaid_message(body) {
+        return CONSOLE_TEAM_PREPAID_STAY_ON_SUPERGROK.to_string();
+    }
     if body.is_empty() {
         return TEAM_CREDIT_FALLBACK.to_string();
     }
-    // Upstream already names team credits / monthly spending limit.
-    let lower = body.to_ascii_lowercase();
-    if lower.contains("monthly spending limit")
-        || lower.contains("used all available credits")
-        || (lower.contains("team") && lower.contains("credit"))
-    {
-        return body.to_string();
-    }
     if is_credit_exhausted_message(body) {
-        // Short bodies ("out of credits") get a plain admin line.
         return format!("{body}. {TEAM_CREDIT_FALLBACK}");
     }
     body.to_string()
 }
 
+const CONSOLE_TEAM_PREPAID_STAY_ON_SUPERGROK: &str = "This HTTP 403 is console team prepaid / console API credits, not included SuperGrok period limits empty. \
+Stay on SuperGrok. grok-oss remaining is a client printout, not xAI billing truth. \
+Check the product Usage view for that workspace or console.x.ai Billing.";
+
 const TEAM_CREDIT_FALLBACK: &str = "Your team has either used all available credits or \
 reached its monthly spending limit. Add credits or raise the monthly spend limit on console.x.ai.";
+
+/// Canned AUTO-compact credit lie (2026-08-21 operator shot). Keep the
+/// exact string so paint/rewrite can recognize leftover shells.
+pub const COMPACT_CREDIT_BLOCK_ADD_CREDITS_LIE: &str =
+    "out of credits or over your spending limit. Add credits and retry.";
+
+/// User-facing AUTO compact failure after a credit / payment-required /
+/// spending-limit sampler response.
+///
+/// grok-oss remaining is a client printout, not xAI billing truth. Do not tell
+/// the operator to add credits when the live compact chip already shows console
+/// team prepaid remaining, and do not say SuperGrok is used up from that
+/// printout.
+pub fn compact_credit_block_user_message(
+    upstream_error: Option<&str>,
+    console_prepaid_remaining_cents: Option<i64>,
+) -> String {
+    let upstream = upstream_error.unwrap_or("").to_ascii_lowercase();
+    // Gateway outage first: a 502 body that says Payment Required is not 402.
+    if message_names_server_or_gateway_outage(&upstream) {
+        let stay = "Stay on SuperGrok if that is the live identity.";
+        return format!(
+            "Compaction sampler got a gateway outage. \
+             grok-oss remaining is a client printout, not xAI billing truth. \
+             {stay} Check the product Usage view or console.x.ai Billing."
+        );
+    }
+    let http_402 = upstream.contains("status 402")
+        || upstream.contains("http 402")
+        || upstream.contains("402 payment");
+    let status = if http_402 {
+        "HTTP 402 (payment required)"
+    } else if upstream.contains("spending-limit") || upstream.contains("spending limit") {
+        "a spending-limit response"
+    } else {
+        "a payment-required or spending-limit response"
+    };
+    let remaining_painted = console_prepaid_remaining_cents.is_some_and(|c| c > 0);
+    let stay = "Stay on SuperGrok if that is the live identity.";
+    if remaining_painted {
+        format!(
+            "Compaction sampler got {status}. \
+             The live compact chip already shows console team prepaid remaining. \
+             grok-oss remaining is a client printout, not xAI billing truth. \
+             {stay} Check the product Usage view or console.x.ai Billing."
+        )
+    } else {
+        format!(
+            "Compaction sampler got {status}. \
+             grok-oss remaining is a client printout, not xAI billing truth. \
+             {stay} Check the product Usage view or console.x.ai Billing."
+        )
+    }
+}
+
+/// True when compact failure copy is the leftover "Add credits" lie, so paint
+/// can rewrite it even if an older shell still emits the canned string.
+pub fn is_compact_credit_block_add_credits_lie(error: &str) -> bool {
+    let t = error.trim();
+    t.eq_ignore_ascii_case(COMPACT_CREDIT_BLOCK_ADD_CREDITS_LIE)
+        || t.to_ascii_lowercase()
+            .contains("out of credits or over your spending limit")
+}
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
 fn api_message_is_overloaded(message: &str) -> bool {
@@ -1669,13 +1839,19 @@ mod tests {
         };
         assert!(!guidelines.is_credit_exhausted());
 
-        // Plain terminal copy strips Display wrap and keeps the team sentence.
+        // Console-live team 403 still hops. Operator copy names console team
+        // prepaid / console API credits and stays on SuperGrok; it must not
+        // paint this body as included SuperGrok period limits empty.
         let wrapped = format!("API error (status 403 Forbidden): {team_body}");
         let plain = credit_exhausted_user_message(&wrapped);
+        let lower = plain.to_ascii_lowercase();
         assert!(
-            plain.contains("used all available credits")
-                || plain.contains("monthly spending limit"),
-            "plain copy must keep team sentence: {plain}"
+            lower.contains("console team prepaid") && lower.contains("console api credits"),
+            "plain copy must name console team prepaid / console API credits: {plain}"
+        );
+        assert!(
+            lower.contains("stay on supergrok"),
+            "plain copy must say stay on SuperGrok: {plain}"
         );
         assert!(
             !plain.contains("API error (status"),
@@ -1684,6 +1860,280 @@ mod tests {
         assert!(
             !plain.contains("Internal error"),
             "must not invent Internal error chrome: {plain}"
+        );
+    }
+
+    /// Operator shot 2026-08-22: team 61fab250 403 body is console team prepaid
+    /// / console API credits, not included SuperGrok period limits empty.
+    #[test]
+    fn console_team_403_body_is_console_team_prepaid_not_supergrok_included_empty() {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit. \
+            To continue making API requests, please purchase more credits.";
+        assert!(
+            is_console_team_prepaid_message(team_body),
+            "team 403 body must classify as console team prepaid / console API credits"
+        );
+        assert!(
+            is_console_team_prepaid_message(&format!(
+                "API error (status 403 Forbidden): {team_body}"
+            )),
+            "Display wrap must still classify as console team prepaid"
+        );
+        assert!(
+            !is_console_team_prepaid_message(
+                "You have reached your SuperGrok Heavy usage limit. Upgrade or wait for reset."
+            ),
+            "SuperGrok Heavy usage limit is not console team prepaid"
+        );
+        assert!(
+            !is_console_team_prepaid_message("Forbidden"),
+            "bare 403 is not console team prepaid"
+        );
+        let err = SamplingError::Api {
+            status: StatusCode::FORBIDDEN,
+            message: team_body.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(
+            err.is_credit_exhausted(),
+            "console-live team 403 still hops as credit-exhausted for the console identity"
+        );
+        assert!(
+            !err.to_string().to_ascii_lowercase().contains("included"),
+            "raw body must not name included SuperGrok period limits"
+        );
+    }
+
+    /// Named contract: when included SuperGrok period limits still have room
+    /// (used percent below 100, known), operator copy must not command a
+    /// console top-up as if SuperGrok included were empty.
+    #[test]
+    fn console_team_403_user_message_must_not_tell_operator_to_purchase_console_credits_while_included_has_room()
+     {
+        let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+            used all available credits or reached its monthly spending limit. \
+            To continue making API requests, please purchase more credits.";
+        let msg = credit_exhausted_user_message_for_included_period(team_body, Some(27.0));
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            lower.contains("console team prepaid") && lower.contains("console api credits"),
+            "must name console team prepaid / console API credits: {msg}"
+        );
+        assert!(
+            lower.contains("stay on supergrok"),
+            "must say stay on SuperGrok: {msg}"
+        );
+        assert!(
+            lower.contains("client printout") && lower.contains("not xai billing truth"),
+            "must say grok-oss remaining is a client printout, not xAI billing truth: {msg}"
+        );
+        assert!(!lower.contains("used up"), "must not say used up: {msg}");
+        assert!(
+            !lower.contains("purchase more")
+                && !lower.contains("add credits")
+                && !lower.contains("used all available credits"),
+            "must not command a console top-up as if SuperGrok included were empty: {msg}"
+        );
+        assert!(
+            !lower.contains("free"),
+            "SuperGrok is paid; must not call SuperGrok free: {msg}"
+        );
+    }
+
+    /// Operator shot 2026-08-21: footer `console · $12.45` while compact
+    /// painted "Add credits and retry." That pair is a product lie.
+    #[test]
+    fn compact_credit_block_must_not_tell_operator_to_add_credits_when_console_prepaid_remaining_is_painted()
+     {
+        let msg = compact_credit_block_user_message(
+            Some("API error (status 402 Payment Required): Grok Build usage balance exhausted"),
+            Some(1_245),
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("add credits"),
+            "must not tell the operator to add credits while console team prepaid remaining is on the chip: {msg}"
+        );
+        assert!(
+            !lower.contains("out of credits"),
+            "must not say out of credits while console · $12.45 is painted: {msg}"
+        );
+        assert!(
+            lower.contains("console team prepaid"),
+            "must name the console team prepaid meter: {msg}"
+        );
+        assert!(
+            lower.contains("http 402") || lower.contains("payment required"),
+            "must classify the compact sampler HTTP 402 honestly: {msg}"
+        );
+        assert!(
+            lower.contains("client printout") || lower.contains("not xai billing truth"),
+            "must say grok-oss remaining is a client printout, not xAI billing truth: {msg}"
+        );
+        assert!(
+            !lower.contains("used up") && !lower.contains("exhausted"),
+            "must not mark SuperGrok used up from a printout: {msg}"
+        );
+        assert!(
+            msg.contains("Stay on SuperGrok if that is the live identity"),
+            "compact recovery must stay on SuperGrok if that is the live identity: {msg}"
+        );
+    }
+
+    /// Fail-open: even without a painted remaining figure, compact must not
+    /// command "Add credits and retry" as if the printout were billing truth.
+    #[test]
+    fn compact_credit_block_must_not_command_add_credits_from_a_client_printout() {
+        let msg = compact_credit_block_user_message(
+            Some("compact failed: API error (status 402 Payment Required): Payment Required"),
+            None,
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("add credits"),
+            "fail-open: compact must not command add credits from a client printout: {msg}"
+        );
+        assert!(
+            lower.contains("http 402") || lower.contains("payment required"),
+            "must name HTTP 402: {msg}"
+        );
+    }
+
+    /// Named contract: HTTP 502 is a gateway outage. A body that says
+    /// "Payment Required" or "usage limit" must not recode it as HTTP 402,
+    /// mark SuperGrok used up, or hop. Operator Usage wins over this printout.
+    #[test]
+    fn http_502_must_not_be_credit_exhausted_even_with_payment_required_body() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_GATEWAY,
+            message: "API error (status 502 Bad Gateway): Payment Required".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(
+            !err.is_credit_exhausted(),
+            "HTTP 502 must not hop or mark used-up even when the body says Payment Required"
+        );
+        assert!(err.is_retryable(), "502 stays a retryable outage");
+
+        let usage = SamplingError::Api {
+            status: StatusCode::BAD_GATEWAY,
+            message: "Grok Build usage balance exhausted".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(
+            !usage.is_credit_exhausted(),
+            "HTTP 502 must not recode Grok Build wording as SuperGrok used-up"
+        );
+
+        let add = SamplingError::Api {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "Add credits and retry.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(
+            !add.is_credit_exhausted(),
+            "HTTP 503 must not recode Add credits copy as billing empty"
+        );
+    }
+
+    /// Named contract: StreamError / Auth have no HTTP status field. A 502
+    /// wrap that also says Payment Required must not classify as used-up.
+    /// Real `status 402` in that text still does.
+    #[test]
+    fn stream_and_auth_502_text_must_not_be_credit_exhausted() {
+        let stream_502 = SamplingError::StreamError {
+            error_type: "server_error".into(),
+            message: "API error (status 502 Bad Gateway): Payment Required".into(),
+            code: None,
+        };
+        assert!(
+            !stream_502.is_credit_exhausted(),
+            "StreamError 502 text must not hop or mark used-up: {stream_502}"
+        );
+
+        let auth_502 =
+            SamplingError::auth_unknown("API error (status 502 Bad Gateway): Payment Required");
+        assert!(
+            !auth_502.is_credit_exhausted(),
+            "Auth 502 text must not hop or mark used-up: {auth_502}"
+        );
+
+        let stream_402 = SamplingError::StreamError {
+            error_type: "insufficient_quota".into(),
+            message: "API error (status 402 Payment Required): Payment Required".into(),
+            code: None,
+        };
+        assert!(
+            stream_402.is_credit_exhausted(),
+            "StreamError that names status 402 still hops"
+        );
+
+        let auth_402 = SamplingError::auth_unknown(
+            "API error (status 402 Payment Required): Payment Required",
+        );
+        assert!(
+            auth_402.is_credit_exhausted(),
+            "Auth that names status 402 still hops"
+        );
+    }
+
+    /// Named leftover: StreamError text `HTTP 502 Bad Gateway: Payment Required`
+    /// is a gateway outage stored without a status field. Fail-open: not used-up.
+    #[test]
+    fn stream_error_502_must_not_be_credit_exhausted() {
+        let err = SamplingError::StreamError {
+            error_type: "server_error".into(),
+            message: "HTTP 502 Bad Gateway: Payment Required".into(),
+            code: None,
+        };
+        assert!(
+            !err.is_credit_exhausted(),
+            "StreamError HTTP 502 Bad Gateway: Payment Required must not hop or mark used-up"
+        );
+    }
+
+    /// Named leftover: Auth text with 502 plus Payment Required is not billing empty.
+    #[test]
+    fn auth_error_502_must_not_be_credit_exhausted() {
+        let err = SamplingError::auth_unknown("HTTP 502 Bad Gateway: Payment Required");
+        assert!(
+            !err.is_credit_exhausted(),
+            "Auth HTTP 502 Bad Gateway: Payment Required must not hop or mark used-up"
+        );
+    }
+
+    /// Named contract: compact copy must not call a 502 a payment-required 402.
+    #[test]
+    fn compact_credit_block_must_not_recode_502_as_http_402() {
+        let msg = compact_credit_block_user_message(
+            Some("compact failed: API error (status 502 Bad Gateway): Payment Required"),
+            None,
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("http 402"),
+            "fail-open: 502 must not be recoded as HTTP 402: {msg}"
+        );
+        assert!(
+            !lower.contains("add credits"),
+            "502 must not command a SuperGrok dollar-credits top-up: {msg}"
+        );
+        assert!(
+            !lower.contains("used up") && !lower.contains("exhausted"),
+            "502 must not mark SuperGrok used up: {msg}"
         );
     }
 

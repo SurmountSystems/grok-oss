@@ -10,19 +10,23 @@
 # Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
 # pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
 # Optional on this Linux host: `just check-remote` realizes flake metadata
-# and the workspace cargo quality derivation (fmt, clippy, test compile) on
+# and the workspace cargo quality derivation (the same gate as `just check` /
+# `just test`: fmt, clippy, workspace nextest, doctests, cargo-mem-guard) on
 # the existing trusted-user remote builder (default $HOME/.config/nix/machines).
-# rustc must not run on the caller. Those rustc jobs require surmount-remote
-# (plus big-parallel). This laptop never auto-detects surmount-remote; the
-# ssh-ng machines line must advertise it. --option system-features that omit
-# big-parallel does not stop local nixbld: the daemon still advertises
-# big-parallel. Tiny crane vendor unpacks that prefer a local build may run here.
-# Force-remote nix passes --cores 64 so one workspace rustc can use the
-# builder's cores. The host machines file max-jobs should match that width.
-# Force-remote exports NIX_SSHOPTS (this account's known_hosts; host-key
-# checks stay on) and copies that host key onto the builders line for
-# nix-daemon SSH. Default `just check` / `just ci` stay local. GitHub
-# Actions must not use check-remote.
+# Named filters: `just test-remote` / `just cargo-remote` realize
+# .#workspace-cargo-named-test the same way (force-remote nix, not host
+# rustc). rustc must not run on the caller. Those rustc jobs require
+# surmount-remote (plus big-parallel). This laptop never auto-detects
+# surmount-remote; the ssh-ng machines line must advertise it. --option
+# system-features that omit big-parallel does not stop local nixbld: the
+# daemon still advertises big-parallel. Tiny crane vendor unpacks that
+# prefer a local build may run here. Force-remote nix passes --cores 64 so
+# one workspace rustc can use the builder's cores. The host machines file
+# max-jobs should match that width. Force-remote exports NIX_SSHOPTS (this
+# account's known_hosts; host-key checks stay on) and copies that host key
+# onto the builders line for nix-daemon SSH. Default `just check` /
+# `just ci` stay local. GitHub Actions must not use check-remote,
+# test-remote, or cargo-remote.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -193,7 +197,7 @@ require_remote_builder:
     fi
     echo "==> just check-remote: using builders file ${file}"
     echo "==> just check-remote: NIX_SSHOPTS uses this account's known_hosts (host-key checks stay on)"
-    echo "==> just check-remote: rustc/clippy requires the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job. Tiny vendor unpacks that prefer a local build may run here."
+    echo "==> just check-remote: rustc, clippy, and nextest require the remote builder surmount-remote feature (fallback=false). This laptop does not advertise that feature, so local nixbld cannot take the rustc job. Tiny vendor unpacks that prefer a local build may run here."
     echo "==> just check-remote: force-remote nix uses --cores 64. Host machines max-jobs should advertise that many jobs on the builder."
 
 # Retry a nix (or other) command. Integer-validates NIX_RETRY_ATTEMPTS (default 4).
@@ -376,9 +380,12 @@ nix_retry +cmd:
 #   nix_retry smoke).
 #
 # There is no `ci-quick` or `ci-host` recipe — use `check`/`ci` or `test`.
-# Optional `check-remote` sends workspace rustc/clippy to the remote builder
-# (surmount-remote). Vendor unpacks may stay on this machine. Default
-# `just check` / `just ci` stay local.
+# Optional `check-remote` sends that same full cargo gate (fmt, clippy,
+# nextest, doctests, cargo-mem-guard) to the remote builder
+# (surmount-remote). Named `just test-remote` / `just cargo-remote` send
+# a filter (cargo test / nextest / clippy / build / check) the same way.
+# Vendor unpacks may stay on this machine. Default `just check` /
+# `just ci` stay local.
 #
 # Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
 # nix monorepo release build — that OOMs on ~16GB runners). Same flag also
@@ -388,9 +395,10 @@ nix_retry +cmd:
 # Alias: same full gate as `ci` (preferred short name before push).
 check: ci
 
-# Optional remote gate: flake metadata plus workspace cargo fmt/clippy/test
-# compile as Nix derivations. rustc requires the remote builder's
-# surmount-remote feature. Default `just check` stays local.
+# Optional remote gate: flake metadata plus the same workspace cargo gate as
+# `just check` (fmt, clippy, nextest run, doctests, cargo-mem-guard) as a
+# Nix derivation. rustc requires the remote builder's surmount-remote
+# feature. Default `just check` stays local.
 check-remote: require_system require_remote_builder
     #!/usr/bin/env bash
     set -euo pipefail
@@ -407,6 +415,84 @@ check-remote: require_system require_remote_builder
     just flake-meta
     echo "==> just check-remote: workspace cargo quality as a remote Nix derivation"
     just nix_retry nix build -L ".#workspace-cargo-quality"
+
+# Named cargo on the same remote builder as check-remote (surmount-remote).
+# Kind is test, nextest, clippy, build, or check. Remaining words are the
+# cargo/nextest argv after that subcommand. rustc does not run on this
+# laptop. GitHub Actions must not call this recipe.
+#
+#   just cargo-remote test -p xai-grok-pager --lib -- actions::defaults
+#   just cargo-remote clippy -p xai-grok-pager --all-targets -- -D warnings
+#   just cargo-remote build -p xai-grok-pager
+[positional-arguments]
+cargo-remote *args: require_system
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just remote_named_cargo "$@"
+
+# Named cargo test on the remote builder. Same path as cargo-remote test.
+# Example: just test-remote -p xai-grok-pager --lib -- actions::defaults
+# That is cargo test --locked (tests execute; not compile-only). Full gate:
+# just check-remote.
+[positional-arguments]
+test-remote *args: require_system
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just remote_named_cargo test "$@"
+
+# Shared body for test-remote / cargo-remote. Check argv before
+# require_remote_builder so a missing filter does not SSH. Encode filters
+# as base64 NUL-separated env for flake builtins.getEnv (nix build --impure).
+# Do not put filter words on the nix_retry argv.
+[private]
+[positional-arguments]
+remote_named_cargo *args: require_system
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ $# -lt 1 ]]; then
+      echo "just cargo-remote needs a kind (test, nextest, clippy, build, or check) and a filter." >&2
+      echo "Example: just test-remote -p xai-grok-pager --lib -- actions::defaults" >&2
+      echo "That runs cargo test on the remote builder. It does not run rustc on this laptop." >&2
+      echo "Full gate: just check-remote." >&2
+      exit 2
+    fi
+    kind="$1"
+    shift
+    case "${kind}" in
+      test|nextest|clippy|build|check) ;;
+      *)
+        echo "just cargo-remote kind must be test, nextest, clippy, build, or check, got: ${kind}" >&2
+        exit 2
+        ;;
+    esac
+    if [[ $# -lt 1 ]]; then
+      echo "just cargo-remote ${kind} needs a filter (for example -p xai-grok-pager --lib -- actions::defaults)." >&2
+      echo "Refusing to run the whole workspace on the builder from an empty filter. Full gate: just check-remote." >&2
+      exit 2
+    fi
+    if [[ "${kind}" == "test" || "${kind}" == "nextest" ]]; then
+      for a in "$@"; do
+        if [[ "${a}" == "--no-run" ]]; then
+          echo "just test-remote / just cargo-remote ${kind} runs the tests on the remote builder. Do not pass --no-run (that is compile-only)." >&2
+          exit 2
+        fi
+      done
+    fi
+    just require_remote_builder
+    export GROK_NIX_FORCE_REMOTE=1
+    export GROK_NIX_BUILDERS_FILE="${GROK_NIX_BUILDERS_FILE:-$HOME/.config/nix/machines}"
+    known_hosts="${GROK_NIX_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
+    extra_ssh="-o UserKnownHostsFile=${known_hosts} -o StrictHostKeyChecking=yes"
+    if [[ -n "${NIX_SSHOPTS:-}" ]]; then
+      export NIX_SSHOPTS="${NIX_SSHOPTS} ${extra_ssh}"
+    else
+      export NIX_SSHOPTS="${extra_ssh}"
+    fi
+    export GROK_REMOTE_CARGO_KIND="${kind}"
+    export GROK_REMOTE_TEST_ARGS="$(printf '%s\0' "$@" | base64 -w0)"
+    echo "==> just cargo-remote ${kind}: named cargo ${kind} as a remote Nix derivation (nix build --impure \".#workspace-cargo-named-test\")"
+    echo "==> rustc requires surmount-remote. This laptop does not run that rustc."
+    just nix_retry nix build --impure -L ".#workspace-cargo-named-test"
 
 # Full local gate — same recipe chain as GHA quality (flake + prep + all tests/lints).
 ci: require_system
@@ -542,20 +628,19 @@ dev-ci:
 # Quality gate (GHA `quality` job + local pre-push). No release build.
 #
 # Cargo host scope (not --all-features): Bazel-only features (default-bazel /
-# runfiles) break plain cargo. Not --all-targets on clippy: unit/integration
-# tests pull cross-crate `cfg(test)` seams that Bazel injects via default-bazel;
-# those need per-crate test-support (partially wired). Clippy therefore lints
-# production surfaces (--lib --bins). Unit/integration tests run via
+# runfiles) break plain cargo. Clippy uses --all-targets so it lints lib, bins,
+# tests, examples, benches, and `#[cfg(test)]` (cargo compile units, not extra
+# rustc targets such as aarch64). Unit/integration tests still run via
 # cargo-nextest (process-per-test isolation for globals like theme cache).
 # Doctests stay on `cargo test --doc` (nextest does not run rustdoc tests).
 #
-# Covers: fmt check, clippy -D warnings (lib+bins), workspace nextest, doctests,
+# Covers: fmt check, clippy -D warnings (--all-targets), workspace nextest, doctests,
 # cargo-mem-guard (workspace-excluded).
 test: test-fmt test-clippy test-unit test-doc test-mem-guard
     @echo "just test passed"
 
 # Local-only extras CI does not run.
-test-extra: test-clippy-targets test-nix-retry-smoke test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-quotes-quality-attr test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-exports-nix-sshopts test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features
+test-extra: test-clippy-targets test-clippy-all-targets test-nix-retry-smoke test-nix-retry-hard-remote-miss-fail-fast test-nix-retry-missing-system-features-fail-fast test-nix-retry-rustfmt-diff-fail-fast test-nix-retry-clippy-compile-fail-fast test-nix-retry-force-remote-argv-is-nix test-nix-retry-force-remote-ssh-ng-max-connections test-check-remote-builders-file-smoke test-check-remote-cargo-is-remote-nix-derivation test-check-remote-quotes-quality-attr test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero test-check-remote-uses-builder-cores test-check-remote-clippy-uses-many-workers test-check-remote-deps-omit-git-sha test-check-remote-omits-local-big-parallel test-check-remote-workspace-rustc-not-local-eligible test-check-remote-exports-nix-sshopts test-check-remote-preflight-same-path-as-nix-ssh test-check-remote-preflight-remote-daemon-features test-test-remote-is-force-remote-nix test-test-remote-runs-tests-not-no-run test-test-remote-workspace-rustc-not-local-eligible test-test-remote-requires-filter
     @echo "just test-extra passed"
 
 test-fmt:
@@ -563,8 +648,8 @@ test-fmt:
     just cargo-ci cargo fmt --all -- --check
 
 test-clippy:
-    @echo "==> cargo clippy --workspace --lib --bins (-D warnings)"
-    just cargo-ci cargo clippy --workspace --lib --bins --locked -- -D warnings
+    @echo "==> cargo clippy --workspace --all-targets (-D warnings)"
+    just cargo-ci cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # Process-per-test runner. Requires cargo-nextest on PATH (devShell / ci-tools /
 # or `cargo install cargo-nextest`). Under CI_LOW_MEM, cargo-mem-guard wraps the
@@ -582,6 +667,115 @@ test-mem-guard:
     @echo "==> cargo test cargo-mem-guard (workspace-excluded)"
     just cargo-ci cargo test --manifest-path crates/codegen/cargo-mem-guard/Cargo.toml --locked
 
+# Clippy must lint every cargo compile unit (`--all-targets`: lib, bins,
+# tests, examples, benches, `#[cfg(test)]`), not only `--lib --bins`.
+# That flag is cargo units, not extra rustc targets (aarch64 stays
+# `test-clippy-targets`). Instantiates just/flake text only. Does not
+# realize rustc. GHA must not call check-remote; check-remote stays the
+# backup gate.
+test-clippy-all-targets:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    gha="${root}/.github/workflows/ci.yml"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name ":") { p=1; next }
+        p && /^[a-zA-Z0-9_.-]+[ \t]*:/ { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    clippy_body="$(recipe_body test-clippy)"
+    targets_body="$(recipe_body test-clippy-targets)"
+    if [[ -z "${clippy_body}" ]]; then
+      echo "test-clippy-all-targets: expected just test-clippy" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'cargo clippy --workspace --all-targets --locked -- -D warnings' <<<"${clippy_body}"; then
+      echo "test-clippy-all-targets: just test-clippy must be cargo clippy --workspace --all-targets --locked -- -D warnings (lint tests, not only lib+bins):" >&2
+      echo "${clippy_body}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--lib --bins' <<<"${clippy_body}" && ! grep -q -- '--all-targets' <<<"${clippy_body}"; then
+      echo "test-clippy-all-targets: just test-clippy still has exclusive --lib --bins without --all-targets:" >&2
+      echo "${clippy_body}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--all-targets' <<<"${targets_body}"; then
+      echo "test-clippy-all-targets: just test-clippy-targets must pass --all-targets (cargo compile units, not extra CPUs):" >&2
+      echo "${targets_body}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--lib --bins' <<<"${targets_body}" && ! grep -q -- '--all-targets' <<<"${targets_body}"; then
+      echo "test-clippy-all-targets: just test-clippy-targets still has exclusive --lib --bins without --all-targets:" >&2
+      echo "${targets_body}" >&2
+      exit 1
+    fi
+    quality="$(awk '
+      $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /openrouter-credentials/ { exit }
+      p { print }
+    ' "${flake}")"
+    named="$(awk '
+      $0 ~ /workspace-cargo-named-test = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /ciLowMemEnv/ { exit }
+      p { print }
+    ' "${flake}")"
+    if ! grep -q 'clippy-driver' <<<"${quality}"; then
+      echo "test-clippy-all-targets: workspace-cargo-quality must still lint with clippy-driver:" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS" --workspace --all-targets --locked' <<<"${quality}"; then
+      echo "test-clippy-all-targets: quality clippy cargo check must be --workspace --all-targets (tests wrapped by clippy-driver):" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--workspace --lib --bins' <<<"${quality}" && ! grep -q -- '--all-targets' <<<"${quality}"; then
+      echo "test-clippy-all-targets: quality still has exclusive --lib --bins without --all-targets:" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    clippy_kind="$(awk '
+      $0 ~ /clippy\)/ { p=1 }
+      p && $0 ~ /build\)/ { exit }
+      p { print }
+    ' <<<"${named}")"
+    if ! grep -q -- '--all-targets' <<<"${clippy_kind}"; then
+      echo "test-clippy-all-targets: named-test clippy kind must pass --all-targets on cargo check:" >&2
+      echo "${clippy_kind}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--lib --bins' <<<"${clippy_kind}" && ! grep -q -- '--all-targets' <<<"${clippy_kind}"; then
+      echo "test-clippy-all-targets: named-test clippy kind still has exclusive --lib --bins without --all-targets:" >&2
+      echo "${clippy_kind}" >&2
+      exit 1
+    fi
+    if grep -q 'check-remote' "${gha}"; then
+      echo "test-clippy-all-targets: GitHub Actions must not call check-remote" >&2
+      exit 1
+    fi
+    if ! grep -qE '^check-remote:' "${justfile}"; then
+      echo "test-clippy-all-targets: just check-remote must stay as the backup gate" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    phase="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.buildPhase")"
+    if ! grep -q -- '--all-targets' <<<"${phase}"; then
+      echo "test-clippy-all-targets: instantiated quality buildPhase must cargo check --all-targets:" >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--workspace --lib --bins' <<<"${phase}" && ! grep -q -- '--all-targets' <<<"${phase}"; then
+      echo "test-clippy-all-targets: instantiated quality still has exclusive --lib --bins without --all-targets:" >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    echo "test-clippy-all-targets: ok (just/flake clippy --all-targets; GHA does not call check-remote; check-remote stays)"
+
 # Cross-target clippy (local / test-extra). Not on free GHA quality job.
 # Override: EXTRA_CLIPPY_TARGETS="aarch64-unknown-linux-gnu ..."
 test-clippy-targets:
@@ -594,12 +788,12 @@ test-clippy-targets:
         echo "==> clippy target ${t}: skip (host, already in test-clippy)"
         continue
       fi
-      echo "==> cargo clippy --target ${t} --workspace --lib --bins (-D warnings)"
+      echo "==> cargo clippy --target ${t} --workspace --all-targets (-D warnings)"
       if [[ "${CI_LOW_MEM:-}" == "1" ]]; then
         nix develop {{ nix_low_mem_opts }} .#ci -c cargo-mem-guard -- \
-          cargo clippy --workspace --lib --bins --locked --target "${t}" -- -D warnings
+          cargo clippy --workspace --all-targets --locked --target "${t}" -- -D warnings
       else
-        cargo clippy --workspace --lib --bins --locked --target "${t}" -- -D warnings
+        cargo clippy --workspace --all-targets --locked --target "${t}" -- -D warnings
       fi
     done
 
@@ -626,10 +820,12 @@ test-check-remote-builders-file-smoke:
     fi
     echo "test-check-remote-builders-file-smoke: ok (missing builders file exited ${status})"
 
-# Prove `just check-remote` sends cargo fmt/clippy/test compile through a
-# remote Nix derivation (builders file via nix_retry, rustc requires
-# big-parallel). Does not realize that derivation. Default `just ci` must
-# still be local host cargo. GHA must not call check-remote.
+# Prove `just check-remote` sends the same cargo gate as `just check` /
+# `just ci` (`just test`: fmt, clippy, workspace nextest, doctests,
+# cargo-mem-guard) through a remote Nix derivation (builders file via
+# nix_retry, rustc requires big-parallel). Tests must actually run, not
+# compile-only `--no-run`. Does not realize that derivation. Default
+# `just ci` must still be local host cargo. GHA must not call check-remote.
 test-check-remote-cargo-is-remote-nix-derivation:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -680,12 +876,49 @@ test-check-remote-cargo-is-remote-nix-derivation:
       echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix must set preferLocalBuild = false on the cargo quality derivation" >&2
       exit 1
     fi
-    if ! grep -q 'clippy --workspace' "${flake}"; then
-      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must run workspace clippy" >&2
+    quality="$(awk '
+      $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /openrouter-credentials/ { exit }
+      p { print }
+    ' "${flake}")"
+    if ! grep -q 'clippy-driver' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must lint with clippy-driver (not skip clippy)" >&2
+      echo "${quality}" >&2
       exit 1
     fi
-    if ! grep -q 'test --workspace --locked --no-run' "${flake}"; then
-      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must compile tests with cargo test --no-run" >&2
+    if ! grep -qE -- '--workspace --all-targets --locked' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must still lint the workspace (--all-targets)" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if grep -qE -- '--workspace --lib --bins' <<<"${quality}" && ! grep -q -- '--all-targets' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: quality must not lint only --lib --bins without --all-targets" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'nextest run --workspace --locked' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: flake.nix workspace-cargo-quality must run cargo nextest run --workspace --locked (tests must actually execute, same as just test)" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if grep -q -- '--no-run' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: workspace-cargo-quality must not be compile-only (no cargo --no-run)" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'test --workspace --doc' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: workspace-cargo-quality must run cargo test --workspace --doc like just test" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'crates/codegen/cargo-mem-guard/Cargo.toml' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: workspace-cargo-quality must run workspace-excluded cargo-mem-guard tests like just test" >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'cargo-nextest' <<<"${quality}"; then
+      echo "test-check-remote-cargo-is-remote-nix-derivation: workspace-cargo-quality must put cargo-nextest on the derivation PATH" >&2
+      echo "${quality}" >&2
       exit 1
     fi
     sys="$(bash "${root}/scripts/nix-current-system.sh")"
@@ -800,10 +1033,11 @@ test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
 # low-memory package sandbox. Force-remote nix must pass --cores 64 so
 # NIX_BUILD_CORES follows the builder, and workspace-cargo-quality must set
 # CARGO_BUILD_JOBS to 32 (OOM hedge vs 64 rustc processes). Cargo clippy
-# and test compile must pass --jobs on argv from those cores (capped),
+# and cargo test --doc must pass --jobs on argv from those cores (capped),
 # after the subcommand (`cargo clippy --jobs N`; cargo 1.97 has no global
 # `cargo --jobs`), and must drop MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token
-# jobserver cannot ignore --jobs. Must use the dev profile like local `just test-clippy`,
+# jobserver cannot ignore --jobs. cargo nextest run uses CARGO_BUILD_JOBS
+# for rustc. Must use the dev profile like local `just test-clippy`,
 # not crane's default --release check (one rustc thread at opt-level 3).
 # Host machines max-jobs lives outside this tree. Does not realize the
 # derivation.
@@ -876,13 +1110,13 @@ test-check-remote-uses-builder-cores:
       exit 1
     fi
     if grep -qE -- 'cargo --jobs' <<<"${quality}${artifacts}"; then
-      echo "test-check-remote-uses-builder-cores: cargo 1.97 has no global --jobs; put --jobs after the subcommand (cargo clippy --jobs, cargo check --jobs)." >&2
+      echo "test-check-remote-uses-builder-cores: cargo 1.97 has no global --jobs; put --jobs after the subcommand (cargo check --jobs, cargo test --jobs)." >&2
       echo "${quality}" >&2
       echo "${artifacts}" >&2
       exit 1
     fi
-    if ! grep -qE -- 'clippy --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${quality}"; then
-      echo "test-check-remote-uses-builder-cores: clippy must pass --jobs after the subcommand (cargo clippy --jobs)." >&2
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace clippy must pass --jobs after cargo check (builtin; cargo clippy is an external dispatcher)." >&2
       echo "${quality}" >&2
       exit 1
     fi
@@ -923,7 +1157,201 @@ test-check-remote-uses-builder-cores:
       echo "test-check-remote-uses-builder-cores: expected CARGO_PROFILE=dev on workspace-cargo-quality, got ${profile}" >&2
       exit 1
     fi
+    # Instantiated buildPhase is what the remote builder runs. Source greps
+    # can pass while crane preBuild copies NIX_BUILD_CORES=1 into
+    # CARGO_BUILD_JOBS and a 1-token jobserver ignores later --jobs.
+    phase="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.buildPhase")"
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${phase}"; then
+      echo "test-check-remote-uses-builder-cores: instantiated buildPhase must pass cargo check --jobs from CARGO_BUILD_JOBS (cap 32 from NIX_BUILD_CORES) for workspace clippy." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    clippy_cmd="$(grep 'clippy-driver' <<<"${phase}" | head -1 || true)"
+    nextest_cmd="$(grep 'cargo nextest' <<<"${phase}" | head -1 || true)"
+    doctest_cmd="$(grep 'cargo test --workspace --doc' <<<"${phase}" | head -1 || true)"
+    if grep -qE -- '-j[[:space:]]*1|--jobs[[:space:]]+1' <<<"${clippy_cmd}"; then
+      echo "test-check-remote-uses-builder-cores: clippy must not be given --jobs 1." >&2
+      echo "${clippy_cmd}" >&2
+      exit 1
+    fi
+    unset_line="$(grep -n 'unset MAKEFLAGS' <<<"${phase}" | head -1 | cut -d: -f1 || true)"
+    clippy_line="$(grep -n 'clippy-driver' <<<"${phase}" | head -1 | cut -d: -f1 || true)"
+    nextest_line="$(grep -n 'cargo nextest' <<<"${phase}" | head -1 | cut -d: -f1 || true)"
+    doctest_line="$(grep -n 'cargo test --workspace --doc' <<<"${phase}" | head -1 | cut -d: -f1 || true)"
+    if [[ -z "${unset_line}" ]] || ! grep -q 'CARGO_MAKEFLAGS' <<<"${phase}"; then
+      echo "test-check-remote-uses-builder-cores: instantiated buildPhase must unset MAKEFLAGS and CARGO_MAKEFLAGS so a 1-token jobserver cannot ignore --jobs." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if [[ -z "${clippy_line}" || "${unset_line}" -ge "${clippy_line}" ]]; then
+      echo "test-check-remote-uses-builder-cores: unset MAKEFLAGS must run before clippy-driver workspace lint." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if [[ -z "${nextest_line}" || "${unset_line}" -ge "${nextest_line}" ]]; then
+      echo "test-check-remote-uses-builder-cores: unset MAKEFLAGS must run before cargo nextest (not -j1)." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if [[ -z "${doctest_line}" || "${unset_line}" -ge "${doctest_line}" ]]; then
+      echo "test-check-remote-uses-builder-cores: unset MAKEFLAGS must run before cargo test --doc." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--jobs "$CARGO_BUILD_JOBS"' <<<"${doctest_cmd}"; then
+      echo "test-check-remote-uses-builder-cores: instantiated cargo test --doc must pass --jobs from CARGO_BUILD_JOBS." >&2
+      echo "${doctest_cmd}" >&2
+      exit 1
+    fi
+    if grep -qE -- '-j[[:space:]]*1|--jobs[[:space:]]+1' <<<"${nextest_cmd}"; then
+      echo "test-check-remote-uses-builder-cores: nextest must not be given -j1." >&2
+      echo "${nextest_cmd}" >&2
+      exit 1
+    fi
+    if grep -q 'floor="${CARGO_BUILD_JOBS' <<<"${phase}" || grep -q "floor=\"\${CARGO_BUILD_JOBS" <<<"${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: do not floor cargo jobs from CARGO_BUILD_JOBS (crane preBuild can set it to NIX_BUILD_CORES=1)." >&2
+      echo "${jobs_helper}" >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'cargoJobs" -lt 2|"\$cargoJobs" -lt 2' <<<"${phase}"; then
+      echo "test-check-remote-uses-builder-cores: when NIX_BUILD_CORES is 1, cargo jobs must still become 32 (cap), not one rustc." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
     echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 32 from cores on argv; CARGO_PROFILE=dev; package sandbox still 2)"
+
+# `cargo clippy --workspace --jobs N` is an external cargo-clippy binary.
+# The outer cargo may start a 1-token GNU jobserver from
+# available_parallelism() (often 1 in a Nix sandbox). Inner `--jobs N` is
+# then ignored: one clippy-driver, sequential Checking, idle cores.
+# Quality must lint via builtin `cargo check` + clippy-driver under a GNU
+# make jobserver with $CARGO_BUILD_JOBS tokens (cap 32). Must not loop
+# `cargo clippy -p` with -j1. Does not realize rustc.
+test-check-remote-clippy-uses-many-workers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    flake="${root}/flake.nix"
+    jobs_helper="$(awk '
+      $0 ~ /workspaceCargoJobsFromCores =/ { p=1 }
+      p && $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { exit }
+      p { print }
+    ' "${flake}")"
+    quality="$(awk '
+      $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /openrouter-credentials/ { exit }
+      p { print }
+    ' "${flake}")"
+    named="$(awk '
+      $0 ~ /workspace-cargo-named-test = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /ciLowMemEnv/ { exit }
+      p { print }
+    ' "${flake}")"
+    if grep -qE -- 'cargo clippy --' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: workspace-cargo-quality must not invoke cargo clippy (external dispatcher; 1-token jobserver). Use cargo check + clippy-driver." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspace_run_make_jobserver' <<<"${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: workspaceCargoJobsFromCores must define workspace_run_make_jobserver (GNU make -j\$CARGO_BUILD_JOBS tokens)." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'make -j"\$CARGO_BUILD_JOBS"' <<<"${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: jobserver helper must run make -j\"\$CARGO_BUILD_JOBS\" (cap 32 from cores)." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'RUSTC_WORKSPACE_WRAPPER' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality must set RUSTC_WORKSPACE_WRAPPER to clippy-driver." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'clippy-driver' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality must run clippy-driver (workspace lint)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'CLIPPY_ARGS' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality must set CLIPPY_ARGS so clippy-driver still denies warnings." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- '-D__CLIPPY_HACKERY__warnings|CLIPPY_ARGS=.*-D' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: CLIPPY_ARGS must deny warnings (-D warnings via clippy-driver)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspace_run_make_jobserver' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality clippy must run under workspace_run_make_jobserver so independent crates share a \$CARGO_BUILD_JOBS-token jobserver." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS" --workspace --all-targets --locked' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality must cargo check --workspace --all-targets --jobs from cores (one cargo; not a per-crate -j1 loop)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if grep -qE -- 'for[[:space:]].+in[[:space:]].+; do' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality must not loop crates (cargo lock serializes cargo clippy -p; -j1 is forbidden)." >&2
+      echo "${quality}" >&2
+      exit 1
+    fi
+    if grep -qE -- '-j[[:space:]]*1|--jobs[[:space:]]+1' <<<"${quality}${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: quality clippy/jobserver must not pass -j1 / --jobs 1." >&2
+      echo "${quality}" >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    phase="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.buildPhase")"
+    if grep -qE -- 'cargo clippy --' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated buildPhase must not invoke cargo clippy." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -q 'clippy-driver' <<<"${phase}" || ! grep -q 'RUSTC_WORKSPACE_WRAPPER' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated buildPhase must set RUSTC_WORKSPACE_WRAPPER=clippy-driver." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspace_run_make_jobserver' <<<"${phase}" || ! grep -qE -- 'make -j"\$CARGO_BUILD_JOBS"' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated buildPhase must run make -j\"\$CARGO_BUILD_JOBS\" for clippy." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS" --workspace --all-targets --locked' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated clippy must be cargo check --workspace --all-targets --jobs from CARGO_BUILD_JOBS." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if grep -qE -- '-j[[:space:]]*1|--jobs[[:space:]]+1' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated buildPhase must not pass -j1 / --jobs 1." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if grep -qE -- 'for[[:space:]].+in[[:space:]].+; do' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated buildPhase must not loop crates with cargo clippy -p." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -q 'clippy-driver' <<<"${named}" || ! grep -q 'workspace_run_make_jobserver' <<<"${named}"; then
+      echo "test-check-remote-clippy-uses-many-workers: named-test clippy kind must use clippy-driver + make jobserver too." >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    named_clippy="$(awk '
+      $0 ~ /clippy\)/ { p=1 }
+      p && $0 ~ /build\)/ { exit }
+      p { print }
+    ' <<<"${named}")"
+    if ! grep -q -- '--all-targets' <<<"${named_clippy}"; then
+      echo "test-check-remote-clippy-uses-many-workers: named-test clippy kind must cargo check --all-targets." >&2
+      echo "${named_clippy}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-clippy-uses-many-workers: ok (cargo check + clippy-driver; make -j\$CARGO_BUILD_JOBS jobserver; no cargo clippy dispatcher; no -j1 crate loop)"
 
 # Dummy workspace deps stubs do not need the pager build-id. GROK_GIT_SHA
 # from dirtyShortRev must not be on workspace-cargo-quality-deps or a dirty
@@ -1354,6 +1782,240 @@ test-check-remote-preflight-remote-daemon-features:
       exit 1
     fi
     echo "test-check-remote-preflight-remote-daemon-features: ok (inject miss fails; inject with surmount-remote passes; no live SSH)"
+
+# Prove `just test-remote` / `just cargo-remote` send named cargo through the
+# same force-remote nix path as check-remote (GROK_NIX_FORCE_REMOTE,
+# require_remote_builder, nix build --impure .#workspace-cargo-named-test).
+# Does not realize rustc. Default just ci stays local. GHA must not call
+# test-remote or cargo-remote.
+test-test-remote-is-force-remote-nix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    gha="${root}/.github/workflows/ci.yml"
+    recipe_body() {
+      local name="$1"
+      awk -v name="${name}" '
+        $0 ~ ("^" name "([ \t*:]|:)") { p=1; next }
+        p && (/^\[/ || /^[a-zA-Z0-9_.-]+([ \t]|:)/) { exit }
+        p { print }
+      ' "${justfile}"
+    }
+    named_body="$(recipe_body remote_named_cargo)"
+    test_body="$(recipe_body test-remote)"
+    cargo_body="$(recipe_body cargo-remote)"
+    if ! grep -qE '^test-remote:' "${justfile}" && ! grep -qE '^test-remote \*args:' "${justfile}"; then
+      echo "test-test-remote-is-force-remote-nix: justfile must define test-remote:" >&2
+      exit 1
+    fi
+    if ! grep -q 'remote_named_cargo test' <<<"${test_body}"; then
+      echo "test-test-remote-is-force-remote-nix: test-remote must invoke remote_named_cargo test:" >&2
+      echo "${test_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'remote_named_cargo' <<<"${cargo_body}"; then
+      echo "test-test-remote-is-force-remote-nix: cargo-remote must invoke remote_named_cargo:" >&2
+      echo "${cargo_body}" >&2
+      exit 1
+    fi
+    if grep -qE '^[[:space:]]*just[[:space:]]+(ci|test|cargo-ci)([[:space:]]|$)' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: named remote cargo must not run host just ci/test/cargo-ci:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'GROK_NIX_FORCE_REMOTE=1' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: remote_named_cargo must set GROK_NIX_FORCE_REMOTE=1:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'require_remote_builder' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: remote_named_cargo must invoke require_remote_builder:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--impure' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: nix build must pass --impure so builtins.getEnv sees the filter:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if grep -qE '(^|[^"'\''])\.#workspace-cargo-named-test' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: must quote .#workspace-cargo-named-test (unquoted # is a bash comment):" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -qE '["'\'']\.#workspace-cargo-named-test["'\'']' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: must nix build the quoted .#workspace-cargo-named-test attr:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'GROK_REMOTE_TEST_ARGS' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: must export GROK_REMOTE_TEST_ARGS for flake getEnv:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if ! grep -q 'GROK_REMOTE_CARGO_KIND' <<<"${named_body}"; then
+      echo "test-test-remote-is-force-remote-nix: must export GROK_REMOTE_CARGO_KIND:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    if grep -qE 'test-remote|cargo-remote|workspace-cargo-named-test' "${gha}"; then
+      echo "test-test-remote-is-force-remote-nix: GitHub Actions must not call test-remote, cargo-remote, or workspace-cargo-named-test" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspace-cargo-named-test' "${flake}"; then
+      echo "test-test-remote-is-force-remote-nix: flake.nix must define workspace-cargo-named-test" >&2
+      exit 1
+    fi
+    echo "test-test-remote-is-force-remote-nix: ok (force-remote nix build --impure .#workspace-cargo-named-test; GHA does not call it)"
+
+# Named remote tests must actually execute (cargo test / nextest run), not
+# compile-only. Does not realize rustc. Does not weaken check-remote smokes.
+test-test-remote-runs-tests-not-no-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    justfile="${root}/justfile"
+    flake="${root}/flake.nix"
+    named="$(awk '
+      $0 ~ /workspace-cargo-named-test = craneLib.mkCargoDerivation/ { p=1 }
+      p && $0 ~ /ciLowMemEnv/ { exit }
+      p { print }
+    ' "${flake}")"
+    if [[ -z "${named}" ]]; then
+      echo "test-test-remote-runs-tests-not-no-run: expected workspace-cargo-named-test in flake.nix" >&2
+      exit 1
+    fi
+    if ! grep -qE 'cargo test --locked' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must run cargo test --locked (tests execute):" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'nextest run --locked' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must be able to run cargo nextest run --locked:" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -q 'clippy-driver' <<<"${named}" || ! grep -qE 'cargo build' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must support clippy-driver lint and cargo build kinds:" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if grep -q -- '--no-run' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: workspace-cargo-named-test must not be compile-only (no cargo --no-run):" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -q 'preferLocalBuild = false' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must set preferLocalBuild = false:" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -q 'surmount-remote' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must require surmount-remote:" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -q 'builtins.getEnv "GROK_REMOTE_TEST_ARGS"' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must read GROK_REMOTE_TEST_ARGS via builtins.getEnv:" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspaceCargoArtifacts' <<<"${named}"; then
+      echo "test-test-remote-runs-tests-not-no-run: named-test must reuse workspaceCargoArtifacts (same remote rustc cache as quality):" >&2
+      echo "${named}" >&2
+      exit 1
+    fi
+    named_body="$(awk '
+      $0 ~ /^remote_named_cargo / { p=1; next }
+      p && (/^\[/ || /^[a-zA-Z0-9_.-]+([ \t]|:)/) { exit }
+      p { print }
+    ' "${justfile}")"
+    if ! grep -q -- '--no-run' <<<"${named_body}"; then
+      echo "test-test-remote-runs-tests-not-no-run: just recipe must reject --no-run for test/nextest:" >&2
+      echo "${named_body}" >&2
+      exit 1
+    fi
+    echo "test-test-remote-runs-tests-not-no-run: ok (cargo test / nextest run; no --no-run in the derivation)"
+
+# Instantiates the named-test drv only. rustc requires surmount-remote so
+# this laptop is not eligible. Does not run test-remote or realize rustc.
+test-test-remote-workspace-rustc-not-local-eligible:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="{{ justfile_directory() }}"
+    flake="${root}/flake.nix"
+    sys="$(bash "${root}/scripts/nix-current-system.sh")"
+    if ! grep -A30 'workspace-cargo-named-test = craneLib.mkCargoDerivation' "${flake}" | grep -q 'surmount-remote'; then
+      echo "test-test-remote-workspace-rustc-not-local-eligible: workspace-cargo-named-test must require surmount-remote" >&2
+      exit 1
+    fi
+    feats="$(nix eval ".#packages.${sys}.workspace-cargo-named-test.requiredSystemFeatures")"
+    if ! grep -q 'surmount-remote' <<<"${feats}" || ! grep -q 'big-parallel' <<<"${feats}"; then
+      echo "test-test-remote-workspace-rustc-not-local-eligible: expected requiredSystemFeatures to include big-parallel and surmount-remote, got ${feats}" >&2
+      exit 1
+    fi
+    prefer="$(nix eval ".#packages.${sys}.workspace-cargo-named-test.preferLocalBuild")"
+    if [[ "${prefer}" != "false" ]]; then
+      echo "test-test-remote-workspace-rustc-not-local-eligible: expected preferLocalBuild=false, got ${prefer}" >&2
+      exit 1
+    fi
+    echo "test-test-remote-workspace-rustc-not-local-eligible: ok (named-test rustc requires surmount-remote; preferLocalBuild=false)"
+
+# A missing filter or --no-run must exit 2 before require_remote_builder /
+# Nix. Does not SSH and does not realize rustc.
+test-test-remote-requires-filter:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set +e
+    empty_out="$(just test-remote 2>&1)"
+    empty_status=$?
+    set -e
+    if [[ "${empty_status}" -ne 2 ]]; then
+      echo "test-test-remote-requires-filter: just test-remote with no filter expected exit 2, got ${empty_status}" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'filter|test-remote' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty-filter message must name the missing filter:" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
+    if grep -qE 'nix attempt|nix build' <<<"${empty_out}"; then
+      echo "test-test-remote-requires-filter: empty filter must not start nix build:" >&2
+      echo "${empty_out}" >&2
+      exit 1
+    fi
+    set +e
+    norun_out="$(just test-remote --no-run 2>&1)"
+    norun_status=$?
+    set -e
+    if [[ "${norun_status}" -ne 2 ]]; then
+      echo "test-test-remote-requires-filter: just test-remote --no-run expected exit 2, got ${norun_status}" >&2
+      echo "${norun_out}" >&2
+      exit 1
+    fi
+    if ! grep -q -- '--no-run' <<<"${norun_out}"; then
+      echo "test-test-remote-requires-filter: --no-run reject message must name --no-run:" >&2
+      echo "${norun_out}" >&2
+      exit 1
+    fi
+    if grep -qE 'nix attempt|nix build' <<<"${norun_out}"; then
+      echo "test-test-remote-requires-filter: --no-run must not start nix build:" >&2
+      echo "${norun_out}" >&2
+      exit 1
+    fi
+    set +e
+    kind_out="$(just cargo-remote not-a-kind -p xai-grok-pager 2>&1)"
+    kind_status=$?
+    set -e
+    if [[ "${kind_status}" -ne 2 ]]; then
+      echo "test-test-remote-requires-filter: bad cargo-remote kind expected exit 2, got ${kind_status}" >&2
+      echo "${kind_out}" >&2
+      exit 1
+    fi
+    echo "test-test-remote-requires-filter: ok (empty filter and --no-run exit 2 before nix)"
 # `false` (proves banner + integer path). Also checks invalid attempts reject.
 test-nix-retry-smoke:
     #!/usr/bin/env bash

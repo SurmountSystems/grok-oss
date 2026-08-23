@@ -157,6 +157,121 @@
         );
     }
 
+    /// Host wait can say completed while the Subagents list still paints
+    /// Responding with a climbing timer. Kill then returns already completed.
+    /// The list must drop the row, clear Responding, and ignore leftover
+    /// SubagentProgress so the timer cannot keep climbing.
+    #[test]
+    fn kill_already_completed_drops_live_list_responding_and_still_running_cue() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-already-done";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "still streaming", "p-child", None),
+            &mut app,
+        );
+
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).len(),
+                1,
+                "precondition: live Subagents list must show the running row"
+            );
+            assert_eq!(agent.watchers().subagents, 1);
+            assert_eq!(
+                agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .unwrap()
+                    .activity_label
+                    .as_deref(),
+                Some("Responding")
+            );
+        }
+
+        let finalized = finalize_killed_subagent(
+            &mut app,
+            &acp::SessionId::new("sess-parent".to_owned()),
+            child_sid,
+            "completed",
+        );
+        assert!(
+            finalized,
+            "kill already-completed must finalize the still-painted row"
+        );
+
+        let duration_after_kill = {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values())
+                    .is_empty(),
+                "live Subagents list must not keep a completed row as running"
+            );
+            assert_eq!(
+                agent.watchers().subagents, 0,
+                "still-running cue must not count a completed nested agent"
+            );
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert!(info.finished);
+            assert_eq!(info.status.as_deref(), Some("completed"));
+            assert_ne!(
+                info.activity_label.as_deref(),
+                Some("Responding"),
+                "list must not keep painting Responding after kill already-completed"
+            );
+            let child = agent.subagent_views.get(child_sid).unwrap();
+            assert!(
+                !child.session.state.is_busy(),
+                "child view must not stay busy after kill already-completed"
+            );
+            assert_ne!(
+                child.session.tracker.activity(),
+                Some(crate::acp::tracker::TurnActivity::Responding)
+            );
+            info.duration_ms
+        };
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                XaiSessionUpdate::SubagentProgress {
+                    subagent_id: child_sid.into(),
+                    parent_session_id: "sess-parent".into(),
+                    child_session_id: child_sid.into(),
+                    duration_ms: 17_220_000,
+                    turn_count: 1,
+                    tool_call_count: 0,
+                    tokens_used: 0,
+                    context_window_tokens: 0,
+                    context_usage_pct: 0,
+                    tools_used: vec![],
+                    error_count: 0,
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "leftover SubagentProgress must not put the row back on the live list"
+        );
+        assert_eq!(agent.watchers().subagents, 0);
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert_ne!(info.activity_label.as_deref(), Some("Responding"));
+        assert_eq!(
+            info.duration_ms, duration_after_kill,
+            "leftover progress must not keep climbing the timer after kill already-completed"
+        );
+    }
+
     /// Thread-leak regression: every `SubagentSpawned` creates a child
     /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
     /// matcher thread used to spawn eagerly per view — one leaked thread per
@@ -398,6 +513,156 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let info = agent.subagent_sessions.get(child_sid).unwrap();
         assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+    }
+
+    #[test]
+    fn subagent_progress_drops_preparing_write_after_child_write_goes_stale() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-stale";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+            agent
+                .subagent_views
+                .get_mut(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .backdate_last_tool_call_delta(
+                    crate::acp::tracker::WRITING_DELTA_STALE_AFTER
+                        + std::time::Duration::from_secs(1),
+                );
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_progress("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let label = agent
+            .subagent_sessions
+            .get(child_sid)
+            .unwrap()
+            .activity_label
+            .as_deref();
+        assert_ne!(
+            label,
+            Some("Preparing write…"),
+            "after a stale child write, SubagentProgress must drop the parent stamp off Preparing write"
+        );
+    }
+
+    #[test]
+    fn nested_agent_is_killed_when_preparing_write_exceeds_named_stream_cap() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-capped";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent
+                .subagent_views
+                .get_mut(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .backdate_writing_stream_start(
+                    crate::acp::tracker::WRITING_STREAM_MAX + std::time::Duration::from_secs(1),
+                );
+            assert!(
+                agent
+                    .subagent_views
+                    .get(child_sid)
+                    .unwrap()
+                    .session
+                    .tracker
+                    .has_capped_tool_call_write(),
+                "stream start past WRITING_STREAM_MAX must be capped even while deltas stay fresh"
+            );
+            assert!(
+                !agent
+                    .subagent_views
+                    .get(child_sid)
+                    .unwrap()
+                    .session
+                    .tracker
+                    .has_stale_tool_call_write(),
+                "silence hide must not fire; this is a live trickle past the cap"
+            );
+        }
+
+        // Argument deltas keep arriving after the bound.
+        let _ = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(
+            info.pending_kill,
+            "a nested write past WRITING_STREAM_MAX must request cancel"
+        );
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                Effect::KillSubagent { subagent_id, .. } if subagent_id == child_sid
+            )),
+            "cap must queue x.ai/subagent/cancel, got {:?}",
+            app.pending_effects
+        );
+        assert_ne!(
+            info.activity_label.as_deref(),
+            Some("Preparing write…"),
+            "Preparing write must not stay on the parent stamp after the stream cap"
+        );
     }
 
     #[test]
@@ -1315,10 +1580,256 @@
             "impl: residual slice",
             "todo contents must survive compact"
         );
+        let counts = agent.todo.counts();
+        assert_eq!(
+            counts.in_progress, 1,
+            "compact must keep in-progress rows on the painted board"
+        );
+        assert_eq!(
+            counts.pending, 1,
+            "compact must keep pending rows on the painted board"
+        );
+        assert!(
+            counts.total() > 0,
+            "compact must not empty the painted board so the status badge can still render"
+        );
+        assert!(
+            !agent.todo.overlay.visible,
+            "compact must not auto-open the todo pane"
+        );
         assert_eq!(
             agent.context_state.as_ref().map(|c| c.used),
             Some(25_000),
             "context bar still refreshes on compact"
+        );
+    }
+
+    /// When the coordinator marks a nested agent completed (exit 0, last
+    /// answer already written), the Subagents list must drop `is_running`,
+    /// must not keep Responding, and leftover SubagentProgress must not
+    /// climb the elapsed timer. Kill is not required.
+    #[test]
+    fn coordinator_completed_nested_agent_leaves_live_list_not_responding() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-coordinator-done";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "last answer written", "p-child", None),
+            &mut app,
+        );
+
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert!(
+                info.is_running(),
+                "precondition: nested agent is still listed as running"
+            );
+            assert_eq!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).len(),
+                1,
+                "precondition: live Subagents list must show the running row"
+            );
+            assert_eq!(agent.watchers().subagents, 1);
+            assert_eq!(info.activity_label.as_deref(), Some("Responding"));
+        }
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+
+        let duration_after_complete = {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert!(
+                !info.is_running(),
+                "coordinator complete must clear list-row is_running"
+            );
+            assert_eq!(info.status.as_deref(), Some("completed"));
+            assert!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values())
+                    .is_empty(),
+                "live Subagents list must not keep a completed nested agent"
+            );
+            assert_eq!(
+                agent.watchers().subagents, 0,
+                "still-running cue must not count a completed nested agent"
+            );
+            assert_ne!(
+                info.activity_label.as_deref(),
+                Some("Responding"),
+                "list must not keep painting Responding after coordinator complete"
+            );
+            let child = agent.subagent_views.get(child_sid).unwrap();
+            assert!(
+                !child.session.state.is_busy(),
+                "child view must not stay busy after coordinator complete"
+            );
+            assert_ne!(
+                child.session.tracker.activity(),
+                Some(crate::acp::tracker::TurnActivity::Responding)
+            );
+            info.duration_ms
+        };
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                XaiSessionUpdate::SubagentProgress {
+                    subagent_id: child_sid.into(),
+                    parent_session_id: "sess-parent".into(),
+                    child_session_id: child_sid.into(),
+                    duration_ms: 16_020_000,
+                    turn_count: 1,
+                    tool_call_count: 0,
+                    tokens_used: 0,
+                    context_window_tokens: 0,
+                    context_usage_pct: 0,
+                    tools_used: vec![],
+                    error_count: 0,
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "leftover SubagentProgress must not put the row back on the live list"
+        );
+        assert_eq!(agent.watchers().subagents, 0);
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(!info.is_running());
+        assert_ne!(info.activity_label.as_deref(), Some("Responding"));
+        assert_eq!(
+            info.duration_ms, duration_after_complete,
+            "leftover progress must not keep climbing the timer after coordinator complete"
+        );
+    }
+
+    fn draw_nested_overlay_text(app: &mut AppView) -> String {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &crate::actions::ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            true,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Screenshot 2026-08-22 ~23:40: nested overlay for a finished L2 still
+    /// painted `Responding` with a climbing clock and `[pause] [stop]` after
+    /// the last assistant Job/State/You. ACP turn-end on the child session
+    /// must drop that live chrome. Last assistant text may stay.
+    #[test]
+    fn nested_overlay_drops_responding_after_child_acp_turn_completes() {
+        use std::time::{Duration, Instant};
+
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-billing-credits";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get_mut(child_sid).unwrap();
+            info.description = std::sync::Arc::from("Fetch Billing Credits card");
+            info.subagent_type = std::sync::Arc::from("general-purpose");
+            info.started_at = Instant::now() - Duration::from_secs(82 * 60);
+            let child = agent.subagent_views.get_mut(child_sid).unwrap();
+            child.session.state = AgentState::TurnRunning;
+            child.turn_started_at = Some(Instant::now() - Duration::from_secs(24 * 60 + 27));
+        }
+        let last = "Job: Fetch Billing Credits card. State: done. You: nothing.";
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, last, "p-child", None),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.active_subagent = Some(child_sid.into());
+        }
+
+        let before = draw_nested_overlay_text(&mut app);
+        assert!(
+            before.contains("Responding"),
+            "precondition: nested overlay paints Responding after the last assistant chunk:\n{before}"
+        );
+        assert!(
+            before.contains(last),
+            "precondition: last assistant text is on the overlay:\n{before}"
+        );
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "p-child", "end_turn", false),
+            &mut app,
+        );
+        assert!(
+            affected,
+            "child-session TurnCompleted must be applied so the open overlay can drop live chrome"
+        );
+
+        let text = draw_nested_overlay_text(&mut app);
+        assert!(
+            text.contains(last),
+            "last assistant text may stay after the nested session finishes:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("responding"),
+            "nested overlay must not keep Responding after ACP turn-end:\n{text}"
+        );
+        assert!(
+            !(text.contains("[pause]") && text.contains("[stop]")),
+            "[pause] [stop] for a finished nested turn is FAIL:\n{text}"
+        );
+        let child = app.agents[&AgentId(0)]
+            .subagent_views
+            .get(child_sid)
+            .unwrap();
+        assert!(
+            !child.session.state.is_busy(),
+            "nested overlay session must leave TurnRunning after ACP turn-end, got {:?}",
+            child.session.state
+        );
+        assert_ne!(
+            child.session.tracker.activity(),
+            Some(crate::acp::tracker::TurnActivity::Responding)
         );
     }
 

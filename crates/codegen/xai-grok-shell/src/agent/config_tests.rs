@@ -7553,6 +7553,125 @@ fn sampling_config_keeps_supergrok_primary_on_unproven_full_printout() {
     clear_all_including_durable();
 }
 
+/// After a real SuperGrok HTTP 402 mark, the next sampling_config uses the next
+/// source in spend order (console team prepaid / console API credits when that
+/// is the remaining source). Session stays usable. A top-up is not required.
+/// Fail-open printout of remaining 0 / SuperGrok dollar credits $0 does not
+/// mark and must not use this path.
+#[test]
+#[serial]
+fn sampling_config_next_request_uses_console_after_real_supergrok_http_402() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use grok_rate_limit::fingerprint_secret;
+    use xai_grok_sampler::{clear_all_including_durable, mark_exhausted};
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-real-402");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let session = "session-jwt-after-real-402";
+    mark_exhausted(&fingerprint_secret(session));
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "personal-after-402".into(),
+            role: SupergrokAccountRole::Personal,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: session.into(),
+        prepaid_balance_cents: Some(0),
+        hard_expired: false,
+    }];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("console-after-real-402"),
+        "next sampling_config after real SuperGrok HTTP 402 must use the console key; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    assert_ne!(
+        sampling.api_key.as_deref(),
+        Some(session),
+        "must not keep the empty SuperGrok JWT as primary after real HTTP 402"
+    );
+    assert!(
+        sampling.base_url.contains("api.x.ai"),
+        "next request must use the console API host: {}",
+        sampling.base_url
+    );
+    clear_all_including_durable();
+}
+
+/// Fetched SuperGrok `prepaidBalance.val` 0 after that meter was the paying
+/// source (included SuperGrok period limits already remaining 0) plus a real
+/// HTTP 402 mark: next sampling_config uses console. Named JSON field, not a
+/// printout guess.
+#[test]
+#[serial]
+fn sampling_config_next_request_uses_console_when_paying_prepaid_balance_is_zero_after_http_402() {
+    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+    use crate::auth::{
+        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
+        SupergrokSessionCandidate,
+    };
+    use grok_rate_limit::fingerprint_secret;
+    use xai_grok_sampler::{clear_all_including_durable, mark_exhausted};
+
+    clear_all_including_durable();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
+    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-prepaid-empty");
+    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+
+    let session = "session-jwt-prepaid-was-paying";
+    mark_exhausted(&fingerprint_secret(session));
+    let sessions = vec![SupergrokSessionCandidate {
+        headroom: SupergrokIdentityHeadroom {
+            identity_id: "personal-prepaid-empty".into(),
+            role: SupergrokAccountRole::Personal,
+            included_remaining: 0,
+            reset_at: None,
+        },
+        access_token: session.into(),
+        prepaid_balance_cents: Some(0),
+        hard_expired: false,
+    }];
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let model = test_model_entry("m", proxy, None, None, None);
+    let creds = resolve_credentials_preferring_with_supergrok_sessions(
+        &model,
+        &sessions,
+        Some(PreferredAuthMethod::Oidc),
+        true,
+    );
+    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    assert_eq!(
+        sampling.api_key.as_deref(),
+        Some("console-after-prepaid-empty"),
+        "fetched prepaidBalance.val 0 after that meter paid, plus HTTP 402, must hop; primary={:?} failover={:?}",
+        sampling.api_key,
+        sampling.failover_api_keys
+    );
+    clear_all_including_durable();
+}
+
 /// Catalog name: while included SuperGrok period limits still have room,
 /// `resolve_model_to_sampling_config` must omit the console key from the hop.
 #[test]
@@ -7775,8 +7894,8 @@ fn sampling_config_hops_to_sibling_included_before_extras() {
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
     assert_eq!(
         sampling.api_key.as_deref(),
-        Some("tok-business-included"),
-        "sampling hop must use Business included SuperGrok period limits before personal extras; primary={:?} failover={:?}",
+        Some("tok-personal-full-extras"),
+        "personal SuperGrok dollar credits stay primary; Team JWT is not the paying source; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
     );
@@ -7784,9 +7903,16 @@ fn sampling_config_hops_to_sibling_included_before_extras() {
         !sampling
             .failover_api_keys
             .iter()
-            .any(|k| k == "console-must-wait-for-sibling-included"
-                || k == "tok-personal-full-extras"),
-        "console and personal extras stay off the hop list while sibling included remains: {:?}",
+            .any(|k| k == "tok-business-included"),
+        "Team JWT omitted while personal SuperGrok dollar credits remain: {:?}",
+        sampling.failover_api_keys
+    );
+    assert!(
+        sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait-for-sibling-included"),
+        "console is failover after personal included exhaust while SuperGrok dollar credits remain: {:?}",
         sampling.failover_api_keys
     );
     clear_all_including_durable();
@@ -7846,8 +7972,8 @@ fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console(
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
     assert_eq!(
         sampling.api_key.as_deref(),
-        Some("tok-team-included"),
-        "sampling hop must use Team included SuperGrok period remaining; primary={:?} failover={:?}",
+        Some("tok-personal-exhausted"),
+        "personal SuperGrok dollar credits stay primary; Team JWT is not the paying source; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
     );
@@ -7855,8 +7981,16 @@ fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console(
         !sampling
             .failover_api_keys
             .iter()
-            .any(|k| k == "console-must-wait" || k == "tok-personal-exhausted"),
-        "console and personal dollar credits stay off the hop list: {:?}",
+            .any(|k| k == "tok-team-included"),
+        "Team JWT omitted while personal SuperGrok dollar credits remain: {:?}",
+        sampling.failover_api_keys
+    );
+    assert!(
+        sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "console-must-wait"),
+        "console is failover after personal included exhaust while SuperGrok dollar credits remain: {:?}",
         sampling.failover_api_keys
     );
     clear_all_including_durable();
@@ -7931,7 +8065,7 @@ fn sampling_config_hop_personal_remaining_team_exhausted() {
     clear_all_including_durable();
 }
 
-/// Both remaining: Team / Business first, then personal. Console omitted.
+/// Both remaining: personal SuperGrok JWT first. Team JWT omitted. Console omitted.
 #[test]
 #[serial]
 fn sampling_config_hop_both_remaining_team_first_then_personal() {
@@ -7984,15 +8118,17 @@ fn sampling_config_hop_both_remaining_team_first_then_personal() {
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
     assert_eq!(
         sampling.api_key.as_deref(),
-        Some("tok-team-included"),
-        "both remaining: Team / Business included SuperGrok period first; primary={:?} failover={:?}",
+        Some("tok-personal-included"),
+        "both remaining: personal SuperGrok included paying identity first; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
     );
-    assert_eq!(
-        sampling.failover_api_keys,
-        vec!["tok-personal-included".to_string()],
-        "personal included is next: {:?}",
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "tok-team-included"),
+        "Team JWT omitted while personal SuperGrok included can pay: {:?}",
         sampling.failover_api_keys
     );
     assert!(
@@ -8162,15 +8298,17 @@ fn sampling_config_hop_missing_heavy_false_100_keeps_sibling_included() {
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
     assert_eq!(
         sampling.api_key.as_deref(),
-        Some("tok-team-included"),
-        "missing Heavy / false 100% must keep Team included hop; primary={:?} failover={:?}",
+        Some("tok-personal-false-100"),
+        "missing Heavy / false 100% keeps personal SuperGrok paying JWT; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
     );
-    assert_eq!(
-        sampling.failover_api_keys,
-        vec!["tok-personal-false-100".to_string()],
-        "personal included remaining is next; console omitted: {:?}",
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "tok-team-included" || k == "console-must-not-win"),
+        "Team JWT and console omitted while personal SuperGrok can pay: {:?}",
         sampling.failover_api_keys
     );
     clear_all_including_durable();
@@ -8252,15 +8390,17 @@ fn sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team() {
     let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
     assert_eq!(
         sampling.api_key.as_deref(),
-        Some("tok-team-included"),
-        "100% + SuperGrok dollar credits on both + missing Heavy must keep Team included hop; primary={:?} failover={:?}",
+        Some("tok-personal-dollars"),
+        "100% + SuperGrok dollar credits on both + missing Heavy keeps personal SuperGrok paying JWT; primary={:?} failover={:?}",
         sampling.api_key,
         sampling.failover_api_keys
     );
-    assert_eq!(
-        sampling.failover_api_keys,
-        vec!["tok-personal-dollars".to_string()],
-        "personal included remaining is next; console omitted: {:?}",
+    assert!(
+        !sampling
+            .failover_api_keys
+            .iter()
+            .any(|k| k == "tok-team-included"),
+        "Team JWT omitted while personal SuperGrok can pay: {:?}",
         sampling.failover_api_keys
     );
     assert!(

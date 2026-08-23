@@ -142,18 +142,43 @@ impl ModelState {
         self.available = new_available;
     }
 
-    /// Set the current model and resolve reasoning effort from catalog meta.
+    /// Set the current model. An explicit effort wins. Same-model with no
+    /// override keeps the operator's chosen effort (catalog `high` must not
+    /// clobber medium). A model change with no override takes catalog meta.
     pub fn set_current(
         &mut self,
         model_id: acp::ModelId,
         effort_override: Option<ReasoningEffort>,
     ) {
+        let same_model = self.current.as_ref() == Some(&model_id);
         self.current = Some(model_id.clone());
-        self.reasoning_effort = effort_override.or_else(|| {
-            self.available
+        self.reasoning_effort = match effort_override {
+            Some(effort) => Some(effort),
+            None if same_model => self.reasoning_effort,
+            None => self
+                .available
                 .get(&model_id)
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()))
-        });
+                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref())),
+        };
+    }
+
+    /// After SessionCreated / SessionLoaded replace the catalog, keep the
+    /// operator's chosen effort when the current model id did not change.
+    pub fn restore_chosen_effort_if_same_model(
+        &mut self,
+        previous_current: Option<&acp::ModelId>,
+        previous_effort: Option<ReasoningEffort>,
+    ) {
+        let Some(effort) = previous_effort else {
+            return;
+        };
+        let Some(prev_id) = previous_current else {
+            return;
+        };
+        if self.current.as_ref() != Some(prev_id) {
+            return;
+        }
+        self.set_current(prev_id.clone(), Some(effort));
     }
 
     /// The reasoning-effort menu for the current model. Gate-first: an unset or
@@ -541,6 +566,72 @@ mod tests {
             state.resolve_effort_token("low"),
             Some(ReasoningEffort::Low)
         );
+    }
+
+    fn reasoning_catalog_state(catalog_effort: &str) -> (ModelState, acp::ModelId) {
+        let id = acp::ModelId::new(Arc::from("grok-4.6"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Grok 4.6".to_string()).meta(
+                serde_json::json!({
+                    "supportsReasoningEffort": true,
+                    "reasoningEffort": catalog_effort,
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        (state, id)
+    }
+
+    #[test]
+    fn set_current_same_model_without_effort_keeps_chosen_medium() {
+        // Operator picked medium. A later same-model switch with no effort
+        // token (bare `/model`, ModelChanged omitting effort, Settings
+        // persist round-trip) must not fall back to catalog `high`.
+        let (mut state, id) = reasoning_catalog_state("high");
+        state.set_current(id.clone(), Some(ReasoningEffort::Medium));
+        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Medium));
+        state.set_current(id, None);
+        assert_eq!(
+            state.reasoning_effort,
+            Some(ReasoningEffort::Medium),
+            "same-model set_current with no effort must keep the operator's medium"
+        );
+    }
+
+    #[test]
+    fn set_current_new_model_without_effort_takes_catalog() {
+        let (mut state, id) = reasoning_catalog_state("high");
+        let other = acp::ModelId::new(Arc::from("grok-4.5"));
+        state.available.insert(
+            other.clone(),
+            acp::ModelInfo::new(other.clone(), "Grok 4.5".to_string()).meta(
+                serde_json::json!({
+                    "supportsReasoningEffort": true,
+                    "reasoningEffort": "low",
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        state.set_current(id, Some(ReasoningEffort::Medium));
+        state.set_current(other, None);
+        assert_eq!(
+            state.reasoning_effort,
+            Some(ReasoningEffort::Low),
+            "changing models with no effort still adopts the new card's catalog default"
+        );
+    }
+
+    #[test]
+    fn restore_chosen_effort_if_same_model_replaces_catalog_high() {
+        let (mut state, id) = reasoning_catalog_state("high");
+        state.set_current(id.clone(), None);
+        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::High));
+        state.restore_chosen_effort_if_same_model(Some(&id), Some(ReasoningEffort::Medium));
+        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Medium));
     }
 
     #[test]

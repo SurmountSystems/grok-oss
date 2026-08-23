@@ -62,12 +62,13 @@ pub use prefer_live_primary::{
     ensure_supergrok_recovery_after_console_credit_exhaust,
     prefer_console_identity_for_use_console_pin, prefer_live_identity_after_credit_exhaust,
     prefer_supergrok_identity_for_stay_pin, primary_is_memoized_credit_exhausted,
-    prune_exhausted_failover_candidates,
+    prune_exhausted_failover_candidates, rotate_sampling_client_after_credit_exhaust,
 };
 pub use retry::{
-    DEFAULT_MAX_RETRIES, MAX_BACKOFF_SECS, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision,
-    classify_error, classify_error_with_window, format_sampling_error, is_unlimited_retries,
-    over_window_blocks_retry, resolve_max_retries, retry_backoff_with_jitter,
+    DEFAULT_MAX_RETRIES, DEFAULT_TRANSPORT_MAX_RETRIES, MAX_BACKOFF_SECS,
+    RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error, classify_error_with_window,
+    format_sampling_error, is_unlimited_retries, over_window_blocks_retry, resolve_max_retries,
+    retry_backoff_with_jitter,
 };
 pub use sampling_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};

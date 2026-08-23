@@ -107,6 +107,19 @@ pub struct TaskToolInput {
     #[schemars(skip)]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Files this subagent is assigned to write. Spawn fails if another live
+    /// subagent already claimed one of these paths. The claim lasts until the
+    /// child finishes. Omit this to skip spawn-time claims; edit tools still
+    /// refuse two agents writing the same file at the same time.
+    #[schemars(
+        description = "Files this subagent is assigned to write. Spawn fails if another live \
+            subagent already claimed one of these paths. The claim lasts until the child \
+            finishes. Omit this when paths are unknown; edit tools still refuse overlapping \
+            writes on the same file."
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_paths: Vec<String>,
 }
 
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
@@ -1126,6 +1139,8 @@ pub struct TaskToolNaming<'a> {
     /// Name of the `isolation` parameter, used in the isolation/worktree
     /// paragraph.
     pub isolation_param: &'a str,
+    /// Name of the `write_paths` parameter.
+    pub write_paths_param: &'a str,
 }
 
 /// Build the `task` tool description from an effective subagent list.
@@ -1152,6 +1167,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
         resume_from_param,
         background_retrieval_tool,
         isolation_param,
+        write_paths_param,
     } = *naming;
 
     let out = format!(
@@ -1168,7 +1184,9 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
          - The resumed agent must use the same subagent_type as the source.\n\n\
          Isolation mode:\n\
-         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
+         - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output.\n\n\
+         Assigned write paths:\n\
+         - Use {write_paths_param} to claim files this subagent will write. Spawn fails if another live subagent already claimed one of those paths. The claim lasts until the child finishes. Omit it when paths are unknown; edit tools still refuse two agents writing the same file at the same time."
     );
 
     out
@@ -1461,6 +1479,7 @@ mod tests {
             resume_from_param: "resume_from",
             background_retrieval_tool: "get_task_output",
             isolation_param: "isolation",
+            write_paths_param: "write_paths",
         }
     }
 
@@ -1509,6 +1528,7 @@ mod tests {
             cwd: None,
             model: None,
             task_id: None,
+            write_paths: Vec::new(),
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
@@ -1632,6 +1652,8 @@ mod tests {
         );
         assert!(desc.contains("Isolation mode:"));
         assert!(desc.contains("Use isolation to control the child's execution environment."));
+        assert!(desc.contains("Assigned write paths:"));
+        assert!(desc.contains("Use write_paths to claim files this subagent will write."));
     }
 
     #[test]
@@ -1793,6 +1815,7 @@ mod tests {
                 resume_from_param: "${{ params.task.resume_from }}",
                 background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
                 isolation_param: "${{ params.task.isolation }}",
+                write_paths_param: "${{ params.task.write_paths }}",
             },
         );
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
@@ -1801,6 +1824,7 @@ mod tests {
             "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
+        assert!(desc.contains("Use ${{ params.task.write_paths }} to claim files"));
     }
 
     // ── Lifecycle tool descriptions ──────────────────────────────────────

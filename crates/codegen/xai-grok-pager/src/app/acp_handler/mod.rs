@@ -70,7 +70,9 @@ pub(crate) use prompt_origin::{
 };
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
-use subagent_activity::{subagent_activity_label, sync_subagent_activity};
+use subagent_activity::{
+    queue_kill_if_nested_write_capped, subagent_activity_label, sync_subagent_activity,
+};
 
 use workflow_ingest::ingest_workflow_update;
 

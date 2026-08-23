@@ -2353,3 +2353,214 @@ fn paint_window_extends_through_offscreen_verb_group_members() {
     assert_eq!(content_y0, virtual_y[range.start]);
     assert_eq!(range.end, header + 50);
 }
+
+fn make_test_png_bytes(width: u32, height: u32) -> Vec<u8> {
+    use image::{ImageBuffer, Rgba};
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(width, height, Rgba([128, 64, 32, 255]));
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+    buf
+}
+
+/// History above a large in-chat PNG must stay reachable. Wheel and keys share
+/// `scroll_up`; Home is `goto_top`. Pixel size 3456x2160 is the operator
+/// screenshot; reserved rows still cap at 20, so the ceiling cannot be the
+/// pixel height itself.
+#[test]
+fn scrolling_up_past_inline_image_reaches_messages_above() {
+    use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+
+    let _theme = pin_theme();
+    let _proto = set_protocol_for_test(GraphicsProtocol::Kitty);
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("shot.png");
+    std::fs::write(&image_path, make_test_png_bytes(3456, 2160)).unwrap();
+
+    let mut state = ScrollbackState::new();
+    let mut appearance = crate::appearance::AppearanceConfig::default();
+    appearance.show_timestamps = false;
+    state.set_appearance(appearance);
+
+    state.push_block(user_block("first prompt, well above the image"));
+    state.push_block(agent_block("reply that must remain reachable"));
+    for i in 0..8 {
+        state.push_block(user_block(&format!("earlier turn {i}")));
+        state.push_block(agent_block(&format!("earlier reply {i}")));
+    }
+    let image_id = state.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
+        OtherToolCallBlock::new("image_gen", "saved image").with_media_ref(&image_path, false),
+    )));
+    state.push_block(RenderBlock::tool_call(
+        "Write",
+        "remaining-work pointer.md",
+        true,
+    ));
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+    state.prepare_layout(W, H);
+    let (offset, vp, total) = state.scroll_info();
+    assert!(
+        total > vp as usize,
+        "precondition: content taller than the viewport (offset={offset}, total={total}, vp={vp})"
+    );
+    assert!(
+        offset > 0,
+        "precondition: follow pins the bottom so there is room to scroll up"
+    );
+
+    let image_idx = state.index_of_id(image_id).expect("image entry");
+    state.goto_top();
+    state.prepare_layout(W, H);
+    assert_eq!(state.scroll_offset(), 0, "Home must reach the true top");
+    let top = state
+        .first_visible_entry()
+        .expect("viewport has a top entry at offset 0");
+    assert!(
+        top < image_idx,
+        "Home must land on a message above the in-chat PNG (top={top}, image={image_idx})"
+    );
+
+    state.goto_bottom();
+    state.prepare_layout(W, H);
+    let mut guard = 0;
+    while state.scroll_offset() > 0 && guard < 10_000 {
+        state.scroll_up(3);
+        state.prepare_layout(W, H);
+        guard += 1;
+    }
+    assert_eq!(
+        state.scroll_offset(),
+        0,
+        "repeated scroll_up (wheel/keys) must reach offset 0, not stall on the PNG"
+    );
+    let top = state
+        .first_visible_entry()
+        .expect("viewport has a top entry at offset 0");
+    assert!(
+        top < image_idx,
+        "scroll_up must reveal messages above the in-chat PNG (top={top}, image={image_idx})"
+    );
+}
+
+/// Off-screen height estimates can overshoot exact layout. Measuring the
+/// newly visible entry then shrinks `total_height`, and
+/// `settle_visible_measurements` used to clamp `scroll_offset` back to the
+/// new bottom — the in-chat image — so wheel/keys could not leave it.
+///
+/// Markdown blank lines do not currently overshoot, so this fixture inflates
+/// the unmeasured cache height (the lazy-estimate contract) without depending
+/// on a particular estimator.
+#[test]
+fn scrolling_up_past_image_survives_overestimate_shrink() {
+    use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
+    use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+
+    let _theme = pin_theme();
+    let _proto = set_protocol_for_test(GraphicsProtocol::Kitty);
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("shot.png");
+    std::fs::write(&image_path, make_test_png_bytes(3456, 2160)).unwrap();
+
+    let mut state = ScrollbackState::new();
+    let mut appearance = crate::appearance::AppearanceConfig::default();
+    appearance.show_timestamps = false;
+    state.set_appearance(appearance);
+
+    state.push_block(user_block("prompt above the tall markdown"));
+    for i in 0..6 {
+        state.push_block(user_block(&format!("earlier turn {i}")));
+        state.push_block(agent_block(&format!("earlier reply {i}")));
+    }
+    let markdown_id = state.push_block(agent_block("reachable paragraph above the image"));
+    let image_id = state.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(
+        OtherToolCallBlock::new("image_gen", "saved image").with_media_ref(&image_path, false),
+    )));
+    state.push_block(RenderBlock::tool_call(
+        "Write",
+        "remaining-work pointer.md",
+        true,
+    ));
+
+    const W: u16 = 80;
+    const H: u16 = 20;
+    state.prepare_layout(W, H);
+
+    let markdown_idx = state.index_of_id(markdown_id).unwrap();
+    let image_idx = state.index_of_id(image_id).unwrap();
+    assert!(measured_at(&state, image_idx));
+
+    let exact = exact_height(&state, markdown_idx, W);
+    let inflated = exact.saturating_add(180);
+    {
+        let cache = state.layout_cache.as_mut().unwrap();
+        cache.entries[markdown_idx].height = inflated;
+        cache.measured[markdown_idx] = false;
+    }
+    state.rebuild_virtual_y_from_heights();
+    state.compute_total_height_from_cache();
+    state.goto_bottom();
+    assert!(
+        inflated > exact,
+        "precondition: inflated estimate {inflated} must exceed exact {exact}"
+    );
+    assert!(
+        !measured_at(&state, markdown_idx),
+        "precondition: inflated message above the image is unmeasured"
+    );
+    assert!(
+        state.scroll_offset() > 0,
+        "precondition: inflated message makes the transcript taller than the viewport"
+    );
+    let bottom_top = state.first_visible_entry().expect("bottom viewport");
+    assert!(
+        bottom_top >= image_idx,
+        "precondition: follow-bottom shows the PNG, not the inflated message \
+         (top={bottom_top}, image={image_idx})"
+    );
+
+    // Peek the last rows of the inflated message. Clamp-to-new-bottom after
+    // measure is the bug: offset can still fall (total_height shrank) while
+    // first_visible jumps back onto the PNG.
+    let y_image = state.layout_cache.as_ref().unwrap().virtual_y[image_idx];
+    assert!(
+        y_image > 3,
+        "precondition: inflated message sits above the PNG (y_image={y_image})"
+    );
+    state.set_scroll_offset(y_image - 3);
+    assert_eq!(
+        state.first_visible_entry(),
+        Some(markdown_idx),
+        "precondition: viewport top is the inflated message, not the PNG"
+    );
+    assert!(!measured_at(&state, markdown_idx));
+
+    state.prepare_layout(W, H);
+    assert_eq!(
+        state.first_visible_entry(),
+        Some(markdown_idx),
+        "measuring a shrink must keep the viewport on the message above the PNG, \
+         not snap back to the image (top={:?}, image={image_idx})",
+        state.first_visible_entry()
+    );
+
+    let mut guard = 0;
+    while state.scroll_offset() > 0 && guard < 10_000 {
+        state.scroll_up(3);
+        state.prepare_layout(W, H);
+        guard += 1;
+    }
+    assert_eq!(
+        state.scroll_offset(),
+        0,
+        "must reach the top even when a message above the PNG shrinks on measure"
+    );
+    let top = state.first_visible_entry().expect("top entry");
+    assert!(
+        top < image_idx,
+        "viewport top must be above the PNG after scrolling (top={top}, image={image_idx})"
+    );
+}

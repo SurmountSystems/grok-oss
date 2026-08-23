@@ -953,27 +953,34 @@ impl ScrollbackPane {
             let first_content_y = content_area.y + if use_vpad { 1 } else { 0 };
             let copy_inset =
                 crate::scrollback::wrappers::bubble_copy_trailing_inset(&ctx.appearance, true);
-            let ts_hovered = mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y
-                    && mx
-                        >= content_area.x
-                            + content_area.width.saturating_sub(
-                                crate::scrollback::wrappers::TIMESTAMP_SHORT_RESERVE + copy_inset,
-                            )
-                    && mx < content_area.x + content_area.width.saturating_sub(copy_inset)
-            });
-            let ts_str = if ts_hovered {
-                ts.format("  %H:%M:%S | %b %d").to_string()
-            } else {
-                ts.format("  %-I:%M %p").to_string()
-            };
-            let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + copy_inset + 1
-                && first_content_y < content_area.y + content_area.height
+            let short_str = ts.format("  %-I:%M %p").to_string();
+            let short_width = short_str.len() as u16;
+            if first_content_y < content_area.y + content_area.height
+                && let Some(short_x) = crate::scrollback::wrappers::timestamp_overlay_x(
+                    content_area.x,
+                    content_area.width,
+                    short_width,
+                    copy_inset,
+                )
             {
-                let ts_x = content_area.x + content_area.width - ts_width - copy_inset;
-                let ts_style = Style::default().fg(theme.gray);
-                buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
+                let ts_hovered = mouse_pos.is_some_and(|(mx, my)| {
+                    my == first_content_y && mx >= short_x && mx < short_x + short_width
+                });
+                let ts_str = if ts_hovered {
+                    ts.format("  %H:%M:%S | %b %d").to_string()
+                } else {
+                    short_str
+                };
+                let ts_width = ts_str.len() as u16;
+                if let Some(ts_x) = crate::scrollback::wrappers::timestamp_overlay_x(
+                    content_area.x,
+                    content_area.width,
+                    ts_width,
+                    copy_inset,
+                ) {
+                    let ts_style = Style::default().fg(theme.gray);
+                    buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
+                }
             }
         }
 

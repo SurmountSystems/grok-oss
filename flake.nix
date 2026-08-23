@@ -141,9 +141,11 @@
               || lib.hasInfix "/prod/" path
               || lib.hasInfix "/third_party/" path
               || lib.hasInfix "/bin/" path
+              || lib.hasInfix "/.config/" path
               || base == "rust-toolchain.toml"
               || base == "clippy.toml"
               || base == "rustfmt.toml"
+              || base == "nextest.toml"
               || base == "protoc";
           };
 
@@ -226,10 +228,12 @@
             }
           );
 
-          # Full workspace cargo fmt, clippy, and test compile. `just check-remote`
-          # realizes this on the Nix remote builder. `--no-run` compiles tests
-          # without executing them in the sandbox. Not in `checks` so
-          # `nix flake check` / GHA stay local and do not need the builder.
+          # Full workspace cargo gate matching `just test` / `just check`:
+          # fmt, clippy -D warnings (--all-targets), cargo nextest run (tests
+          # actually execute), doctests, and workspace-excluded cargo-mem-guard
+          # tests. `just check-remote` realizes this on the Nix remote builder.
+          # Not in `checks` so `nix flake check` / GHA stay local and do not
+          # need the builder.
           # preferLocalBuild=false is not enough: Nix still uses a local
           # nixbld worker when this machine has the required features.
           # --option system-features is also not enough: this host's daemon
@@ -248,14 +252,23 @@
           # --release still type-checks at opt-level 3 on one thread per
           # crate. Use the same dev profile as local `just test-clippy`.
           # Pass cargo --jobs on argv from NIX_BUILD_CORES (nix --cores),
-          # capped at 32. Floor at CARGO_BUILD_JOBS (32) so a 1-core
-          # NIX_BUILD_CORES does not force one rustc. cargo fmt rejects
-          # --jobs; only clippy/check/build/test get it.
-          # cargo 1.97.1 has no global `cargo --jobs N` (tip: `check --jobs`).
-          # Put --jobs after the subcommand: `cargo check --jobs N`,
-          # `cargo clippy --jobs N`. A 1-token GNU jobserver (MAKEFLAGS)
-          # still wins over later --jobs, so drop MAKEFLAGS / CARGO_MAKEFLAGS
-          # / MFLAGS first.
+          # n = min(NIX_BUILD_CORES, 32). Do not floor from CARGO_BUILD_JOBS:
+          # crane preBuild can copy NIX_BUILD_CORES=1 into that env and then
+          # a 1-core assignment stays one rustc. If cores is 0 or 1, use 32
+          # so the remote quality gate is not a single clippy-driver. cargo
+          # fmt rejects --jobs; check/build/test get it. cargo nextest
+          # run uses CARGO_BUILD_JOBS for rustc; nextest --jobs is test
+          # processes. cargo 1.97.1 has no global `cargo --jobs N` (tip:
+          # `check --jobs`). Put --jobs after the subcommand: `cargo check
+          # --jobs N`. Do not run `cargo clippy`: that is an external
+          # cargo-clippy binary. The outer cargo may start a 1-token GNU
+          # jobserver from available_parallelism() (often 1 in a Nix
+          # sandbox); inner `--jobs N` is then ignored and you get one
+          # clippy-driver. Workspace lint is builtin `cargo check` with
+          # RUSTC_WORKSPACE_WRAPPER=clippy-driver under a GNU make
+          # jobserver with $CARGO_BUILD_JOBS tokens. Drop Nix MAKEFLAGS
+          # first (may be 1 token), then make -j$CARGO_BUILD_JOBS.
+          # Never raise Nix max-jobs for this.
           workspaceCargoJobsFromCores = ''
             cargoJobs="''${NIX_BUILD_CORES:-32}"
             case "$cargoJobs" in
@@ -264,16 +277,27 @@
             if [ "$cargoJobs" -gt 32 ]; then
               cargoJobs=32
             fi
-            floor="''${CARGO_BUILD_JOBS:-32}"
-            case "$floor" in
-              "" | *[!0-9]*) floor=32 ;;
-            esac
-            if [ "$cargoJobs" -lt "$floor" ]; then
-              cargoJobs="$floor"
+            if [ "$cargoJobs" -lt 2 ]; then
+              cargoJobs=32
             fi
             export CARGO_BUILD_JOBS="$cargoJobs"
             unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
             echo "workspace cargo jobs=$CARGO_BUILD_JOBS NIX_BUILD_CORES=''${NIX_BUILD_CORES:-unset}"
+            workspace_run_make_jobserver() {
+              unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+              if [ "$#" -lt 1 ]; then
+                echo "workspace_run_make_jobserver: missing command" >&2
+                exit 2
+              fi
+              mk="''${TMPDIR:-/tmp}/workspace-cargo-jobserver.mk"
+              {
+                printf 'all:\n\t+'
+                printf '%q ' "$@"
+                printf '\n'
+              } > "$mk"
+              echo "workspace cargo make -j$CARGO_BUILD_JOBS jobserver: $*"
+              make -j"$CARGO_BUILD_JOBS" --no-print-directory -f "$mk"
+            }
           '';
           # Dummy deps stubs do not need the pager build-id. GROK_GIT_SHA from
           # dirtyShortRev would bust this drv on any dirty tree, even files
@@ -301,12 +325,8 @@
               CARGO_PROFILE = "dev";
               buildPhaseCargoCommand = ''
                 ${workspaceCargoJobsFromCores}
-                cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --all-targets
-                cargo build --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked
-              '';
-              checkPhaseCargoCommand = ''
-                ${workspaceCargoJobsFromCores}
-                cargo test --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --no-run
+                workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --all-targets
+                workspace_run_make_jobserver cargo build --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked
               '';
             }
           );
@@ -329,16 +349,48 @@
               enableParallelBuilding = true;
               CARGO_BUILD_JOBS = "32";
               CARGO_PROFILE = "dev";
+              # Same cargo steps as `just test`. nextest is not in commonArgs.
+              nativeBuildInputs = nativeBuildInputs ++ [
+                pkgs.cargo-nextest
+                pkgs.git
+                pkgs.python3
+              ];
+              cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+                cargoLockList = [
+                  ./Cargo.lock
+                  ./crates/codegen/cargo-mem-guard/Cargo.lock
+                ];
+              };
               # Gate only: skip post-clippy zstd of target (not an artifacts cache).
               doInstallCargoArtifacts = false;
+              # Tests run in buildPhaseCargoCommand (same order as `just test`).
+              doCheck = false;
               buildPhaseCargoCommand = ''
                 ${workspaceCargoJobsFromCores}
+                export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+                export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
+                export GROK_DISABLE_SHARED_HARNESS_SECRETS="''${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+                export GROK_CREDENTIALS_FORCE_FILE="''${GROK_CREDENTIALS_FORCE_FILE:-1}"
+                export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="''${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
+                unset NO_COLOR
+                unset CARGO_TERM_COLOR
+                unset OPENROUTER_API_KEY
                 cargo fmt --all -- --check
-                cargo clippy --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --lib --bins --locked -- -D warnings
-                cargo test --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --locked --no-run
-                # cargo 1.97 refuses --doc with --no-run ("can't skip running
-                # doc tests with --no-run"). Doctest *execution* stays out of
-                # this sandbox; rustdoc examples are not compile-only here.
+                clippyDriver="$(command -v clippy-driver)"
+                if [ -z "$clippyDriver" ] || [ ! -x "$clippyDriver" ]; then
+                  echo "workspace-cargo-quality: clippy-driver not on PATH" >&2
+                  exit 2
+                fi
+                export RUSTC_WORKSPACE_WRAPPER="$clippyDriver"
+                export CLIPPY_ARGS="-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__"
+                workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --workspace --all-targets --locked
+                unset RUSTC_WORKSPACE_WRAPPER CLIPPY_ARGS
+                unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+                cargo nextest run --workspace --locked
+                unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+                workspace_run_make_jobserver cargo test --workspace --doc --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS"
+                unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+                workspace_run_make_jobserver cargo test --manifest-path crates/codegen/cargo-mem-guard/Cargo.toml --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS"
               '';
             }
           );
@@ -351,6 +403,100 @@
               cargoTestExtraArgs = "--test openrouter_credentials";
               preCheck = ''
                 export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              '';
+            }
+          );
+
+          # Named cargo test / clippy / build / check on the same remote
+          # builder as workspace-cargo-quality (surmount-remote, not this
+          # laptop). `just test-remote` and `just cargo-remote` set
+          # GROK_REMOTE_CARGO_KIND and GROK_REMOTE_TEST_ARGS (base64 of
+          # NUL-separated argv) and `nix build --impure` this attr.
+          # Tests actually run (cargo test / cargo nextest run). Not in
+          # `checks`. GitHub Actions must not realize this. Pure eval
+          # (empty env) still produces a drv; the build fails until the
+          # just recipe supplies a kind and a filter.
+          workspace-cargo-named-test = craneLib.mkCargoDerivation (
+            commonArgs
+            // {
+              pname = "workspace-cargo-named-test";
+              cargoArtifacts = workspaceCargoArtifacts;
+              pnameSuffix = "";
+              preferLocalBuild = false;
+              requiredSystemFeatures = [
+                "big-parallel"
+                "surmount-remote"
+              ];
+              hardeningDisable = [
+                "fortify"
+                "fortify3"
+              ];
+              enableParallelBuilding = true;
+              CARGO_BUILD_JOBS = "32";
+              CARGO_PROFILE = "dev";
+              nativeBuildInputs = nativeBuildInputs ++ [
+                pkgs.cargo-nextest
+                pkgs.git
+                pkgs.python3
+              ];
+              doInstallCargoArtifacts = false;
+              doCheck = false;
+              GROK_REMOTE_TEST_ARGS = builtins.getEnv "GROK_REMOTE_TEST_ARGS";
+              GROK_REMOTE_CARGO_KIND = builtins.getEnv "GROK_REMOTE_CARGO_KIND";
+              buildPhaseCargoCommand = ''
+                ${workspaceCargoJobsFromCores}
+                export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
+                export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
+                export GROK_DISABLE_SHARED_HARNESS_SECRETS="''${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"
+                export GROK_CREDENTIALS_FORCE_FILE="''${GROK_CREDENTIALS_FORCE_FILE:-1}"
+                export GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY="''${GROK_TRUST_LOOPBACK_CLI_CHAT_PROXY:-1}"
+                unset NO_COLOR
+                unset CARGO_TERM_COLOR
+                unset OPENROUTER_API_KEY
+                kind="''${GROK_REMOTE_CARGO_KIND:-}"
+                args_b64="''${GROK_REMOTE_TEST_ARGS:-}"
+                if [ -z "$kind" ] || [ -z "$args_b64" ]; then
+                  echo "workspace-cargo-named-test: just test-remote / just cargo-remote must pass a cargo kind and a filter through nix build --impure." >&2
+                  exit 2
+                fi
+                case "$kind" in
+                  test|nextest|clippy|build|check) ;;
+                  *)
+                    echo "workspace-cargo-named-test: GROK_REMOTE_CARGO_KIND must be test, nextest, clippy, build, or check." >&2
+                    exit 2
+                    ;;
+                esac
+                mapfile -d $'\0' -t remote_args < <(printf '%s' "$args_b64" | base64 -d)
+                if [ "''${#remote_args[@]}" -lt 1 ]; then
+                  echo "workspace-cargo-named-test: filter argv is empty." >&2
+                  exit 2
+                fi
+                unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+                case "$kind" in
+                  test)
+                    workspace_run_make_jobserver cargo test --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" "''${remote_args[@]}"
+                    ;;
+                  nextest)
+                    cargo nextest run --locked "''${remote_args[@]}"
+                    ;;
+                  clippy)
+                    clippyDriver="$(command -v clippy-driver)"
+                    if [ -z "$clippyDriver" ] || [ ! -x "$clippyDriver" ]; then
+                      echo "workspace-cargo-named-test: clippy-driver not on PATH" >&2
+                      exit 2
+                    fi
+                    export RUSTC_WORKSPACE_WRAPPER="$clippyDriver"
+                    export CLIPPY_ARGS="-D__CLIPPY_HACKERY__warnings__CLIPPY_HACKERY__"
+                    workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked --all-targets "''${remote_args[@]}"
+                    unset RUSTC_WORKSPACE_WRAPPER CLIPPY_ARGS
+                    ;;
+                  build)
+                    workspace_run_make_jobserver cargo build --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked "''${remote_args[@]}"
+                    ;;
+                  check)
+                    workspace_run_make_jobserver cargo check --profile "$CARGO_PROFILE" --jobs "$CARGO_BUILD_JOBS" --locked "''${remote_args[@]}"
+                    ;;
+                esac
               '';
             }
           );
@@ -495,6 +641,7 @@
             cargo-mem-guard-tests
             cargoCheck
             workspace-cargo-quality
+            workspace-cargo-named-test
             openrouter-credentials
             justPkg
             ci-tools
@@ -520,6 +667,7 @@
             ci-tools
             cargo-mem-guard-unwrapped
             workspace-cargo-quality
+            workspace-cargo-named-test
             ;
         }
       );

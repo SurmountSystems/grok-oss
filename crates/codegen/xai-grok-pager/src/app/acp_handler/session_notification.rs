@@ -54,6 +54,14 @@ pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
 /// Refresh the bar and record `used` as the confirmed count for a pending
 /// compaction message; call only from the `meta.totalTokens` path.
 pub(super) fn confirm_context_used(view: &mut AgentView, used: u64) {
+    if let Some(ceiling) = view.session.tracker.compact_occupancy_ceiling()
+        && used > ceiling
+    {
+        // Compact already dropped occupancy. A later ACP chunk that still
+        // carries the pre-compact estimate must not paint 474K / 500K after
+        // the transcript said 509.4k → 422.1k.
+        return;
+    }
     refresh_context_used(view, used);
     view.session.note_context_used(used);
 }
@@ -155,20 +163,29 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     };
     let parent_id = matched.agent_id();
     let is_active = is_matched_agent_active(app, parent_id);
+    if matches!(matched, SessionMatch::Child(_)) {
+        let child_sid = session_notif.session_id.0.as_ref().to_string();
+        let (changed, extra) = {
+            let agent = app
+                .agents
+                .get_mut(&parent_id)
+                .expect("find_session_match returned an existing AgentId");
+            let changed = handle_child_session_notification(
+                session_notif.update,
+                &child_sid,
+                agent,
+                is_api_key_auth,
+            );
+            (changed, std::mem::take(&mut agent.pending_effects))
+        };
+        let queued_kill = !extra.is_empty();
+        app.pending_effects.extend(extra);
+        return (changed && is_active) || queued_kill;
+    }
     let agent = app
         .agents
         .get_mut(&parent_id)
         .expect("find_session_match returned an existing AgentId");
-    if matches!(matched, SessionMatch::Child(_)) {
-        let child_sid: &str = session_notif.session_id.0.as_ref();
-        let changed = handle_child_session_notification(
-            session_notif.update,
-            child_sid,
-            agent,
-            is_api_key_auth,
-        );
-        return changed && is_active;
-    }
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
     if drop_unexpected_replay(
         agent,
@@ -621,6 +638,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             ..
         } => {
             if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+                if info.finished {
+                    return true;
+                }
                 info.duration_ms = Some(duration_ms);
                 info.turn_count = Some(turn_count);
                 info.tool_call_count = Some(tool_call_count);
@@ -644,6 +664,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 .get(&child_session_id)
                 .and_then(|cv| subagent_activity_label(cv));
             sync_subagent_activity(agent, &child_session_id, activity_label);
+            if let Some(effect) = queue_kill_if_nested_write_capped(agent, &child_session_id) {
+                agent.pending_effects.push(effect);
+            }
             true
         }
         XaiSessionUpdate::SubagentFinished {
@@ -736,6 +759,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
             }
+            agent.drop_satisfied_task_output_waits();
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
@@ -1188,6 +1212,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             return false;
         }
     };
+    let extra = std::mem::take(&mut agent.pending_effects);
+    app.pending_effects.extend(extra);
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()
@@ -1290,6 +1316,9 @@ pub(super) fn handle_child_session_notification(
                 false
             }
         }
+        XaiSessionUpdate::TurnCompleted { .. } => {
+            crate::app::subagent::finish_nested_child_session_turn(agent, child_sid)
+        }
         XaiSessionUpdate::SubagentSpawned { .. }
         | XaiSessionUpdate::SubagentProgress { .. }
         | XaiSessionUpdate::SubagentFinished { .. } => apply_nested_subagent_update(agent, update),
@@ -1311,15 +1340,19 @@ pub(super) fn handle_child_session_notification(
             if !row_live {
                 return false;
             }
-            if !child_view
+            let label_changed = child_view
                 .session
                 .tracker
-                .note_tool_call_arguments_delta(name.as_deref(), tool_index)
-            {
+                .note_tool_call_arguments_delta(name.as_deref(), tool_index);
+            let capped = child_view.session.tracker.has_capped_tool_call_write();
+            if !label_changed && !capped {
                 return false;
             }
             let activity_label = subagent_activity_label(child_view);
             sync_subagent_activity(agent, child_sid, activity_label);
+            if let Some(effect) = queue_kill_if_nested_write_capped(agent, child_sid) {
+                agent.pending_effects.push(effect);
+            }
             true
         }
         _ => false,
@@ -1407,6 +1440,9 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) else {
                 return false;
             };
+            if info.finished {
+                return true;
+            }
             info.duration_ms = Some(duration_ms);
             info.turn_count = Some(turn_count);
             info.tool_call_count = Some(tool_call_count);
@@ -1442,6 +1478,15 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.pending_kill = false;
             info.kill_requested_at = None;
             info.last_progress_at = std::time::Instant::now();
+            let elapsed = std::time::Duration::from_millis(duration_ms);
+            let resuming = agent.session.loading_replay;
+            if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
+                child_view.session.state = AgentState::Idle;
+                if !resuming {
+                    crate::app::subagent::finalize_finished_child_view(child_view, elapsed);
+                }
+            }
+            agent.drop_satisfied_task_output_waits();
             true
         }
         _ => false,
@@ -1637,13 +1682,15 @@ pub(super) fn apply_retry_state(
                 reason: reason.clone(),
             }));
         }
-        // Live stream after a retry: soft-reconnect chrome, not a hard clear.
+        // Live stream after a retry: keep Retrying chrome, not a hard clear.
         // Hard clear made the footer fall through to zombie "Waiting for
         // response..." for the entire headers/TTFB window (up to ~120s) when the
-        // network was still bad after a timeout retry. Keep the retry family
-        // with reason "reconnecting" until real stream content arrives
-        // (`handle_update` clears `retry_activity`) or the next Retrying/
-        // Exhausted/Failed. First stream (no prior Retrying) stays clear.
+        // network was still bad after a timeout retry. StreamStarted fires
+        // before the first token, so the wait is first token, not reconnect.
+        // Keep attempt N until real stream content arrives (`handle_update`
+        // clears `retry_activity`) or the next Retrying/Exhausted/Failed.
+        // First stream (no prior Retrying) stays clear. The number next to
+        // this label is the phase timer, not a reconnect countdown.
         RetryState::StreamResumed => match session.tracker.activity() {
             Some(TurnActivity::Retrying {
                 attempt,
@@ -1653,7 +1700,7 @@ pub(super) fn apply_retry_state(
                 session.set_retry_activity(Some(TurnActivity::Retrying {
                     attempt,
                     max_retries,
-                    reason: "reconnecting".into(),
+                    reason: "waiting for first token".into(),
                 }));
             }
             _ => {

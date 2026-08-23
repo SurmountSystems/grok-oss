@@ -1927,20 +1927,38 @@ fn minimal_ctrl_backslash_is_inert_while_full_modes_open_dashboard() {
     }
 }
 #[test]
-fn minimal_ctrl_t_toggles_todo_panel() {
+fn minimal_ctrl_shift_t_toggles_todo_panel() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = ScreenMode::Minimal;
+    assert!(!app.minimal_state.show_todos);
+    let out = app.handle_input(&key_event(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(matches!(out, InputOutcome::Changed));
+    assert!(
+        app.minimal_state.show_todos,
+        "Ctrl+Shift+T pins the panel visible"
+    );
+    let _ = app.handle_input(&key_event(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(
+        !app.minimal_state.show_todos,
+        "Ctrl+Shift+T again unpins the panel"
+    );
+}
+#[test]
+fn minimal_ctrl_t_expands_folded_and_does_not_pin_todos() {
     let mut app = test_app_with_agent();
     app.screen_mode = ScreenMode::Minimal;
     assert!(!app.minimal_state.show_todos);
     let out = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(matches!(out, InputOutcome::Changed));
     assert!(
-        app.minimal_state.show_todos,
-        "Ctrl+T pins the panel visible"
-    );
-    let _ = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
-    assert!(
         !app.minimal_state.show_todos,
-        "Ctrl+T again unpins the panel"
+        "Ctrl+T is thinking/fold expand in minimal, not the todo pin"
     );
 }
 #[test]

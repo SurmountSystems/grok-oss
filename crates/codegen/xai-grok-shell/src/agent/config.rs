@@ -5110,7 +5110,15 @@ pub(crate) fn resolve_credentials_preferring_with_supergrok_sessions(
     }
 
     let console_keys = collect_xai_console_api_keys();
-    let order = crate::auth::order_credentials_for_preferred_auto(sessions, &console_keys);
+    // Real SuperGrok HTTP 402 (process memo) is empty-wallet proof. Drop those
+    // JWTs from auto rank so the next sampling_config uses the next source in
+    // spend order. Fail-open printout does not mark and keeps SuperGrok.
+    let live_sessions: Vec<crate::auth::SupergrokSessionCandidate> = sessions
+        .iter()
+        .filter(|c| !xai_grok_sampler::is_credential_exhausted(c.access_token.trim()))
+        .cloned()
+        .collect();
+    let order = crate::auth::order_credentials_for_preferred_auto(&live_sessions, &console_keys);
 
     let session_host = info.base_url.clone();
     let console_host = console_hop_host(model, first_party);

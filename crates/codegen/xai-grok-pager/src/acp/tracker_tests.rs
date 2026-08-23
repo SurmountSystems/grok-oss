@@ -2321,6 +2321,35 @@ fn activity_writing_tool_call_expires_when_deltas_go_stale() {
         Some(TurnActivity::WritingToolCall(_))
     ));
 }
+/// Deltas that keep arriving must still drop Preparing write after the named
+/// stream cap. Silence hide is a different clock and stays at 10 seconds.
+#[test]
+fn writing_stream_is_capped_when_deltas_keep_arriving_past_named_bound() {
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.note_tool_call_arguments_delta(Some("write"), 0);
+    assert!(matches!(
+        tracker.activity(),
+        Some(TurnActivity::WritingToolCall(_))
+    ));
+    assert!(!tracker.has_capped_tool_call_write());
+    tracker.backdate_writing_stream_start(WRITING_STREAM_MAX + std::time::Duration::from_secs(1));
+    assert!(
+        !tracker.has_stale_tool_call_write(),
+        "last delta is still fresh; this is not the 10-second silence hide"
+    );
+    assert!(tracker.has_capped_tool_call_write());
+    assert_eq!(
+        tracker.activity(),
+        None,
+        "the named stream cap must drop Preparing write even while argument deltas stay fresh"
+    );
+    tracker.note_tool_call_arguments_delta(None, 0);
+    assert!(
+        tracker.has_capped_tool_call_write(),
+        "a continuation delta must not reset the stream cap"
+    );
+    assert_eq!(tracker.activity(), None);
+}
 #[test]
 fn activity_writing_tool_call_prettifies_qualified_mcp_names() {
     let mut tracker = AcpUpdateTracker::new();

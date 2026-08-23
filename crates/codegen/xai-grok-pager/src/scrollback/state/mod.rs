@@ -101,7 +101,7 @@ pub struct ScrollbackState {
 
     /// Minimal mode only: a bounded ring of entry IDs that were committed to
     /// native scrollback in a folded display mode (collapsed reasoning,
-    /// truncated tool output). `Ctrl+E` / `/expand` pops the most-recent one
+    /// truncated tool output). `Ctrl+T` / `/expand` pops the most-recent one
     /// and re-prints it fully below (committed terminal
     /// text can't be mutated, so expansion is a re-print). Bounded so a long
     /// session never grows it without limit; reset by `clear()`.
@@ -169,7 +169,7 @@ pub struct ScrollbackState {
     // Sticky modes
     /// Display mode applied to thinking blocks when they finish running.
     /// Defaults to `Collapsed` (auto-collapse on finish).
-    /// Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
+    /// Toggled by `expand_all_thinking()` (Ctrl+T) between `Expanded` and `Collapsed`.
     thinking_display_mode: DisplayMode,
 
     // Animation
@@ -1138,11 +1138,11 @@ impl ScrollbackState {
         }
     }
 
-    /// Maximum number of folded-commit IDs retained for `Ctrl+E` / `/expand`.
+    /// Maximum number of folded-commit IDs retained for `Ctrl+T` / `/expand`.
     const EXPAND_RING_CAP: usize = 256;
 
     /// Record that the entry `id` was committed to native scrollback in a folded
-    /// display mode (collapsed reasoning / truncated tool output), so `Ctrl+E` /
+    /// display mode (collapsed reasoning / truncated tool output), so `Ctrl+T` /
     /// `/expand` can later re-print it in full. Bounded:
     /// the oldest entry is dropped once the ring is full.
     pub(crate) fn record_committed_for_expand(&mut self, id: EntryId) {
@@ -1153,7 +1153,7 @@ impl ScrollbackState {
     }
 
     /// Pop the most-recently committed folded entry whose entry still exists,
-    /// for `Ctrl+E` / `/expand` to re-print fully. Returns `None` when nothing
+    /// for `Ctrl+T` / `/expand` to re-print fully. Returns `None` when nothing
     /// folded remains to expand. Stale IDs (entries removed by rewind / clear)
     /// are skipped.
     pub(crate) fn take_expandable_committed(&mut self) -> Option<EntryId> {
@@ -1350,7 +1350,7 @@ impl ScrollbackState {
     /// Apply a live `[ui] always_expand_thinking` flip (Settings toggle).
     ///
     /// Existing thinking rows re-materialize so stacked overlay
-    /// `Thought for N.s` headers match the setting. Sticky Ctrl+E mode
+    /// `Thought for N.s` headers match the setting. Sticky Ctrl+T mode
     /// follows the setting so later finishes stay consistent.
     pub fn apply_always_expand_thinking_flip(&mut self, new_flag: bool) {
         let target = if new_flag {
@@ -1458,7 +1458,7 @@ impl ScrollbackState {
             // Let the block decide what display mode to adopt on finish.
             // For thinking blocks, `[ui] always_expand_thinking` wins over
             // session sticky. Otherwise use sticky `thinking_display_mode`
-            // so Ctrl+E is respected across the session, except an
+            // so Ctrl+T is respected across the session, except an
             // already-Expanded thinking block keeps its mode. Entries the
             // user manually folded (pinned) keep their mode.
             if respect_manual_folds && entry.display_mode_pinned {
@@ -3494,7 +3494,7 @@ mod tests {
     }
 
     #[test]
-    fn always_expand_thinking_blocks_ctrl_e_collapse() {
+    fn always_expand_thinking_blocks_ctrl_t_collapse() {
         std::thread::spawn(|| {
             crate::appearance::cache::set_always_expand_thinking(true);
             let mut state = ScrollbackState::new();
@@ -3504,7 +3504,7 @@ mod tests {
             assert_eq!(
                 state.get_by_id(id).unwrap().display_mode,
                 DisplayMode::Expanded,
-                "Ctrl+E must not collapse thinking while always-expand is on"
+                "Ctrl+T must not collapse thinking while always-expand is on"
             );
         })
         .join()

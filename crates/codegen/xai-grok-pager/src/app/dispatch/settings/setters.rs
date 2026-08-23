@@ -1809,7 +1809,8 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
         // snapshot) reflect the new selection without waiting for the
         // ACP roundtrip.
         //
-        // `set_current(_, None)` resets `reasoning_effort` to model default.
+        // Same-model `set_current(_, None)` keeps the operator's effort.
+        // A real model change still takes the new card's catalog default.
         agent.session.models.set_current(id.clone(), None);
     }
     // Mirror the new default into the app-level model state too. A later `/new`
@@ -2129,17 +2130,49 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
 
 /// State-only mutation for `[models].default_reasoning_effort`.
 /// Updates the `AppView` mirror so `current_value_for` + snapshot
-/// refresh see the override without a restart.
+/// refresh see the override without a restart, and paints the live
+/// composer so the footer matches the Settings row.
 pub(super) fn set_default_reasoning_effort_inner(app: &mut AppView, canonical: &str) {
     app.default_reasoning_effort = Some(canonical.to_string());
+    apply_live_reasoning_effort(app, canonical);
+}
+
+/// Paint `[models].default_reasoning_effort` onto `app.models` and every
+/// top-level agent. Nested overlay views keep their own effort.
+fn apply_live_reasoning_effort(app: &mut AppView, canonical: &str) {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let Ok(effort) = canonical.parse::<ReasoningEffort>() else {
+        return;
+    };
+    if let Some(id) = app.models.current.clone()
+        && app
+            .models
+            .resolve_effort_token_for(&id, canonical)
+            .is_some()
+    {
+        app.models.set_current(id, Some(effort));
+    }
+    for agent in app.agents.values_mut() {
+        if let Some(id) = agent.session.models.current.clone()
+            && agent
+                .session
+                .models
+                .resolve_effort_token_for(&id, canonical)
+                .is_some()
+        {
+            agent.session.models.set_current(id, Some(effort));
+        }
+    }
 }
 
 /// Persist `[models].default_reasoning_effort` (`low` | `medium` | `high`).
-/// SHELL-owned. Live-applied on `AppView`.
+/// SHELL-owned. Live-applied on the composer and SwitchModel so the
+/// sampler matches the footer.
 pub(in crate::app::dispatch) fn set_default_reasoning_effort(
     app: &mut AppView,
     value: String,
 ) -> Vec<Effect> {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
     let canonical = crate::settings::canonical_default_reasoning_effort(Some(&value));
     let prev = crate::settings::canonical_default_reasoning_effort(
         app.default_reasoning_effort.as_deref(),
@@ -2156,11 +2189,34 @@ pub(in crate::app::dispatch) fn set_default_reasoning_effort(
         "setting changed",
     );
     app.show_toast(&format!("\u{2713} Default reasoning effort: {canonical}"));
-    vec![Effect::PersistSetting {
+    let mut effects = vec![Effect::PersistSetting {
         key: "default_reasoning_effort",
         value: crate::settings::SettingValue::Enum(canonical),
         rollback_value: crate::settings::SettingValue::Enum(prev),
-    }]
+    }];
+    let effort = canonical.parse::<ReasoningEffort>().ok();
+    if let ActiveView::Agent(aid) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&aid)
+        && let Some(model_id) = agent.session.models.current.clone()
+    {
+        if let Some(session_id) = agent.session.session_id.clone() {
+            agent.session.model_switch_pending = true;
+            effects.push(Effect::SwitchModel {
+                agent_id: aid,
+                session_id,
+                model_id,
+                effort,
+                prev_model_id: None,
+            });
+        } else {
+            agent.session.deferred_model_switch = Some(crate::app::agent::DeferredModelSwitch {
+                model_id,
+                effort,
+                prev_model_id: None,
+            });
+        }
+    }
+    effects
 }
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,25 @@ pub(crate) fn take_deferred_model_switch(
         },
     }
 }
+/// Replace the session catalog from SessionCreated / SessionLoaded /
+/// WorktreeSessionCreated. Same-model catalog `high` must not clobber the
+/// operator's already-chosen effort.
+pub(crate) fn replace_session_models_keeping_chosen_effort(
+    app_models: &mut ModelState,
+    session_models: &mut ModelState,
+    new_models: Option<acp::SessionModelState>,
+) {
+    let previous_current = session_models.current.clone();
+    let previous_effort = session_models.reasoning_effort;
+    if let Some(m) = new_models {
+        *app_models = Some(m).into();
+        *session_models = app_models.clone();
+        session_models
+            .restore_chosen_effort_if_same_model(previous_current.as_ref(), previous_effort);
+        app_models.restore_chosen_effort_if_same_model(previous_current.as_ref(), previous_effort);
+    }
+}
+
 /// Take the stashed deferred switch, resolve any CLI effort token against the
 /// session catalog, surface effort errors, and return the switch to apply.
 /// `prev_model_id` becomes the session's authoritative model when the
@@ -1068,10 +1087,11 @@ pub(in crate::app::dispatch) fn handle_session_created(
         }
         agent.bind_session_id(session_id);
         agent.scheduler_background_loops = scheduler_background_loops;
-        if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
-        }
+        replace_session_models_keeping_chosen_effort(
+            &mut app.models,
+            &mut agent.session.models,
+            new_models,
+        );
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
         let deferred_mode = agent.deferred_session_mode.take();
         let cwd = agent.session.cwd.clone();
@@ -1171,10 +1191,11 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.main_repo = None;
         agent.is_worktree = true;
         crate::git_info::populate_from_cwd_async(session_cwd.clone());
-        if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
-        }
+        replace_session_models_keeping_chosen_effort(
+            &mut app.models,
+            &mut agent.session.models,
+            new_models,
+        );
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(
             "Worktree ready: {}",

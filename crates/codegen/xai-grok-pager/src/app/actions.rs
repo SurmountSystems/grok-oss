@@ -344,8 +344,9 @@ pub enum Action {
     /// Minimal mode (`grok --minimal`): re-print the most-recently committed
     /// folded block (collapsed reasoning / truncated tool output) into native
     /// scrollback, fully expanded, below the conversation (design decision K10).
-    /// Bound to `Ctrl+E` and the `/expand` command. No-op outside minimal mode
-    /// or when nothing folded remains to expand.
+    /// Bound to `Ctrl+T` (Ctrl+E stays an extra chord) and the `/expand`
+    /// command. No-op outside minimal mode or when nothing folded remains to
+    /// expand.
     MinimalExpandLast,
     /// Copy selected block's metadata (e.g., command for execute blocks).
     CopyBlockMeta,
@@ -549,7 +550,7 @@ pub enum Action {
     /// Hide in-app status / welcome / dashboard headers. SHELL-owned:
     /// cache + `[ui].hide_header`.
     SetHideHeader(bool),
-    /// Keep thinking blocks expanded and hide Ctrl+E. SHELL-owned:
+    /// Keep thinking blocks expanded and hide Ctrl+T. SHELL-owned:
     /// cache + `[ui].always_expand_thinking`.
     SetAlwaysExpandThinking(bool),
     /// Plan approval park (`soft` | `modal`). SHELL-owned:

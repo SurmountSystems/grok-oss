@@ -112,6 +112,13 @@ pub struct LimitsSnapshotManagement {
     pub team_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepaid_cents: Option<i64>,
+    /// Billing Credits card from GetAmountToPay remaining. Never filled from
+    /// [`Self::prepaid_cents`].
+    #[serde(default)]
+    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    /// Remaining USD cents when [`Self::billing_credits_card`] is `fetched`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_credits_cents: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postpaid_period_total_cents: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +282,7 @@ fn apply_management_snapshot(mgmt: &LimitsSnapshotManagement) {
             default_credits_issued_cents: mgmt.postpaid_default_credits_issued_cents,
             billing_cycle_year: mgmt.postpaid_billing_cycle_year,
             billing_cycle_month: mgmt.postpaid_billing_cycle_month,
+            billing_credits_remaining_cents: mgmt.billing_credits_cents,
         });
     }
     if let (Some(start), Some(end)) = (
@@ -324,9 +332,18 @@ pub async fn fetch_management_into_snapshot() -> Option<LimitsSnapshotManagement
     if team_id.is_none() && prepaid.is_none() && postpaid.is_none() && series.is_none() {
         return None;
     }
+    let remaining = postpaid
+        .as_ref()
+        .and_then(|m| m.billing_credits_remaining_cents);
     Some(LimitsSnapshotManagement {
         team_id,
         prepaid_cents: prepaid.as_ref().map(|m| m.balance_cents),
+        billing_credits_card: match remaining {
+            Some(_) => xai_grok_sampling_types::BillingCreditsCard::Fetched,
+            None if postpaid.is_none() => xai_grok_sampling_types::BillingCreditsCard::Error,
+            None => xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+        },
+        billing_credits_cents: remaining,
         postpaid_period_total_cents: postpaid.as_ref().map(|m| m.period_total_cents),
         postpaid_oauth_class_cents: postpaid.as_ref().map(|m| m.oauth_class_cents),
         postpaid_api_class_cents: postpaid.as_ref().map(|m| m.api_class_cents),

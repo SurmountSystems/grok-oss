@@ -1104,7 +1104,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
         &collapsed_appearance(),
     ));
     assert_eq!(entry.display_mode(), DisplayMode::Collapsed);
-    // The mode `commit_active` records for the Ctrl+E ring.
+    // The mode `commit_active` records for the Ctrl+T expand ring.
     assert!(matches!(
         entry.display_mode(),
         DisplayMode::Collapsed | DisplayMode::Truncated
@@ -1128,7 +1128,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
             .collect();
         assert!(row.contains("Thought"), "@{width}: {row:?}");
         assert!(
-            row.contains("ctrl+e to expand"),
+            row.contains("ctrl+t to expand"),
             "@{width}: the only way into a print-once folded block must be \
              advertised: {row:?}"
         );

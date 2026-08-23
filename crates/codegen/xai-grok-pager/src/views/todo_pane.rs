@@ -188,8 +188,8 @@ impl TodoCounts {
         self.in_progress + self.pending + self.completed + self.cancelled
     }
 
-    /// Tasks that count toward completion progress — every status except
-    /// cancelled. Used as the denominator of the status-bar `done/total`
+    /// Tasks that count toward completion progress. Every status except
+    /// cancelled. Used as the denominator of the status-bar `tasks N/M`
     /// badge so cancelled tasks don't keep it from reaching `N/N`.
     pub fn total_excluding_cancelled(&self) -> usize {
         self.in_progress + self.pending + self.completed
@@ -298,8 +298,8 @@ impl TodoPane {
     /// Replace all todo items (called from ACP Plan handler).
     ///
     /// Does NOT auto-show the todo pane — the badge in the status bar is
-    /// the primary indicator. Users toggle the pane with Ctrl-T or by
-    /// clicking the badge.
+    /// the primary indicator. Users toggle the pane with Ctrl+Shift+T or by
+    /// clicking the badge. Ctrl+T expands or collapses thinking.
     ///
     /// Triggers a badge flash when counts change (including first arrival).
     pub fn update_todos(&mut self, items: Vec<TodoItem>) {

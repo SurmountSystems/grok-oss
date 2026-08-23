@@ -3,7 +3,7 @@ use super::foreign::{dispatch_fetch_session_list, invalidate_foreign_picker};
 use super::fork::build_child_fork_marker;
 use super::lifecycle::{
     clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
-    refuse_chat_mode_build_agent,
+    refuse_chat_mode_build_agent, replace_session_models_keeping_chosen_effort,
 };
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::{Action, Effect};
@@ -13,7 +13,8 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::ActiveView;
 use crate::app::app_view::AppView;
 use crate::app::dispatch::ctx::{
-    SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
+    SwitchCause, find_agent_id_by_session_id, get_active_agent, get_active_agent_mut,
+    switch_to_agent, with_active_agent,
 };
 use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
@@ -25,6 +26,7 @@ use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
+use std::path::{Path, PathBuf};
 /// Create a placeholder agent and load an existing session by ID.
 ///
 /// `session_cwd` overrides the CWD in the `LoadSessionRequest`. This is needed
@@ -49,7 +51,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session(
             });
         return vec![];
     }
-    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind)
+    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true)
 }
 /// Clear `session_id` from any existing agent that already owns the given
 /// session, then return a freshly constructed [`acp::SessionId`].
@@ -140,6 +142,7 @@ fn dispatch_load_session_ungated(
     session_id: String,
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
+    restore_fork_parent: bool,
 ) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
     let bypass_chat_refusal = app.welcome_history_load_as_build;
@@ -168,6 +171,11 @@ fn dispatch_load_session_ungated(
         }
         return vec![];
     }
+    let mut effects = if restore_fork_parent {
+        ensure_fork_parent_loaded(app, &session_id, session_cwd.as_deref(), chat_kind)
+    } else {
+        Vec::new()
+    };
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
@@ -288,14 +296,96 @@ fn dispatch_load_session_ungated(
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
+    wire_forked_from_from_disk(app, agent_id);
     switch_to_agent(app, agent_id, SwitchCause::Load);
-    vec![Effect::LoadSession {
+    effects.push(Effect::LoadSession {
         agent_id,
         session_id,
         session_cwd,
         // Conversation-entry bit; effects OR SessionFlags.chat_mode for meta.
         chat_kind,
-    }]
+    });
+    effects
+}
+
+/// Load the persisted `/fork` parent before the child placeholder so the
+/// child is family member 2 of 2 (same insertion order as live `/fork`).
+fn ensure_fork_parent_loaded(
+    app: &mut AppView,
+    session_id: &str,
+    session_cwd: Option<&Path>,
+    chat_kind: bool,
+) -> Vec<Effect> {
+    let cwd = session_cwd.unwrap_or(app.cwd.as_path());
+    let Some(parent_sid) = crate::app::session_startup::fork_parent_session_id(session_id, cwd)
+    else {
+        return vec![];
+    };
+    if parent_sid == session_id {
+        return vec![];
+    }
+    if find_agent_id_by_session_id(&app.agents, &parent_sid).is_some() {
+        return vec![];
+    }
+    let cwd_str = cwd.to_string_lossy();
+    let parent_cwd = xai_grok_shell::session::resolve_local_session_any_cwd(&parent_sid)
+        .map(PathBuf::from)
+        .or_else(|| {
+            xai_grok_shell::session::resolve_local_session(&parent_sid, &cwd_str)
+                .map(|_| cwd.to_path_buf())
+        });
+    let Some(parent_cwd) = parent_cwd else {
+        return vec![];
+    };
+    dispatch_load_session_ungated(app, parent_sid, Some(parent_cwd), chat_kind, false)
+}
+
+/// Stamp `forked_from` from `summary.json` once the parent is a live agent.
+fn wire_forked_from_from_disk(app: &mut AppView, loaded_id: AgentId) {
+    let Some(sid) = app
+        .agents
+        .get(&loaded_id)
+        .and_then(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
+    else {
+        return;
+    };
+    let cwd = app
+        .agents
+        .get(&loaded_id)
+        .map(|a| a.session.cwd.clone())
+        .unwrap_or_else(|| app.cwd.clone());
+    if let Some(parent_sid) = crate::app::session_startup::fork_parent_session_id(&sid, &cwd)
+        && let Some(parent_id) = find_agent_id_by_session_id(&app.agents, &parent_sid)
+        && parent_id != loaded_id
+        && let Some(child) = app.agents.get_mut(&loaded_id)
+    {
+        child.session.forked_from = Some(parent_id);
+    }
+    let Some(loaded_sid) = app
+        .agents
+        .get(&loaded_id)
+        .and_then(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
+    else {
+        return;
+    };
+    let child_ids: Vec<AgentId> = app
+        .agents
+        .iter()
+        .filter_map(|(id, agent)| {
+            if *id == loaded_id {
+                return None;
+            }
+            let child_sid = agent.session.session_id.as_ref()?.0.as_ref();
+            let parent =
+                crate::app::session_startup::fork_parent_session_id(child_sid, &agent.session.cwd)?;
+            (parent == loaded_sid).then_some(*id)
+        })
+        .collect();
+    for child_id in child_ids {
+        if let Some(child) = app.agents.get_mut(&child_id) {
+            child.session.forked_from = Some(loaded_id);
+        }
+    }
 }
 /// Load the session selected in the session picker.
 pub(in crate::app::dispatch) fn dispatch_pick_session(
@@ -1090,10 +1180,11 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if let Some(placeholder_id) = agent.loading_placeholder_id.take() {
             agent.scrollback.remove_entry(placeholder_id);
         }
-        if let Some(m) = new_models {
-            app.models = Some(m).into();
-            agent.session.models = app.models.clone();
-        }
+        replace_session_models_keeping_chosen_effort(
+            &mut app.models,
+            &mut agent.session.models,
+            new_models,
+        );
         let deferred = crate::app::dispatch::session::lifecycle::apply_deferred_model_switch(
             agent,
             app.cli_effort_token.as_deref(),

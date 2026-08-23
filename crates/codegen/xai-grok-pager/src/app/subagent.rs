@@ -103,6 +103,46 @@ impl SubagentInfo {
             self.elapsed()
         }
     }
+
+    /// Last operator-visible tool or progress for wait chrome.
+    ///
+    /// Prefers a real `activity_label`, then the last `tools_used` name, then
+    /// a tool-call count. Generic `Waiting on task output` labels are not
+    /// progress: nested progress often leaves that leftover while `tools_used`
+    /// still names the last tool.
+    pub(crate) fn wait_progress_label(&self) -> Option<String> {
+        if let Some(label) = meaningful_wait_progress(self.activity_label.as_deref()) {
+            return Some(label);
+        }
+        if let Some(tool) = self
+            .tools_used
+            .last()
+            .map(|s| s.as_ref())
+            .and_then(|s| meaningful_wait_progress(Some(s)))
+        {
+            return Some(tool);
+        }
+        match self.tool_call_count.or(self.tool_calls) {
+            Some(1) => Some("1 tool".to_string()),
+            Some(n) if n > 1 => Some(format!("{n} tools")),
+            _ => None,
+        }
+    }
+}
+
+fn meaningful_wait_progress(label: Option<&str>) -> Option<String> {
+    let label = label?.trim_end_matches('…').trim_end_matches("...").trim();
+    if label.is_empty() {
+        return None;
+    }
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("waiting on task output")
+        || lower.contains("waiting for the model")
+        || lower == "waiting"
+    {
+        return None;
+    }
+    Some(label.to_string())
 }
 /// Minimal pager-side view of the shell's on-disk `SubagentMeta`.
 #[derive(Debug, Deserialize)]
@@ -349,6 +389,32 @@ pub(crate) fn finalize_finished_child_view(
                 elapsed: Some(elapsed),
             },
         ));
+}
+
+/// Nested child views never receive `PromptResponse`. ACP turn-end on the
+/// child session must idle overlay chrome so last-assistant `Responding`
+/// cannot keep a climbing clock and `[pause] [stop]`.
+pub(crate) fn finish_nested_child_session_turn(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) -> bool {
+    let Some(child_view) = parent.subagent_views.get_mut(child_sid) else {
+        return false;
+    };
+    let live =
+        child_view.session.state.is_busy() || child_view.session.tracker.activity().is_some();
+    if !live {
+        return false;
+    }
+    child_view.session.finish_turn(&mut child_view.scrollback);
+    child_view.scrollback.finish_all_running();
+    child_view.mark_turn_finished();
+    if let Some(info) = parent.subagent_sessions.get_mut(child_sid)
+        && !info.finished
+    {
+        info.activity_label = None;
+    }
+    true
 }
 fn join_meta_parts(parts: &[Option<&str>]) -> String {
     let non_empty: Vec<&str> = parts.iter().copied().flatten().collect();

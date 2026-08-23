@@ -873,6 +873,7 @@ pub fn render_todo_badge_spans(
             return None;
         }
         return Some(vec![
+            Span::styled("tasks ", count_style),
             Span::styled(counts.completed.to_string(), count_style),
             Span::styled("/", dim_style),
             Span::styled(total.to_string(), count_style),
@@ -1063,7 +1064,7 @@ pub fn build_hints(
             } else {
                 crate::key!(Enter, SHIFT)
             };
-            let submit_label = if is_turn_running { "queue" } else { "send" };
+            let submit_label = if is_turn_running { "interject" } else { "send" };
             if let Some(key) = registry.key_for(ActionId::SendPrompt) {
                 if prompt.paste_element_at_cursor().is_some() {
                     hints.push(HintItem::new(key, "expand"));
@@ -1096,6 +1097,11 @@ pub fn build_hints(
                     continue;
                 }
                 if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
+                    continue;
+                }
+                if def.id == ActionId::ExpandAllThinking
+                    && crate::appearance::cache::load_always_expand_thinking()
+                {
                     continue;
                 }
                 hints.push(def.hint());
@@ -1178,9 +1184,25 @@ pub fn build_hints(
                 }
                 offer_focus_hint(&mut hints);
             }
+            let always_expand_thinking = crate::appearance::cache::load_always_expand_thinking();
+            // `-` (ExpandAllThinking) owns "expand" while thoughts are
+            // collapsed. A selected-entry expand next to "collapse thinking"
+            // is dead chrome: the advertised key does not open thoughts.
+            let thinking_owns_expand =
+                !always_expand_thinking && thinking_label == "expand thinking";
+            let suppress_dead_expand =
+                !always_expand_thinking && thinking_label == "collapse thinking";
+            let skip_entry_expand = thinking_owns_expand || suppress_dead_expand;
+            let thinking_expand_key = if thinking_owns_expand {
+                crate::key!('-')
+            } else {
+                registry
+                    .key_for(ActionId::ExpandAllThinking)
+                    .unwrap_or_else(|| crate::key!('t', CONTROL))
+            };
             if selected_is_user_prompt {
                 let user_collapsed = fold_label == Some("expand");
-                if user_collapsed {
+                if user_collapsed && !skip_entry_expand {
                     let key = registry
                         .key_for_mode(ActionId::ToggleFold, vim_mode)
                         .or_else(|| registry.key_for_mode(ActionId::Expand, vim_mode));
@@ -1188,9 +1210,16 @@ pub fn build_hints(
                         hints.push(HintItem::new(key, "expand"));
                     }
                 }
-                if !crate::appearance::cache::load_always_expand_thinking()
+                if !always_expand_thinking
                     && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
                 {
+                    // Replace the selected-entry expand with `-` only when
+                    // that slot would otherwise be "expand". A collapsed
+                    // thinking hint on an already-expanded prompt stays
+                    // "expand thinking" (Ctrl+T) so hoist order holds.
+                    if thinking_owns_expand && user_collapsed {
+                        hints.push(HintItem::new(crate::key!('-'), "expand"));
+                    }
                     hints.push(HintItem::new(key, thinking_label));
                 }
                 if !user_collapsed {
@@ -1204,16 +1233,19 @@ pub fn build_hints(
                     hints.push(HintItem::new(key, label));
                 }
             } else if !user_collapsed_already_pushed && let Some(label) = fold_label {
-                let directional = if label == "expand" {
-                    ActionId::Expand
-                } else {
-                    ActionId::Collapse
-                };
-                let key = registry
-                    .key_for_mode(ActionId::ToggleFold, vim_mode)
-                    .or_else(|| registry.key_for_mode(directional, vim_mode));
-                if let Some(key) = key {
-                    hints.push(HintItem::new(key, label));
+                let skip_this_expand = label == "expand" && skip_entry_expand;
+                if !skip_this_expand {
+                    let directional = if label == "expand" {
+                        ActionId::Expand
+                    } else {
+                        ActionId::Collapse
+                    };
+                    let key = registry
+                        .key_for_mode(ActionId::ToggleFold, vim_mode)
+                        .or_else(|| registry.key_for_mode(directional, vim_mode));
+                    if let Some(key) = key {
+                        hints.push(HintItem::new(key, label));
+                    }
                 }
             }
             if group_header_label.is_none()
@@ -1238,11 +1270,8 @@ pub fn build_hints(
             {
                 hints.push(HintItem::paired(l, h, "turn").pinned());
             }
-            if !selected_is_user_prompt
-                && !crate::appearance::cache::load_always_expand_thinking()
-                && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
-            {
-                hints.push(HintItem::new(key, thinking_label));
+            if !selected_is_user_prompt && !always_expand_thinking {
+                hints.push(HintItem::new(thinking_expand_key, thinking_label));
             }
             if vim_mode
                 && let (Some(g), Some(bg)) = (
@@ -1565,6 +1594,125 @@ mod tests {
         let hints = scrollback_hints(&registry, Some("expand"), false, false, true, false);
         assert_eq!(first_two_labels(&hints), vec!["expand", "expand thinking"]);
     }
+    fn scrollback_hints_with_thinking_label(
+        registry: &ActionRegistry,
+        fold_label: Option<&'static str>,
+        thinking_label: &'static str,
+        selected_is_user_prompt: bool,
+        vim_mode: bool,
+    ) -> Vec<HintItem> {
+        build_hints(
+            ActivePane::Scrollback,
+            prompt_focus_hint(),
+            &PromptWidget::default(),
+            registry,
+            false,
+            fold_label,
+            None,
+            thinking_label,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            vim_mode,
+            false,
+            false,
+            false,
+            false,
+            selected_is_user_prompt,
+            false,
+            false,
+            false,
+            None,
+        )
+    }
+    #[test]
+    fn scrollback_collapsed_thinking_advertises_hyphen_expand() {
+        let registry = ActionRegistry::defaults();
+        for vim_mode in [true, false] {
+            let hints = scrollback_hints_with_thinking_label(
+                &registry,
+                Some("expand"),
+                "expand thinking",
+                true,
+                vim_mode,
+            );
+            let expand = hints
+                .iter()
+                .find(|h| h.label == "expand")
+                .unwrap_or_else(|| {
+                    panic!("collapsed thinking must advertise expand (vim_mode={vim_mode})")
+                });
+            assert_eq!(
+                expand.keys,
+                vec![crate::key!('-')],
+                "the advertised expand key must be `-` so it matches the footer (vim_mode={vim_mode})"
+            );
+            assert!(
+                hints.iter().any(|h| h.label == "expand thinking"),
+                "Ctrl+T expand thinking stays discoverable (vim_mode={vim_mode})"
+            );
+            assert!(
+                !hints.iter().any(|h| h.label == "collapse thinking"),
+                "must not advertise collapse thinking while thinking is collapsed (vim_mode={vim_mode})"
+            );
+        }
+    }
+    #[test]
+    fn scrollback_collapsed_thinking_non_user_advertises_hyphen_expand_thinking() {
+        let registry = ActionRegistry::defaults();
+        for vim_mode in [true, false] {
+            let hints = scrollback_hints_with_thinking_label(
+                &registry,
+                Some("expand"),
+                "expand thinking",
+                false,
+                vim_mode,
+            );
+            let expand_thinking = hints
+                .iter()
+                .find(|h| h.label == "expand thinking")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "collapsed thinking must advertise expand thinking (vim_mode={vim_mode})"
+                    )
+                });
+            assert_eq!(
+                expand_thinking.keys,
+                vec![crate::key!('-')],
+                "the advertised expand-thinking key must be `-` (vim_mode={vim_mode})"
+            );
+            assert!(
+                !hints.iter().any(|h| h.label == "expand"),
+                "selected-entry expand must not steal the thinking expand slot (vim_mode={vim_mode})"
+            );
+        }
+    }
+    #[test]
+    fn scrollback_expanded_thinking_does_not_advertise_dead_expand() {
+        let registry = ActionRegistry::defaults();
+        for vim_mode in [true, false] {
+            let hints = scrollback_hints_with_thinking_label(
+                &registry,
+                Some("expand"),
+                "collapse thinking",
+                true,
+                vim_mode,
+            );
+            assert!(
+                !hints.iter().any(|h| h.label == "expand"),
+                "expanded thinking must not advertise a dead expand next to collapse thinking (vim_mode={vim_mode}); got {:?}",
+                hints.iter().map(|h| h.label.as_ref()).collect::<Vec<_>>()
+            );
+            assert!(
+                hints.iter().any(|h| h.label == "collapse thinking"),
+                "Ctrl+T collapse thinking stays (vim_mode={vim_mode})"
+            );
+        }
+    }
     #[test]
     fn scrollback_user_prompt_expanded_hoists_thinking_then_space() {
         let registry = ActionRegistry::defaults();
@@ -1866,12 +2014,12 @@ mod tests {
         let hints = prompt_hints_with_text_and_turn(false, false, true);
         let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
         assert!(
-            labels.contains(&"queue"),
-            "mid-turn follow-up must advertise Enter:queue (not send); got {labels:?}"
+            labels.contains(&"interject"),
+            "mid-turn follow-up must advertise Enter:interject (not send); got {labels:?}"
         );
         assert!(
-            !labels.contains(&"send"),
-            "mid-turn must not mislabel Enter as send; got {labels:?}"
+            !labels.contains(&"send") && !labels.contains(&"queue"),
+            "mid-turn Enter with text must not be labeled send or queue; got {labels:?}"
         );
         assert!(
             labels.contains(&"send now"),
@@ -2401,8 +2549,8 @@ mod tests {
         assert_eq!(layout.follow_ups, Rect::default());
         assert!(layout.scrollback.height >= 5);
     }
-    /// Default todo badge is a `done/total` fraction: numerator = completed,
-    /// denominator = all tasks except cancelled.
+    /// Default todo badge names tasks and shows a `done/total` fraction:
+    /// numerator = completed, denominator = all tasks except cancelled.
     #[test]
     fn todo_badge_default_renders_done_over_total_fraction() {
         let theme = Theme::current();
@@ -2417,8 +2565,8 @@ mod tests {
                 .expect("badge renders when there are todos");
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            text.starts_with("2/5"),
-            "expected a 2/5 done/total fraction, got {text:?}"
+            text.starts_with("tasks 2/5"),
+            "expected tasks plus a 2/5 done/total fraction, got {text:?}"
         );
         let with_cancelled = super::super::todo_pane::TodoCounts {
             in_progress: 0,
@@ -2436,8 +2584,52 @@ mod tests {
         .expect("badge renders");
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            text.starts_with("2/3"),
-            "cancelled tasks are excluded from the total, got {text:?}"
+            text.starts_with("tasks 2/3"),
+            "cancelled tasks are excluded from the total and the badge still names tasks, got {text:?}"
+        );
+    }
+
+    /// Named contract: the status-row badge must say the word tasks, not
+    /// only a `614/638` (or `N/M`) fraction. Click still uses this same
+    /// badge; the overlay stays closed until the operator toggles it.
+    #[test]
+    fn todo_badge_names_tasks_not_only_fraction() {
+        let theme = Theme::current();
+        let counts = super::super::todo_pane::TodoCounts {
+            in_progress: 0,
+            pending: 24,
+            completed: 614,
+            cancelled: 0,
+        };
+        let spans =
+            render_todo_badge_spans(&counts, false, false, TodoBadgeFormat::Default, &theme)
+                .expect("badge renders when there are todos");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("tasks"),
+            "status badge must name tasks, not only a fraction; got {text:?}"
+        );
+        assert!(
+            !lower.contains("todos"),
+            "status badge must not name todos; got {text:?}"
+        );
+        assert!(
+            text.contains("614/638"),
+            "status badge must still show the done/total fraction, got {text:?}"
+        );
+        let digits_only = text
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '/')
+            .collect::<String>();
+        assert_ne!(
+            text.trim(),
+            "614/638",
+            "a header that is only 614/638 is FAIL"
+        );
+        assert!(
+            digits_only.contains("614/638"),
+            "fraction must remain in the badge, got {text:?}"
         );
     }
     /// No todos → no badge.

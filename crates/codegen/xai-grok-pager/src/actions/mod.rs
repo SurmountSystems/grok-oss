@@ -847,6 +847,74 @@ mod tests {
     }
 
     #[test]
+    fn hyphen_expands_all_thinking_from_scrollback() {
+        let registry = ActionRegistry::defaults();
+        let hyphen = KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE);
+        assert_eq!(
+            registry.lookup(&hyphen, When::ScrollbackFocused),
+            Some(ActionId::ExpandAllThinking),
+            "`-` on the scrollback must expand/collapse thinking, not type or no-op"
+        );
+        assert_eq!(
+            registry.lookup_with_mode(&hyphen, When::ScrollbackFocused, false),
+            Some(ActionId::ExpandAllThinking),
+            "`-` is not a letter; vim-off must still expand thinking"
+        );
+        assert_eq!(
+            registry.lookup(&hyphen, When::PromptFocused),
+            None,
+            "`-` in the composer must stay a typed hyphen"
+        );
+    }
+
+    #[test]
+    fn ctrl_t_toggles_thinking_on_scrollback_prompt_and_agent_screen() {
+        let registry = ActionRegistry::defaults();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(
+            registry.lookup(&ctrl_t, When::ScrollbackFocused),
+            Some(ActionId::ExpandAllThinking),
+            "Ctrl+T on the scrollback must expand or collapse thinking"
+        );
+        assert_eq!(
+            registry.lookup(&ctrl_t, When::PromptFocused),
+            Some(ActionId::ExpandAllThinking),
+            "Ctrl+T in the composer must expand or collapse thinking, not type t"
+        );
+        assert_eq!(
+            registry.lookup(&ctrl_t, When::AgentScreen),
+            Some(ActionId::ExpandAllThinking),
+            "Ctrl+T on the agent screen must expand or collapse thinking"
+        );
+        assert_ne!(
+            registry.lookup(&ctrl_e, When::ScrollbackFocused),
+            Some(ActionId::ExpandAllThinking),
+            "Ctrl+E is not the thinking expand/collapse chord"
+        );
+        let def = registry.find(ActionId::ExpandAllThinking).unwrap();
+        assert_eq!(
+            def.default_key,
+            crate::key!('t', CONTROL),
+            "documented thinking toggle is Ctrl+T"
+        );
+        assert_eq!(
+            registry.lookup(&ctrl_t, When::DashboardFocused),
+            Some(ActionId::DashboardTogglePin),
+            "dashboard list Ctrl+T stays pin; that surface has no thinking chrome"
+        );
+        let ctrl_shift_t = KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            registry.lookup(&ctrl_shift_t, When::AgentScreen),
+            Some(ActionId::ToggleTodos),
+            "todo pane uses Ctrl+Shift+T so Ctrl+T can stay thinking"
+        );
+    }
+
+    #[test]
     fn find_action_def() {
         let registry = ActionRegistry::defaults();
         let def = registry.find(ActionId::Quit).unwrap();

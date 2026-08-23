@@ -296,7 +296,7 @@ Grok Build also discovers roles from `.grok/roles/*.toml` and personas from `.gr
 Grok Build shows running and finished work in side panes on the agent screen:
 
 - Press `Ctrl+G` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
-- Press `Ctrl+T` to toggle the separate todo pane.
+- Press `Ctrl+Shift+T` to toggle the separate todo pane, or click the status-row **tasks N/M** badge. Inside a nested L2 overlay, that toggle is for the nested session's board. `Ctrl+T` expands or collapses thinking on that overlay's scrollback, same as the main session.
 
 To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
 
@@ -345,7 +345,7 @@ The default nesting limit is two. The main thread (L1) can spawn subagents (L2).
 
 ## Token efficiency
 
-Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, agents are three layers deep. That includes implement loops. A simple implement job is not an exception.
+Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, spawn an L2 so the main thread stays a coordinator. L2 spawns L3 only if the problem is actually hard. Easy work can stay on L2. That includes implement loops.
 
 **Hierarchical fast path.** The main thread may do these three things without spawning a subagent:
 
@@ -360,18 +360,18 @@ That is not a license to diagnose or implement in the main thread.
 | Depth | Does | Does not |
 | ----- | ---- | -------- |
 | **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. Spawn L3 specialists. Stay token-efficient. Discard context after a report goes up. Operator-facing nested view: you can ask or clarify in that L2 overlay. | Fill itself with product tool work (that is L3's job) |
+| **L2 subagent** | Parallelize. Spawn L3 specialists only if the problem is actually hard. Easy work can stay on L2. Stay token-efficient. Discard context after a report goes up. Operator-facing nested view: you can ask or clarify in that L2 overlay. | Spawn L4. Show raw edits as if this were the main thread. |
 | **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (forbidden). Operator chat does not barge into a live L3. |
 
 L3 is not a weaker agent. It has the same tools as L2 except spawn. The hard cap is no L4. L2's extra job versus L3 is spawning L3 specialists and being the nested view you talk to. L3's extra job versus L2 is doing the tools.
 
 Spawn an L2 when the job needs isolation from the main thread: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
 
-L2 parallelizes, must spawn L3 for tool work, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
+L2 parallelizes, spawns L3 only if the problem is actually hard, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. Easy work can stay on L2. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
 
 The main (L1) session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact. Nested L3 sampling also stays 200k, but L3 never compact. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
 
-L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing the work on L2 fills L2 and may cause compaction. That is allowed on L2. The older softer rule (spawn L3 only when there are many greps, or after half the window) is too weak and is replaced.
+L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing easy work on L2 fills L2 and may cause compaction. That is allowed on L2. Spawn L3 only if the problem is actually hard.
 
 See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the parent stays small.
 
@@ -389,4 +389,4 @@ See [Configuration → Token Economy](05-configuration.md#token-economy) for eco
 **When not to use:**
 
 - Tasks that require tight back-and-forth with the user, since a subagent runs autonomously and isn't suited to interactive exchanges
-- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one-command host question, a single known-path read already named, or reading the asked-for report). Implement work, multi-file diagnosis, CI, and regressions still stay three layers deep.
+- Tasks where the Isolated Agent setup cost exceeds the parallelism benefit, and the **Hierarchical fast path** already covers the job (one-command host question, a single known-path read already named, or reading the asked-for report). Implement work, multi-file diagnosis, CI, and regressions still spawn an L2. L2 spawns L3 only if the problem is actually hard.

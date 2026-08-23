@@ -18,11 +18,11 @@ use crate::appearance::AppearanceConfig;
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord
 /// literally instead of going through the keybinding registry. Resolve the
 /// label from the registry once it does, so a remap is advertised correctly.
-const EXPAND_HINT: &str = "ctrl+e to expand";
+const EXPAND_HINT: &str = "ctrl+t to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
-/// Append the dim `(ctrl+e to expand)` affordance to a collapsed header line.
+/// Append the dim `(ctrl+t to expand)` affordance to a collapsed header line.
 ///
 /// The `Collapsed` guard matters because `render_empty_placeholder` reuses the
 /// collapsed renderer for an empty body in other modes, where the hint would be
@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn always_expand_thinking_hides_ctrl_e_hint() {
+    fn always_expand_thinking_hides_ctrl_t_hint() {
         std::thread::spawn(|| {
             crate::appearance::cache::set_always_expand_thinking(true);
             let mut appearance = AppearanceConfig::default();
@@ -708,8 +708,8 @@ mod tests {
                 .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
                 .collect();
             assert!(
-                !text.contains("ctrl+e"),
-                "Ctrl+E hint must be hidden when always_expand_thinking is on: {text:?}"
+                !text.contains("ctrl+t"),
+                "Ctrl+T hint must be hidden when always_expand_thinking is on: {text:?}"
             );
         })
         .join()

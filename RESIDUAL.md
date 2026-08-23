@@ -6,6 +6,12 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Task tracking system (open; Grok OSS product; named 2026-08-22).** Unique to this product, not GitHub. More formal than the session todo board. Less formal than Linear or GitHub issues. Local first always. Do not replace the session todo board (Ctrl+T, status chip `tasks N/M`). Do not shorten the name. The live HITL board is already there. Intended chrome is **not** shipped: tasks on a left sidebar, plan stays a right sidebar, like an AI-assisted Gantt chart in grok-oss. Durable rows already live in `$GROK_HOME/grok_oss.db` (`prompt_tasks`, drafts, templates, `prompt_exec_metrics`). That store already records tokens and honest wall duration on composer submit. It does not yet fill or average the estimate columns, and it has no occupancy column. This is not a second GitHub. Host `AGENTS.md` is not dual-pinned for this product name. Board `feat:task-tracking-system`. Report: `~/.agents/reports/feat-task-tracking-system.md`.
+
+- **2026-08-22 mid-turn Enter interjects (product shipped in source; process leftover).** Composer Enter with explaining-work text while a turn is running is `x.ai/interject` into this turn, not a serial `#1` queue row. Named `/queue /finish` still holds. Empty Enter does not Approve a plan. Ctrl+Enter is still cancel-and-send. **Process leftover:** L1 must treat that interjected user text as additive immediately (board, remaining pointer, spawn). Do not wait for idle. **Docs leftover:** `FORK.md` still says Ctrl+Enter never cancels; user-guide `03-keyboard-shortcuts` matches that stale story. Code and PTY say Ctrl+Enter is cancel-and-send; Enter is now interject. Live TUI needs rebuild/install. Report: `/home/hunter/.agents/reports/fix-prompt-queue-blocks-explain.md`. Law: `AGENTS.md` additive asks, mid-turn Enter is this turn.
+
+- **2026-08-22 polish, billing honesty, sluggish nested agents, compact occupancy.** Pointer only. The inventory lives on the operator machine reports home at `~/.agents/reports/remaining-2026-08-22-incidents.md`. That report is not in git. `/polish` is a default Grok OSS skill (product tree `crates/codegen/xai-grok-bundle/skills/polish/`). SuperGrok is paid. grok-oss limits is a client printout, not xAI billing truth. Do not call any pool used up. Do not paste that inventory into D1.
+
 - **Running grok-oss sessions (shipped 2026-08-16).** Slash `/running` (alias `/windows`) and CLI `grok-oss running` / `grok-oss running --json` list live grok-oss TUI windows from `$GROK_HOME/active_sessions.json`. Identity is `(pid, session_id)`. Missing heartbeat is activity `unknown`. Title is the on-disk session summary. Default headless stays unlisted unless `GROK_TRACK_HEADLESS` is already set. Leader daemons stay on `grok-oss leader list`. `/rebuild` still signals each live grok-oss PID once (dedupe by PID). This is not Agent Dashboard. Lasting truth: [`FORK.md`](FORK.md) Product **Running grok-oss sessions**; user-guide `04-slash-commands`, `17-sessions`, `23-dashboard` (cite only). Reports: `.agents/reports/impl-running-registry.md`, `impl-running-heartbeat.md`, `impl-running-slash-cli.md`, `impl-running-rebuild.md`, `impl-running-docs.md`. Live TUI still needs install plus quit/reopen before `/running` appears in an already-open window. **Not leftover implement of this feature:** the plan-present idle cue, sparse UI, or SuperGrok Heavy ranking. Those stay their own Open items.
 
 - **SuperGrok Heavy ranking leftover (open; not a product-code diagnose).** Live chrome now says SuperGrok dollar credits for the prepaid SuperGrok top-up meter (slice 5 shipped). Omit the word extras in user-facing copy, residual, reports, board titles, comments that humans read, and process law. SuperGrok is paid. Never call SuperGrok free. **SuperGrok Heavy ranking optional label is not implemented.** SuperGrok Heavy is a real tier, distinct from standard SuperGrok. Personal SuperGrok Heavy and Business/Team SuperGrok Heavy are separate weekly compute pools. They do not combine. Switching workspace switches which pool is drawn from. Standard Business seats are SuperGrok. Heavy is an explicit upgrade. xAI does not publish fixed numeric quotas. Remaining percent is in the product Usage view for that workspace. The operator has SuperGrok Heavy and does not see it used. Board `bug:supergrok-heavy-not-used` owns the diagnose. This pin does not diagnose product code. Law: `AGENTS.md` hard constraint 4. Report: `.agents/reports/pin-omit-extras.md`. An occupancy check on this host (2026-08-16) found two SuperGrok OIDC principals already stored, one personal and one Team/Business; synthesis: `.agents/reports/ask-te-second-supergrok-login-stored.md`.
@@ -75,28 +81,26 @@ or code — not only here. Closed campaign history:
   bullet below. Live snapshot:
   `.agents/reports/live-tasks-2026-08-15.md`.
 
-- **ACP edit tools take a per-path write lock (shipped 2026-08-15).**
-  `search_replace`, `apply_patch`, `write`, OpenCode `edit`, and
-  `hashline_edit` (`GrokBuildHashline:hashline_edit`) acquire the path
+- **ACP edit tools take a per-path write lock (shipped 2026-08-15;
+  spawn `write_paths` 2026-08-22).** `search_replace`, `apply_patch`,
+  `write`, OpenCode `edit`, and `hashline_edit` acquire the path
   automatically as part of the tool call. Happy path is silent (no lock
   argument). A held path is a tool error that names the holder and the
   file. The tool does not write, wait, or show a human steal, skip, or
-  wait menu. Agents resolve the conflict by talking to each other. Lock
-  releases when the call finishes. File-level infer-from-path verify
-  still runs under the same hold. OpenCode `edit` acquires after
-  directory, same-string, and bulk-edit checks, and holds the lock
-  through rustfmt and clippy-driver on the same `.rs` path.
-  `hashline_edit` acquires on the joined path after
-  `resolve_model_path` so it collides with the other tools on the same
-  file. FORK subsection **ACP per-path write lock**. Named tests:
-  module filter `per_path_write_lock` (original ACP fixtures plus
-  `hashline_edit_refuses_when_another_agent_holds_the_path` and
-  `hashline_edit_happy_path_does_not_mention_the_lock`); OpenCode edit
-  module `opencode_edit_cannot_write_a_path_another_agent_already_holds`
-  (not in the `per_path_write_lock` module). Reports:
-  `.agents/reports/impl-acp-file-edit-lock.md`,
-  `.agents/reports/impl-opencode-edit-lock.md`,
-  `.agents/reports/impl-hashline-edit-lock.md`.
+  wait menu. Agents resolve the conflict by talking to each other. The
+  in-flight lock releases when the call finishes. Spawn may also pass
+  `write_paths` on `task` / `spawn_subagent` to claim files until the
+  child finishes. That claim is optional. Omit it when paths are
+  unknown. File-level infer-from-path verify still runs under the
+  in-flight hold. FORK subsection **ACP per-path write lock**. Named
+  tests: module filter `per_path_write_lock`; spawn
+  `spawn_rejects_when_write_paths_overlap_a_live_claim`; OpenCode edit
+  `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
+  Report: `/home/hunter/.agents/reports/feat-subagent-write-coordination.md`.
+  Spawn claims stay optional. Session board todos do not claim files.
+  Nested agents do not get a sibling-writer list. The table is in this
+  process only. "Preparing write" is a TUI activity label, not a lock
+  wait.
 
 - **Tools improve tools (pinned 2026-08-15; process law, not a product
   slice).** Do not write disposable bash, Python, or one-off `curl` as
@@ -163,7 +167,9 @@ or code — not only here. Closed campaign history:
   todos in this wave. Plan as its own design slice after dogfood priority work.
   Board: `feat:thoughtful-todo-tracking-process`. Shipped baseline remains in
   [`FORK.md`](FORK.md) (fib progress, clear finished, also-guard bind). Soft
-  remainders under Open item 0 (structured todos) still apply.
+  remainders under Open item 0 (structured todos) still apply. The **task
+  tracking system** (Open, named 2026-08-22) is the local durable tracker in
+  `grok_oss.db`, not a second session board.
 
 - **Plan approval UI (product chrome shipped → FORK; agent freeform still soft):**
   soft-park **auto-opens** the plan side panel; footer mouse CTAs hit-tested;
@@ -707,7 +713,11 @@ or code — not only here. Closed campaign history:
      SuperGrok session traffic can still settle on **team postpaid OAuth /
      Grok Build class** and can change **console team prepaid remaining**
      (team Billing Credits) without included SuperGrok period used % moving and
-     without the console API key being live. **Shipped honesty + chrome:**
+     without the console API key being live. **Client hop 2026-08-23:** sampling
+     hop omits a Team / Business SuperGrok JWT while a stored personal SuperGrok
+     login exists (that JWT is not the paying source). Team-only login still
+     uses the Team JWT. Server settlement of a personal SuperGrok JWT is still
+     unproven live. **Shipped honesty + chrome:**
      human Console line **Team prepaid remaining**; note
      `NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT`; doctor dogfood block; Work C
      status compact `included SuperGrok period limits · N%` (not bare `intent ·`); SuperGrok-live

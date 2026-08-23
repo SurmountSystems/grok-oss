@@ -80,7 +80,8 @@ Locally, the same quality gate:
 
 ```bash
 just check     # or: just ci  — full gate; run before push
-just check-remote  # workspace rustc as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised; cargo --jobs from cores, cap 32; same dev profile as local clippy)
+just check-remote  # same full gate as just check, as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised; cargo --jobs from cores, cap 32; same dev profile as local clippy)
+just test-remote -p <crate> --lib -- <filter>  # named cargo test on that same remote builder (not rustc on this laptop)
 just test      # fmt / clippy / tests without redoing full flake prep
 ```
 
@@ -135,11 +136,11 @@ Users: `grok-oss update --check`. Maintainers: `just upstream-detect` / import o
 
 ```bash
 just check                    # full quality gate (preferred before push)
-just check-remote             # workspace rustc as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised)
-cargo check -p <crate>
-cargo test -p xai-grok-shell --test openrouter_credentials
-cargo clippy -p <crate>
-cargo fmt --all
+just check-remote             # same full gate as just check, as a Nix derivation on this host's remote builder (requires surmount-remote; 64 cores advertised)
+just test-remote -p xai-grok-shell --test openrouter_credentials
+just cargo-remote clippy -p <crate> --all-targets -- -D warnings
+just cargo-remote check -p <crate>
+cargo fmt --all               # rustfmt only; does not invoke rustc
 ```
 
 ## Contributing

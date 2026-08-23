@@ -3,8 +3,8 @@ pub mod file_operation_lock;
 pub mod per_path_write_lock;
 pub use file_operation_lock::{FileOperationLockGuard, FileOperationLockManager};
 pub use per_path_write_lock::{
-    PathHeldError, PerPathWriteGuard, acquire_for_tool, acquire_paths_for_tool, try_acquire_write,
-    try_acquire_writes,
+    PathHeldError, PerPathWriteGuard, acquire_for_tool, acquire_paths_for_tool, release_holder,
+    try_acquire_write, try_acquire_writes, try_reserve_writes,
 };
 #[cfg(test)]
 mod per_path_write_lock_tests;

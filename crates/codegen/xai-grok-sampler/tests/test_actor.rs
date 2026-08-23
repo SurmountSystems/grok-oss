@@ -319,6 +319,65 @@ async fn cancel_in_flight_request_terminates_task() {
     server.shutdown();
 }
 
+/// Pause / session cancel while chrome is still `Waiting for the model…`
+/// (headers have not arrived; no first token). The cancel token must abort
+/// that wait immediately — not sit on the headers budget (~120s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_aborts_headers_wait_before_first_token() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(0);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let rid = RequestId::from("req-cancel-headers");
+    handle.submit(rid.clone(), user_request("hi"));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !handle.is_active(rid.clone()).await {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("sampler never registered the in-flight headers wait");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    handle.cancel(rid.clone());
+
+    let failed = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Failed { .. }),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("cancel must abort the headers wait without waiting for the headers budget");
+
+    if let SamplingEvent::Failed { error, .. } = failed {
+        assert!(
+            error.message.contains("cancelled"),
+            "headers-wait cancel must be a cancellation, got {}",
+            error.message
+        );
+    }
+
+    let cleanup = tokio::time::Instant::now() + Duration::from_millis(500);
+    while handle.active_count().await != 0 {
+        if tokio::time::Instant::now() >= cleanup {
+            panic!(
+                "cancelled headers wait stayed active (pause would not unstick Waiting for the model)"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    server.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent requests
 // ---------------------------------------------------------------------------
@@ -1212,6 +1271,201 @@ async fn console_team_credit_403_no_hop_when_supergrok_also_dead() {
         1,
         "single console attempt when SuperGrok also dead"
     );
+}
+
+/// SuperGrok JWT primary: team 61fab250 403 must not hop to console or mark
+/// SuperGrok exhausted while included SuperGrok period limits still have room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_team_credit_403_on_supergrok_session_does_not_mark_or_hop_to_console_when_included_has_room()
+ {
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for SuperGrok stay");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
+    let session = "supergrok-primary-stay-jwt";
+    let sibling = "supergrok-sibling-jwt";
+    let console = "console-failover-must-not-become-primary";
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let session_key = session.to_string();
+    let sibling_key = sibling.to_string();
+    let console_key = console.to_string();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            let session_key = session_key.clone();
+            let sibling_key = sibling_key.clone();
+            let console_key = console_key.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                assert_ne!(
+                    key, console_key,
+                    "must not hop to console on SuperGrok-live team 403"
+                );
+                assert!(
+                    key == session_key || key == sibling_key,
+                    "expected SuperGrok identity, got {key}"
+                );
+                Err::<
+                    Sse<
+                        futures_util::stream::Iter<
+                            std::vec::IntoIter<Result<Event, std::convert::Infallible>>,
+                        >,
+                    >,
+                    (StatusCode, String),
+                >((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": {
+                            "message": "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits."
+                        }
+                    })
+                    .to_string(),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some(session.into());
+    cfg.failover_api_keys = vec![sibling.into(), console.into()];
+    cfg.session_identity_key = Some(session.into());
+    cfg.session_base_url = Some(server.base_url());
+    cfg.failover_base_url = Some(server.base_url());
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(RequestId::from("req-sg-team-403-stay"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    let hop_reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hop_reasons
+            .iter()
+            .all(|r| !r.contains("out of allowance") || !r.to_ascii_lowercase().contains("console")),
+        "no out of allowance hop reason toward console: {hop_reasons:?}"
+    );
+    assert!(
+        !xai_grok_sampler::is_credential_exhausted(session),
+        "SuperGrok fingerprint must not be marked exhausted from console team prepaid 403"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { .. } | SamplingEvent::Completed { .. } => {}
+        other => panic!("expected terminal or stay, got {other:?}"),
+    }
+    clear_all_including_durable();
+}
+
+/// Console team 403 then the same team body on SuperGrok recovery: do not
+/// leave SuperGrok marked exhausted; do not make console primary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_team_credit_403_must_not_exhaust_supergrok_when_recovery_jwt_also_gets_the_same_team_body()
+ {
+    let _memo_home = {
+        let dir = tempfile::TempDir::new().expect("temp GROK_HOME for recovery stay");
+        let guard = EnvGuard::set("GROK_HOME", dir.path());
+        clear_all_including_durable();
+        (dir, guard)
+    };
+    clear_all_including_durable();
+
+    let console = "console-then-sg-team-403";
+    let session = "supergrok-recovery-also-team-403-jwt";
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let console_key = console.to_string();
+    let session_key = session.to_string();
+    let last_key = Arc::new(std::sync::Mutex::new(String::new()));
+    let last_key_handler = Arc::clone(&last_key);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap| {
+            let counter = Arc::clone(&counter_handler);
+            let console_key = console_key.clone();
+            let session_key = session_key.clone();
+            let last_key = Arc::clone(&last_key_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let key = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("")
+                    .to_owned();
+                *last_key.lock().expect("last key") = key.clone();
+                let _ = (console_key, session_key);
+                Err::<
+                    Sse<
+                        futures_util::stream::Iter<
+                            std::vec::IntoIter<Result<Event, std::convert::Infallible>>,
+                        >,
+                    >,
+                    (StatusCode, String),
+                >((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": {
+                            "message": "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either used all available credits or reached its monthly spending limit."
+                        }
+                    })
+                    .to_string(),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.api_key = Some(console.into());
+    cfg.failover_api_keys = vec![];
+    cfg.session_identity_key = Some(session.into());
+    cfg.session_base_url = Some(server.base_url());
+    cfg.failover_base_url = Some(server.base_url());
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(
+        RequestId::from("req-console-then-sg-403"),
+        user_request("hi"),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        !xai_grok_sampler::is_credential_exhausted(session),
+        "SuperGrok must not be marked exhausted from the same console team prepaid body"
+    );
+    let last = last_key.lock().expect("last key").clone();
+    assert_ne!(
+        last, console,
+        "must not leave console as primary after SuperGrok recovery also got the team body"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { .. } | SamplingEvent::Completed { .. } => {}
+        other => panic!("expected terminal or stay, got {other:?}"),
+    }
+    assert!(
+        counter.load(Ordering::SeqCst) >= 2,
+        "console 403 then SuperGrok recovery attempt"
+    );
+    clear_all_including_durable();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

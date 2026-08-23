@@ -49,9 +49,9 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
         Some(running_pid.as_str())
     );
 
-    // Second prompt typed while running → immediate server-authoritative
-    // send (queued at the leader). Capture its prompt_id.
-    let effects = dispatch(Action::SendPrompt("queued".into()), &mut app);
+    // Chip follow-up while running still immediate-sends onto the server
+    // queue (composer Enter interjects; this RPC is not that path).
+    let effects = dispatch(Action::SubmitFollowUp("queued".into()), &mut app);
     let queued_pid = match &effects[0] {
         Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
         other => panic!("expected immediate SendPrompt, got {other:?}"),
@@ -274,6 +274,49 @@ fn cancel_turn_in_subagent_view_kills_child_even_with_running_root() {
         "the root turn must keep running"
     );
     assert!(!app.agents[&id].session.state.is_cancelling());
+}
+
+/// List `[x]` / KillSubagent on a nested-agent row the coordinator already
+/// marked completed (idle child view, row still listed as running) must drop
+/// that row from the live list. Sending cancel alone while the row stays is
+/// the chrome no-op the operator hits.
+#[test]
+fn kill_subagent_on_idle_listed_child_drops_live_row() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = make_test_subagent("child-1", "sa-1");
+        info.activity_label = Some("Responding".into());
+        agent.subagent_sessions.insert("child-1".to_string(), info);
+        let mut child = crate::app::agent_view::test_fixtures::make_agent();
+        child.session.state = AgentState::Idle;
+        agent
+            .subagent_views
+            .insert("child-1".into(), Box::new(child));
+    }
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .any(|info| info.subagent_id.as_ref() == "sa-1"),
+        "setup: completed-but-listed child must still be on the live list"
+    );
+
+    let effects = dispatch(Action::KillSubagent("sa-1".into()), &mut app);
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-1"
+        ),
+        "chrome kill must still send a real cancel, got {effects:?}"
+    );
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .all(|info| info.subagent_id.as_ref() != "sa-1"),
+        "an idle listed nested agent must leave the live list after list [x]"
+    );
 }
 
 /// A finished focused subagent must NOT swallow the cancel into a kill: the

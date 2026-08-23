@@ -2625,3 +2625,155 @@ fn plain_picker_fetch_carries_no_query_and_bumps_seq() {
         "picker fetch must be unfiltered and supersede the search, got {effects:?}"
     );
 }
+
+/// Resume of a persisted fork must restore the parent as a live agent
+/// and stamp `forked_from`, so `fork_family_position` is parent plus
+/// child. Without this, last-session-on-start constructs the child
+/// with `forked_from: None` and the upper-left switcher never paints.
+#[serial_test::serial(GROK_HOME)]
+#[test]
+fn load_session_restores_fork_family_from_disk() {
+    let mut fx = crate::test_util::GrokHomeFixture::new();
+    let cwd = fx.cwd_str();
+    fx.write_summary(&cwd, "family-parent-restore", serde_json::json!({}));
+    fx.write_summary(
+        &cwd,
+        "family-child-restore",
+        serde_json::json!({
+            "parent_session_id": "family-parent-restore",
+            "session_kind": "fork",
+            "forked_at": "2026-08-22T00:00:00Z",
+        }),
+    );
+    let mut app = test_app();
+    app.cwd = PathBuf::from(&cwd);
+    dispatch(
+        Action::LoadSession(
+            "family-child-restore".into(),
+            Some(PathBuf::from(&cwd)),
+            false,
+        ),
+        &mut app,
+    );
+
+    let child_id =
+        crate::app::dispatch::ctx::find_agent_id_by_session_id(&app.agents, "family-child-restore")
+            .expect("resumed fork must stay a live agent");
+    let parent_id = crate::app::dispatch::ctx::find_agent_id_by_session_id(
+        &app.agents,
+        "family-parent-restore",
+    )
+    .expect("parent of a resumed fork must be loaded as a live agent");
+    assert_eq!(
+        app.agents[&child_id].session.forked_from,
+        Some(parent_id),
+        "load must stamp forked_from from summary.json parent_session_id"
+    );
+    assert_eq!(
+        crate::app::agent_view::fork_family_position(&app.agents, child_id),
+        Some((2, 2)),
+        "resumed fork family must be parent plus this child so N/M can paint"
+    );
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == child_id),
+        "resume must stay on the forked session, not switch to the parent"
+    );
+}
+
+/// Loading a fork while the parent is already in this pager must wire
+/// `forked_from` without creating a second parent agent.
+#[serial_test::serial(GROK_HOME)]
+#[test]
+fn load_session_wires_forked_from_when_parent_already_live() {
+    let mut fx = crate::test_util::GrokHomeFixture::new();
+    let cwd = fx.cwd_str();
+    fx.write_summary(&cwd, "live-parent-restore", serde_json::json!({}));
+    fx.write_summary(
+        &cwd,
+        "live-child-restore",
+        serde_json::json!({
+            "parent_session_id": "live-parent-restore",
+            "session_kind": "fork",
+            "forked_at": "2026-08-22T00:00:00Z",
+        }),
+    );
+    let mut app = test_app();
+    app.cwd = PathBuf::from(&cwd);
+    dispatch(
+        Action::LoadSession(
+            "live-parent-restore".into(),
+            Some(PathBuf::from(&cwd)),
+            false,
+        ),
+        &mut app,
+    );
+    let parent_id =
+        crate::app::dispatch::ctx::find_agent_id_by_session_id(&app.agents, "live-parent-restore")
+            .expect("parent load");
+    dispatch(
+        Action::LoadSession(
+            "live-child-restore".into(),
+            Some(PathBuf::from(&cwd)),
+            false,
+        ),
+        &mut app,
+    );
+    let child_id =
+        crate::app::dispatch::ctx::find_agent_id_by_session_id(&app.agents, "live-child-restore")
+            .expect("child load");
+    assert_eq!(app.agents.len(), 2, "must not duplicate the live parent");
+    assert_eq!(app.agents[&child_id].session.forked_from, Some(parent_id));
+    assert_eq!(
+        crate::app::agent_view::fork_family_position(&app.agents, child_id),
+        Some((2, 2))
+    );
+}
+
+/// SessionLoaded replaces ModelState from catalog meta. Catalog `high` must
+/// not clobber the operator's already-chosen medium on the same model.
+#[test]
+fn session_loaded_same_model_catalog_high_does_not_clobber_medium() {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+    let info = acp::ModelInfo::new(model_id.clone(), "Grok 4.6".to_string()).meta(
+        serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "high",
+        })
+        .as_object()
+        .cloned(),
+    );
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .session
+            .models
+            .available
+            .insert(model_id.clone(), info.clone());
+        agent
+            .session
+            .models
+            .set_current(model_id.clone(), Some(ReasoningEffort::Medium));
+    }
+    let loaded = acp::SessionModelState::new(model_id, vec![info]);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            models: Some(loaded),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "SessionLoaded catalog high must not paint the composer high after medium"
+    );
+}

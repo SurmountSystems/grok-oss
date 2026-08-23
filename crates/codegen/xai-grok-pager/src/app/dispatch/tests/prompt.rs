@@ -1059,40 +1059,23 @@ fn send_prompt_while_running_queues_without_drain() {
 
     let effects = dispatch(Action::SendPrompt("queued".into()), &mut app);
 
-    // A plain prompt typed while a turn is running is sent to the
-    // agent IMMEDIATELY (server-authoritative) rather than held in the
-    // local drip-feed queue. It does NOT start a concurrent turn.
-    assert_eq!(effects.len(), 1);
-    let pid = match &effects[0] {
-        Effect::SendPrompt {
-            text, prompt_id, ..
-        } => {
-            assert_eq!(text, "queued");
-            prompt_id.clone()
-        }
-        other => panic!("expected immediate SendPrompt, got {other:?}"),
-    };
-    // Not in the local queue; turn state unchanged (no new turn started).
+    // Mid-turn Enter with text is a soft interject: this turn sees it,
+    // the serial queue does not, and the running turn is not cancelled.
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "queued"),
+        other => panic!("expected SendInterject, got {other:?}"),
+    }
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     assert!(app.agents[&id].session.state.is_turn_running());
-    // Optimistic echo present in the shared queue, keyed by prompt_id.
-    let q = app
-        .shared_prompt_queue("test-session")
-        .expect("optimistic echo present");
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0].id, pid);
-    assert_eq!(q[0].text, "queued");
+    assert!(
+        app.shared_prompt_queue("test-session")
+            .is_none_or(|q| q.is_empty()),
+        "interject must not optimistic-echo onto the serial shared queue"
+    );
 }
 
-/// Regression (queue reorder race): a plain prompt typed while a turn is
-/// running must NOT jump onto the server queue when an older prompt is still
-/// waiting in the local drip-feed queue — e.g. prompts queued during
-/// "Starting session…" before the turn began, where the first drains to
-/// start the turn and the rest are stranded locally. If the new prompt
-/// immediate-sent onto the server queue it would render/run AHEAD of the
-/// older local prompt (the merge is server-rows-first), so `[2, 3]` showed
-/// up as `[3, 2]`. The new prompt must instead join the local queue behind
-/// the older one, preserving FIFO.
+/// Already-queued serial rows stay queued. Mid-turn Enter with new text
+/// interjects this turn instead of joining behind them as the next prompt.
 #[test]
 fn send_while_running_with_pending_local_prompt_preserves_fifo() {
     let mut app = test_app_with_agent();
@@ -1107,16 +1090,12 @@ fn send_while_running_with_pending_local_prompt_preserves_fifo() {
         assert_eq!(agent.session.pending_prompts.len(), 1);
     }
 
-    // Send "3" while the queue still holds "2": it must route LOCALLY.
     let effects = dispatch(Action::SendPrompt("three".into()), &mut app);
 
-    // No immediate server-authoritative send (no SendPrompt effect, and no
-    // drain since the turn is running).
-    assert!(
-        effects.is_empty(),
-        "must not immediate-send while a local prompt is pending, got {effects:?}"
-    );
-    // "3" joined the LOCAL queue behind "2" (FIFO preserved).
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "three"),
+        other => panic!("new Enter text must interject this turn, got {other:?}"),
+    }
     let agent = &app.agents[&id];
     let order: Vec<&str> = agent
         .session
@@ -1126,61 +1105,35 @@ fn send_while_running_with_pending_local_prompt_preserves_fifo() {
         .collect();
     assert_eq!(
         order,
-        vec!["two", "three"],
-        "new prompt must queue behind the older local prompt"
+        vec!["two"],
+        "already-queued rows stay queued; new Enter must not join them"
     );
-    // No optimistic shared-queue echo was created (nothing went server-side).
     assert!(
         app.shared_prompt_queue("test-session")
             .is_none_or(|q| q.is_empty()),
-        "no server-queue echo while routing locally"
+        "interject must not echo onto the serial shared queue"
     );
 }
 
 #[test]
 fn turn_end_drains_next_queued_prompt() {
-    // A plain prompt typed while running is sent server-authoritatively
-    // and drained by the leader, not by the local queue. The leader's
-    // `running_prompt_id` broadcast (modeled here by a stashed adoption that
-    // arrived before the previous turn's PromptResponse) is adopted by the
-    // PromptResponse handler after `finish_turn`, rendering its user block.
+    // Mid-turn Enter interjects into the running turn. It is not a serial
+    // next prompt, so turn-end must not drain or re-send it.
+    crate::appearance::cache::set_prompt_suggestions(false);
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // Submit first prompt (drains immediately → Running).
     let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(app.agents[&id].session.state.is_turn_running());
 
-    // Submit second prompt while running → immediate server-authoritative
-    // send (no local queue entry).
     let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
-    let pid_second = match &effects[0] {
-        Effect::SendPrompt {
-            text, prompt_id, ..
-        } => {
-            assert_eq!(text, "second");
-            prompt_id.clone()
-        }
-        other => panic!("expected immediate SendPrompt, got {other:?}"),
-    };
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "second"),
+        other => panic!("expected SendInterject, got {other:?}"),
+    }
     assert_eq!(app.agents[&id].session.queue_len(), 0);
 
-    // Model the leader's running=second broadcast arriving before first's
-    // PromptResponse: stash the adoption (FIFO handoff race).
-    app.pending_running_adoptions.insert(
-        id,
-        crate::app::acp_handler::PendingRunningAdoption {
-            prompt_id: pid_second.clone(),
-            text: Some("second".to_string()),
-            combined_texts: None,
-            kind: "prompt".to_string(),
-            turn_ended: false,
-        },
-    );
-
-    // Turn ends → PromptResponse → finish_turn clears current_prompt_id,
-    // then the stashed adoption is applied (turn-start shim).
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
@@ -1191,22 +1144,14 @@ fn turn_end_drains_next_queued_prompt() {
         &mut app,
     );
 
-    // No re-send (the prompt was already sent at enqueue time): only the
-    // billing refresh effect.
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        &effects[0],
-        Effect::FetchBilling { silent: true, .. }
-    ));
-    assert!(app.agents[&id].session.state.is_turn_running());
-    // current_prompt_id was handed off to the second prompt for correlation.
-    assert_eq!(
-        app.agents[&id].session.current_prompt_id.as_deref(),
-        Some(pid_second.as_str())
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "interjected text must not start a next turn, got {effects:?}"
     );
-    assert!(app.pending_running_adoptions.is_empty());
-    // Scrollback: user "first" + "Worked for" + user "second".
-    assert_eq!(app.agents[&id].scrollback.len(), 3);
+    assert!(app.agents[&id].session.state.is_idle());
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 
 /// PromptResponse FIFO handoff must forward `combined_texts` (one bubble each).
@@ -2001,9 +1946,9 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
     assert_eq!(effects.len(), 1);
     assert!(app.agents[&id].session.state.is_turn_running());
 
-    // Send a second prompt while the first is running → immediate
-    // server-authoritative send.
-    let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+    // Chip follow-up while running still immediate-sends (composer Enter
+    // interjects and would not occupy the serial queue).
+    let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
     let pid_second = match &effects[0] {
         Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
         other => panic!("expected immediate SendPrompt, got {other:?}"),
@@ -2880,6 +2825,123 @@ fn slash_unknown_command_passthrough_enqueues_prompt() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/unknown-cmd arg1"));
     assert!(app.agents[&id].prompt.text().is_empty());
+}
+
+/// Mid-turn freeform Enter merges into the running turn. It must not sit
+/// on the serial prompt queue until idle, and it must not cancel.
+#[test]
+fn mid_turn_freeform_enter_interjects_into_running_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPrompt("also spawn an L2 for the check-remote slice".into()),
+        &mut app,
+    );
+
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => {
+            assert_eq!(text, "also spawn an L2 for the check-remote slice");
+        }
+        other => panic!("expected SendInterject this turn, got {other:?}"),
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "must not serial-queue or cancel-and-send, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].session.pending_prompts.is_empty(),
+        "must not land in pending_prompts as the next serial prompt"
+    );
+    assert!(
+        app.shared_prompt_queue("test-session")
+            .is_none_or(|q| q.is_empty()),
+        "must not optimistic-echo onto the serial shared queue"
+    );
+    assert!(
+        app.agents[&id].session.state.is_turn_running(),
+        "current turn must keep running"
+    );
+}
+
+/// `/goal` is pager PassThrough (shell builtin). Mid-turn Enter must inject
+/// this turn, not wait as a local `#1` row until idle drain.
+#[test]
+fn mid_turn_goal_passthrough_interjects_and_does_not_local_queue() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPrompt("/goal just check-remote --option system-features".into()),
+        &mut app,
+    );
+
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => {
+            assert_eq!(text, "/goal just check-remote --option system-features");
+        }
+        other => panic!("expected SendInterject for mid-turn /goal, got {other:?}"),
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "PassThrough must not serial-queue or cancel-and-send, got {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        0,
+        "must not local-queue until idle"
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+
+/// Named hold stays: `/queue /finish` while a turn runs does not inject
+/// this turn and does not drain.
+#[test]
+fn queue_finish_while_running_still_holds() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("/queue /finish".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "named hold must skip drain and must not interject, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert!(
+        held.display_as_skill,
+        "held /finish is a skill row, not a command drain"
+    );
+    assert!(
+        held.text.contains("/finish"),
+        "held row should be /finish, got {}",
+        held.text
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+    assert_eq!(
+        app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Queued on the prompt queue. It will not run this turn.")
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/finish queue".into()), &mut app);
+    assert!(
+        via_token.is_empty(),
+        "/finish queue must still hold, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
 }
 
 #[test]
@@ -5129,5 +5191,147 @@ fn live_composer_submit_fail_open_when_grok_oss_db_missing() {
     assert!(
         matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "still send"),
         "missing grok_oss.db must fail-open and still send, got {effects:?}"
+    );
+}
+
+fn next_implement_was_started(
+    app: &AppView,
+    id: AgentId,
+    effects: &[Effect],
+    marker: &str,
+) -> bool {
+    let sent = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text.contains("/implement") && text.contains(marker)
+        )
+    });
+    let queued = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text.contains("/implement") && p.text.contains(marker));
+    sent || queued
+}
+
+/// Named contract: a successful agent turn auto-runs the trailing
+/// `## Next implement prompt` `/implement` block so implement looping
+/// continues. HTTP 502 retry chrome on the way to that success is not a
+/// compact-fail skip and must not stop the loop.
+#[test]
+fn successful_turn_end_auto_runs_trailing_next_implement_prompt() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-1".into());
+        agent.session.prompt_history = vec!["/implement --effort 3 first slice".into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(
+            "/implement --effort 3 first slice",
+        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
+                error: "API error (status 502 Bad Gateway): temporarily unavailable".into(),
+                error_type: None,
+            }));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Summary\nFirst slice done.\n\n\
+             ## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice\n\
+             1) keep going",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "successful turn must auto-run trailing Next implement prompt; \
+         a 502 retry that later succeeded must not skip leftover /implement; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    let toast = app.agents[&id]
+        .toast
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("next task /implement detected"),
+        "auto-run must toast, got {toast:?}"
+    );
+}
+
+/// Named contract: a failed HTTP 502 turn is not a successful turn end.
+/// Do not auto-run leftover `/implement` from a failed sampler response.
+#[test]
+fn http_502_failed_turn_does_not_auto_run_next_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-502".into());
+        agent.session.prompt_history = vec!["/implement --effort 3 first slice".into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(
+            "/implement --effort 3 first slice",
+        ));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("API error (status 502 Bad Gateway): temporarily unavailable".into()),
+            http_status: Some(502),
+            prompt_id: Some("impl-502".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "a failed 502 turn must not auto-run leftover /implement; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
     );
 }

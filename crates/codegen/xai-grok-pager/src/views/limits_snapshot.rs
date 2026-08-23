@@ -274,9 +274,15 @@ pub struct ConsoleMeter {
     /// key used for team prepaid balance.
     pub key_available: bool,
     /// Console **team prepaid** remaining USD cents from the Management API
-    /// (`GET …/billing/teams/{team_id}/prepaid/balance`). `None` = use
+    /// (`GET …/billing/teams/{team_id}/prepaid/balance` `total.val`). `None` = use
     /// [`Self::prepaid_gap`] for honest copy. Never SuperGrok dollar credits.
+    /// Never the console.x.ai Billing Credits card.
     pub balance_cents: Option<i64>,
+    /// Billing Credits card from GetAmountToPay remaining. Never filled from
+    /// [`Self::balance_cents`].
+    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    /// Remaining USD cents when [`Self::billing_credits_card`] is `fetched`.
+    pub billing_credits_cents: Option<i64>,
     /// Why dollars are absent when [`Self::balance_cents`] is `None`.
     pub prepaid_gap: ConsoleTeamPrepaidGap,
     /// Team postpaid invoice preview (OAuth vs API class). Distinct from
@@ -573,6 +579,8 @@ impl LimitsSnapshot {
                 // Default gap = missing management key (most common dogfood miss);
                 // wire real gap via [`Self::with_console_prepaid_gap`].
                 balance_cents: None,
+                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
                 postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,
@@ -655,6 +663,18 @@ impl LimitsSnapshot {
     /// not-configured). Does not touch SuperGrok meters.
     pub fn with_console_balance_cents(mut self, cents: Option<i64>) -> Self {
         self.console.balance_cents = cents;
+        self
+    }
+
+    /// Attach Billing Credits remaining from GetAmountToPay. Not team prepaid.
+    pub fn with_billing_credits(
+        mut self,
+        card: xai_grok_sampling_types::BillingCreditsCard,
+        cents: Option<i64>,
+    ) -> Self {
+        self.console.billing_credits_card = card;
+        self.console.billing_credits_cents =
+            cents.filter(|_| card == xai_grok_sampling_types::BillingCreditsCard::Fetched);
         self
     }
 
@@ -781,6 +801,8 @@ impl LimitsSnapshot {
                 is_live: live_identity.is_console(),
                 key_available: live_identity.is_console(),
                 balance_cents: None,
+                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
                 postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,
@@ -1070,6 +1092,9 @@ pub fn format_limits_detail_with_meter_source(
         snap,
         meter_source,
     ));
+    // Fail-open printout vs Usage before percents. Combined remaining is not
+    // grok.com Usage. Agents reading this tool must not treat chrome as truth.
+    lines.push(super::limits_honesty::NOTE_LIMITS_PRINTOUT_NOT_USAGE.to_string());
     if snap.shared_unified_supergrok_pool {
         // Only if a caller constructed a snapshot with this flag. Matching
         // independent polls from from_principals never set it. Do not claim
@@ -1107,6 +1132,9 @@ Not console team prepaid."
     // SuperGrok included % + remaining bar under the fold on typical heights.
     // CLI `grok limits` keeps the same order: meters first, caveats second.
     for note in honesty_notes_for_snapshot(snap) {
+        if lines.iter().any(|l| l == &note) {
+            continue;
+        }
         lines.push(String::new());
         lines.push(note.to_string());
     }
@@ -1195,6 +1223,7 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         has_console_team_prepaid_reading: snap.console.balance_cents.is_some(),
         has_team_default_credits_reading: has_team_default_credits,
         turns_blocked_free_period_debit_unproven: turns_blocked,
+        billing_credits_card: snap.console.billing_credits_card,
     })
 }
 
@@ -1387,10 +1416,10 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
             fmt_dollars(p.oauth_class_cents)
         ));
     }
-    // First-class Management prepaid ledger remaining (never SuperGrok dollar
-    // credits). Not the console.x.ai Billing Credits total (that page includes
-    // free credits granted). Shown under SuperGrok live too when Management
-    // knows the meter (not only when console key is live).
+    // First-class Management prepaid remaining (`total.val`). Never SuperGrok
+    // dollar credits. Never fill the console.x.ai Billing Credits card from
+    // this ledger. Shown under SuperGrok live too when Management knows the
+    // meter (not only when console key is live).
     match c.balance_cents {
         Some(cents) => lines.push(format!("  Team prepaid remaining: {}", fmt_dollars(cents))),
         None => {
@@ -1402,6 +1431,19 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
             ));
         }
     }
+    lines.push(format!(
+        "  Billing Credits card: {}",
+        match (c.billing_credits_card, c.billing_credits_cents) {
+            (xai_grok_sampling_types::BillingCreditsCard::Fetched, Some(cents)) => {
+                fmt_dollars(cents)
+            }
+            (xai_grok_sampling_types::BillingCreditsCard::Fetched, None) => "fetched".to_string(),
+            (xai_grok_sampling_types::BillingCreditsCard::Error, _) => "fetch failed".to_string(),
+            (xai_grok_sampling_types::BillingCreditsCard::NotFetched, _) => {
+                "not fetched".to_string()
+            }
+        }
+    ));
     // Postpaid period + API class (OAuth / Grok Build already above when > 0).
     match &c.postpaid {
         Some(p) => {
@@ -1543,6 +1585,51 @@ mod tests {
         };
         assert_eq!(full.used_pct_floored(), 100);
         assert_eq!(full.remaining_pct_floored(), 0);
+    }
+
+    /// Named contract: human `grok-oss limits` / TUI `/limits` leads with
+    /// printout vs Usage, fail-open, and named commands before percents.
+    /// Combined remaining is not grok.com Usage. Do not invent remaining.
+    /// Do not call any pool used up from this printout.
+    #[test]
+    fn format_limits_detail_leads_with_printout_not_usage_before_percents() {
+        use crate::views::limits_honesty::{
+            NOTE_LIMITS_PRINTOUT_NOT_USAGE, copy_names_limits_tool_fail_open,
+        };
+
+        let bal = weekly(27.0, "Aug 22, 12:00", Some(1250));
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let out = format_limits_detail(&snap);
+        let fail_open_at = out
+            .find(NOTE_LIMITS_PRINTOUT_NOT_USAGE)
+            .expect("fail-open printout note must appear on the limits tool body");
+        let pct_at = out
+            .find("27% used")
+            .or_else(|| out.find("27%"))
+            .expect("fixture included percent must appear");
+        assert!(
+            fail_open_at < pct_at,
+            "agents must see printout vs Usage before percents:\n{out}"
+        );
+        assert!(
+            copy_names_limits_tool_fail_open(NOTE_LIMITS_PRINTOUT_NOT_USAGE),
+            "banner must keep the fail-open contract"
+        );
+        assert_eq!(
+            out.matches(NOTE_LIMITS_PRINTOUT_NOT_USAGE).count(),
+            1,
+            "fail-open banner must not duplicate after meters: {out}"
+        );
+        let lower = out.to_ascii_lowercase();
+        assert!(
+            !lower.contains("pool is used up") && !lower.contains("included is used up"),
+            "must not call any pool used up from chrome: {out}"
+        );
+        assert!(
+            !lower.contains("free supergrok"),
+            "must not call SuperGrok free: {out}"
+        );
     }
 
     /// Named contract: `/limits` **Active:** names the `meter_source` pin
@@ -1915,10 +2002,17 @@ mod tests {
             "must name TUI force-refresh path: {out_d}"
         );
         assert!(
-            out_d.contains("Management prepaid ledger")
-                && out_d.contains("not the console.x.ai Billing Credits total")
-                && out_d.contains("free credits granted"),
-            "must not present prepaid remaining as Billing Credits: {out_d}"
+            out_d.contains("Management prepaid")
+                && (out_d.contains("total.val") || out_d.contains("prepaid/balance")),
+            "must label team prepaid remaining as Management total.val: {out_d}"
+        );
+        assert!(
+            out_d.contains("Billing Credits card: not fetched"),
+            "must not present prepaid remaining as the Billing Credits card: {out_d}"
+        );
+        assert!(
+            !out_d.contains("Billing Credits card: $25"),
+            "must not fill the Credits card from team prepaid remaining: {out_d}"
         );
     }
 
@@ -2140,13 +2234,23 @@ mod tests {
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
         let out = format_limits_detail(&snap);
+        let meter = out
+            .split("SuperGrok:")
+            .nth(1)
+            .and_then(|s| s.split("Console API:").next())
+            .unwrap_or("");
         assert!(
-            out.contains("SuperGrok dollar credits: none on file"),
-            "zero prepaid is not a positive SuperGrok dollar credits meter: {out}"
+            meter.contains("SuperGrok dollar credits: none on file"),
+            "zero prepaid is not a positive SuperGrok dollar credits meter: {meter}"
         );
         assert!(
-            !out.contains("$0"),
-            "must not show $0 SuperGrok dollar credits: {out}"
+            !meter.contains("$0"),
+            "must not paint $0 SuperGrok dollar credits on the meter: {meter}"
+        );
+        assert!(
+            out.contains(crate::views::limits_honesty::NOTE_LIMITS_PRINTOUT_NOT_USAGE)
+                || out.contains("SuperGrok dollar credits $0 must not mark SuperGrok used up"),
+            "fail-open banner may name a $0 printout class; that is not a painted extras meter: {out}"
         );
     }
 
@@ -2727,6 +2831,8 @@ mod tests {
                 is_live: false,
                 key_available: false,
                 balance_cents: None,
+                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
                 postpaid_gap: ConsoleTeamPostpaidGap::MissingManagementKey,

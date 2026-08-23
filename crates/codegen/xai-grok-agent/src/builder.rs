@@ -1238,10 +1238,11 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     resume_from_param: "${{ params.task.resume_from }}",
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
+    write_paths_param: "${{ params.task.write_paths }}",
 };
-/// Concise task-tool description for child (L2) sessions. L2 always
-/// spawns L3 for any tools/work. L2 never does greps, edits, or tests.
-/// Three layers always. L2 may compact. L3 must not compact-and-continue.
+/// Concise task-tool description for child (L2) sessions. Spawn L3 only
+/// if the problem is actually hard. Easy work can stay on L2. L2 may
+/// compact. L3 must not compact-and-continue.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
@@ -1249,10 +1250,8 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Whenever work is to be done and tools are to be called, agents are \
-three layers deep. Always. Including implement loops. \
-You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
-L2 may compact. L3 must not compact-and-continue. \
+Spawn L3 only if the problem is actually hard. Easy work can stay on L2. \
+Including implement loops. L2 may compact. L3 must not compact-and-continue. \
 Give each L3 a distinct description. One reviewer unless the operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\
@@ -1666,20 +1665,28 @@ mod tests {
     #[test]
     fn child_task_description_is_concise() {
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("three layers deep. Always"),
-            "child description must teach three layers always"
+            CHILD_TASK_DESCRIPTION.contains("Spawn L3 only if the problem is actually hard"),
+            "child description must match 2026-08-20: spawn L3 only if actually hard"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3 for any tools/work"),
-            "child description must tell L2 to always spawn L3 for any tools/work"
+            CHILD_TASK_DESCRIPTION.contains("Easy work can stay on L2"),
+            "child description must allow easy work to stay on L2"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
-            "child description must forbid L2 greps, edits, and tests"
+            !CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3"),
+            "child description must not force MUST always spawn L3"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("MUST spawn L3 for all tool work"),
+            "nested L2 prompt must not teach MUST spawn L3 for all tool work"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
+            "child description must not ban L2 tool work when the job is easy"
         );
         assert!(
             CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
-            "child description must include implement loops in the three-layer rule"
+            "child description must include implement loops"
         );
         assert!(
             CHILD_TASK_DESCRIPTION.contains("L3 must not compact-and-continue"),

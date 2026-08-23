@@ -507,20 +507,20 @@ impl ScrollbackState {
 
     /// Toggle expand/collapse for all thinking blocks only.
     ///
-    /// If ANY thinking block is collapsed, expand all thinking blocks.
-    /// Otherwise collapse all thinking blocks.
+    /// If ANY thinking block is not expanded (collapsed or truncated), expand
+    /// all thinking blocks. Otherwise collapse all thinking blocks.
     ///
     /// Also sets `thinking_display_mode` so that future thinking blocks
     /// adopt the chosen mode when they finish running.
     pub fn expand_all_thinking(&mut self) {
-        let any_collapsed = self.entries.values().any(|entry| {
+        let any_not_expanded = self.entries.values().any(|entry| {
             matches!(entry.block, RenderBlock::Thinking(_))
                 && entry.block.is_foldable()
-                && entry.display_mode == DisplayMode::Collapsed
+                && entry.display_mode != DisplayMode::Expanded
         });
 
         let target_mode =
-            if crate::appearance::cache::load_always_expand_thinking() || any_collapsed {
+            if crate::appearance::cache::load_always_expand_thinking() || any_not_expanded {
                 DisplayMode::Expanded
             } else {
                 DisplayMode::Collapsed
@@ -608,14 +608,15 @@ impl ScrollbackState {
     /// Returns "expand thinking" or "collapse thinking" based on current state.
     ///
     /// Uses the same logic as `expand_all_thinking`: if ANY thinking block is
-    /// collapsed the next toggle will expand, so the label is "expand thinking".
+    /// not expanded (collapsed or truncated) the next toggle will expand, so
+    /// the label is "expand thinking".
     pub fn thinking_fold_label(&self) -> &'static str {
-        let any_collapsed = self.entries.values().any(|entry| {
+        let any_not_expanded = self.entries.values().any(|entry| {
             matches!(entry.block, RenderBlock::Thinking(_))
                 && entry.block.is_foldable()
-                && entry.display_mode == DisplayMode::Collapsed
+                && entry.display_mode != DisplayMode::Expanded
         });
-        if any_collapsed {
+        if any_not_expanded {
             "expand thinking"
         } else {
             "collapse thinking"

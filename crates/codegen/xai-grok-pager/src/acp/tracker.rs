@@ -165,6 +165,11 @@ struct BlockingWait {
 /// Deltas stream continuously during a live write — silence this long means the stream is dead.
 pub(crate) const WRITING_DELTA_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(10);
+/// Longest a live write-argument stream may run, even if deltas keep arriving.
+/// Silence hide is [`WRITING_DELTA_STALE_AFTER`] (10 seconds) and does not
+/// cancel anyone. This cap is five minutes so a hung or huge write cannot
+/// look like a stuck nested agent for hours.
+pub(crate) const WRITING_STREAM_MAX: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// The model is streaming tool-call arguments (xAI `tool_call_delta_chunk`),
 /// which reach no scrollback until the canonical `ToolCall` lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +384,9 @@ pub struct AcpUpdateTracker {
     /// The instant is the last delta's arrival; expiry lives in the accessors
     /// ([`Self::fresh_writing_tool_call`] / [`Self::has_stale_tool_call_write`]).
     writing_tool_call: Option<(WritingToolCall, std::time::Instant)>,
+    /// First delta of the current write stream. Not refreshed by continuation
+    /// deltas. [`WRITING_STREAM_MAX`] is measured from this instant.
+    writing_stream_started_at: Option<std::time::Instant>,
     /// Per-`tool_index` names so interleaved deltas restore a call's name on
     /// switch-back; `None` marks an index observed before its name arrived
     /// (it still ranks for ordinals). Cleared together with `writing_tool_call`.
@@ -588,6 +596,28 @@ impl AcpUpdateTracker {
             })
             .map(|w| w.reason.clone())
     }
+    /// Pending blocking `get_command_or_subagent_output` waits: tool-call id
+    /// plus the waited-on task ids (empty when the model omitted them).
+    pub(crate) fn task_output_blocking_waits(&self) -> Vec<(String, Vec<String>)> {
+        self.blocking_waits
+            .iter()
+            .filter_map(|(key, wait)| match &wait.reason {
+                WaitingReason::TaskOutput {
+                    task_ids,
+                    waits: true,
+                    ..
+                } => Some((key.clone(), task_ids.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn remove_blocking_waits(&mut self, keys: &[String]) {
+        for key in keys {
+            self.blocking_waits.remove(key);
+        }
+    }
+
     /// Drop waits not registered under `current_stream` (stale earlier rounds,
     /// or an unknown `None` stream); co-batched same-stream waits survive.
     fn drop_stale_blocking_waits(&mut self, current_stream: Option<i64>) {
@@ -646,9 +676,29 @@ impl AcpUpdateTracker {
         });
     }
     pub fn note_context_used(&mut self, used: u64) {
-        if let Some(pending) = self.pending_compaction.as_mut() {
-            pending.last_used = Some(used);
+        let Some(pending) = self.pending_compaction.as_mut() else {
+            return;
+        };
+        // Pre-compact ACP `totalTokens` can flush after AutoCompactCompleted.
+        // Do not confirm a count above the compact remainder.
+        if used > pending.estimate_after {
+            return;
         }
+        pending.last_used = Some(pending.last_used.map_or(used, |prev| prev.min(used)));
+    }
+
+    /// Highest occupancy the chip may take while a compact remainder is pending.
+    ///
+    /// Stale thought-chunk `totalTokens` from before compact must not raise
+    /// the bar back to the pre-compact estimate.
+    pub fn compact_occupancy_ceiling(&self) -> Option<u64> {
+        let pending = self.pending_compaction.as_ref()?;
+        Some(
+            pending
+                .last_used
+                .unwrap_or(pending.estimate_after)
+                .min(pending.estimate_after),
+        )
     }
     /// Set a retry-related activity override.
     ///
@@ -664,7 +714,9 @@ impl AcpUpdateTracker {
     pub fn note_tool_call_arguments_delta(&mut self, name: Option<&str>, tool_index: u32) -> bool {
         let now = std::time::Instant::now();
         let retry_cleared = self.retry_activity.take().is_some();
+        let already_capped = self.has_capped_tool_call_write();
         let expired = self.has_stale_tool_call_write();
+        let new_stream = !already_capped && (self.writing_tool_call.is_none() || expired);
         if self.writing_tool_names.len() < MAX_WRITING_TOOL_NAMES
             || self.writing_tool_names.contains_key(&tool_index)
         {
@@ -687,11 +739,18 @@ impl AcpUpdateTracker {
         let changed =
             expired || self.writing_tool_call.as_ref().map(|(writing, _)| writing) != Some(&next);
         self.writing_tool_call = Some((next, now));
+        if new_stream {
+            self.writing_stream_started_at = Some(now);
+        }
         retry_cleared || changed
     }
     /// The in-flight write while its deltas are fresh; a stream silent past
-    /// [`WRITING_DELTA_STALE_AFTER`] is treated as no longer writing.
+    /// [`WRITING_DELTA_STALE_AFTER`] is treated as no longer writing. A stream
+    /// past [`WRITING_STREAM_MAX`] is also hidden even if deltas keep arriving.
     fn fresh_writing_tool_call(&self) -> Option<&WritingToolCall> {
+        if self.has_capped_tool_call_write() {
+            return None;
+        }
         self.writing_tool_call
             .as_ref()
             .filter(|(_, at)| at.elapsed() < WRITING_DELTA_STALE_AFTER)
@@ -704,12 +763,30 @@ impl AcpUpdateTracker {
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed() >= WRITING_DELTA_STALE_AFTER)
     }
+    /// A write-argument stream that has run past [`WRITING_STREAM_MAX`] from
+    /// its first delta, even if later deltas are still arriving.
+    pub(crate) fn has_capped_tool_call_write(&self) -> bool {
+        self.writing_stream_started_at
+            .is_some_and(|at| at.elapsed() >= WRITING_STREAM_MAX)
+    }
     /// Backdate the write's delta stamp (staleness tests).
     #[cfg(test)]
     pub(crate) fn backdate_last_tool_call_delta(&mut self, age: std::time::Duration) {
         if let Some((_, at)) = &mut self.writing_tool_call {
             *at = std::time::Instant::now() - age;
         }
+    }
+    /// Backdate the write stream's first-delta instant (stream-cap tests).
+    #[cfg(test)]
+    pub(crate) fn backdate_writing_stream_start(&mut self, age: std::time::Duration) {
+        if let Some(at) = &mut self.writing_stream_started_at {
+            *at = std::time::Instant::now() - age;
+        }
+    }
+    fn clear_writing_tool_call(&mut self) {
+        self.writing_tool_call = None;
+        self.writing_stream_started_at = None;
+        self.writing_tool_names.clear();
     }
     /// Take pending ACP commands, if any. Returns `None` if no update arrived
     /// since the last drain.
@@ -961,8 +1038,7 @@ impl AcpUpdateTracker {
                 | acp::SessionUpdate::ToolCallUpdate(_)
         );
         if is_agent_output && !matches!(&update, acp::SessionUpdate::ToolCallUpdate(_)) {
-            self.writing_tool_call = None;
-            self.writing_tool_names.clear();
+            self.clear_writing_tool_call();
         }
         let changed = match update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
@@ -1023,8 +1099,7 @@ impl AcpUpdateTracker {
         self.last_stream_start_ms = None;
         self.compaction_activity = None;
         self.retry_activity = None;
-        self.writing_tool_call = None;
-        self.writing_tool_names.clear();
+        self.clear_writing_tool_call();
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
         self.orphan_updates.clear();

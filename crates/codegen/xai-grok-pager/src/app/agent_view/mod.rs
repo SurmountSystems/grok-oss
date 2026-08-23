@@ -365,6 +365,53 @@ impl HitArea {
         self.hovered = false;
     }
 }
+
+/// 1-based index and size of the live fork family that contains `current`
+/// (the living parent plus its forks, in pager insertion order).
+///
+/// Used to paint the upper-left forked-conversation switcher. A family of
+/// one is still returned so a lone fork can show `[Dashboard]` without
+/// cycle chips.
+pub(crate) fn fork_family_position(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Option<(usize, usize)> {
+    let family = fork_family_ids(agents, current);
+    let idx = family.iter().position(|id| *id == current)?;
+    Some((idx + 1, family.len()))
+}
+
+fn fork_family_root(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> crate::app::agent::AgentId {
+    let mut id = current;
+    for _ in 0..agents.len().saturating_add(1) {
+        let Some(parent) = agents.get(&id).and_then(|a| a.session.forked_from) else {
+            break;
+        };
+        if parent == id || !agents.contains_key(&parent) {
+            break;
+        }
+        id = parent;
+    }
+    id
+}
+
+fn fork_family_ids(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Vec<crate::app::agent::AgentId> {
+    if !agents.contains_key(&current) {
+        return Vec::new();
+    }
+    let root = fork_family_root(agents, current);
+    agents
+        .keys()
+        .copied()
+        .filter(|id| fork_family_root(agents, *id) == root)
+        .collect()
+}
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 ///
@@ -1168,6 +1215,13 @@ pub struct AgentView {
     pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
+    /// `[Dashboard]` chip on the upper-left status header for a fork family.
+    /// Empty when the session is not in a fork family or already has overlay chrome.
+    pub hit_header_dashboard: HitArea,
+    /// `[‹]` previous-fork chip on the upper-left status header.
+    pub hit_header_prev: HitArea,
+    /// `[›]` next-fork chip on the upper-left status header.
+    pub hit_header_next: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
     /// Global pause / resume button in turn status line (`[pause]` / `[resume]`).
@@ -1401,6 +1455,12 @@ pub struct AgentView {
     /// place: the shortcuts bar builds the pane's hints once for both the bar
     /// and the cheatsheet, neither of which can see `draw`'s arguments.
     pub(crate) overlay_can_cycle: bool,
+    /// 1-based index and family size for live parent/fork siblings in this
+    /// pager. Set by `AppView` before draw. `Some((_, n))` with `n > 1` means
+    /// the upper-left status header must paint the forked-conversation
+    /// switcher. A lone fork (parent gone, no siblings) still paints
+    /// `[Dashboard]` from [`crate::app::agent::AgentSession::forked_from`].
+    pub(crate) fork_family_position: Option<(usize, usize)>,
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.

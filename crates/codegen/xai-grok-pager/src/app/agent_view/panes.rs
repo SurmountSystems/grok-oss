@@ -276,10 +276,13 @@ impl AgentView {
     pub(super) fn handle_todo_key(
         &mut self,
         key: &KeyEvent,
-        _registry: &ActionRegistry,
+        registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
-        if key!('t', CONTROL).matches(key) {
+        if registry.matches_id(ActionId::ExpandAllThinking, key) {
+            return InputOutcome::Action(Action::ExpandAllThinking);
+        }
+        if registry.matches_id(ActionId::ToggleTodos, key) {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
             if !self.todo.overlay.focused {

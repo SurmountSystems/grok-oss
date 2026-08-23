@@ -789,9 +789,9 @@ pub struct AgentSession {
     /// Whether this session is running inside a git worktree.
     pub is_worktree: bool,
     /// `AgentId` of the parent session if this session was created via
-    /// `/fork`. Display-only (status bar, future agent picker grouping);
-    /// navigation does not consult it -- the session picker is the
-    /// source of truth for navigation history.
+    /// `/fork`, or restored on load from `summary.json` `parent_session_id`.
+    /// Status header switcher and `[Dashboard]` consult it. The session
+    /// picker is still the source of truth for navigation history.
     pub forked_from: Option<AgentId>,
     /// Prompts waiting to be sent. Drained front-to-back when
     /// `state` becomes [`AgentState::Idle`].

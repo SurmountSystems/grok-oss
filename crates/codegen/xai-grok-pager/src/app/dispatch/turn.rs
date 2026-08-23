@@ -679,6 +679,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         drain_permission_queue(agent);
         agent.cancel_turn_view = None;
         agent.cancel_turn_buttons.clear();
+        let was_bash_turn = agent.bash_turn;
         if agent.bash_turn {
             agent.bash_turn = false;
             agent.scrollback.goto_bottom();
@@ -699,6 +700,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         } else {
             None
         };
+        if !was_cancelling && !was_bash_turn {
+            match pending.stop_reason.as_deref() {
+                Some("error") | Some("rate_limit") | Some("cancelled") => {}
+                _ => crate::app::auto_implement::on_successful_turn_end(agent),
+            }
+        }
         let drain = maybe_drain_queue(agent);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
@@ -764,6 +771,17 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
         return vec![];
     };
 
+    // Child view already idle: coordinator finished, list row is stale.
+    // Drop it now so list `[x]` does not wait on ACP after already-completed.
+    let drop_idle_listed = agent.subagent_sessions.values().any(|info| {
+        info.subagent_id.as_ref() == subagent_id
+            && !info.finished
+            && agent
+                .subagent_views
+                .get(info.child_session_id.as_ref())
+                .is_some_and(|child| !child.session.state.is_busy())
+    });
+
     // Mark as pending_kill for UI feedback
     for info in agent.subagent_sessions.values_mut() {
         if info.subagent_id.as_ref() == subagent_id {
@@ -772,10 +790,19 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
         }
     }
 
-    vec![Effect::KillSubagent {
-        session_id,
-        subagent_id,
-    }]
+    let effects = vec![Effect::KillSubagent {
+        session_id: session_id.clone(),
+        subagent_id: subagent_id.clone(),
+    }];
+    if drop_idle_listed {
+        crate::app::acp_handler::finalize_killed_subagent(
+            app,
+            &session_id,
+            &subagent_id,
+            "completed",
+        );
+    }
+    effects
 }
 
 pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {

@@ -687,6 +687,7 @@ impl SessionActor {
         reason: SuppressReason,
         estimated_tokens: u64,
         context_window: u64,
+        upstream_error: Option<&str>,
     ) {
         let new_state = reason.suppress_state();
         if self
@@ -713,10 +714,13 @@ impl SessionActor {
                     context_window,
                 },
             );
+            let credit_owned = (reason == SuppressReason::CreditBlock).then(|| {
+                xai_grok_sampling_types::compact_credit_block_user_message(upstream_error, None)
+            });
             let message = match reason {
-                SuppressReason::CreditBlock => {
-                    "out of credits or over your spending limit. Add credits and retry."
-                }
+                SuppressReason::CreditBlock => credit_owned.as_deref().unwrap_or(
+                    "Compaction sampler got a payment-required or spending-limit response.",
+                ),
                 SuppressReason::Auth => {
                     "authentication problem — re-authenticate using /login and retry."
                 }
@@ -743,6 +747,8 @@ impl SessionActor {
             || m.contains("out of credits")
             || m.contains("usage balance exhausted")
             || m.contains("usage limit reached")
+            || m.contains("status 402")
+            || m.contains("payment required")
         {
             SuppressReason::CreditBlock
         } else if is_context_length_error(&m) {
@@ -1254,6 +1260,7 @@ impl SessionActor {
                                 SuppressReason::Size,
                                 estimated_input_tokens,
                                 context_window,
+                                Some(message.as_str()),
                             )
                             .await;
                         }
@@ -1268,6 +1275,7 @@ impl SessionActor {
                                 reason,
                                 estimated_input_tokens,
                                 context_window,
+                                Some(message.as_str()),
                             )
                             .await;
                         }

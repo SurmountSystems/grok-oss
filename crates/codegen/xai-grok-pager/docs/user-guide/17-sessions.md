@@ -105,7 +105,7 @@ Confirms, then permanently removes the session history. Returns to the welcome s
 
 ## The session todo board
 
-The live session board is the TODO list. `resources_state.json` is the live snapshot. `plan.json` is a resume fallback. Open the pane with `Ctrl+T`.
+The live session board is the TODO list. `resources_state.json` is the live snapshot. `plan.json` is a resume fallback. Open the pane with `Ctrl+Shift+T`, or click the status-row **tasks N/M** badge. The pane starts closed. A nested overlay shows that nested session's board, not the parent L1 list. `Ctrl+T` expands or collapses thinking.
 
 When the board is open and at least one completed or cancelled row exists, the todo header shows compact **`[−]`** (U+2212 minus) next to close. The icon paints whether or not the todo pane has keyboard focus. It does not paint when the board is hidden or nothing is finished.
 

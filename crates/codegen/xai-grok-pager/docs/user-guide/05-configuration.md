@@ -51,7 +51,7 @@ remember_tool_approvals = false        # show per-command "Always allow" options
                                        # grants are remembered per project (default: false); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
 always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
-                                       # true keeps the body open and hides the Ctrl+E hint
+                                       # true keeps the body open and hides the Ctrl+T hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -115,7 +115,7 @@ respect_gitignore = false              # default: false; set true to make every 
 
 Token Economy is the Grok OSS surface for **spend brakes and books**. SuperGrok is paid. Period pacing talks about **included SuperGrok period limits** (how much of that included quota is already used), not SuperGrok dollar credits.
 
-Desired spend order (chrome and rank): spend included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover. Operator CLI: `grok-oss limits` and `grok-oss limits --json`.
+Desired spend order (chrome and rank): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover. Operator CLI: `grok-oss limits` and `grok-oss limits --json`.
 
 | Knob | Default | Where | Role |
 |------|---------|-------|------|
@@ -733,7 +733,7 @@ highlight_overlays_border = false     # highlight extends over selection box bor
 dim_accent = 0.5                      # dimming factor for collapsed accents (0.0-1.0)
 ```
 
-`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+E` clears pins on thinking blocks.
+`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+T` clears pins on thinking blocks.
 
 ### Block configuration
 

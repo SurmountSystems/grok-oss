@@ -777,6 +777,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Mid-turn Enter: slash PassThrough that is not a named hold
+                // (`/goal ...`, unknown shell builtins) merges into this turn.
+                // `/queue /finish` is QueueLater above, not this arm.
+                if consume_input && agent.session.state.is_turn_running() {
+                    let images = agent.prompt.drain_images();
+                    agent.prompt.set_text("");
+                    return interject::dispatch_interject(app, pass_text, images);
+                }
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -799,13 +807,13 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         return dispatch(Action::Quit, app);
     } else {
-        // ── Server-authoritative immediate send (plain prompt only) ──
-        // A plain prompt typed while a turn is RUNNING is sent to the agent
-        // immediately instead of being held in the local drip-feed queue. The
-        // agent appends it to its authoritative `pending_inputs` (no concurrent
-        // turn starts — validated keystone) and drives the drain via
-        // `x.ai/queue/changed`. We render an optimistic echo into the shared
-        // queue keyed by `prompt_id`; the broadcast reconciles it by id.
+        // ── Composer Enter while a turn is running: soft interject ──
+        // Freeform text (and slash PassThrough that is not a named hold) is
+        // merged into this turn via `x.ai/interject`. It must not wait on
+        // `pending_prompts` / `pending_inputs` as the next serial prompt.
+        // Immediate server-send below is for follow-up chips, palette
+        // dispatch, and the leader-mode idle-with-nonempty-shared-queue
+        // window, not for mid-turn Enter.
         //
         // The IDLE case is unchanged (falls through to the local path below,
         // which drains instantly and renders the user block) — preserving the
@@ -833,9 +841,19 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.clear_follow_ups();
         }
 
+        // Mid-turn composer Enter with text merges into the running turn
+        // (soft interject). Named `/queue` hold and empty Enter (plan
+        // Approve / force-send of a queued row) are other paths. Ctrl+Enter
+        // stays cancel-and-send (`SendPromptNow`).
+        if consume_input && agent.session.state.is_turn_running() {
+            let images = agent.prompt.drain_images();
+            agent.prompt.set_text("");
+            return interject::dispatch_interject(app, text, images);
+        }
+
         // If the user queues a follow-up while a turn is already running, surface
-        // a short tip advertising send-now — plain Enter queues; Enter again on
-        // the emptied composer sends the queued message now (cancel-and-send).
+        // a short tip advertising send-now — empty Enter on the composer
+        // force-sends the top queued row (cancel-and-send for a local row).
         let queued_while_running = agent.session.state.is_turn_running();
 
         // Composer-recognized slash tokens at submit time: styles the
@@ -1637,6 +1655,14 @@ pub(super) fn handle_prompt_response(
         } else {
             None
         };
+
+        // Auto-run trailing `## Next implement prompt` `/implement` before
+        // drain. `bash_turn` is already cleared; skip bash via `was_bash_turn`.
+        // A failed 502 turn never reaches here as `Ok`. A 502 retry that later
+        // succeeded is a successful turn and must loop.
+        if result.is_ok() && !was_cancelling && !was_bash_turn {
+            crate::app::auto_implement::on_successful_turn_end(agent);
+        }
 
         let drain = maybe_drain_queue(agent);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);

@@ -5,7 +5,7 @@
 //! and large tool output truncated (design decision K9). Committed terminal text
 //! can't be mutated, so "expanding" one is an honest re-print of the same block
 //! in full below the conversation (K10). `/expand` is the slash-command twin of
-//! the `Ctrl+E` chord; both walk backwards through the most-recently committed
+//! the `Ctrl+T` chord; both walk backwards through the most-recently committed
 //! folded blocks.
 
 use crate::app::actions::Action;

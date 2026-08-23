@@ -54,12 +54,12 @@ async fn minimal_lookup_commits_one_line_summary() {
         harness.full_text()
     );
 
-    harness.inject_keys(b"\x05").expect("ctrl+e expand");
+    harness.inject_keys(b"\x14").expect("ctrl+t expand");
     harness
         .wait_for_full_text(BODY_SENTINEL, Duration::from_secs(10))
         .unwrap_or_else(|e| {
             panic!(
-                "Ctrl+E must re-print the read with its file content: {e}\nfull:\n{}",
+                "Ctrl+T must re-print the read with its file content: {e}\nfull:\n{}",
                 harness.full_text()
             )
         });

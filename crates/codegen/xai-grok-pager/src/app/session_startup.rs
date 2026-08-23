@@ -83,6 +83,34 @@ pub fn fork_session_params(
     }
     payload
 }
+/// Disk parent session id for a persisted `/fork` (not a subagent).
+///
+/// Resume/load uses this to restore `forked_from` and bring the parent
+/// into the pager so the upper-left family switcher can paint.
+pub fn fork_parent_session_id(session_id: &str, cwd: &Path) -> Option<String> {
+    let cwd_str = cwd.to_string_lossy();
+    let encoded = xai_grok_shell::util::grok_home::encode_cwd_dirname(&cwd_str);
+    let summary_path = xai_grok_shell::util::grok_home::grok_home()
+        .join("sessions")
+        .join(encoded)
+        .join(session_id)
+        .join("summary.json");
+    let bytes = std::fs::read(summary_path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let kind = v.get("session_kind").and_then(|k| k.as_str()).unwrap_or("");
+    if kind == "subagent" || kind == "subagent_fork" {
+        return None;
+    }
+    let parent = v
+        .get("parent_session_id")
+        .and_then(|p| p.as_str())
+        .filter(|s| !s.is_empty())?;
+    let is_fork = kind == "fork"
+        || v.get("forked_at").is_some_and(|x| !x.is_null())
+        || v.get("fork_context_source").and_then(|k| k.as_str()) == Some("forked");
+    is_fork.then_some(parent.to_string())
+}
+
 /// Whether a persisted session (or its cwd) is worktree-backed.
 /// Mirrors in-session `/fork` reading `agent.session.is_worktree`.
 pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {

@@ -351,7 +351,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             assert!(actor.check_auto_compact_needed().await.is_some());
             assert!(actor.should_compact_on_error(&err).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Other, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             assert!(!actor.should_compact_on_error(&err).await);
@@ -363,7 +363,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -389,7 +389,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::Size, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Size, 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
@@ -426,7 +426,9 @@ async fn model_switch_clears_sticky_suppression() {
             let actor =
                 Arc::new(create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await);
             for reason in [SuppressReason::Size, SuppressReason::Other] {
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 assert_ne!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     SUPPRESS_NONE,
@@ -467,7 +469,9 @@ async fn model_switch_keeps_account_state_suppression() {
                 (SuppressReason::CreditBlock, SUPPRESS_UNTIL_SUCCESS),
                 (SuppressReason::Auth, SUPPRESS_AUTH),
             ] {
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     expected,
@@ -506,7 +510,7 @@ async fn auth_suppress_clears_on_credential_recovery() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -534,7 +538,7 @@ async fn clear_auth_suppress_leaves_credit_suppress() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000, None)
                 .await;
             actor.clear_auth_compact_suppression();
             assert_eq!(
@@ -558,7 +562,7 @@ async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -866,7 +870,9 @@ async fn suppression_notification_is_reason_specific() {
                 let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
                 let actor =
                     create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 let mut text = None;
                 while let Ok(msg) = persistence_rx.try_recv() {
                     if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(
@@ -882,7 +888,14 @@ async fn suppression_notification_is_reason_specific() {
                 text.expect("expected an AutoCompactFailed notification")
             }
             let credit = notification_for(SuppressReason::CreditBlock).await;
-            assert!(credit.contains("spending limit"), "credit_block: {credit}");
+            assert!(
+                !credit.to_ascii_lowercase().contains("add credits"),
+                "credit_block must not command add credits: {credit}"
+            );
+            assert!(
+                credit.contains("client printout") || credit.contains("not xAI billing truth"),
+                "credit_block: {credit}"
+            );
             let auth = notification_for(SuppressReason::Auth).await;
             assert!(auth.contains("/login"), "auth: {auth}");
             let size = notification_for(SuppressReason::Size).await;
@@ -1142,7 +1155,7 @@ async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
             let actor =
                 Arc::new(create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -1391,6 +1404,10 @@ fn classify_suppress_reason_maps_error_text() {
     );
     assert_eq!(
         classify("API error (status 402 Payment Required): Grok Build usage balance exhausted"),
+        SuppressReason::CreditBlock
+    );
+    assert_eq!(
+        classify("API error (status 402 Payment Required): Payment Required"),
         SuppressReason::CreditBlock
     );
     assert_eq!(

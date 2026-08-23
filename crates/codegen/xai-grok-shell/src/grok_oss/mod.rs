@@ -25,7 +25,8 @@ mod prompt_tasks;
 mod session_ids;
 pub use plan_choice::{PlanRecordedChoice, PlanRecordedChoiceRow, SESSION_PLAN_IDENTITY};
 pub use prompt_exec::{
-    HonestWorkClock, LivePromptTask, PromptExecMetrics, PromptExecRecord, tokens_per_dollar,
+    HonestWorkClock, LivePromptTask, PromptExecEstimate, PromptExecMetrics, PromptExecRecord,
+    tokens_per_dollar,
 };
 pub use prompt_tasks::{
     PromptTask, PromptTaskDraft, PromptTemplate, STORED_PROMPT_SUGGEST_MIN_CHARS, StoredPromptKind,

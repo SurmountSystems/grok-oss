@@ -397,10 +397,17 @@ pub fn render_turn_status(
         } else {
             " \u{00b7} send a message to interrupt".to_string()
         };
+        let parked_elapsed = match turn_elapsed {
+            Some(d) if d.as_secs() >= 60 => format!(" {}", format_turn_timer(d)),
+            _ => String::new(),
+        };
         let cue = match (still_running_label(watchers), parked) {
-            (Some(label), true) => Some(format!("{label}{parked_suffix}")),
+            (Some(label), true) => Some(format!("{label}{parked_elapsed}{parked_suffix}")),
             (Some(label), false) => Some(label),
-            (None, true) => Some(format!("{}{parked_suffix}", parked_wait_name(activity))),
+            (None, true) => Some(format!(
+                "{}{parked_elapsed}{parked_suffix}",
+                parked_wait_name(activity)
+            )),
             (None, false) => None,
         };
         if let Some(cue) = cue {
@@ -576,8 +583,14 @@ pub fn render_turn_status(
     let show_pause = chrome.show_pause;
 
     // ── Compute activity style and label ──
-    let (activity_style, label, is_tool) =
+    let (mut activity_style, mut label, is_tool) =
         compute_activity(&theme, state, activity, is_bash_turn, goal_verifying);
+    // Pause must unstick first-token / Retrying chrome immediately. Cancel
+    // is in flight; do not keep "Waiting for the model…" on the live row.
+    if global_paused && is_pauseable_sampler_wait(activity) {
+        activity_style = Style::default().fg(theme.gray);
+        label = "Paused all work".to_string();
+    }
 
     // Early return for idle (shouldn't happen if should_show is respected, but be safe).
     if matches!(state, AgentState::Idle) {
@@ -662,8 +675,11 @@ pub fn render_turn_status(
                 if title.starts_with("Ask: ") || title.starts_with("Ask ")
         );
 
-    // Phase timer (gray, same as turn timer) — hidden for ask tools
-    let phase_timer_str = if is_asking {
+    // Phase timer (gray, same as turn timer) — hidden for ask tools, and
+    // hidden when Retrying chrome already names the wait (`next try in 29s`).
+    // Appending elapsed `26s` there paints `29s 26s`, which reads as 29
+    // minutes 26 seconds or a stuck dual countdown.
+    let phase_timer_str = if is_asking || retry_reason_already_names_wait(activity) {
         String::new()
     } else {
         activity_started_at
@@ -874,6 +890,26 @@ pub fn render_turn_status(
         pause_button: pause_button_rect,
         bg_button: bg_button_rect,
         watching_cue: None,
+    }
+}
+
+/// First-token model wait or Retrying chrome that `[pause]` must replace.
+fn is_pauseable_sampler_wait(activity: &Option<TurnActivity>) -> bool {
+    matches!(
+        activity,
+        Some(TurnActivity::Waiting(WaitingReason::Model) | TurnActivity::Retrying { .. })
+    )
+}
+
+/// True when Retrying chrome already includes a wait duration. The phase
+/// timer must not sit after that duration (`next try in 29s` + `26s`).
+fn retry_reason_already_names_wait(activity: &Option<TurnActivity>) -> bool {
+    match activity {
+        Some(TurnActivity::Retrying { reason, .. }) => {
+            let r = reason.as_str();
+            r.contains("next try in") || r.contains("shared wait") || r.contains(" · wait ")
+        }
+        _ => false,
     }
 }
 
@@ -1207,7 +1243,34 @@ mod tests {
     fn format_minutes() {
         assert_eq!(format_turn_timer(Duration::from_secs(60)), "1m0s");
         assert_eq!(format_turn_timer(Duration::from_secs(80)), "1m20s");
+        assert_eq!(format_turn_timer(Duration::from_secs(133)), "2m13s");
         assert_eq!(format_turn_timer(Duration::from_secs(600)), "10m0s");
+    }
+
+    /// While AUTO compact runs, the status row must tick a live phase
+    /// timer in minutes, not sit on a frozen `Compacting…` with no
+    /// elapsed. Product already did this; this pins the honesty contract
+    /// for a multi-minute summarizer wait (no fake speedup).
+    #[test]
+    fn compacting_status_shows_live_minutes_phase_timer() {
+        let activity = Some(TurnActivity::AutoCompacting);
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(133));
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("Compacting"),
+            "status must name Compacting while AUTO compact runs, got: {text:?}"
+        );
+        assert!(
+            text.contains("2m13s"),
+            "live compact wait of 133s must paint 2m13s, got: {text:?}"
+        );
+        assert!(
+            !text.contains("133s") && !text.contains("133 s"),
+            "must not print raw seconds for a 2m13s compact wait, got: {text:?}"
+        );
     }
 
     #[test]
@@ -1269,6 +1332,75 @@ mod tests {
         assert!(
             label.contains("transient error"),
             "retry chrome must name the cause, not hide it behind attempt N: {label}"
+        );
+    }
+
+    /// HTTP 502 retry chrome already names the wait (`next try in 29s`).
+    /// The phase timer must not sit immediately after that and paint
+    /// `29s 26s`, which reads as 29 minutes 26 seconds or a stuck dual wait.
+    #[test]
+    fn retrying_502_wait_must_not_glue_phase_timer_as_seconds_pair() {
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "xAI unavailable (HTTP 502) · next try in 29s".into(),
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(26));
+        args.turn_elapsed = Some(Duration::from_secs(80));
+        let (output, buf) = render_row(args, 160);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("xAI unavailable (HTTP 502)"),
+            "502 retry must name the outage, got: {text:?}"
+        );
+        assert!(
+            text.contains("next try in 29s"),
+            "502 retry must keep the backoff wait, got: {text:?}"
+        );
+        assert!(
+            !text.contains("29s 26s"),
+            "phase elapsed must not glue onto next-try seconds (looks like 29m26s): {text:?}"
+        );
+        assert!(
+            text.contains("[pause]") && text.contains("[stop]"),
+            "pause and stop must stay clickable during a 502 retry wait, got: {text:?}"
+        );
+        assert!(
+            output.pause_button.is_some() && output.cancel_button.is_some(),
+            "502 retry must keep pause/stop hit targets, pause={:?} stop={:?}",
+            output.pause_button,
+            output.cancel_button
+        );
+    }
+
+    /// StreamResumed chrome after a timeout retry is a first-token wait,
+    /// not leftover "reconnecting". The 28s next to the label is the phase
+    /// timer, not a reconnect countdown.
+    #[test]
+    fn retrying_chrome_names_first_token_wait_not_reconnecting() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: u32::MAX,
+                reason: "waiting for first token".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            "Retrying the model request (attempt 1): waiting for first token"
+        );
+        assert!(!is_tool);
+        assert!(
+            !label.to_ascii_lowercase().contains("reconnect"),
+            "must not paint reconnecting for a first-token wait: {label}"
         );
     }
 
@@ -1889,6 +2021,44 @@ mod tests {
         );
     }
 
+    /// Nested L2 parked wait on a named specialist must paint the specialist
+    /// and compact minutes when the wait is at least a minute. Bare
+    /// `Waiting on task output` is FAIL.
+    #[test]
+    fn parked_nested_specialist_wait_names_elapsed_not_generic_output() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+            task_ids: vec!["l3-cert".into()],
+            subject: Some("Subagent (prove cert DNS-01): read_file".into()),
+            waits: true,
+        }));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        args.turn_elapsed = Some(Duration::from_secs(15 * 60 + 9));
+        let text = render_row_text(args, 100);
+        assert!(
+            text.contains("prove cert DNS-01"),
+            "parked nested wait must name the specialist, got: {text:?}"
+        );
+        assert!(
+            text.contains("15m9s"),
+            "parked wait of at least a minute must use compact minutes, got: {text:?}"
+        );
+        assert!(
+            !text.contains("909s") && !text.contains("909 s"),
+            "must not print raw seconds for a 15m9s wait, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL, got: {text:?}"
+        );
+        assert!(
+            text.contains("send a message to interrupt"),
+            "parked cue still carries interrupt copy, got: {text:?}"
+        );
+    }
+
     /// Parked `wait_tasks` must name the wait, not generic `waiting`.
     #[test]
     fn parked_tasks_complete_names_tasks_wait() {
@@ -2339,6 +2509,54 @@ mod tests {
             "monitors alone must not paint pause/stop, got: {text:?}"
         );
         assert!(output.pause_button.is_none() && output.cancel_button.is_none());
+    }
+
+    /// After `[pause]` during first-token wait, the row must not keep
+    /// `Waiting for the model…` — that is the hang the operator still sees.
+    #[test]
+    fn global_paused_waiting_for_model_paints_paused_not_waiting() {
+        use crate::acp::tracker::WaitingReason;
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.global_paused = true;
+        args.turn_elapsed = Some(Duration::from_secs(23));
+        let (output, buf) = render_row(args, 90);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("Paused all work") && text.contains("[resume]"),
+            "pause must replace the model wait chrome, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Waiting for the model"),
+            "must not stay stuck on Waiting for the model after pause, got: {text:?}"
+        );
+        assert!(output.pause_button.is_some(), "resume hit target must stay");
+        assert!(
+            output.cancel_button.is_some(),
+            "[stop] must still cancel the live sampler wait"
+        );
+    }
+
+    #[test]
+    fn global_paused_retrying_paints_paused_not_retrying() {
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "waiting for first token".into(),
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.global_paused = true;
+        let (_output, buf) = render_row(args, 90);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("Paused all work") && !text.contains("Retrying"),
+            "pause must replace Retrying chrome, got: {text:?}"
+        );
+        assert!(!text.contains("Waiting for the model"), "got: {text:?}");
     }
 
     /// Global pause with idle sessions: row stays visible with `[resume]` only.

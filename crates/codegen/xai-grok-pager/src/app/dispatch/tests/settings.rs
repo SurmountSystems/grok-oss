@@ -3976,3 +3976,74 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
     );
     reset_mouse_capture_enabled(true);
 }
+
+/// Settings `default_reasoning_effort` must live-apply the composer and
+/// SwitchModel the session. A toast-only persist left the footer on catalog
+/// `high` after the operator picked medium.
+#[test]
+fn set_default_reasoning_effort_live_applies_session_and_switch_model() {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+    let info = acp::ModelInfo::new(model_id.clone(), "Grok 4.6".to_string()).meta(
+        serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "high",
+        })
+        .as_object()
+        .cloned(),
+    );
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .session
+            .models
+            .available
+            .insert(model_id.clone(), info.clone());
+        agent
+            .session
+            .models
+            .set_current(model_id.clone(), Some(ReasoningEffort::High));
+    }
+    app.models.available.insert(model_id.clone(), info);
+    app.models
+        .set_current(model_id.clone(), Some(ReasoningEffort::High));
+
+    let effects = dispatch(
+        Action::SetDefaultReasoningEffort("medium".to_string()),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "composer footer reads session.models.reasoning_effort; Settings medium must live-apply"
+    );
+    assert_eq!(
+        app.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "app.models must follow so a later /new welcome card stays medium"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "default_reasoning_effort",
+                value: crate::settings::SettingValue::Enum("medium"),
+                ..
+            }
+        )),
+        "must persist [models].default_reasoning_effort, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SwitchModel {
+                model_id: mid,
+                effort: Some(ReasoningEffort::Medium),
+                ..
+            } if *mid == model_id
+        )),
+        "sampler must SwitchModel medium so the wire matches the footer, got {effects:?}"
+    );
+}

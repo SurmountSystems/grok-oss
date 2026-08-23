@@ -433,13 +433,17 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
     let session_id = payload.session_id.as_str();
 
     let sid = acp::SessionId::new(session_id.to_string());
-    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
+    let Some(matched) = find_session_match(app, &sid) else {
         return false;
     };
+    let id = matched.agent_id();
     let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         return false;
     };
+    if matches!(matched, SessionMatch::Child(_)) {
+        return crate::app::subagent::finish_nested_child_session_turn(agent, session_id);
+    }
 
     // Finalize on the agent, then map the outcome to the return bool in the one
     // shared place both terminal rails use (returns it directly — arming reports

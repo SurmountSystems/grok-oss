@@ -674,6 +674,41 @@ pub fn management_prepaid_success_log_fields(
     })
 }
 
+/// Management prepaid `total.val` is team prepaid remaining, not the
+/// console.x.ai Billing Credits card. Public docs:
+/// [Billing Management REST](https://docs.x.ai/developers/rest-api-reference/management/billing)
+/// (accessed: 2026-08-22).
+pub fn billing_credits_card_from_prepaid_total(
+    _total_val: &str,
+) -> xai_grok_sampling_types::BillingCreditsCard {
+    xai_grok_sampling_types::BillingCreditsCard::NotFetched
+}
+
+/// Billing Credits remaining from documented GetAmountToPay fields on a
+/// postpaid preview body. Requires both `prepaidCredits` and
+/// `prepaidCreditsUsed`.
+pub fn billing_credits_remaining_cents_from_preview(
+    body: &PostpaidInvoicePreviewResponse,
+) -> Option<i64> {
+    let core = body.core_invoice.as_ref()?;
+    let prepaid = core.prepaid_credits.as_ref()?;
+    let used = core.prepaid_credits_used.as_ref()?;
+    xai_grok_sampling_types::billing_credits_cents_from_core_invoice_prepaid_remaining(
+        &prepaid.val,
+        &used.val,
+    )
+}
+
+/// Card status from GetAmountToPay remaining cents.
+pub fn billing_credits_card_from_remaining_cents(
+    remaining_cents: Option<i64>,
+) -> xai_grok_sampling_types::BillingCreditsCard {
+    match remaining_cents {
+        Some(_) => xai_grok_sampling_types::BillingCreditsCard::Fetched,
+        None => xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+    }
+}
+
 /// Parse a full prepaid JSON body into a meter for `team_id`.
 pub fn console_team_prepaid_from_response(
     team_id: &str,
@@ -1050,8 +1085,14 @@ pub struct PostpaidCoreInvoice {
     #[serde(default)]
     pub default_credits_issued: Option<String>,
     /// Prepaid credits applied on the postpaid invoice (not SuperGrok extras).
+    /// Documented as total prepaid on the team **before** this invoice.
     #[serde(default)]
     pub prepaid_credits: Option<UsdCentsVal>,
+    /// Prepaid credits used to pay this invoice. Documented on GetAmountToPay.
+    /// Remaining on the Billing Credits card is abs(prepaidCredits.val) minus
+    /// abs(this.val). This field alone is not team prepaid `total.val`.
+    #[serde(default)]
+    pub prepaid_credits_used: Option<UsdCentsVal>,
 }
 
 /// Calendar billing cycle on the preview response.
@@ -1100,6 +1141,10 @@ pub struct ConsoleTeamPostpaidPreview {
     pub default_credits_issued_cents: Option<i64>,
     pub billing_cycle_year: Option<i32>,
     pub billing_cycle_month: Option<u32>,
+    /// Billing Credits card remaining cents from documented GetAmountToPay
+    /// `prepaidCredits` minus `prepaidCreditsUsed`. `None` when that pair is
+    /// missing. Never `total.val`. Never SuperGrok `prepaidBalance.val`.
+    pub billing_credits_remaining_cents: Option<i64>,
 }
 
 impl ConsoleTeamPostpaidPreview {
@@ -1168,6 +1213,7 @@ pub fn console_team_postpaid_from_response(
             .and_then(postpaid_cents_abs),
         billing_cycle_year: body.billing_cycle.as_ref().and_then(|c| c.year),
         billing_cycle_month: body.billing_cycle.as_ref().and_then(|c| c.month),
+        billing_credits_remaining_cents: billing_credits_remaining_cents_from_preview(body),
     })
 }
 
@@ -2078,6 +2124,90 @@ mod tests {
         assert_eq!(meter.balance_cents, 4500);
     }
 
+    /// Documented `{"total":{"val":"..."}}` is team prepaid remaining only.
+    /// See [Billing Management REST](https://docs.x.ai/developers/rest-api-reference/management/billing)
+    /// (accessed: 2026-08-22). Never a field named Billing Credits.
+    #[test]
+    fn prepaid_total_val_maps_only_to_team_prepaid_remaining_never_billing_credits() {
+        use xai_grok_sampling_types::{BillingCreditsCard, current_billing_credits_usd};
+
+        let body: PrepaidBalanceResponse = serde_json::from_value(serde_json::json!({
+            "total": { "val": "-4703" },
+            "changes": []
+        }))
+        .unwrap();
+        let meter = console_team_prepaid_from_response("team-live", &body).unwrap();
+        assert_eq!(meter.balance_cents, 4703);
+        assert_eq!(
+            billing_credits_card_from_prepaid_total(&body.total.val),
+            BillingCreditsCard::NotFetched
+        );
+        assert_eq!(
+            current_billing_credits_usd(Some(89.94), Some(47.03), None),
+            None
+        );
+    }
+
+    /// Named remaining on GetAmountToPay is not `total.val` and not SuperGrok
+    /// `prepaidBalance.val`. See
+    /// [Billing Management REST](https://docs.x.ai/developers/rest-api-reference/management/billing)
+    /// (accessed: 2026-08-22).
+    #[test]
+    fn postpaid_preview_named_remaining_is_billing_credits_card_not_total_val() {
+        use xai_grok_sampling_types::{
+            BILLING_CREDITS_CARD_NAMED_FIELD, BillingCreditsCard,
+            billing_credits_usd_from_named_json_field, current_billing_credits_usd,
+        };
+
+        let body: PostpaidInvoicePreviewResponse = serde_json::from_value(serde_json::json!({
+            "coreInvoice": {
+                "lines": [],
+                "totalWithCorr": { "val": "0" },
+                "prepaidCredits": { "val": "-11245" },
+                "prepaidCreditsUsed": { "val": "6542" }
+            },
+            "defaultCredits": "0"
+        }))
+        .expect("parse fixture");
+        let remaining = billing_credits_remaining_cents_from_preview(&body);
+        assert_eq!(remaining, Some(4_703));
+        let meter = console_team_postpaid_from_response("team-card", &body).expect("meter");
+        assert_eq!(meter.billing_credits_remaining_cents, Some(4_703));
+        assert_eq!(
+            billing_credits_card_from_remaining_cents(remaining),
+            BillingCreditsCard::Fetched
+        );
+        assert_eq!(
+            billing_credits_card_from_prepaid_total("-11245"),
+            BillingCreditsCard::NotFetched
+        );
+        let usd = remaining.expect("cents") as f64 / 100.0;
+        assert_eq!(
+            billing_credits_usd_from_named_json_field(BILLING_CREDITS_CARD_NAMED_FIELD, usd),
+            Some(usd)
+        );
+        assert_eq!(
+            current_billing_credits_usd(Some(89.94), Some(112.45), Some(usd)),
+            Some(usd)
+        );
+        assert_eq!(
+            billing_credits_usd_from_named_json_field("prepaidBalance.val", 248.24),
+            None
+        );
+        assert_eq!(
+            billing_credits_remaining_cents_from_preview(
+                &serde_json::from_value(serde_json::json!({
+                    "coreInvoice": {
+                        "prepaidCredits": { "val": "-11245" }
+                    }
+                }))
+                .expect("prepaidCredits alone")
+            ),
+            None,
+            "prepaidCredits.val alone is not the card"
+        );
+    }
+
     /// RED/GREEN: missing management key leaves meter absent (no invented $).
     #[tokio::test]
     #[serial]
@@ -2592,6 +2722,7 @@ mod tests {
             default_credits_issued_cents: Some(20_756),
             billing_cycle_year: Some(2026),
             billing_cycle_month: Some(8),
+            billing_credits_remaining_cents: None,
         };
         let fields = management_postpaid_success_log_fields(&meter);
         assert_eq!(fields["team_id"], "61fab250-b2c1-40cf-b5b8-628e673a2eeb");

@@ -1460,13 +1460,13 @@ pub fn default_settings() -> Vec<SettingMeta> {
             owner: SettingOwner::Shell,
             label: "Always expand thinking",
             description: "Keep thinking fully expanded (including nested overlays) and hide \
-                          the Ctrl+E hint. Off paints collapsed Thought-for headers only. \
+                          the Ctrl+T hint. Off paints collapsed Thought-for headers only. \
                           Distinct from showing thinking blocks at all.",
             keywords: &[
                 "thinking",
                 "expand",
                 "always",
-                "ctrl+e",
+                "ctrl+t",
                 "reasoning",
                 "collapse",
             ],

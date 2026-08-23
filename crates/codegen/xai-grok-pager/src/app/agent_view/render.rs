@@ -601,6 +601,7 @@ impl AgentView {
         use crate::app::subagent::{format_context_badge, format_subagent_label};
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
+        self.sync_parented_specialists_into_child_view(child_sid);
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let compact = appearance.prompt.compact;
@@ -678,11 +679,7 @@ impl AgentView {
             .to_string();
         let badge = info.map(format_context_badge).unwrap_or("");
         let activity_label: Option<String> = if is_running {
-            self.subagent_views.get(child_sid).and_then(|cv| {
-                cv.resolve_turn_activity()
-                    .map(|a| crate::app::subagent::format_activity_label(&a))
-                    .or_else(|| cv.session.state.is_busy().then(|| "Waiting".to_string()))
-            })
+            self.overlay_wait_activity_label(child_sid)
         } else {
             None
         };
@@ -1699,6 +1696,57 @@ impl AgentView {
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
         let mut path_offset: u16 = 0;
+        self.hit_header_dashboard.clear();
+        self.hit_header_prev.clear();
+        self.hit_header_next.clear();
+        let show_fork_header = !self.in_dashboard_overlay
+            && (self.session.forked_from.is_some()
+                || self.fork_family_position.is_some_and(|(_, n)| n > 1));
+        let mut header_prev_x: Option<(u16, u16)> = None;
+        let mut header_next_x: Option<(u16, u16)> = None;
+        let mut header_dash_x: Option<(u16, u16)> = None;
+        if show_fork_header {
+            let chip = |hovered: bool| {
+                Style::default()
+                    .fg(if hovered {
+                        theme.text_primary
+                    } else {
+                        theme.gray
+                    })
+                    .bg(theme.bg_base)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            };
+            let gap = Style::default().bg(theme.bg_base);
+            if self.fork_family_position.is_some_and(|(_, n)| n > 1) {
+                if let Some((cur, total)) = self.fork_family_position {
+                    let pos_text = format!("{cur}/{total} ");
+                    path_offset += pos_text.width() as u16;
+                    parts.push(Span::styled(
+                        pos_text,
+                        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                    ));
+                }
+                let prev_label = format!("[{}]", crate::glyphs::chevron_left());
+                let next_label = format!("[{}]", crate::glyphs::chevron());
+                let prev_w = prev_label.width() as u16;
+                let next_w = next_label.width() as u16;
+                header_prev_x = Some((path_offset, prev_w));
+                parts.push(Span::styled(prev_label, chip(self.hit_header_prev.hovered)));
+                path_offset += prev_w;
+                header_next_x = Some((path_offset, next_w));
+                parts.push(Span::styled(next_label, chip(self.hit_header_next.hovered)));
+                path_offset += next_w;
+                parts.push(Span::styled(" ", gap));
+                path_offset += 1;
+            }
+            let dash = "[Dashboard]";
+            let dash_w = dash.width() as u16;
+            header_dash_x = Some((path_offset, dash_w));
+            parts.push(Span::styled(dash, chip(self.hit_header_dashboard.hovered)));
+            path_offset += dash_w;
+            parts.push(Span::styled("  ", gap));
+            path_offset += 2;
+        }
         let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
         let branch = self
             .current_branch
@@ -1784,6 +1832,20 @@ impl AgentView {
             width: visible_path_width,
             height: 1,
         });
+        let header_hit = |off: u16, w: u16| {
+            (off + w <= cwd_width && w > 0).then_some(Rect {
+                x: layout.status_bar.x + off,
+                y: layout.status_bar.y,
+                width: w,
+                height: 1,
+            })
+        };
+        self.hit_header_prev
+            .set(header_prev_x.and_then(|(off, w)| header_hit(off, w)));
+        self.hit_header_next
+            .set(header_next_x.and_then(|(off, w)| header_hit(off, w)));
+        self.hit_header_dashboard
+            .set(header_dash_x.and_then(|(off, w)| header_hit(off, w)));
         let mut upgrade_cta_rect = None;
         if let Some((_owner, label, _url)) = upgrade_cta {
             let avail = max_cwd_width.saturating_sub(cwd_width);
@@ -5194,6 +5256,422 @@ mod overlay_cycle_hint_tests {
         );
     }
 }
+
+/// Nested L2 overlay wait chrome: name the live specialist, compact minutes,
+/// and last known tool. Bare `Waiting on task output` is FAIL.
+#[cfg(test)]
+mod nested_l2_overlay_wait_chrome_tests {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::acp::meta::NotificationMeta;
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentState;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use agent_client_protocol as acp;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn draw_text(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            true,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn nested_l2_overlay_wait_names_specialist_elapsed_and_progress() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut specialist = running_subagent_info("l3-cert");
+        specialist.description = Arc::from("prove cert DNS-01");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        l2.subagent_sessions.insert("l3-cert".into(), specialist);
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix cryptoquick mail cert");
+        l2_info.started_at = Instant::now() - Duration::from_secs(15 * 60 + 9);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("prove cert DNS-01"),
+            "nested overlay wait must name the live specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file"),
+            "nested overlay wait must show last known tool when the registry has it:\n{text}"
+        );
+        assert!(
+            text.contains("15m9s"),
+            "nested overlay wait of at least a minute must use compact minutes:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL in the nested overlay:\n{text}"
+        );
+        assert!(
+            !text.contains("You MUST spawn L3 for all tool work"),
+            "overlay must not paint MUST spawn L3 for all tool work:\n{text}"
+        );
+    }
+
+    /// Live nested specialists are registered on the parent, not on the L2
+    /// child view. Overlay wait chrome must still name that specialist, last
+    /// tool, and elapsed. Bare `Waiting on task output` is FAIL.
+    #[test]
+    fn nested_overlay_wait_names_parent_registry_specialist() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix nested wait overlay");
+        l2_info.started_at = Instant::now() - Duration::from_secs(3 * 60 + 12);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        let mut specialist = running_subagent_info("l3-gate");
+        specialist.description = Arc::from("Land check-remote full gate");
+        specialist.is_background = true;
+        specialist.depth = Some(2);
+        specialist.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.tools_used = vec![Arc::from("read_file")];
+        specialist.tool_call_count = Some(4);
+        parent
+            .subagent_sessions
+            .insert("l3-gate".into(), specialist);
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("Land check-remote full gate"),
+            "nested overlay wait must name the parent-registry specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file"),
+            "nested overlay wait must show last tool from specialist progress:\n{text}"
+        );
+        assert!(
+            text.contains("3m12s"),
+            "nested overlay wait of at least a minute must use compact minutes:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL in the nested overlay:\n{text}"
+        );
+    }
+
+    /// Screenshot 2026-08-22: nested L2 overlay whose activity is model-wait
+    /// (not a task-output wait) while a parent-registry specialist is still
+    /// running. Bare `Waiting for the model` is FAIL; title and footer must
+    /// name that specialist and last tool (or tool count).
+    #[test]
+    fn nested_overlay_model_wait_names_parent_registry_specialist() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("Implementer Grow CheckersLater subset");
+        l2_info.model = Some(Arc::from("grok-4.6"));
+        l2_info.started_at = Instant::now() - Duration::from_secs(37 * 60 + 36);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        let mut specialist = running_subagent_info("l3-impl");
+        specialist.description = Arc::from("Land CheckersLater subset");
+        specialist.is_background = true;
+        specialist.depth = Some(2);
+        specialist.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.tools_used = vec![Arc::from("read_file")];
+        specialist.tool_call_count = Some(6);
+        specialist.started_at = Instant::now() - Duration::from_secs(27 * 60 + 18);
+        parent
+            .subagent_sessions
+            .insert("l3-impl".into(), specialist);
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("Land CheckersLater subset"),
+            "nested overlay model-wait must name the live parent-registry specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file") || text.contains("6 tools"),
+            "nested overlay model-wait must show last tool or tool count:\n{text}"
+        );
+        assert!(
+            text.contains("27m18s") || text.contains("37m36s"),
+            "nested overlay model-wait must show elapsed of that wait or specialist:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("waiting for the model"),
+            "bare Waiting for the model is FAIL while a parented specialist is live:\n{text}"
+        );
+    }
+
+    /// After the waited-on nested agent has completed (exit 0, duration
+    /// stamped), the parent overlay must not stay `Waiting on task output`.
+    /// The wait tool may still be Pending; that is the stall, not a healthy wait.
+    #[test]
+    fn nested_overlay_wait_chrome_ends_after_waited_child_completes() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut specialist = running_subagent_info("l3-lake");
+        specialist.description = Arc::from("remote Lake");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        l2.subagent_sessions.insert("l3-lake".into(), specialist);
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 600_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        {
+            let info = l2.subagent_sessions.get_mut("l3-lake").unwrap();
+            info.finished = true;
+            info.status = Some(Arc::from("completed"));
+            info.duration_ms = Some(4_000);
+            info.activity_label = None;
+        }
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix nested overlay stall");
+        l2_info.started_at = Instant::now() - Duration::from_secs(60 * 60);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            !text.contains("Waiting on task output"),
+            "nested overlay must not stay Waiting on task output after the waited-on child completed:\n{text}"
+        );
+        let l2 = parent.subagent_views.get("l2-coord").unwrap();
+        assert!(
+            !matches!(
+                l2.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::TaskOutput { .. }
+                ))
+            ),
+            "L2 wait chrome must end after the waited-on nested agent completed, got {:?}",
+            l2.resolve_turn_activity()
+        );
+        assert!(
+            !crate::views::turn_status::is_sendable_wait(&l2.resolve_turn_activity_unenriched()),
+            "footer must not stay parked on task output after the child completed"
+        );
+        let specialist = l2.subagent_sessions.get("l3-lake").unwrap();
+        assert_eq!(
+            specialist.display_elapsed(),
+            Duration::from_millis(4_000),
+            "completed nested-agent timer must stop"
+        );
+        assert!(
+            crate::app::subagent::live_subagent_list(l2.subagent_sessions.values())
+                .iter()
+                .all(|info| info.child_session_id.as_ref() != "l3-lake"),
+            "live list must not show the completed nested agent as running"
+        );
+    }
+
+    fn sample_todos() -> Vec<xai_grok_shell::tools::TodoItem> {
+        use xai_grok_shell::tools::{TodoItem, TodoStatus};
+        vec![
+            TodoItem {
+                content: "nested board item".into(),
+                priority: Default::default(),
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            },
+            TodoItem {
+                content: "still open on nested".into(),
+                priority: Default::default(),
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            },
+        ]
+    }
+
+    /// Named contract: the top status header paints the word tasks next to
+    /// the done/total fraction. A chip that is only `1/2` is FAIL. The pane
+    /// stays closed until Ctrl+Shift+T or a badge click.
+    #[test]
+    fn status_header_todo_badge_names_tasks() {
+        let mut agent = make_agent();
+        agent.todo.update_todos(sample_todos());
+        assert!(
+            !agent.todo.overlay.visible,
+            "todo pane must stay closed until toggled"
+        );
+        let text = draw_text(&mut agent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("tasks"),
+            "status header must name tasks, not only N/M:\n{text}"
+        );
+        assert!(
+            !lower.contains("todos"),
+            "status header must not name todos:\n{text}"
+        );
+        assert!(
+            text.contains("1/2"),
+            "status header must still show the done/total fraction:\n{text}"
+        );
+        assert!(
+            agent.hit_badge.rect.is_some(),
+            "todo badge must remain a click target"
+        );
+        assert!(
+            !agent.todo.overlay.visible,
+            "painting the named badge must not auto-open the pane"
+        );
+    }
+
+    /// Named contract: a nested L2 overlay keeps that nested session's todo
+    /// toggle (named badge plus Ctrl+Shift+T). Parent L1 board stays on L1. Do
+    /// not hide the only findable control. Ctrl+T expands or collapses thinking.
+    #[test]
+    fn nested_l2_overlay_todo_toggle_stays_findable() {
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.todo.update_todos(sample_todos());
+        assert!(!l2.todo.overlay.visible);
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix cryptoquick mail cert");
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        let child = parent
+            .subagent_views
+            .get("l2-coord")
+            .expect("nested L2 view");
+        assert!(
+            child.hit_badge.rect.is_some(),
+            "nested overlay must keep the todo badge click target:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            lower.contains("tasks"),
+            "nested overlay status must name tasks so the board is findable:\n{text}"
+        );
+        assert!(
+            !lower.contains("todos"),
+            "nested overlay status must not name todos:\n{text}"
+        );
+        assert!(
+            !parent.todo.overlay.visible,
+            "nested overlay must not open the parent L1 todo pane"
+        );
+        assert!(
+            !child.todo.overlay.visible,
+            "named badge must not auto-open the nested pane"
+        );
+
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Ctrl+Shift+T in a nested L2 overlay must toggle that nested board, got {outcome:?}"
+        );
+        let child = parent
+            .subagent_views
+            .get("l2-coord")
+            .expect("nested L2 after Ctrl+Shift+T");
+        assert!(
+            child.todo.overlay.visible,
+            "Ctrl+Shift+T must open the nested session todo board"
+        );
+        assert!(
+            !parent.todo.overlay.visible,
+            "Ctrl+Shift+T in nested overlay must not toggle the parent L1 board"
+        );
+    }
+}
 #[cfg(test)]
 mod overlay_post_flush_tests {
     use super::super::test_fixtures::make_agent;
@@ -5706,6 +6184,193 @@ mod status_credits_meter_tests {
     }
 }
 
+/// Forked-session upper-left header chrome. The 11:10 screenshot painted
+/// only git branch plus cwd on the status row. That must not pass: a fork
+/// family needs the conversation switcher and the dashboard control on
+/// that same header, without typing `/dashboard`.
+#[cfg(test)]
+mod forked_session_status_header_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentId;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Named contract: drawing the header of a forked session (fork family)
+    /// must include the forked-conversation switcher and the dashboard
+    /// control in the upper-left status header. This would have been red on
+    /// the 11:10 screenshot (`main ~/Projects/...` only, no switcher, no
+    /// dashboard).
+    #[test]
+    fn forked_session_status_header_paints_switcher_and_dashboard() {
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((2, 2));
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.chars().any(|c| !c.is_whitespace()))
+            .unwrap_or("");
+        assert!(
+            header.contains("[Dashboard]"),
+            "forked-session status header must paint the dashboard control; \
+             the 11:10 screenshot only had git plus cwd:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            header.contains("[‹][›]"),
+            "forked-session status header must paint the forked-conversation \
+             switcher as adjacent `[‹][›]`; the 11:10 screenshot had none:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            agent.hit_header_dashboard.rect.is_some(),
+            "dashboard control must be a real click target on the status header"
+        );
+        assert!(
+            agent.hit_header_prev.rect.is_some() && agent.hit_header_next.rect.is_some(),
+            "fork switcher chips must be real click targets on the status header"
+        );
+    }
+
+    /// Named contract: the header dashboard chip opens the dashboard, and
+    /// the switcher chips cycle the fork family.
+    #[test]
+    fn forked_session_status_header_clicks_open_dashboard_and_cycle() {
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((2, 2));
+        let _ = draw(&mut agent);
+        let dash = agent
+            .hit_header_dashboard
+            .rect
+            .expect("dashboard chip must arm a hit");
+        let next = agent
+            .hit_header_next
+            .rect
+            .expect("next-fork chip must arm a hit");
+        let prev = agent
+            .hit_header_prev
+            .rect
+            .expect("prev-fork chip must arm a hit");
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(dash.x, dash.y)),
+                InputOutcome::Action(Action::OpenDashboard)
+            ),
+            "clicking [Dashboard] must open the dashboard"
+        );
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(next.x, next.y)),
+                InputOutcome::Action(Action::DashboardOverlayNext)
+            ),
+            "clicking [›] must cycle to the next forked conversation"
+        );
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(prev.x, prev.y)),
+                InputOutcome::Action(Action::DashboardOverlayPrev)
+            ),
+            "clicking [‹] must cycle to the previous forked conversation"
+        );
+    }
+
+    /// A lone fork (parent gone, no siblings) still paints `[Dashboard]`
+    /// on the upper-left status header. Cycle chips are only for a family
+    /// of more than one.
+    #[test]
+    fn forked_session_status_header_paints_dashboard_for_lone_fork() {
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((1, 1));
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.chars().any(|c| !c.is_whitespace()))
+            .unwrap_or("");
+        assert!(
+            header.contains("[Dashboard]"),
+            "a lone fork must still paint the dashboard control on the status header:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            !header.contains("[‹]") && !header.contains("[›]"),
+            "a lone fork must not paint cycle chips:\n{header}"
+        );
+        assert!(
+            agent.hit_header_dashboard.rect.is_some(),
+            "lone-fork dashboard control must be a real click target"
+        );
+        assert!(
+            agent.hit_header_prev.rect.is_none() && agent.hit_header_next.rect.is_none(),
+            "lone fork must not arm cycle-chip hits"
+        );
+    }
+
+    /// `fork_family_position` must count the living parent plus the child
+    /// so the header switcher is not only a test stub on `AgentView`.
+    #[test]
+    fn fork_family_position_counts_parent_and_live_child() {
+        let mut parent = make_agent();
+        parent.session.id = AgentId(0);
+        let mut child = make_agent();
+        child.session.id = AgentId(1);
+        child.session.forked_from = Some(AgentId(0));
+        let mut agents = indexmap::IndexMap::new();
+        agents.insert(AgentId(0), parent);
+        agents.insert(AgentId(1), child);
+        assert_eq!(
+            crate::app::agent_view::fork_family_position(&agents, AgentId(0)),
+            Some((1, 2)),
+            "parent must be 1 of 2 in the live fork family"
+        );
+        assert_eq!(
+            crate::app::agent_view::fork_family_position(&agents, AgentId(1)),
+            Some((2, 2)),
+            "child must be 2 of 2 in the live fork family"
+        );
+    }
+}
+
 /// Clear finished `[−]` todo-header chrome (open board + finished rows).
 /// Restored from origin/main catalog contracts.
 #[cfg(test)]
@@ -6002,6 +6667,100 @@ mod clear_finished_paint_tests {
             agent.active_subagent.as_deref(),
             Some(child_sid),
             "must open the correct child via open_subagent_fullscreen"
+        );
+    }
+
+    fn setup_completed_listed_nested_agent(agent: &mut AgentView, child_sid: &str) {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.activity_label = Some("Responding".into());
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        let mut child = make_agent();
+        child.session.state = crate::app::agent::AgentState::Idle;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child));
+        agent.tasks.overlay.visible = true;
+    }
+
+    fn click_at(agent: &mut AgentView, col: u16, row: u16) -> InputOutcome {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: col,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        )
+    }
+
+    fn first_agent_kill_rect(agent: &AgentView) -> ratatui::layout::Rect {
+        agent
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .map(|(_, rect)| *rect)
+            .expect("listed nested agent must paint list [x]")
+    }
+
+    /// Named contract: list `[x]` on a nested-agent row the coordinator already
+    /// marked completed (child view idle, row still listed as running) must
+    /// emit a real cancel, not no-op.
+    #[test]
+    fn click_tasks_kill_on_completed_listed_nested_agent_emits_kill() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-stale-kill";
+        setup_completed_listed_nested_agent(&mut agent, child_sid);
+        let _buf = draw_hits(&mut agent);
+        let kill = first_agent_kill_rect(&agent);
+        let out = click_at(&mut agent, kill.x, kill.y);
+        match out {
+            InputOutcome::Action(Action::KillSubagent(id)) => {
+                assert_eq!(id, format!("sa-{child_sid}"));
+            }
+            other => panic!("list [x] must emit KillSubagent, got {other:?}"),
+        }
+    }
+
+    /// Named contract: overlay frame `[x]` on a completed nested snapshot that
+    /// is still listed must drop the live row or emit KillSubagent. Closing
+    /// the overlay alone is a chrome no-op. The tasks pane is hidden while
+    /// the overlay is open, so this is the close hit the operator can click.
+    #[test]
+    fn overlay_frame_close_on_completed_listed_nested_agent_drops_or_cancels() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-overlay-close";
+        setup_completed_listed_nested_agent(&mut agent, child_sid);
+        agent.active_subagent = Some(child_sid.into());
+        let _buf = draw_hits(&mut agent);
+        let close = agent
+            .hit_subagent_frame_close
+            .rect
+            .expect("open nested overlay must paint frame [x]");
+        let out = click_at(&mut agent, close.x, close.y);
+        let still_listed =
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values())
+                .iter()
+                .any(|info| info.child_session_id.as_ref() == child_sid);
+        let cancelled = matches!(
+            &out,
+            InputOutcome::Action(Action::KillSubagent(id))
+                if id == &format!("sa-{child_sid}")
+        );
+        assert!(
+            cancelled || !still_listed,
+            "overlay [x] on a completed listed nested agent must cancel or drop the row, got {out:?}, still_listed={still_listed}"
         );
     }
 

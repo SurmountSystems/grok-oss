@@ -160,6 +160,67 @@ mod tests {
         );
     }
 
+    /// Pin words confirm host/key identity in plain English and must not dump JSON.
+    #[test]
+    #[serial_test::serial]
+    fn limits_pin_words_confirm_switch_not_json_dump() {
+        use tempfile::TempDir;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let store =
+            xai_grok_shell::auth::credentials_store::CredentialsStore::at_grok_home(home.path());
+        xai_grok_shell::auth::store_console_api_key(&store, "slash-pin-console-key")
+            .expect("store console key");
+
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+
+        let stay = LimitsCommand.run(&mut ctx, crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK);
+        match stay {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("SuperGrok session") && msg.contains("cli-chat-proxy"),
+                    "stay-supergrok must confirm SuperGrok session host: {msg}"
+                );
+                assert!(
+                    !msg.contains("schemaVersion") && !msg.trim_start().starts_with('{'),
+                    "pin confirmation must not dump JSON: {msg}"
+                );
+            }
+            other => panic!("stay-supergrok must be a short confirmation, not {other:?}"),
+        }
+
+        let use_console = LimitsCommand.run(&mut ctx, crate::limits_cmd::LIMITS_WORD_USE_CONSOLE);
+        match use_console {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("console API key") && msg.contains("api.x.ai"),
+                    "use-console must confirm console key host: {msg}"
+                );
+                assert!(
+                    msg.to_ascii_lowercase().contains("operator asked"),
+                    "use-console must say the operator asked, not a printout hop: {msg}"
+                );
+                assert!(
+                    !msg.contains("schemaVersion") && !msg.trim_start().starts_with('{'),
+                    "pin confirmation must not dump JSON: {msg}"
+                );
+            }
+            other => panic!("use-console must be a short confirmation, not {other:?}"),
+        }
+
+        let bare = LimitsCommand.run(&mut ctx, "");
+        assert!(
+            matches!(bare, CommandResult::Action(Action::ShowLimits)),
+            "bare /limits stays collect, got {bare:?}"
+        );
+    }
+
     /// TUI `/limits` and CLI `grok-oss limits` share the same named words.
     #[test]
     #[serial_test::serial]

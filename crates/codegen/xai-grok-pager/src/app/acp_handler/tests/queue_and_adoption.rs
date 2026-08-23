@@ -665,8 +665,9 @@
             Some(pid_first.as_str())
         );
 
-        // p2: running submit → immediate server send + optimistic echo.
-        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        // p2: chip follow-up while running still immediate-sends (composer
+        // Enter now interjects and would not occupy the serial queue).
+        let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
         let pid_second = match &effects[0] {
             Effect::SendPrompt {
                 text, prompt_id, ..
@@ -772,8 +773,8 @@
         user_echo(&mut app, "first");
         assert_eq!(user_block_count(&app, id, "first"), 1);
 
-        // p2 submitted while running → immediate server send.
-        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        // p2 chip follow-up while running → immediate server send.
+        let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
         let pid_second = match &effects[0] {
             Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
             other => panic!("expected immediate SendPrompt, got {other:?}"),

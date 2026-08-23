@@ -169,17 +169,21 @@ identifier that has no matching `fn`.
   `sampling_config_auto_use_extras_keep_session_console_failover` stay `fn`
   names. Human prose next to them says SuperGrok dollar credits. This
   file does not claim live Business remaining or a live window hop.
-- [x] **Business / Team included SuperGrok period limits before personal**:
-  spend Business or Team included SuperGrok period limits before this login's
-  personal included SuperGrok period limits. Crate: `xai-grok-shell`
-  `auth/supergrok_identity_rank.rs`, `auth/manager_tests.rs`. Tests:
+- [x] **Personal SuperGrok JWT is the paying identity**: spend included SuperGrok
+  period limits on a stored personal SuperGrok login first. A Team / Business
+  SuperGrok JWT is not the paying source while that personal login exists
+  (that JWT settles as team postpaid OAuth / Grok Build and can debit the
+  Billing Credits card). Team-only login still uses the Team JWT. Crate:
+  `xai-grok-shell` `auth/supergrok_identity_rank.rs`, `auth/manager_tests.rs`.
+  Tests: `live_operator_numbers_omit_team_jwt_while_personal_included_and_dollar_credits_remain`,
   `pick_prefers_business_included_before_personal_when_both_have_remaining`,
   `order_credentials_business_included_before_personal_when_both_have_room`,
-  `align_after_billing_switches_sticky_personal_full_to_business_included`.
+  `align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal`.
 - [x] **Sibling included SuperGrok period limits before SuperGrok dollar credits**:
-  another SuperGrok identity's remaining included SuperGrok period limits beat
-  this login's SuperGrok dollar credits. After-burner skip only when every
-  included pool is exhausted. Tests:
+  remaining included SuperGrok period limits on a **paying** SuperGrok identity
+  (personal JWT) beat SuperGrok dollar credits. Team JWT remaining is not a
+  SuperGrok paying source while a personal SuperGrok login exists. After-burner
+  skip only when every paying included pool is exhausted. Tests:
   `sampling_config_hops_to_sibling_included_before_extras`,
   `afterburner_does_not_skip_mark_when_sibling_has_included_remaining`
   (`auth/allowance_exhaust_from_billing.rs`). Compact meter stays on included
@@ -476,17 +480,17 @@ identifier that has no matching `fn`.
   `get_results_does_not_keep_a_stale_search_alive`. Per-matcher pool size
   `NUM_NUCLEO_THREADS = 2` is shipped in code (`xai-fuzzy-file-search`); no
   `fn` asserts `Some(2)`.
-- [x] **Always-three-layer product prompt**: process law lives in
-  [`AGENTS.md`](AGENTS.md) (D1; path-restored). Product also teaches it: L2
-  task description must say three layers always and must spawn L3;
-  default max depth must let depth-1 spawn L3. Tests:
+- [x] **L2 spawn prompt (2026-08-20)**: process law lives in
+  [`AGENTS.md`](AGENTS.md) (D1; path-restored). Product spawn-tool copy for
+  nested L2 must say spawn L3 only if the problem is actually hard, and that
+  easy work can stay on L2. It must not teach `MUST spawn L3 for all tool
+  work`. Default max depth must still let depth-1 spawn L3. Tests:
   `child_task_description_is_concise` (`xai-grok-agent` `builder.rs`
   `CHILD_TASK_DESCRIPTION`),
   `default_max_allows_l2_to_spawn_l3` (`xai-grok-tools` `task/mod.rs`).
-  User-guide `16-subagents.md` has the three-layer paragraph and names
-  Hierarchical fast path (L1-only: one-command host question, one already
-  named path, or the asked-for report). No dedicated cargo `fn` for that
-  sentence. Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
+  User-guide `16-subagents.md` names Hierarchical fast path (L1-only:
+  one-command host question, one already named path, or the asked-for
+  report). Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
   A restack can keep AGENTS via `FORK_PATHS` and still drop
   `CHILD_TASK_DESCRIPTION`.
 - [x] **Soft interject only + Enter cue honesty**: mid-turn interject
@@ -498,6 +502,14 @@ identifier that has no matching `fn`.
 - [x] **Todo board survives auto-compact**:
   `auto_compact_completed_preserves_todo_board`
   (`app/acp_handler/tests/subagents.rs`).
+- [x] **Status-row todo badge names tasks**: paints `tasks N/M`, not only
+  `614/638`. Click and Ctrl+T still toggle. Nested L2 overlay keeps that
+  nested session's badge and Ctrl+T. The pane stays closed until the
+  operator toggles it. Tests: `todo_badge_names_tasks_not_only_fraction`,
+  `status_header_todo_badge_names_tasks`,
+  `nested_l2_overlay_todo_toggle_stays_findable`
+  (`views/agent.rs`, `app/agent_view/render.rs`). User-guide
+  `03-keyboard-shortcuts`, `16-subagents`, `17-sessions`.
 - [x] **plan.json honesty + resume board**: compact writes the live
   Resources `TodoState` to `plan.json`. FORK claims; not a land class.
   User-guide `17-sessions`.
@@ -528,6 +540,11 @@ identifier that has no matching `fn`.
 - [x] **Multi-track also-guard (first cut)**: `todo_write` accepts
   `meta.taskId`; demoting `in_progress` → `pending` is rejected while that
   subagent is still Running. FORK claims; not a land class.
+- [ ] **Task tracking system (local first; chrome not shipped):** more formal
+  than the session todo board, less formal than issues. Durable rows live in
+  `$GROK_HOME/grok_oss.db` (`prompt_tasks`, `prompt_exec_metrics`). This does
+  not replace Ctrl+T session todos. Left-sidebar tasks / right-sidebar plan is
+  residual. Open: [`RESIDUAL.md`](RESIDUAL.md).
 
 ### Chrome
 
@@ -570,6 +587,17 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `included SuperGrok period limits · N%`; click opens `/limits`. Tests:
   `status_bar_pushes_credits_compact_included_supergrok_period_limits`,
   `hit_credits_click_dispatches_show_limits` (`app/agent_view/render.rs`).
+- [x] **Forked-session upper-left header switcher plus dashboard**: a
+  fork family paints `[‹][›]` and `[Dashboard]` on the status row, not
+  git plus cwd only. The yellow `use /dashboard` transcript line is not
+  this chrome. Tests:
+  `forked_session_status_header_paints_switcher_and_dashboard`,
+  `forked_session_status_header_clicks_open_dashboard_and_cycle`,
+  `forked_session_status_header_paints_dashboard_for_lone_fork`
+  (`app/agent_view/render.rs`). Resume of a persisted fork restores the
+  parent as a live agent and stamps `forked_from`:
+  `load_session_restores_fork_family_from_disk`
+  (`app/dispatch/tests/session/load.rs`).
 - [x] **Plan footer CTAs**: idle footer is Approve / Comment / Revise / Exit
   (four CTAs). Clarify is only in the comment flow after Comment, not an
   idle top-level notes path. Notes is gone. Letter `a` / `A` type. Empty
@@ -835,8 +863,9 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   scripts. Host `~/.agents/skills` is operator-owned and is **not** this
   class. Tests: `sanitize_rejects_non_excepted_skill_python`,
   `extract_archive_skips_non_excepted_skill_python`,
-  `product_repo_skill_roots_have_no_non_excepted_python`
-  (`xai-grok-bundle` `lib.rs`);
+  `product_repo_skill_roots_have_no_non_excepted_python`,
+  `default_product_skills_include_polish_and_subagent`
+  (`xai-grok-bundle` `lib.rs` / `default_skills.rs`);
   `user_guide_skills_are_not_a_python_runtime` (`xai-grok-pager` `docs.rs`);
   `implement_memory_snapshot_intercept_does_not_spawn_shell`,
   `plan_validate_intercept_does_not_spawn_shell`,
@@ -887,9 +916,17 @@ other non-`.rs` paths stay quiet. The command-running tool still
 `--workspace`). Kill switch if already in the plan:
 `GROK_SKIP_EDIT_VERIFY=1`.
 
+File-level rustfmt-only may stay on this laptop (no rustc). File-level
+clippy that compiles belongs on the remote builder too (`just
+cargo-remote` / `just check-remote`). Agents must not run `cargo test`,
+`cargo clippy`, `cargo build`, or rustc on this laptop for grok-oss.
+Named filters: `just test-remote` (see the CI table). `GROK_SKIP_EDIT_VERIFY`
+is the kill switch, not the default.
+
 This is product behavior. Process law (do not prove the slice by
-spawning crate-wide cargo through extra subagents) lives in
-[`AGENTS.md`](AGENTS.md) hard constraint 3b.
+spawning crate-wide cargo through extra subagents; named cargo on the
+remote builder) lives in [`AGENTS.md`](AGENTS.md) hard constraints 3b,
+3b-remote, and 3b-remote-named.
 
 **Named tests** (fixture and argv only; they must not clippy this
 workspace). Module filter `rust_edit_verify` matches these `fn`s:
@@ -974,9 +1011,16 @@ before canonicalize or any write. Existing-file edits and new-file
 - `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`
 - `hashline_edit_refuses_when_another_agent_holds_the_path`
 - `hashline_edit_happy_path_does_not_mention_the_lock`
+- `search_replace_refuses_a_path_reserved_by_another_agent`
+- `reserved_path_blocks_another_agent_until_holder_released`
+- `same_holder_can_write_a_path_they_reserved`
+- `reserved_path_blocks_another_agent_in_flight_write`
+
+Spawn-time claims (`write_paths` on `task` / `spawn_subagent`) last until the child finishes. Omit the field to skip spawn-time claims; edit tools still refuse overlapping in-flight writes.
 
 ```bash
 cargo test -p xai-grok-tools --lib per_path_write_lock
+cargo test -p xai-grok-tools --lib spawn_rejects_when_write_paths_overlap_a_live_claim
 ```
 
 OpenCode `edit` fixture (not under that module filter):
@@ -995,10 +1039,11 @@ user-guide [`08-skills.md`](crates/codegen/xai-grok-pager/docs/user-guide/08-ski
 
 | Source | Role |
 |--------|------|
-| Project `.agents/skills`, `.grok/skills` | Git-trackable on the branch (supported; may be empty) |
+| Project `.agents/skills`, `.grok/skills` | Git-trackable on the branch (supported; may be empty). Not the home for `/polish` or `/subagent`. |
+| `crates/codegen/xai-grok-bundle/skills/` | In-tree Grok OSS default skills (`polish`, `subagent`). Installed into `~/.grok/bundled/skills/` on startup and after network extract. Live cache is not the source. |
 | `~/.agents/skills` then `~/.grok/skills` | Host operator overlay (agents wins) |
 | `[skills].paths` / server inject / plugins | Config and managed dirs |
-| `~/.grok/bundled/skills` | Platform cache from network bundle sync |
+| `~/.grok/bundled/skills` | Platform cache from network bundle sync plus installed Grok OSS defaults |
 
 **Process pins that must survive recon** (import / onto): document in **FORK +
 AGENTS + product user-guide** when product-facing; **dual-pin** host skills
@@ -1016,10 +1061,10 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. Fail-open: a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up. Named `/limits` words and `limits_pins.json`. grok-oss limits is not xAI billing truth. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`, `user_guide_limits_names_fail_open_and_named_commands`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. Nested L2/L3 overlay Esc dismisses the view and does not cancel. | Plan honesty `fn`s under Chrome. Overlay Esc: `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues. `/what` restates this session in four lines (Job, State, You, Next) when chat is unclear (host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four lines (Job, State, You, Next) when chat is unclear (host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
-| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/what` is host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `what_empty_args_injects_what_skill` |
+| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish` and `/subagent` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). `/what` is host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. |
@@ -1214,7 +1259,8 @@ cargo `fn`):
 5. **Dual-auth hop after included SuperGrok period limits are full.** Rank
    helpers are not hop. `sampling_config` must fill console failover after
    those included limits are full, and must omit it while they still have
-   room. Includes Business / Team included before personal, any stored
+   room. Includes personal SuperGrok JWT as the paying identity while that
+   login exists (Team JWT omitted; that JWT settles Billing Credits), any stored
    SuperGrok login with included remaining before SuperGrok dollar credits,
    sibling included before SuperGrok dollar credits, and the one-process
    limits flock. Do not flatten remaining to zero from usage percent 100
@@ -1406,7 +1452,13 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
-  auto_compact_completed_preserves_todo_board
+  auto_compact_completed_preserves_todo_board \
+  todo_badge_names_tasks_not_only_fraction \
+  status_header_todo_badge_names_tasks \
+  nested_l2_overlay_todo_toggle_stays_findable \
+  forked_session_status_header_paints_switcher_and_dashboard \
+  forked_session_status_header_clicks_open_dashboard_and_cycle \
+  load_session_restores_fork_family_from_disk
 
 # 5. Dual-auth hop after included SuperGrok period limits are full (rank helpers are not hop)
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use \
@@ -1437,7 +1489,8 @@ cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_wh
 # 7. Product skills are not a Python runtime (non-excepted .py or dropped intercept is a failed land)
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
   extract_archive_skips_non_excepted_skill_python \
-  product_repo_skill_roots_have_no_non_excepted_python
+  product_repo_skill_roots_have_no_non_excepted_python \
+  default_product_skills_include_polish_and_subagent
 cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
 cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
   plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell
@@ -1583,7 +1636,8 @@ Actions (supply-chain boundary). Humans package from a trusted tree when ready.
 | Command | Role |
 |---------|------|
 | **`just check`** or **`just ci`** | Full local gate (flake-meta + prep + fmt/clippy/tests): **run before push**. Stays on this machine. |
-| **`just check-remote`** | Optional. Realizes flake metadata and `.#workspace-cargo-quality` (cargo fmt, clippy, and test compile as a Nix derivation) on this host's existing remote builder. rustc requires that builder's `surmount-remote` feature (and `big-parallel`) and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. `--option system-features` that omit `big-parallel` does not stop local nixbld (the daemon still advertises `big-parallel`). Force-remote nix also passes `--cores 64` so that rustc can use the builder's cores. Workspace cargo passes `--jobs` from those cores, capped at 32 (an OOM hedge; not 2 from the package sandbox, and not a full 64 rustc processes). `--jobs` is after the subcommand (`cargo clippy --jobs`, `cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. The quality script unsets `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS` so a 1-token GNU jobserver cannot ignore `--jobs` and leave one clippy-driver. That derivation uses the same cargo **dev** profile as local `just test-clippy`, not crane's default `--release` check (one rustc thread at opt-level 3; codegen-units does not parallelize `cargo check` / clippy). Nix jobs (machines-file `max-jobs`: how many derivations) are not cargo/rustc workers (jobs inside one derivation). Do not raise Nix max-jobs to fix a single busy rustc. Tiny crane vendor unpacks that prefer a local build may run here. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. |
+| **`just check-remote`** | Optional. Realizes flake metadata and `.#workspace-cargo-quality` (the same full cargo gate as `just check` / `just test`: fmt, clippy, workspace nextest execution, doctests, and cargo-mem-guard, as a Nix derivation) on this host's existing remote builder. rustc requires that builder's `surmount-remote` feature (and `big-parallel`) and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. `--option system-features` that omit `big-parallel` does not stop local nixbld (the daemon still advertises `big-parallel`). Force-remote nix also passes `--cores 64` so that rustc can use the builder's cores. Workspace cargo passes `--jobs` from those cores, capped at 32 (an OOM hedge; not 2 from the package sandbox, and not a full 64 rustc processes). `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping Nix `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. That derivation uses the same cargo **dev** profile as local `just test-clippy`, not crane's default `--release` check (one rustc thread at opt-level 3; codegen-units does not parallelize `cargo check` / clippy). Nix jobs (machines-file `max-jobs`: how many derivations) are not cargo/rustc workers (jobs inside one derivation). Do not raise Nix max-jobs to fix a single busy rustc. Tiny crane vendor unpacks that prefer a local build may run here. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. |
+| **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. |
 | **`just test`** | Quality suite without re-running full flake prep |
 | **`just build` / install** | Optional release-style package (not CI) |
 

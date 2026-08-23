@@ -169,7 +169,7 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
         }
         LimitsNamedAction::StaySupergrok => match apply_stay_supergrok() {
             Ok(StaySupergrokApply::Applied) => Ok(
-                "Stay SuperGrok pin written. Exhaust memo cleared. SuperGrok will be used again without requiring console credits."
+                "Stay SuperGrok: next request uses SuperGrok session on the cli-chat-proxy host (session JWT). Exhaust memo cleared. Stock [auth] preferred_method = api_key still pins console."
                     .into(),
             ),
             Ok(StaySupergrokApply::BlockedByPreferredApiKey) => Err(
@@ -180,7 +180,7 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
         },
         LimitsNamedAction::UseConsole => apply_use_console()
             .map(|()| {
-                "Use-console pin written. The operator asked for the console key (sidecar, not a new [auth] key)."
+                "Use console: next request uses the stored console API key on api.x.ai. The operator asked for this switch. Sidecar pin, not a new [auth] key."
                     .into()
             })
             .map_err(|e| format!("Could not write use-console pin: {e}")),
@@ -310,6 +310,11 @@ pub struct LimitsCliReport {
     /// including a `meter_source` pin when one is set). grok-oss limits JSON
     /// is a client printout, not xAI billing truth.
     pub active_driver_label: String,
+    /// Always true. grok-oss limits JSON is a client printout, not grok.com
+    /// Usage and not xAI billing truth. Combined remaining is not Usage.
+    pub printout_not_billing_truth: bool,
+    /// Same named words as TUI `/limits`: stay-supergrok, use-console, meter, refresh.
+    pub named_commands: &'static [&'static str],
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
     /// True when process + durable SuperGrok included poll history shows free
@@ -398,10 +403,19 @@ pub struct ConsoleCliSection {
     pub key_available: bool,
     /// Live sampling is currently the console key.
     pub is_live: bool,
+    /// `isLive` is sampler identity. It is not proof that credits are unused.
+    pub is_live_meaning: &'static str,
     /// Console team prepaid remaining USD when Management meter known
-    /// (`GET …/prepaid/balance` `total.val` abs). Not console.x.ai Billing Credits.
+    /// (`GET …/prepaid/balance` `total.val` abs). Not a fetch of the
+    /// console.x.ai Billing Credits card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_prepaid_usd: Option<f64>,
+    /// Billing Credits card wire: `not_fetched` | `fetched` | `error`.
+    /// Never filled from `teamPrepaidUsd` or SuperGrok `prepaidBalance.val`.
+    pub billing_credits_card: &'static str,
+    /// USD only when a documented JSON field for that card is fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_credits_usd: Option<f64>,
     /// Honest gap when team prepaid dollars unknown (snake-ish display key).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_prepaid_gap: Option<&'static str>,
@@ -436,25 +450,68 @@ pub struct ConsoleCliSection {
     pub team_usage_series_end_time: Option<String>,
 }
 
+/// Sidecar pins that sampler reconstruct honors (`stay-supergrok` /
+/// `use-console`). Stock `[auth] preferred_method = "api_key"` is a separate
+/// `preferred_console_primary` flag and still wins.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LiveSamplingOperatorPins {
+    /// `/limits stay-supergrok` / `grok-oss limits stay-supergrok`.
+    pub stay_supergrok: bool,
+    /// `/limits use-console` / `grok-oss limits use-console`. The operator
+    /// asked for the console key; this is not a printout hop.
+    pub use_console: bool,
+}
+
+impl LiveSamplingOperatorPins {
+    /// Load stay SuperGrok / use-console from `$GROK_HOME/limits_pins.json`.
+    pub fn from_sidecar() -> Self {
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        Self {
+            stay_supergrok: pins.stay_supergrok,
+            use_console: pins.use_console,
+        }
+    }
+}
+
+/// Client included-% printout must not hop `liveSampling` to console.
+///
+/// A client 100% / remaining 0 printout is not an exhaust memo. Collect
+/// predict still fails open: this flag is not operator `use-console`. Real
+/// HTTP 402 hop is sampler-side.
+pub fn session_out_of_allowance_for_live_sampling_predict(
+    exhaust_memo_with_console_ready: bool,
+    _client_included_printout_full: bool,
+) -> bool {
+    exhaust_memo_with_console_ready
+}
+
 /// Predict which identity the next first-party sample would burn (read-only).
 ///
-/// Does **not** mutate hop / exhaust state. Mirrors dual-auth primary rules:
-/// console-primary pin, session out of allowance with console ready, else
-/// session when present.
+/// Does **not** mutate hop / exhaust state. Mirrors reconstruct:
+/// stock console-primary pin, then stay SuperGrok, then operator use-console,
+/// else SuperGrok session when present. `session_out_of_allowance` is a
+/// printout / exhaust flag and must not invent ConsoleKey here.
 pub fn predict_live_sampling(
     session_present: bool,
     console_present: bool,
     preferred_console_primary: bool,
     session_out_of_allowance: bool,
+    pins: LiveSamplingOperatorPins,
 ) -> SamplingIdentityKind {
     match (session_present, console_present) {
         (false, true) => SamplingIdentityKind::ConsoleKey,
         (true, false) => SamplingIdentityKind::SuperGrokSession,
         (false, false) => SamplingIdentityKind::SuperGrokSession,
         (true, true) => {
-            if preferred_console_primary || session_out_of_allowance {
+            if preferred_console_primary {
+                SamplingIdentityKind::ConsoleKey
+            } else if pins.stay_supergrok {
+                SamplingIdentityKind::SuperGrokSession
+            } else if pins.use_console {
                 SamplingIdentityKind::ConsoleKey
             } else {
+                // Fail-open: printout / exhaust is not operator use-console.
+                let _ = session_out_of_allowance;
                 SamplingIdentityKind::SuperGrokSession
             }
         }
@@ -618,6 +675,8 @@ pub fn report_from_snapshot_with_meter_source(
         live_principal_role: snap.live_principal_label.clone(),
         active_driver: driver.as_wire(),
         active_driver_label: active_driver_line_for_snapshot_with_meter_source(snap, meter_source),
+        printout_not_billing_truth: true,
+        named_commands: crate::views::limits_honesty::LIMITS_NAMED_COMMANDS,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
         flat_poll_observed_build: snap.flat_poll_observed_build,
         flat_poll_observed_extras: snap.flat_poll_observed_extras,
@@ -629,7 +688,20 @@ pub fn report_from_snapshot_with_meter_source(
         console: ConsoleCliSection {
             key_available: snap.console.key_available,
             is_live: snap.console.is_live,
+            is_live_meaning: crate::views::limits_honesty::CONSOLE_IS_LIVE_MEANING,
             team_prepaid_usd: snap.console.balance_cents.map(|c| c.abs() as f64 / 100.0),
+            billing_credits_card: snap.console.billing_credits_card.as_wire(),
+            billing_credits_usd: xai_grok_sampling_types::current_billing_credits_usd(
+                None,
+                None,
+                match snap.console.billing_credits_card {
+                    xai_grok_sampling_types::BillingCreditsCard::Fetched => snap
+                        .console
+                        .billing_credits_cents
+                        .map(|c| c.abs() as f64 / 100.0),
+                    _ => None,
+                },
+            ),
             team_prepaid_gap: if snap.console.balance_cents.is_some() {
                 None
             } else {
@@ -813,6 +885,7 @@ fn postpaid_meter_from_snapshot(
             default_credits_issued_cents: m.postpaid_default_credits_issued_cents,
             billing_cycle_year: m.postpaid_billing_cycle_year,
             billing_cycle_month: m.postpaid_billing_cycle_month,
+            billing_credits_remaining_cents: m.billing_credits_cents,
         },
     ))
 }
@@ -1102,15 +1175,18 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     // honors the TTL (see `management_meter_cache_policy_for_background_billing_poll`);
     // TUI explicit `/limits` open uses the same ForceRefresh clear (see
     // `management_meter_cache_policy_for_explicit_limits_open`).
-    // App state still keeps last-good cents on fetch None.
+    // App state still keeps last-good cents on fetch None for team prepaid
+    // remaining (`total.val`). A newer live documented fetch replaces stored
+    // cents. Never paint those dollars as the console Billing Credits card.
     let has_mgmt_key = xai_grok_shell::auth::resolve_management_api_key_default().is_some();
     // Management HTTP ran only inside the hub leader fetch (if this process
     // held the flock). Followers read prepaid/postpaid/series from the snapshot.
-    let console_prepaid_cents = hub_doc
-        .management
-        .as_ref()
-        .and_then(|m| m.prepaid_cents)
-        .or_else(xai_grok_shell::auth::cached_console_team_prepaid_cents_default);
+    let live_prepaid_cents = hub_doc.management.as_ref().and_then(|m| m.prepaid_cents);
+    let stored_prepaid_cents = xai_grok_shell::auth::cached_console_team_prepaid_cents_default();
+    let console_prepaid_cents = match (stored_prepaid_cents, live_prepaid_cents) {
+        (_, Some(live)) => Some(live),
+        (stored, None) => stored,
+    };
     if has_mgmt_key && console_prepaid_cents.is_none() {
         notes.push("console team prepaid fetch failed or empty".into());
     }
@@ -1178,16 +1254,18 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
         }
     }
 
-    // Existing exhaust memo (from prior TUI/session) **or** just-polled
-    // included ≥100% with dual-auth ready — prediction only, no memo write.
-    let session_out =
-        xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(grok_home)
-            || (dual.dual_auth_ready() && active_included_full);
+    // Existing exhaust memo (from prior TUI/session). Client included ≥100%
+    // printout is passed separately so fail-open can refuse to hop.
+    let session_out = session_out_of_allowance_for_live_sampling_predict(
+        xai_grok_shell::auth::supergrok_out_of_allowance_with_console_ready(grok_home),
+        dual.dual_auth_ready() && active_included_full,
+    );
     let live = predict_live_sampling(
         session_present,
         console_present,
         preferred_console_primary,
         session_out,
+        LiveSamplingOperatorPins::from_sidecar(),
     );
 
     let live_role = if live.is_console() {
@@ -1300,6 +1378,17 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
             (report, snap)
         }
         None => (report, snap),
+    };
+    let (report, snap) = if let Some(mgmt) = hub_doc.management.as_ref() {
+        let snap = snap.with_billing_credits(mgmt.billing_credits_card, mgmt.billing_credits_cents);
+        let report = report_from_snapshot_with_meter_source(
+            &snap,
+            report.notes,
+            xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+        );
+        (report, snap)
+    } else {
+        (report, snap)
     };
     // Overlay stored SuperGrok roles + fingerprints (no secrets). Slot
     // inference has no JWT; doctor listings are the source of truth.
@@ -2033,10 +2122,14 @@ mod tests {
         );
     }
 
+    fn no_operator_pins() -> LiveSamplingOperatorPins {
+        LiveSamplingOperatorPins::default()
+    }
+
     #[test]
     fn predict_live_session_when_only_session() {
         assert_eq!(
-            predict_live_sampling(true, false, false, false),
+            predict_live_sampling(true, false, false, false, no_operator_pins()),
             SamplingIdentityKind::SuperGrokSession
         );
     }
@@ -2044,7 +2137,7 @@ mod tests {
     #[test]
     fn predict_live_console_when_only_console() {
         assert_eq!(
-            predict_live_sampling(false, true, false, false),
+            predict_live_sampling(false, true, false, false, no_operator_pins()),
             SamplingIdentityKind::ConsoleKey
         );
     }
@@ -2052,24 +2145,140 @@ mod tests {
     #[test]
     fn predict_live_console_when_preferred_console_primary() {
         assert_eq!(
-            predict_live_sampling(true, true, true, false),
+            predict_live_sampling(true, true, true, false, no_operator_pins()),
             SamplingIdentityKind::ConsoleKey
         );
     }
 
+    /// Named contract: collect must not hop `liveSampling` to console from
+    /// `session_out_of_allowance`. That flag is a client printout / exhaust
+    /// memo. Real HTTP 402 hop is sampler-side. Operator `use-console` is
+    /// a different path.
     #[test]
-    fn predict_live_console_when_session_out_of_allowance() {
+    fn session_out_of_allowance_printout_must_not_hop_live_sampling_to_console() {
         assert_eq!(
-            predict_live_sampling(true, true, false, true),
-            SamplingIdentityKind::ConsoleKey
+            predict_live_sampling(true, true, false, true, no_operator_pins()),
+            SamplingIdentityKind::SuperGrokSession,
+            "fail-open: printout / exhaust flag must stay SuperGrok session"
         );
     }
 
     #[test]
     fn predict_live_session_when_dual_and_session_has_headroom() {
         assert_eq!(
-            predict_live_sampling(true, true, false, false),
+            predict_live_sampling(true, true, false, false, no_operator_pins()),
             SamplingIdentityKind::SuperGrokSession
+        );
+    }
+
+    /// Named contract: stay-supergrok keeps SuperGrok session primary while
+    /// included SuperGrok period limits still have room. Fixture is not 100%
+    /// used. Do not invent remaining.
+    #[test]
+    fn stay_supergrok_keeps_supergrok_session_primary_when_included_period_limits_have_room() {
+        let included_used_pct = 41.0;
+        assert!(
+            included_used_pct < 100.0,
+            "fixture must not be a 100% used printout"
+        );
+        let pins = LiveSamplingOperatorPins {
+            stay_supergrok: true,
+            use_console: false,
+        };
+        assert_eq!(
+            predict_live_sampling(true, true, false, false, pins),
+            SamplingIdentityKind::SuperGrokSession,
+            "stay-supergrok must keep SuperGrok session while included period limits have room ({included_used_pct}% used)"
+        );
+        assert_eq!(
+            predict_live_sampling(true, true, true, false, pins),
+            SamplingIdentityKind::ConsoleKey,
+            "stock preferred_method = api_key still pins console"
+        );
+    }
+
+    /// Named contract: use-console makes console the live sampler because the
+    /// operator asked, not because a printout hopped.
+    #[test]
+    fn use_console_makes_console_the_live_sampler_because_the_operator_asked() {
+        let pins = LiveSamplingOperatorPins {
+            stay_supergrok: false,
+            use_console: true,
+        };
+        assert_eq!(
+            predict_live_sampling(true, true, false, false, pins),
+            SamplingIdentityKind::ConsoleKey,
+            "use-console must switch liveSampling to console because the operator asked"
+        );
+    }
+
+    /// Named contract: a client 100% printout must not force use-console.
+    #[test]
+    fn client_100_printout_must_not_force_use_console() {
+        assert!(
+            !session_out_of_allowance_for_live_sampling_predict(false, true),
+            "client 100% / remaining 0 printout must not hop liveSampling to console"
+        );
+        assert_eq!(
+            predict_live_sampling(true, true, false, false, no_operator_pins()),
+            SamplingIdentityKind::SuperGrokSession,
+            "fail-open: no operator use-console pin and no exhaust memo → SuperGrok session"
+        );
+        assert_eq!(
+            predict_live_sampling(true, true, false, true, no_operator_pins()),
+            SamplingIdentityKind::SuperGrokSession,
+            "fail-open: session_out_of_allowance from a printout must not hop to console"
+        );
+    }
+
+    /// Named contract: after use-console / stay-supergrok, collect JSON
+    /// `liveSampling` matches what reconstruct would use unless stock
+    /// `preferred_method = "api_key"`.
+    #[test]
+    #[serial_test::serial]
+    fn after_pin_collect_live_sampling_matches_reconstruct_unless_stock_api_key() {
+        use tempfile::TempDir;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let store =
+            xai_grok_shell::auth::credentials_store::CredentialsStore::at_grok_home(home.path());
+        xai_grok_shell::auth::store_console_api_key(&store, "console-key-for-pin")
+            .expect("store console key");
+
+        xai_grok_shell::auth::limits_pins::apply_use_console().expect("use-console pin");
+        let use_pins = LiveSamplingOperatorPins::from_sidecar();
+        assert!(use_pins.use_console);
+        assert!(!use_pins.stay_supergrok);
+        assert_eq!(
+            predict_live_sampling(true, true, false, false, use_pins),
+            SamplingIdentityKind::ConsoleKey,
+            "collect liveSampling after use-console must be console_key (reconstruct would switch host/key)"
+        );
+        assert_eq!(
+            predict_live_sampling(true, true, true, false, use_pins),
+            SamplingIdentityKind::ConsoleKey,
+            "stock preferred_method = api_key still pins console"
+        );
+
+        xai_grok_shell::auth::limits_pins::apply_stay_supergrok().expect("stay-supergrok pin");
+        let stay_pins = LiveSamplingOperatorPins::from_sidecar();
+        assert!(stay_pins.stay_supergrok);
+        assert!(!stay_pins.use_console);
+        assert_eq!(
+            predict_live_sampling(true, true, false, false, stay_pins),
+            SamplingIdentityKind::SuperGrokSession,
+            "collect liveSampling after stay-supergrok must be supergrok_session"
+        );
+        assert_eq!(
+            predict_live_sampling(true, true, true, false, stay_pins),
+            SamplingIdentityKind::ConsoleKey,
+            "stock preferred_method = api_key still wins over stay-supergrok"
         );
     }
 
@@ -2421,6 +2630,236 @@ mod tests {
         assert!(!flat.contains("authorization"));
         assert!(!flat.contains("eyj")); // JWT header base64
         assert!(!s.contains("sk-"));
+    }
+
+    /// Stored $89.94 must not paint as current Billing Credits when live $47.03
+    /// disagrees. Without named remaining, the card stays `not_fetched`.
+    #[test]
+    fn stale_stored_dollars_are_not_reported_as_current_billing_credits_when_live_fetch_disagrees()
+    {
+        use xai_grok_sampling_types::{
+            BillingCreditsCard, current_billing_credits_usd, prefer_live_documented_usd_over_stored,
+        };
+
+        assert_eq!(
+            current_billing_credits_usd(Some(89.94), Some(47.03), None),
+            None
+        );
+        assert_eq!(
+            prefer_live_documented_usd_over_stored(Some(89.94), Some(47.03)),
+            Some(47.03)
+        );
+
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(bal(47.03)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: None,
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            Some(8_994),
+            ConsoleTeamPrepaidGap::Loading,
+            vec![],
+        );
+        assert_eq!(
+            report.console.billing_credits_card,
+            BillingCreditsCard::NotFetched.as_wire()
+        );
+        assert_eq!(report.console.billing_credits_usd, None);
+        assert_eq!(report.console.team_prepaid_usd, Some(89.94));
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains("Billing Credits card: not fetched"),
+            "must not paint stored $89.94 as current Billing Credits: {human}"
+        );
+        assert!(
+            !human.contains("Billing Credits card: $89.94")
+                && !human.contains("Billing Credits card: $47.03")
+                && !human.contains("Billing Credits card: $25.32"),
+            "must not fill the Credits card from prepaid, SuperGrok dollars, or the operator-visible $25.32 card: {human}"
+        );
+        assert_eq!(
+            xai_grok_sampling_types::current_billing_credits_usd(Some(25.32), None, None),
+            None,
+            "operator-visible $25.32 is not a grok-oss meter without a named JSON field for that card"
+        );
+        let mut buf = Vec::new();
+        write_limits_output(&report, &snap, true, &mut buf).expect("write json");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(buf).expect("utf8")).expect("json");
+        assert_eq!(v["console"]["billingCreditsCard"], "not_fetched");
+        assert!(
+            v["console"].get("billingCreditsUsd").is_none(),
+            "JSON must omit Billing Credits USD when the card is not fetched: {v}"
+        );
+        assert_eq!(v["console"]["teamPrepaidUsd"], 89.94);
+    }
+
+    /// Named GetAmountToPay remaining fills JSON `billingCreditsCard: fetched`
+    /// and `billingCreditsUsd: 47.03`. Team prepaid `total.val` $112.45 and
+    /// SuperGrok `prepaidBalance.val` $248.24 must not fill the card.
+    #[test]
+    fn limits_json_billing_credits_card_from_named_remaining_not_total_val() {
+        use xai_grok_sampling_types::BillingCreditsCard;
+
+        let mut b = bal(12.0);
+        b.prepaid_balance_cents = Some(24_824);
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(b),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            Some(11_245),
+            ConsoleTeamPrepaidGap::Loading,
+            vec![],
+        );
+        assert_eq!(
+            report.console.billing_credits_card,
+            BillingCreditsCard::NotFetched.as_wire(),
+            "without named remaining, collect stays not_fetched"
+        );
+        let snap = snap.with_billing_credits(BillingCreditsCard::Fetched, Some(4_703));
+        let report = report_from_snapshot(&snap, report.notes);
+        assert_eq!(
+            report.console.billing_credits_card,
+            BillingCreditsCard::Fetched.as_wire()
+        );
+        assert_eq!(report.console.billing_credits_usd, Some(47.03));
+        assert_eq!(report.console.team_prepaid_usd, Some(112.45));
+        assert_eq!(
+            report.supergrok.principals[0].dollar_extras_usd,
+            Some(248.24)
+        );
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains("Billing Credits card: $47.03"),
+            "human must print named remaining: {human}"
+        );
+        assert!(
+            !human.contains("Billing Credits card: $112.45")
+                && !human.contains("Billing Credits card: $248.24"),
+            "must not fill the card from total.val or prepaidBalance.val: {human}"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("does not hop sampling from this card")),
+            "fetched honesty must refuse hop from this card: {:?}",
+            report.notes
+        );
+        let mut buf = Vec::new();
+        write_limits_output(&report, &snap, true, &mut buf).expect("write json");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(buf).expect("utf8")).expect("json");
+        assert_eq!(v["console"]["billingCreditsCard"], "fetched");
+        assert_eq!(v["console"]["billingCreditsUsd"], 47.03);
+        assert_eq!(v["console"]["teamPrepaidUsd"], 112.45);
+        assert_eq!(v["supergrok"]["principals"][0]["dollarExtrasUsd"], 248.24);
+        assert_ne!(
+            v["console"]["billingCreditsUsd"],
+            v["console"]["teamPrepaidUsd"]
+        );
+        assert_ne!(
+            v["console"]["billingCreditsUsd"],
+            v["supergrok"]["principals"][0]["dollarExtrasUsd"]
+        );
+    }
+
+    /// Named contract: `grok-oss limits --json` names printout vs Usage,
+    /// fail-open, named commands, and that `console.isLive` is sampler
+    /// identity. Combined remaining is not grok.com Usage. Do not invent
+    /// remaining. Do not call any pool used up from this printout.
+    #[test]
+    fn limits_json_names_printout_not_usage_fail_open_and_named_commands() {
+        use crate::views::limits_honesty::{
+            CONSOLE_IS_LIVE_MEANING, LIMITS_NAMED_COMMANDS, NOTE_LIMITS_PRINTOUT_NOT_USAGE,
+            copy_names_limits_tool_fail_open,
+        };
+
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok (personal)".into(),
+            role_label: Some("personal".into()),
+            balance: Some(bal(27.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            Some("personal"),
+            &[input],
+            true,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            vec![],
+        );
+        assert!(
+            report.printout_not_billing_truth,
+            "JSON must flag client printout, not xAI billing truth"
+        );
+        assert_eq!(report.named_commands, LIMITS_NAMED_COMMANDS);
+        assert!(
+            !report.console.is_live,
+            "fixture stays SuperGrok session; isLive false is sampler identity, not unused credits"
+        );
+        assert_eq!(report.console.is_live_meaning, CONSOLE_IS_LIVE_MEANING);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_LIMITS_PRINTOUT_NOT_USAGE),
+            "JSON notes must carry the fail-open banner: {:?}",
+            report.notes
+        );
+        assert!(
+            copy_names_limits_tool_fail_open(NOTE_LIMITS_PRINTOUT_NOT_USAGE),
+            "banner must keep the fail-open contract"
+        );
+
+        let pretty = format_limits_json_pretty(&report).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&pretty).expect("parse");
+        assert_eq!(v["printoutNotBillingTruth"], true);
+        assert_eq!(
+            v["namedCommands"],
+            serde_json::json!([
+                "stay-supergrok",
+                "use-console",
+                "meter included|dollar-credits|console|combined",
+                "refresh",
+            ])
+        );
+        assert_eq!(
+            v["console"]["isLiveMeaning"],
+            "sampler identity, not proof that credits are not being used"
+        );
+        assert_eq!(v["console"]["isLive"], serde_json::Value::Bool(false));
+        let human = format_limits_human(&snap, &report.notes);
+        let fail_open_at = human
+            .find(NOTE_LIMITS_PRINTOUT_NOT_USAGE)
+            .expect("human CLI must print the fail-open banner");
+        let pct_at = human.find("27%").expect("fixture percent");
+        assert!(
+            fail_open_at < pct_at,
+            "human JSON companion must still lead with printout vs Usage:\n{human}"
+        );
     }
 
     /// Named contract (P3/P5): free period headroom + SuperGrok extras on account

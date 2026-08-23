@@ -1141,6 +1141,58 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
     }
 }
 
+/// Same-model SwitchModelComplete with effort None must not persist catalog
+/// `high` over the operator's medium (that write is what made high stick).
+#[test]
+fn switch_model_complete_same_model_effort_none_keeps_medium() {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+    let info = acp::ModelInfo::new(model_id.clone(), "Grok 4.6".to_string()).meta(
+        serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "high",
+        })
+        .as_object()
+        .cloned(),
+    );
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .session
+            .models
+            .available
+            .insert(model_id.clone(), info);
+        agent
+            .session
+            .models
+            .set_current(model_id.clone(), Some(ReasoningEffort::Medium));
+        agent.session.model_switch_pending = true;
+    }
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: model_id.clone(),
+            effort: None,
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "same-model SwitchModelComplete with no effort must not paint high"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPreferredModel { .. })),
+        "must not persist catalog high over medium, got {effects:?}"
+    );
+}
+
 #[test]
 fn switch_to_non_reasoning_model_clears_persisted_effort() {
     use xai_grok_shell::sampling::types::ReasoningEffort;

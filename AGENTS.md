@@ -64,14 +64,47 @@ less than product code and tests. Do not invent long essays or git nags.
    `GROK_SKIP_EDIT_VERIFY=1`. Host dual-pin: `~/.grok/AGENTS.md` §
    *Structured Rust edits*.
 3b. **Do not prove product work with crate-wide cargo via subagents (pinned 2026-08-15).**
-   Do not launch crate-wide cargo (`cargo clippy -p ... --lib`, `cargo fmt -p`,
-   `just check`) through extra subagents to prove a product slice. One agent
-   per job. No duplicate red-test pairs. No backup mop swarm for file-level
-   edit verify. Implement-time proof is the named fixture tests
-   (`cargo test -p xai-grok-tools --lib rust_edit_verify`). Ordinary post-impl
-   mop stays one L2 after a finished slice (not a swarm; that L2 spawns L3).
-   Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove product work with
-   crate-wide cargo via subagents*.
+   Do not launch **local** crate-wide cargo (`cargo clippy -p ... --lib`,
+   `cargo fmt -p`, `just check`) through extra subagents to prove a product
+   slice on this laptop. One agent per job. No duplicate red-test pairs. No
+   extra file-level edit-verify swarm. Implement-time proof is the
+   named fixture tests (`just test-remote -p xai-grok-tools --lib rust_edit_verify`).
+   Ordinary post-impl mop stays one L2 after a finished slice (not a swarm;
+   that L2 spawns L3). Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove
+   product work with crate-wide cargo via subagents*.
+3b-remote. **`just check-remote` may run whenever useful (pinned 2026-08-22).**
+   The only reason agents avoided the full gate was laptop burden. rustc (and
+   the matching `just check` gate, once landed) runs on **surmount-1**. That
+   does not burden this machine. Agents may run `just check-remote` whenever
+   the full gate is useful. GitHub Actions must not call `check-remote`.
+   `just check` / `just ci` stay local. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-remote-named. **Named cargo test, clippy, and build run on the remote
+   builder (pinned 2026-08-22).** Agents must not run `cargo test`,
+   `cargo clippy`, `cargo build`, or rustc on this laptop for grok-oss.
+   Use `just check-remote` for the full gate. Use `just test-remote` for a
+   named filter (example: `just test-remote -p xai-grok-pager --lib --
+   actions::defaults`). That is `nix build --impure .#workspace-cargo-named-test`
+   on the same builder as `just check-remote` (`surmount-remote`, `--cores 64`,
+   cargo jobs cap 32). `just cargo-remote` is the same path for `test`,
+   `nextest`, `clippy`, `build`, or `check`. File-level rustfmt-only may stay
+   local if it does not invoke rustc. File-level clippy that compiles belongs
+   on the remote builder too. `GROK_SKIP_EDIT_VERIFY` is the kill switch for
+   the edit-tool verify, not the default. GitHub Actions must not call
+   `test-remote` or `cargo-remote`. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-remote-clippy. **Remote quality clippy must use many workers (pinned
+   2026-08-23).** Do not invoke `cargo clippy` on `workspace-cargo-quality`.
+   That external binary lets the outer cargo start a 1-token jobserver;
+   inner `--jobs` is then ignored and the operator sees one clippy-driver
+   with idle cores. Lint with builtin `cargo check` plus
+   `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under a GNU make jobserver with
+   `$CARGO_BUILD_JOBS` tokens (from `--cores 64`, cap 32). One
+   clippy-driver process is still one typeck thread; independent crates
+   must run at once. Passing `--jobs` on `cargo clippy` is not the fix.
+   Host dual-pin: `~/.grok/AGENTS.md`.
+3b-complaints-are-work. **Operator complaints are work to fix (pinned
+   2026-08-23).** When the operator complains twice about the same broken
+   chrome or gate, fix the thing they can see. Do not answer the second
+   complaint with "we already set jobs." Host dual-pin: `~/.grok/AGENTS.md`.
 3c. **Implementer ↔ reviewer swap each feature.** For each **new** feature or
    independent implement slice, swap who implements and who reviews (roles
    fixed within one feature’s fix/re-review loop). Host dual-pin:
@@ -134,9 +167,10 @@ less than product code and tests. Do not invent long essays or git nags.
    fields we do not own may keep upstream spelling; our files, wrappers, and
    tests still get clear names.
    **Sapient Experience (stance pointer):** speak to humans as humans do; do
-   not try to *be* human. Full pin: host `~/.grok/AGENTS.md` § Sapient
-   Experience; open residual [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump
-   novels here.
+   not try to *be* human. Honesty with texture: encourage, acknowledge,
+   support, never lie. Not a fake inner life. Not brick-robotic. Full pin:
+   host `~/.grok/AGENTS.md` § Sapient Experience; open residual
+   [`RESIDUAL.md`](RESIDUAL.md) §2f. Do not dump novels here.
    **Billing meters stay distinct:** SuperGrok dollar credits ≠ included SuperGrok
    period limits ≠ console team prepaid / console API credits. Name which meter.
    **Limits and credits vocabulary (pinned 2026-08-08; SuperGrok is paid 2026-08-13; omit extras 2026-08-16):**
@@ -174,6 +208,17 @@ less than product code and tests. Do not invent long essays or git nags.
    CLI. `console.isLive` false is sampler identity, not "credits are not
    being used." Do not invent remaining. Do not call any pool used up.
    Dual-pin: host `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **Fetch live named meters this turn (pinned 2026-08-22).** Do not reuse a
+   last-seen chat or screenshot dollar figure as if it were current. Same
+   turn, run a named live fetch (`grok-oss limits refresh` then
+   `grok-oss limits --json`, or the live product Usage / `/limits` surface
+   the operator can see). Name which meter and which workspace. If a
+   surface is `not_fetched` (the grok.com / console.x.ai Billing Credits
+   card still is), say that and report the named JSON fields you actually
+   got. Do not invent that card from SuperGrok dollar credits or console
+   team prepaid remaining. grok-oss printout is still not xAI billing
+   truth. Dual-pin: host `~/.grok/AGENTS.md` § *Limits and credits
+   vocabulary*.
    **Fail-open plus named `/limits` commands (pinned 2026-08-19).** A client
    100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark
    SuperGrok used up or hop to console so this session cannot self-fix.
@@ -226,6 +271,22 @@ less than product code and tests. Do not invent long essays or git nags.
    Real control, path, or outcome first. **No void/gap/jargon padding** —
    short concrete sentences only (host pin: *Speak like a normal precise
    person*). Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **No nicknames (pinned 2026-08-22):** Operator: I hate nicknames. No
+   nicknames, now or ever. Speak clearly always. Chat, board titles, spawn
+   descriptions, reports, residual, plans, and status must name the real
+   thing in ordinary American English. Do not invent a nickname for a set of
+   files, a log bundle, a job, a meter, or a UI control. Wrong: "the packet"
+   for the saved `just check-remote` logs. Right: name the files or say
+   "the saved `just check-remote` logs." Do not say **nits** or **mop** to
+   the operator. Wrong: "I tracked the nits. I did not spawn a mop." Right:
+   name the leftover comments, tests, or chrome and do that work. Host
+   dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **ISA vs cores vs cargo targets (pinned 2026-08-23).** aarch64 versus
+   x86_64 is instruction-set architecture (ISA), not "extra CPUs." CPU in
+   that sentence reads as cores or VM size (GitHub `CI_LOW_MEM` versus
+   `just check-remote`). `cargo clippy --all-targets` is test harnesses,
+   examples, and benches. It is not another ISA and not more cores. Host
+   dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **No lossy job nicknames (pinned 2026-08-15):** Chat, board titles, spawn
    descriptions, and status lines are operator-facing. Do not mash process
    slang with a tool name into a nickname (wrong: "Red bash"). Say the real
@@ -243,6 +304,11 @@ less than product code and tests. Do not invent long essays or git nags.
    product-specific; host `~/.grok/AGENTS.md` when cross-repo). Prefer a short
    named subsection. Chat alone does not survive compaction. Full host pin:
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
+   **Write that down (pinned 2026-08-22):** when the operator explicitly
+   says "write that down", same turn put the fact in the useful place
+   (report, plan, residual, process note, user-guide) and then track the
+   work on the session board (and spawn if it is product). Chat alone is
+   not enough. Host dual-pin: `~/.grok/AGENTS.md` § *Write that down*.
    **Citation standard (pinned 2026-08-03):** docs and non-trivial comments that
    rely on external rate limits, APIs, or vendor policy need a markdown link to
    the public page plus **accessed: YYYY-MM-DD**. Example: See
@@ -397,7 +463,8 @@ joins under project `.agents/joins/`.
 
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
-- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3.
+- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error.
+- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path.
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
@@ -473,6 +540,18 @@ if disjoint). Host: § *Hard stop* default loop.
   **never kill**, cancel, or re-prompt healthy in-flight subagents on the prior
   goal unless the operator explicitly stops/supersedes. Full pin:
   `~/.grok/AGENTS.md` § *Additive asks*.
+- **Mid-turn composer Enter is this turn (pinned 2026-08-22).** While a
+  turn is running, Enter with explaining-work text (plain freeform, and
+  slash PassThrough that is not a named hold, including `/goal ...`) is a
+  **soft interject** into this turn (`x.ai/interject`). It is not a serial
+  prompt queue. L1 must treat that user text as additive immediately:
+  board, remaining-work pointer, spawn. Do not wait for the current turn
+  to finish, and do not wait for “all subagents done,” to record the work.
+  Named hold (`/queue /finish`, `/queue` compact/plan/reports) still waits.
+  Ctrl+Enter is still cancel-and-send. Empty Enter does not Approve a plan.
+  Product: pager `dispatch/prompt.rs`. Report:
+  `/home/hunter/.agents/reports/fix-prompt-queue-blocks-explain.md`.
+  Host dual-pin: `~/.grok/AGENTS.md` § *Additive asks*.
 - **Multi-track (prose is not enough):** every parent tool turn inventories live
   subagent `task_id`s + board owners before spawn/demote/complete. Never demote
   `in_progress` work that still has a live subagent (abandonment = kill class).
@@ -523,7 +602,7 @@ intent, or recon survival from prose alone.
 
 - First tool turn for multi-file / CI / regression / “where do skills live?” is
   **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
-  L2. L2 always **MUST spawn L3** for the greps, reads, and edits. L2 does not do them.
+  L2. L2 spawns L3 only if the problem is actually hard. Easy work can stay on L2.
 - Verify against **code and load paths** (and live trees) before asserting
   (L3 does that work; L1/L2 read the short report).
 - Read short on-disk reports; do not re-prove the subagent in the parent.
@@ -613,17 +692,21 @@ cannot fail a deleted catalog test. Catalog:
 - **CI is checks only** — never a release package build in GHA. Local gate:
   **`just check`** / **`just ci`**. No `ci-quick` / `ci-host`.
   Optional **`just check-remote`** realizes flake metadata and the workspace
-  cargo quality derivation (fmt, clippy, test compile) on the existing
-  trusted-user remote builder. rustc requires that builder's `surmount-remote`
+  cargo quality derivation (the same full gate as `just check` / `just test`:
+  fmt, clippy, workspace nextest execution, doctests, cargo-mem-guard) on the
+  existing trusted-user remote builder. rustc requires that builder's `surmount-remote`
   feature (and `big-parallel`) and must not run on the caller. This laptop
   never auto-detects `surmount-remote`; the host machines file must advertise
   it. `--option system-features` that omit `big-parallel` does not stop local
   nixbld: the daemon still advertises `big-parallel`. Force-remote nix also
   passes `--cores 64` so workspace rustc can use the builder's cores. Cargo
   on that derivation passes `--jobs` from those cores, capped at 32
-  (`cargo clippy --jobs`, never global `cargo --jobs`; cargo 1.97 has no
-  global `--jobs`. MAKEFLAGS/CARGO_MAKEFLAGS dropped so a 1-token jobserver
-  cannot ignore `--jobs`), and uses the same **dev** profile as local `just test-clippy`
+  (`cargo check --jobs`, never global `cargo --jobs`; cargo 1.97 has no
+  global `--jobs`). Quality does not run `cargo clippy` (that external
+  dispatcher plus a 1-token jobserver ignores `--jobs`). Workspace lint is
+  `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make
+  `-j$CARGO_BUILD_JOBS` after dropping Nix MAKEFLAGS/CARGO_MAKEFLAGS, and uses
+  the same **dev** profile as local `just test-clippy`
   (not crane `--release` check/clippy).
   **Nix jobs are not cargo/rustc workers (pinned 2026-08-18).** Nix jobs
   are how many derivations a builder may take at once (machines-file
@@ -635,8 +718,12 @@ cannot fail a deleted catalog test. Catalog:
   how many jobs we send to the remote. `--cores 64` sets `NIX_BUILD_CORES`
   inside a derivation. Cargo jobs 32 is an OOM hedge, not 64 Nix jobs.
   Tiny crane vendor unpacks that prefer a
-  local build may run on the caller. Default `just check` / `just ci` and
-  GitHub Actions stay local and must not require that builder.
+  local build may run on the caller. Named filters use **`just test-remote`**
+  (or **`just cargo-remote`**) which realizes `.#workspace-cargo-named-test`
+  the same force-remote way; rustc still requires `surmount-remote` and must
+  not run on this laptop. Default `just check` / `just ci` and
+  GitHub Actions stay local and must not require that builder. GitHub Actions
+  must not call `check-remote`, `test-remote`, or `cargo-remote`.
 - Feature branches → PR → **`main`**. Tool branches (`import/*`, `onto-xai/*`)
   land through PRs, not a second main.
 

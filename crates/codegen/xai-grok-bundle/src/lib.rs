@@ -91,6 +91,10 @@ struct BundleFile<'a> {
     content: &'a str,
 }
 
+mod default_skills;
+
+pub use default_skills::{DEFAULT_PRODUCT_SKILL_NAMES, install_default_product_skills};
+
 pub fn bundled_root() -> PathBuf {
     xai_grok_config::grok_home().join(BUNDLED_DIR_NAME)
 }
@@ -265,7 +269,7 @@ pub fn extract_bundle_archive(root: &Path, archive_bytes: &[u8]) -> Result<Bundl
     Ok(next_manifest)
 }
 
-fn checksum_bytes(bytes: &[u8]) -> String {
+pub(crate) fn checksum_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -897,6 +901,10 @@ mod tests {
         for rel in [".agents/skills", ".grok/skills"] {
             collect_non_excepted_skill_python(&repo.join(rel), &mut bad);
         }
+        collect_non_excepted_skill_python(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills"),
+            &mut bad,
+        );
         assert!(
             bad.is_empty(),
             "product skill roots must not contain non-excepted Python: {bad:?}"

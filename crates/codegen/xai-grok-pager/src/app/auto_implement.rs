@@ -513,6 +513,15 @@ more review notes";
                 || prompt_src.contains("clamp_implement_effort_for_economic_mode"),
             "dispatch_send_prompt_inner must apply implement effort policy"
         );
+        assert!(
+            prompt_src.contains("on_successful_turn_end"),
+            "PromptResponse success must call on_successful_turn_end before drain"
+        );
+        let turn_src = include_str!("dispatch/turn.rs");
+        assert!(
+            turn_src.contains("on_successful_turn_end"),
+            "lost-RPC turn reconcile success must call on_successful_turn_end before drain"
+        );
     }
 
     #[test]

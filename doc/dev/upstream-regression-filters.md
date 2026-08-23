@@ -160,6 +160,9 @@ check after these `fn`s exist.
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA |
 | `default_theme_is_doge` | Unset theme resolves to DOGE |
+| `forked_session_status_header_paints_switcher_and_dashboard` | Forked-session upper-left status header paints `[‹][›]` plus `[Dashboard]` (11:10 screenshot was git plus cwd only) |
+| `forked_session_status_header_clicks_open_dashboard_and_cycle` | Header `[Dashboard]` opens the dashboard; `[‹]`/`[›]` cycle the fork family |
+| `load_session_restores_fork_family_from_disk` | Resume of a persisted fork loads the parent and stamps `forked_from` so header paint can run |
 
 Closest existing spinner/glyph neighbors (not a lower-left magenta throbber
 paint `fn`; do not catalog the missing names `doge_idle_subagent_still_running`
@@ -176,7 +179,10 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
-  plan_approval_footer_paints_five_cta_vocabulary
+  plan_approval_footer_paints_five_cta_vocabulary \
+  forked_session_status_header_paints_switcher_and_dashboard \
+  forked_session_status_header_clicks_open_dashboard_and_cycle \
+  load_session_restores_fork_family_from_disk
 ```
 
 ### 5. Dual-auth hop after included SuperGrok period limits are full
@@ -300,7 +306,8 @@ User-guide `08-skills.md` must keep that sentence. The host overlay under
 | `xai-grok-bundle` `sanitize_rejects_non_excepted_skill_python` | Bundle path sanitize rejects junk `.py`; keep only intercept CLI stubs and office/docx/pptx/xlsx/pdf |
 | `xai-grok-bundle` `extract_archive_skips_non_excepted_skill_python` | Network archive extract does not write non-excepted `.py` into the bundled cache |
 | `xai-grok-bundle` `product_repo_skill_roots_have_no_non_excepted_python` | Project `.agents/skills` and `.grok/skills` have no junk `.py` |
-| `xai-grok-pager` `docs::user_guide_skills_are_not_a_python_runtime` | User-guide `08-skills.md` says skills are not a Python runtime and names the exceptions |
+| `xai-grok-bundle` `default_product_skills_include_polish_and_subagent` | In-tree Grok OSS default skills include polish and subagent |
+| `xai-grok-pager` `docs::user_guide_skills_are_not_a_python_runtime` | User-guide `08-skills.md` says skills are not a Python runtime and names the exceptions. `/polish` and `/subagent` are default Grok OSS skills, not project `.agents/skills` packs. |
 | `xai-grok-tools` `implement_memory_snapshot_intercept_does_not_spawn_shell` | `memory.py` CLI is Rust; no Python process |
 | `xai-grok-tools` `plan_validate_intercept_does_not_spawn_shell` | `validate-plan.py` CLI is Rust; no Python process |
 | `xai-grok-tools` `session_reader_list_intercept_does_not_spawn_shell` | `session_reader.py` CLI is Rust; no Python process |
@@ -308,7 +315,8 @@ User-guide `08-skills.md` must keep that sentence. The host overlay under
 ```bash
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
   extract_archive_skips_non_excepted_skill_python \
-  product_repo_skill_roots_have_no_non_excepted_python
+  product_repo_skill_roots_have_no_non_excepted_python \
+  default_product_skills_include_polish_and_subagent
 cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
 cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
   plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell
@@ -373,14 +381,14 @@ cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_app
 cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval
 ```
 
-#### Always-three-layer product prompt
+#### L2 spawn prompt (2026-08-20)
 
 Process law stays in AGENTS. These cargo names keep the product prompt from
-teaching the old "many greps / half the window" rule after a restack.
+teaching "MUST spawn L3 for all tool work" after a restack.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-agent` `child_task_description_is_concise` | L2 task description says three layers always and must spawn L3 |
+| `xai-grok-agent` `child_task_description_is_concise` | L2 task description says spawn L3 only if actually hard; easy work can stay on L2 |
 | `xai-grok-tools` `default_max_allows_l2_to_spawn_l3` | Default max depth lets a depth-1 agent spawn L3 |
 
 ```bash
@@ -924,7 +932,13 @@ Do not call SuperGrok free.
 | `limits_snapshot_second_process_reads_file_and_does_not_http` | One grok-oss process fetches SuperGrok billing; others read the flock snapshot | **Keep** |
 | `compact_meter_stays_included_while_sibling_pool_has_remaining` | Compact meter stays on included SuperGrok period limits while a distinct sibling pool has remaining | **Keep** |
 | `auto_compact_completed_preserves_todo_board` | AutoCompact does not wipe the UI todo board | **Keep** |
+| `todo_badge_names_tasks_not_only_fraction` | Status-row badge names tasks, not only `614/638` | **Keep** |
+| `status_header_todo_badge_names_tasks` | Agent status header paints `tasks N/M` and does not auto-open the pane | **Keep** |
+| `nested_l2_overlay_todo_toggle_stays_findable` | Nested L2 overlay keeps that nested session's tasks badge and Ctrl+T | **Keep** |
 | `hide_header_zeroes_*` | `hide_header` zeros status / welcome / dashboard chrome | **Keep** (serde default tests are not paint) |
+| `forked_session_status_header_paints_switcher_and_dashboard` | Forked-session status header paints switcher plus `[Dashboard]`, not git plus cwd only | **Keep** (the yellow `/dashboard` banner is not this paint) |
+| `forked_session_status_header_clicks_open_dashboard_and_cycle` | Header chips open the dashboard and cycle the fork family | **Keep** |
+| `load_session_restores_fork_family_from_disk` | Resume of a persisted fork restores the parent as a live agent and stamps `forked_from` | **Keep** (paint tests alone cannot catch load dropping the family) |
 | `failed_install_must_not_replace_or_signal_peers` | Failed `/rebuild` install must not replace the binary or SIGUSR1 peers | **Keep** |
 | `version_without_tty` | `--version` first token is `grok-oss` with no TTY | **Keep** (substring `grok` is forbidden) |
 
@@ -934,7 +948,13 @@ cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
-  auto_compact_completed_preserves_todo_board hide_header_zeroes
+  auto_compact_completed_preserves_todo_board \
+  todo_badge_names_tasks_not_only_fraction \
+  status_header_todo_badge_names_tasks \
+  nested_l2_overlay_todo_toggle_stays_findable hide_header_zeroes \
+  forked_session_status_header_paints_switcher_and_dashboard \
+  forked_session_status_header_clicks_open_dashboard_and_cycle \
+  load_session_restores_fork_family_from_disk
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
   limits_snapshot_second_process_reads_file_and_does_not_http
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining
@@ -1063,7 +1083,10 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
-  auto_compact_completed_preserves_todo_board
+  auto_compact_completed_preserves_todo_board \
+  todo_badge_names_tasks_not_only_fraction \
+  status_header_todo_badge_names_tasks \
+  nested_l2_overlay_todo_toggle_stays_findable
 
 # 5. Dual-auth hop after included SuperGrok period limits are full
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
@@ -1101,7 +1124,8 @@ cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_wh
 # 7. Product skills are not a Python runtime
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
   extract_archive_skips_non_excepted_skill_python \
-  product_repo_skill_roots_have_no_non_excepted_python
+  product_repo_skill_roots_have_no_non_excepted_python \
+  default_product_skills_include_polish_and_subagent
 cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
 cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
   plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell

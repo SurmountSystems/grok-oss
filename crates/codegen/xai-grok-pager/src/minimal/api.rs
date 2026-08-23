@@ -143,11 +143,11 @@ pub struct TranscriptBuild {
 /// Minimal-mode-only state held on [`AppView::minimal_state`].
 #[derive(Default)]
 pub(crate) struct MinimalState {
-    /// Pin the todo panel visible (minimal reuses Ctrl+T for this).
+    /// Pin the todo panel visible (minimal uses Ctrl+Shift+T for this).
     pub(crate) show_todos: bool,
     /// A welcome card is queued to commit into native scrollback next draw.
     pub(crate) welcome_pending: bool,
-    /// Entry IDs queued by Ctrl+E / `/expand` to re-print fully expanded (K10).
+    /// Entry IDs queued by Ctrl+T / `/expand` to re-print fully expanded (K10).
     pub(crate) pending_expand: Vec<EntryId>,
     /// In-progress `/transcript` build, pumped one slice per frame.
     pub(crate) transcript: Option<TranscriptBuild>,
@@ -179,13 +179,13 @@ pub fn minimal_pending_expand(app: &AppView) -> &[EntryId] {
     &app.minimal_state.pending_expand
 }
 
-/// Drain `AppView::minimal_state.pending_expand` (Ctrl+E / `/expand` queue).
+/// Drain `AppView::minimal_state.pending_expand` (Ctrl+T / `/expand` queue).
 pub fn take_minimal_pending_expand(app: &mut AppView) -> Vec<EntryId> {
     std::mem::take(&mut app.minimal_state.pending_expand)
 }
 
 /// Put drained expand IDs back at the FRONT of the queue (a terminal write
-/// failed mid-drain): they retry next frame, ahead of any newly queued Ctrl+E.
+/// failed mid-drain): they retry next frame, ahead of any newly queued Ctrl+T.
 pub fn requeue_minimal_pending_expand(app: &mut AppView, mut ids: Vec<EntryId>) {
     ids.extend(std::mem::take(&mut app.minimal_state.pending_expand));
     app.minimal_state.pending_expand = ids;

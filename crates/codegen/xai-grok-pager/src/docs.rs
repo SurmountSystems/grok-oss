@@ -418,7 +418,8 @@ mod tests {
     }
 
     /// Named contract: user-guide spend-order sentences match source
-    /// (Business / Team included first, combined remaining, one fetcher).
+    /// (personal SuperGrok paying JWT first, Team JWT omitted while personal
+    /// exists, combined remaining, one fetcher).
     #[test]
     fn user_guide_names_token_economy_spend_order() {
         let auth = USER_GUIDE
@@ -435,13 +436,13 @@ mod tests {
         ] {
             assert!(
                 content.contains(
-                    "spend included SuperGrok period limits on stored Business / Team SuperGrok logins first"
+                    "spend included SuperGrok period limits on a stored personal SuperGrok login first"
                 ),
-                "{name} must spend Business / Team included SuperGrok period limits first"
+                "{name} must spend personal included SuperGrok period limits first"
             );
             assert!(
-                content.contains("then personal included"),
-                "{name} must spend personal included SuperGrok period limits after Team"
+                content.contains("A Team / Business SuperGrok JWT is not the paying source"),
+                "{name} must say a Team / Business SuperGrok JWT is not the paying source while a personal login exists"
             );
             assert!(
                 content.contains("SuperGrok dollar credits that never expire"),
@@ -551,6 +552,29 @@ mod tests {
             slash.content.contains("does not require console credits"),
             "04-slash-commands.md must say hop-back does not require console credits"
         );
+        let auth_lower = auth.content.to_ascii_lowercase();
+        assert!(
+            auth_lower.contains("fetches the console.x.ai billing credits card")
+                && auth_lower.contains("prepaidcredits")
+                && auth_lower.contains("prepaidcreditsused")
+                && auth_lower.contains("postpaid/invoice/preview"),
+            "02-authentication.md must say grok-oss fetches GetAmountToPay remaining"
+        );
+        assert!(
+            auth_lower.contains("total.val")
+                && auth_lower.contains("prepaidbalance.val")
+                && auth_lower.contains("does not hop sampling from this card"),
+            "02-authentication.md must keep total.val / prepaidBalance.val distinct and not hop from the card"
+        );
+        assert!(
+            !auth_lower.contains("does not fetch the console.x.ai billing credits card"),
+            "02-authentication.md must not claim grok-oss never fetches the Billing Credits card"
+        );
+        assert!(
+            !auth_lower.contains("billing credits card is console team prepaid")
+                && !auth_lower.contains("billing credits card is supergrok dollar credits"),
+            "02-authentication.md must not classify the Billing Credits card as another meter"
+        );
     }
 
     /// Named contract: product skills are not a Python runtime. Restack must
@@ -582,6 +606,48 @@ mod tests {
                 && skills.content.contains("xlsx")
                 && skills.content.contains("pdf"),
             "08-skills.md must name the office/PDF exception"
+        );
+        assert!(
+            skills.content.contains("default Grok OSS skill")
+                || skills.content.contains("default product skills"),
+            "08-skills.md must say polish/subagent are default Grok OSS skills"
+        );
+        assert!(
+            skills
+                .content
+                .contains("crates/codegen/xai-grok-bundle/skills/")
+                && skills.content.contains("/polish")
+                && skills.content.contains("/subagent"),
+            "08-skills.md must name the in-tree default skill source and /polish /subagent"
+        );
+        assert!(
+            skills
+                .content
+                .contains("not project packs at `.agents/skills/polish/`")
+                || skills
+                    .content
+                    .contains("Do not ship them as project `.agents/skills/polish`"),
+            "08-skills.md must not treat polish/subagent as project-only packs"
+        );
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("default Grok OSS skill")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/polish/")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/subagent/"),
+            "04-slash-commands.md must describe /polish and /subagent as default Grok OSS skills"
+        );
+        assert!(
+            !slash
+                .content
+                .contains("version-controlled **repo skill** at `.agents/skills/polish"),
+            "04-slash-commands.md must not call /polish a project repo skill"
         );
     }
 
