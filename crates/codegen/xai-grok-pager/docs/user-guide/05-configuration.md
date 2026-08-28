@@ -120,7 +120,7 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | Knob | Default | Where | Role |
 |------|---------|-------|------|
 | `[ui] economic_mode` | true | Settings → Agent | Soft-cap effective context at 200k (price cliff). Also gates implement-effort ceiling and desired inject when the cap master is true. `/economic-mode` overrides one conversation. |
-| `[ui] auto_run_implement` | true | Settings → Agent | After a successful turn, auto-queue a trailing `/implement` block. |
+| `[ui] auto_run_implement` | true | Settings → Agent | After a successful turn, auto-queue a trailing `/implement` block. Plan-approval review comments that contain `/implement` are that turn, not a second auto-run when leftover work is operator-gated only. |
 | `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |

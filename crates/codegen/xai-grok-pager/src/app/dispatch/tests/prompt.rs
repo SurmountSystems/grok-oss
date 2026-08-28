@@ -5285,6 +5285,162 @@ fn successful_turn_end_auto_runs_trailing_next_implement_prompt() {
     );
 }
 
+fn plan_approval_implement_prompt_with_implement_comments() -> String {
+    let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+    let lead = crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD;
+    format!(
+        "{implement}\n\n{lead}\n\n\
+         /implement --effort 3 all planned tasks in priority order according to these rules:\n\
+         Implement all remaining work using nested hierarchical subagents..."
+    )
+}
+
+/// Named contract: after plan Approve with review comments that contain
+/// `/implement`, a successful implement turn that reports leftover is
+/// operator-gated only (no Next implement block) must not auto-run that
+/// `/implement` body again.
+#[test]
+fn successful_implement_turn_does_not_auto_run_plan_approval_comments_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-1".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Job: remaining work is operator-gated only.\n\
+             State: I did not spawn an implementer.\n\
+             I am not emitting a /implement block, so Auto-run does not pick this up again.",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(&app, id, &effects, "all planned tasks in priority order"),
+        "finished implement with operator-gated leftover must not auto-run \
+         approval-comment /implement; effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: quoting the original approval `/implement` body in the
+/// assistant reply is not a new Next implement prompt.
+#[test]
+fn successful_implement_turn_does_not_auto_run_echoed_approval_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-echo".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Done. Leftover is operator-gated only. I am not emitting a new Next implement prompt.\n\
+             /implement --effort 3 all planned tasks in priority order according to these rules:\n\
+             Implement all remaining work using nested hierarchical subagents...",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-echo".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(&app, id, &effects, "all planned tasks in priority order"),
+        "echo of approval-comment /implement must not auto-run; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: a new trailing Next implement prompt after plan Approve
+/// still auto-runs. Only the comments body and its echo are skipped.
+#[test]
+fn successful_plan_approval_turn_still_auto_runs_new_next_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-next".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Summary\nFirst slice done.\n\n\
+             ## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice\n\
+             1) keep going",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-next".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "a new Next implement prompt after plan Approve must still auto-run; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Named contract: a failed HTTP 502 turn is not a successful turn end.
 /// Do not auto-run leftover `/implement` from a failed sampler response.
 #[test]

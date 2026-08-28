@@ -261,15 +261,20 @@ less than product code and tests. Do not invent long essays or git nags.
    Usage view for that workspace. The operator has SuperGrok Heavy and does not
    see it used. Board `bug:supergrok-heavy-not-used` owns the diagnose. This pin
    does not diagnose product code.
-   **Complete thoughts (pinned 2026-08-03):** Plans, residual, reports, board
-   titles, user-facing docs, and chat about product work must use **complete
-   American English thoughts**. Do not use half-labels as if they were sentences
-   (wrong: "SuperGrok included weekly"). Right: "the included SuperGrok period limits
-   for the current billing period (how much of that included quota is already used)."
-   When naming a meter, say what it is and what it is not. Conditions use full
-   clauses (not "room/headroom"). Config and wire names may follow the plain
-   thought in parentheses. Operator corrections about incomplete phrasing are
-   permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Complete thoughts (pinned 2026-08-03; leftover lists 2026-08-28):** Plans,
+   residual, reports, board titles, remaining-work pointers, user-facing docs,
+   and chat about product work must use **complete American English thoughts**.
+   Do not use half-labels as if they were sentences (wrong: "SuperGrok included
+   weekly"). Right: "the included SuperGrok period limits for the current
+   billing period (how much of that included quota is already used)." Numbered
+   leftover lists, Job / State / You / Next lines, and remaining-work bullets
+   each need a subject and a finite verb. Wrong: "This running TUI until you
+   install." Right: "This running TUI will not show the plan-composer fixes
+   until you install grok-oss and reopen the session." When naming a meter,
+   say what it is and what it is not. Conditions use full clauses (not
+   "room/headroom"). Config and wire names may follow the plain thought in
+   parentheses. Operator corrections about incomplete phrasing are permanent
+   law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **Job / State / You / Next, with evidence for You (pinned 2026-08-21;
    other path 2026-08-23):**
    Keep the four-line restatement. On **You**, always say why the

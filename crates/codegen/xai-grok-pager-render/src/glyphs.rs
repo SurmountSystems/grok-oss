@@ -311,6 +311,22 @@ pub fn dot_spinner_frames() -> &'static [&'static str] {
     }
 }
 
+/// Dwell per live-work sparkler frame, matching turn-status
+/// `SPINNER_DIVISOR` at ~30 animation ticks per second (~7.5 fps).
+pub const SPARKLER_FRAME_MS: u64 = 133;
+
+/// Live-work sparkler glyph for `elapsed_ms` on a wall or job clock.
+///
+/// Frame selection does not depend on a parked animation counter. Two
+/// elapsed values a frame-dwell apart must not freeze on one glyph.
+pub fn sparkler_frame_at_ms(elapsed_ms: u64) -> &'static str {
+    let frames = dot_spinner_frames();
+    if frames.is_empty() {
+        return "\u{22c5}";
+    }
+    frames[(elapsed_ms / SPARKLER_FRAME_MS) as usize % frames.len()]
+}
+
 /// `"┃"` (U+2503 HEAVY VERTICAL) normally, `"│"` (U+2502 LIGHT VERTICAL,
 /// CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
 ///
@@ -1091,6 +1107,29 @@ mod tests {
                     && *f != "\u{2577}"
             }),
             "sparkle frames must not include striped-marquee glyphs: {sparkle:?}"
+        );
+    }
+
+    /// The running sparkler must change glyphs from a live clock, not sit
+    /// on one frame while a turn, nested agent, or tool is still running.
+    #[test]
+    fn sparkler_frame_advances_with_elapsed_clock() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let early = sparkler_frame_at_ms(0);
+        let later = sparkler_frame_at_ms(SPARKLER_FRAME_MS);
+        assert_ne!(
+            early, later,
+            "sparkler must change glyphs after one frame dwell, got {early:?} then {later:?}"
+        );
+        let wrapped = sparkler_frame_at_ms(SPARKLER_FRAME_MS * dot_spinner_frames().len() as u64);
+        assert_eq!(
+            wrapped, early,
+            "sparkler clock must wrap the frame set rather than freeze"
+        );
+        assert!(
+            dot_spinner_frames().contains(&early),
+            "sparkler must stay on the density sparkle set, got {early:?}"
         );
     }
 

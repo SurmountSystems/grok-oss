@@ -524,7 +524,8 @@ impl AgentView {
                 None
             } else {
                 Some(format!(
-                    "The user approved the plan with the following review comments:\n\n{}",
+                    "{}\n\n{}",
+                    crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
                     formatted
                 ))
             }

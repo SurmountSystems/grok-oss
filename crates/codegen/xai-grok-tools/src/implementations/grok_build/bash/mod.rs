@@ -175,7 +175,10 @@ pub struct BashParams {
     ///
     /// Set `foreground_block_budget_ms: 0` to disable the short budget so only
     /// the resolved timeout triggers auto-bg (reference-compatible).
-    #[serde(default)]
+    ///
+    /// Default **true**: a still-running compile at the wait cap must stay
+    /// running (background + task id), not SIGKILL then re-exec.
+    #[serde(default = "default_true")]
     pub auto_background_on_timeout: bool,
     /// Max FG block before auto-bg when [`Self::auto_background_on_timeout`] is
     /// true (milliseconds). Independent of model `timeout`.
@@ -217,7 +220,7 @@ impl Default for BashParams {
             output_byte_limit: None,
             cmd_prefix: None,
             enabled_background: true,
-            auto_background_on_timeout: false,
+            auto_background_on_timeout: true,
             foreground_block_budget_ms: None,
             max_block_until_ms: None,
             allow_background_operator: true,
@@ -1523,7 +1526,7 @@ impl BashTool {
         r#"Run a ${%- if is_windows %} shell command${%- else %} bash command${%- endif %} and return its output.
 
 Usage notes:
-  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
+  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later. Do not start the same command again because the wait window ended; use ${{ tools.by_kind.background_task_action }} with that task id.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely${%- if tools.by_kind.kill_task_action %}; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}${%- endif %}.
   - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
   - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
@@ -2239,14 +2242,8 @@ impl xai_tool_runtime::Tool for BashTool {
                 // The previous gate (`input.timeout.is_none()`) hard-
                 // timed out commands with explicit timeouts even when
                 // the session had opted into auto-bg behavior.
-                // The relaxed semantics matter here:
-                // every Shell call carries an explicit `block_until_ms`
-                // and the harness's observed behavior is to auto-background
-                // past that deadline rather than kill the process.
-                // Backwards compatible because
-                // `auto_background_on_timeout` defaults to `false`;
-                // existing grok_build callers that never opted in are
-                // unaffected.
+                // Default is on: a still-running process at the wait
+                // cap is moved to the background, not SIGKILL'd.
                 auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
@@ -2751,6 +2748,13 @@ mod tests {
     /// terminal actor emits `BashOutputChunk`s. Returns the `TempDir` too so
     /// the caller keeps the session/cwd directory alive for the test.
     fn make_real_resources(output_byte_limit: Option<usize>) -> (Resources, tempfile::TempDir) {
+        make_real_resources_with_params(BashParams {
+            output_byte_limit,
+            ..BashParams::default()
+        })
+    }
+
+    fn make_real_resources_with_params(params: BashParams) -> (Resources, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut resources = Resources::new();
         let backend: Arc<dyn TerminalBackend> =
@@ -2760,10 +2764,7 @@ mod tests {
         resources.insert(SessionFolder(tmp.path().to_path_buf()));
         resources.insert(SessionEnv(Arc::new(HashMap::new())));
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
-        resources.insert(Params(BashParams {
-            output_byte_limit,
-            ..BashParams::default()
-        }));
+        resources.insert(Params(params));
         resources.insert(TemplateRenderer::new(
             HashMap::from([(
                 ToolKind::BackgroundTaskAction,
@@ -3237,6 +3238,54 @@ mod tests {
         }
     }
 
+    /// Named contract: a still-running shell command at the wait cap must stay
+    /// running (auto-background + task id). Do not SIGKILL it and treat that
+    /// as a failed command the model should start over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn still_running_foreground_command_at_wait_cap_is_auto_backgrounded_not_killed() {
+        let (resources, _tmp) = make_real_resources_with_params(BashParams {
+            timeout_secs: Some(0.2),
+            foreground_block_budget_ms: Some(0),
+            ..BashParams::default()
+        });
+        let backend = resources
+            .get::<Terminal>()
+            .expect("terminal backend")
+            .0
+            .clone();
+        let tool = BashTool;
+        let input = BashToolInput {
+            command: "sleep 30".to_string(),
+            timeout: Some(200),
+            description: "stand-in for a still-running remote compile".to_string(),
+            is_background: false,
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            BashToolOutput::Background(bg) => {
+                assert_eq!(bg.status, "running");
+                assert!(
+                    bg.summary.contains("still running"),
+                    "auto-bg summary must say the process is still running: {}",
+                    bg.summary
+                );
+                let outcome = backend.kill_task(&bg.task_id).await;
+                assert!(
+                    matches!(outcome, KillOutcome::Killed | KillOutcome::AlreadyExited),
+                    "cleanup kill after auto-bg: {outcome:?}"
+                );
+            }
+            BashToolOutput::Foreground(bash) => panic!(
+                "still-running command at the wait cap must stay running, not be killed \
+                 (timed_out={}, exit={}, signal={:?})",
+                bash.timed_out, bash.exit_code, bash.signal
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn foreground_command_error() {
         let resources = make_resources(MockTerminal::failing());
@@ -3376,6 +3425,7 @@ mod tests {
             MockTerminal::background_ok("bg-task-disabled"),
             BashParams {
                 enabled_background: false,
+                auto_background_on_timeout: false,
                 ..BashParams::default()
             },
         );
@@ -3399,6 +3449,7 @@ mod tests {
             MockTerminal::success("", 0),
             BashParams {
                 enabled_background: false,
+                auto_background_on_timeout: false,
                 ..BashParams::default()
             },
         );
@@ -4289,10 +4340,22 @@ mod tests {
 
         #[test]
         fn budget_none_when_auto_bg_off() {
-            let params = BashParams::default();
+            let params = BashParams {
+                auto_background_on_timeout: false,
+                ..BashParams::default()
+            };
             assert!(!params.auto_background_on_timeout);
             assert!(BashTool::effective_foreground_block_budget(&params).is_none());
             assert!(BashTool::effective_auto_bg_wait_ms(&params).is_none());
+        }
+
+        #[test]
+        fn default_params_auto_background_still_running_commands() {
+            let params = BashParams::default();
+            assert!(
+                params.enabled_background && params.auto_background_on_timeout,
+                "default bash params must auto-background a still-running command at the wait cap"
+            );
         }
 
         #[test]
@@ -5049,6 +5112,10 @@ mod tests {
             );
             // The OS-neutral contract (timeout/kill mechanics) is still present.
             assert!(out.contains("disables the wrapper timeout"));
+            assert!(
+                out.contains("Do not start the same command again because the wait window ended"),
+                "must not teach retrying the same command after the wait cap: {out}"
+            );
         }
 
         #[test]

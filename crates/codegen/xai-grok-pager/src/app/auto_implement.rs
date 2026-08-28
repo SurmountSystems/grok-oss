@@ -8,10 +8,13 @@
 //! Sources (in order):
 //! 1. **User prompt follow-up** — prior user message has non-implement content
 //!    first, then a later `/implement` block (same-message design→implement).
+//!    Plan-panel Approve text is already an implement turn. `/implement` inside
+//!    those review comments is not a follow-up.
 //! 2. **Assistant residual** — last turn’s agent messages contain a trailing
 //!    `/implement` block (models should leave “Next implement prompt” near the
 //!    end). Skipped when the block is an exact echo of the user prompt just
-//!    run (avoids re-queueing the same primary implement).
+//!    run, or an `/implement` block that prompt already contained (avoids
+//!    re-queueing the same primary implement or quoted approval comments).
 //!
 //! Implement-loop effort may be rewritten via Token Economy: optional lock and
 //! min floor always apply when set; when **economic mode** is on and
@@ -196,11 +199,36 @@ fn find_implement_token_offset(line: &str) -> Option<usize> {
     None
 }
 
+/// Plan-panel Approve already started implement. A `/implement` block inside
+/// review comments is that turn's instruction, not a later follow-up.
+pub fn is_plan_approval_implement_prompt(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with(crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        || t.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+}
+
+/// True when `cmd` is an `/implement` block the prior user prompt already
+/// contained. Echoing that block is not a new Next implement prompt.
+fn prior_already_contains_implement_block(prior: &str, cmd: &str) -> bool {
+    let want = cmd.trim();
+    if want.is_empty() {
+        return false;
+    }
+    if prior.trim() == want {
+        return true;
+    }
+    extract_last_implement_block(prior).is_some_and(|b| b.trim() == want)
+}
+
 /// Extract a follow-up multi-line `/implement` block from the prior user prompt.
 ///
-/// Returns `None` when no follow-up exists or the primary turn is already
-/// implement (first non-empty line starts with `/implement`).
+/// Returns `None` when no follow-up exists, the primary turn is already
+/// implement (first non-empty line starts with `/implement`), or the prompt
+/// is a plan-approval implement turn (review comments may contain `/implement`).
 pub fn extract_auto_implement_followup(prior_prompt: &str) -> Option<String> {
+    if is_plan_approval_implement_prompt(prior_prompt) {
+        return None;
+    }
     let start = find_followup_implement_offset(prior_prompt)?;
     extract_implement_block_at(prior_prompt, start)
 }
@@ -288,11 +316,13 @@ pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Opt
         .as_deref()
         .and_then(extract_last_implement_block)
         .filter(|cmd| {
-            // Don't re-queue an exact echo of the prompt that just ran.
-            prior
-                .as_deref()
-                .map(|p| p.trim() != cmd.trim())
-                .unwrap_or(true)
+            // Don't re-queue an exact echo of the prompt that just ran, or
+            // an `/implement` block that prompt already contained (approval
+            // review comments, quoted original implement body).
+            match prior.as_deref() {
+                None => true,
+                Some(p) => !prior_already_contains_implement_block(p, cmd),
+            }
         });
 
     let raw = from_user.or(from_assistant)?;
@@ -368,6 +398,40 @@ mod tests {
                 "/implement --effort 5 residual work:\n1) wire Systems.Proc\n2) keep SCORE fail=0"
             ),
             None
+        );
+    }
+
+    /// Named contract: Approve-with-comments that contain `/implement` already
+    /// ran that implement. Auto-run must not treat the comments as a follow-up.
+    #[test]
+    fn extract_skips_plan_approval_review_comments_containing_implement() {
+        let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+        let lead = crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD;
+        let prior = format!(
+            "{implement}\n\n{lead}\n\n\
+             /implement --effort 3 all planned tasks in priority order according to these rules:\n\
+             Implement all remaining work using nested hierarchical subagents..."
+        );
+        assert!(
+            is_plan_approval_implement_prompt(&prior),
+            "approval wrapper must count as an implement turn"
+        );
+        assert_eq!(
+            extract_auto_implement_followup(&prior),
+            None,
+            "review-comment /implement is this turn, not a later auto-run"
+        );
+        assert_eq!(
+            extract_auto_implement_followup(&format!(
+                "{lead}\n\n/implement --effort 3 leftover from comments"
+            )),
+            None
+        );
+        let echoed = "/implement --effort 3 all planned tasks in priority order according to these rules:\n\
+             Implement all remaining work using nested hierarchical subagents...";
+        assert!(
+            prior_already_contains_implement_block(&prior, echoed),
+            "quoted original implement body must not auto-run from the assistant"
         );
     }
 

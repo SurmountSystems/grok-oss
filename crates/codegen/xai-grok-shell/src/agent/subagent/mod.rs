@@ -433,19 +433,36 @@ impl SubagentSpawnContext {
             .resolve()
             .value
     }
-    /// Per-tool params for the child's spawn. The ask_user_question timeout is
-    /// session-level config, so it is resolved from the same tiers as the
-    /// parent (requirements/env/user/managed from disk; remote from the
-    /// parent's snapshot) and follows the session into subagents. Bash stays
-    /// on tool defaults, as before that knob existed.
+    /// Per-tool params for the child's spawn. Ask-user-question timeout and
+    /// production bash wait policy (auto-background on timeout, 10h foreground
+    /// ceiling) follow the parent. Nested agents must not fall back to the
+    /// tool-server 5-minute kill: that SIGKILL'd still-running `just
+    /// test-remote` compiles and invited the model to start the same command
+    /// again.
     pub(crate) fn resolve_tool_params_json(
         &self,
     ) -> crate::session::agent_rebuild::ResolvedToolParamsJson {
         let params = crate::util::config::resolve_ask_user_question_params_from_disk(
             self.remote_settings.as_ref(),
         );
+        let default_bash = crate::tools::config::BashToolConfig::default();
+        let bash_cfg = self
+            .agent_config
+            .as_ref()
+            .map(|c| &c.toolset.bash)
+            .unwrap_or(&default_bash);
+        let remote_auto_bg = self
+            .remote_settings
+            .as_ref()
+            .and_then(|r| r.auto_background_on_timeout);
+        let remote_allow_background_operator = self
+            .remote_settings
+            .as_ref()
+            .and_then(|r| r.allow_background_operator);
         crate::session::agent_rebuild::ResolvedToolParamsJson {
-            bash: None,
+            bash: Some(
+                bash_cfg.to_bash_params_json(remote_auto_bg, remote_allow_background_operator),
+            ),
             ask_user_question: match serde_json::to_value(params) {
                 Ok(serde_json::Value::Object(map)) => Some(map),
                 _ => None,

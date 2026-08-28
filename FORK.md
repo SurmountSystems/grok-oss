@@ -365,6 +365,10 @@ identifier that has no matching `fn`.
   (`xai-grok-tools` `task/mod.rs`).
 - [x] **Auto-run `/implement`**: after a successful turn, queue a follow-up
   implement block when present; **appends** after any already-queued prompts.
+  Plan-approval review comments that contain `/implement` are that turn's
+  work, not a later auto-run (named tests
+  `extract_skips_plan_approval_review_comments_containing_implement`,
+  `successful_implement_turn_does_not_auto_run_plan_approval_comments_implement`).
   FORK claims; not a land class.
 - [x] **Shared rate limits**: crate `grok-rate-limit` (Surmount name, not
   `xai-`); cooldowns under `~/.grok/rate_limits/`; optional

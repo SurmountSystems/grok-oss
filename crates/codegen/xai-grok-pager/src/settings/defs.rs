@@ -1055,7 +1055,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           /implement block (from the /implement token through end of message) \
                           from a user-prompt follow-up or a trailing residual in the assistant \
                           reply. Prefer leaving \"Next implement prompt\" near the end of the \
-                          reply. Explicit --effort N on the block is honored as written.",
+                          reply. Explicit --effort N on the block is honored as written. \
+                          Plan-approval review comments that contain /implement are that \
+                          turn's work, not a second auto-run after leftover is operator-gated only.",
             keywords: &[
                 "implement",
                 "auto",

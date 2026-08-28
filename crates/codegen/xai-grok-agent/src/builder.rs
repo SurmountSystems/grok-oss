@@ -950,10 +950,17 @@ impl AgentBuilder {
                 );
             }
             if unresolved.is_empty() {
+                let bash_in_allowlist = definition.tools.iter().any(|t| {
+                    claude_tool_kind(t) == Some(ToolKind::Execute)
+                        || tool_id_eq(t, "run_terminal_cmd")
+                        || tool_id_eq(t, "run_terminal_command")
+                });
+                let bash_lifecycle = ["get_task_output", "kill_task", "wait_tasks"];
                 tool_config.tools.retain(|tc| {
                     tool_id_matches(&definition.tools, &tc.id)
                         || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
                         || (has_agent_entry && task_deps.contains(&short_tool_name(&tc.id)))
+                        || (bash_in_allowlist && bash_lifecycle.contains(&short_tool_name(&tc.id)))
                         || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
                 });
                 tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
@@ -1023,17 +1030,13 @@ impl AgentBuilder {
             }
         }
         if definition.allowed_subagent_types.as_deref() == Some(&[]) {
-            let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
+            // Strip spawn only. Keep bash background, auto-background on
+            // timeout, and get_task_output/kill_task/wait_tasks so a
+            // still-running command at the wait cap can be handed to
+            // background instead of SIGKILL.
             tool_config
                 .tools
-                .retain(|tc| !task_deps.contains(&short_tool_name(&tc.id)));
-            for tc in &mut tool_config.tools {
-                if short_tool_name(&tc.id) == "run_terminal_cmd" {
-                    let params = tc.params.get_or_insert_with(Default::default);
-                    params.insert("enabled_background".into(), false.into());
-                    params.insert("auto_background_on_timeout".into(), false.into());
-                }
-            }
+                .retain(|tc| short_tool_name(&tc.id) != "task");
         }
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();

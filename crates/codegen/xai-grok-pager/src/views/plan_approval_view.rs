@@ -54,6 +54,11 @@ pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
 pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
     "The user approved the plan. Implement the plan in plan.md.";
 
+/// Lead-in when Approve sends typed review comments with the implement turn.
+/// A `/implement` block after this line is that turn, not a later auto-run.
+pub const PLAN_APPROVED_REVIEW_COMMENTS_LEAD: &str =
+    "The user approved the plan with the following review comments:";
+
 /// Status while Revise unparked and the agent is rewriting `plan.md`
 /// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.
 pub const PLAN_REVISING_STATUS: &str = "Revising plan...";
