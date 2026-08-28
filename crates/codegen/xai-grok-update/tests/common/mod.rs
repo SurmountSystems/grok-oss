@@ -145,6 +145,22 @@ pub fn small_good_artifact() -> Vec<u8> {
     b"#!/bin/sh\nexit 0\n".to_vec()
 }
 
+/// Distinct from [`small_good_artifact`] so refused installs cannot
+/// false-green by overwriting previous-good with identical bytes.
+pub fn previous_good_artifact() -> Vec<u8> {
+    b"#!/bin/sh\nexit 0\n# prev\n".to_vec()
+}
+
+/// SHA-256 (lowercase hex) of [`small_good_artifact`]. Not SHA-1.
+pub fn small_good_artifact_sha256() -> String {
+    xai_grok_update::artifact_sha256::sha256_hex(&small_good_artifact())
+}
+
+/// GNU `hash  name` line for [`small_good_artifact`].
+pub fn small_good_artifact_sha256_line() -> String {
+    format!("{}  grok\n", small_good_artifact_sha256())
+}
+
 /// Backdate every file in `GROK_HOME/downloads` by ~2 hours.
 ///
 /// `cleanup_old_downloads` deliberately never deletes a freshly-written
@@ -223,6 +239,29 @@ impl FakeBinGuard {
     /// Install a fake `gh` using the standard [`fake_gh_script`] template.
     pub fn install_gh() -> Self {
         Self::install("gh", fake_gh_script)
+    }
+
+    /// Install a fake `gh` that can `release download` a binary and the
+    /// published `${artifact}.sha256` asset. See [`fake_gh_serving_releases`].
+    pub fn install_gh_serving_releases() -> Self {
+        Self::install("gh", fake_gh_serving_releases)
+    }
+
+    /// Bytes written for a non-checksum `release download`. Default is
+    /// [`small_good_artifact`].
+    pub fn set_gh_artifact(&self, bytes: &[u8]) {
+        std::fs::write(self.dir().join("gh-artifact"), bytes).unwrap();
+    }
+
+    /// Published checksum-file body for a `.sha256` `release download`.
+    /// Default is the GNU line for [`small_good_artifact`].
+    pub fn set_gh_sha256_body(&self, body: &str) {
+        std::fs::write(self.dir().join("gh-sha256"), body.as_bytes()).unwrap();
+    }
+
+    /// Make `.sha256` `release download` fail (no published checksum asset).
+    pub fn set_gh_sha256_missing(&self) {
+        std::fs::write(self.dir().join("gh-sha256-missing"), []).unwrap();
     }
 
     /// The tempdir backing this guard (where canned stdout/stderr/exit files
@@ -348,6 +387,71 @@ fi
 exit_code=0
 if [ -f {dq}/gh-exit ]; then exit_code=$(cat {dq}/gh-exit); fi
 exit "$exit_code"
+"#
+    )
+}
+
+/// Fake `gh` that lists releases and downloads a binary plus the published
+/// `${artifact}.sha256` GitHub release asset. Not SHA-1.
+///
+/// Files under the fake's dir:
+/// - `gh-stable-only-stdout` / `gh-with-pre-stdout` — `release list`
+/// - `gh-artifact` — non-checksum download bytes (default: [`small_good_artifact`])
+/// - `gh-sha256` — checksum file body (default: GNU line for that default artifact)
+/// - `gh-sha256-missing` — if present, checksum downloads exit 1
+pub fn fake_gh_serving_releases(dir: &Path) -> String {
+    let dq = single_quote_for_sh(dir);
+    // SHA-256 of [`small_good_artifact`]. Must stay in lockstep with
+    // `artifact_sha256` tests. Not SHA-1.
+    let default_sha = small_good_artifact_sha256();
+    format!(
+        r#"#!/bin/sh
+echo "$@" >> {dq}/gh-args.log
+case "$*" in
+  *"release list"*)
+    if echo "$@" | grep -q '\-\-exclude-pre-releases'; then
+      if [ -f {dq}/gh-stable-only-stdout ]; then cat {dq}/gh-stable-only-stdout; fi
+    else
+      if [ -f {dq}/gh-with-pre-stdout ]; then cat {dq}/gh-with-pre-stdout; fi
+    fi
+    ;;
+  *"release download"*)
+    out=""
+    pattern=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--output" ]; then out="$a"; fi
+      if [ "$prev" = "--pattern" ]; then pattern="$a"; fi
+      prev="$a"
+    done
+    case "$pattern" in
+      *.sha256)
+        if [ -f {dq}/gh-sha256-missing ]; then
+          echo "no matching assets" >&2
+          exit 1
+        fi
+        if [ -n "$out" ]; then
+          if [ -f {dq}/gh-sha256 ]; then
+            cat {dq}/gh-sha256 > "$out"
+          else
+            printf '%s  grok\n' '{default_sha}' > "$out"
+          fi
+        fi
+        ;;
+      *)
+        if [ -n "$out" ]; then
+          if [ -f {dq}/gh-artifact ]; then
+            cat {dq}/gh-artifact > "$out"
+          else
+            printf '#!/bin/sh\nexit 0\n' > "$out"
+          fi
+          chmod +x "$out"
+        fi
+        ;;
+    esac
+    ;;
+esac
+exit 0
 "#
     )
 }

@@ -1863,6 +1863,7 @@ fn fetch_failures_surface_in_open_modal() {
 #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
 fn show_spend_ingests_usage_jsonl_and_is_not_empty_default() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", tmp.path());
     let db = tmp.path().join("grok_oss.db");
     let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
         grok_oss_database_path: Some(db.clone()),

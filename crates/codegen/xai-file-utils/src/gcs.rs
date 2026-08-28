@@ -522,11 +522,14 @@ async fn upload_file_direct(
     use tokio::fs::File as TokioFile;
     use tokio_util::io::ReaderStream;
 
-    let client = build_gcs_client(service_account_key).await?;
-
+    // Open before GCS client construction: gcloud-metadata panics if the process
+    // has no system CA bundle (Nix quality sandbox). A missing local file must
+    // return an error, not that panic.
     let file = TokioFile::open(file_path)
         .await
         .with_context(|| format!("Failed to open file: {}", file_path.display()))?;
+
+    let client = build_gcs_client(service_account_key).await?;
     // ReaderStream<TokioFile> yields io::Result<Bytes>; io::Error satisfies
     // upload_streamed_object's S::Error: Into<Box<dyn Error + Send + Sync>> bound directly.
     let stream = ReaderStream::new(file);
@@ -733,8 +736,8 @@ mod tests {
 
     #[tokio::test]
     async fn upload_file_direct_missing_file_returns_error() {
-        // Direct mode tries to authenticate first — bucket URL parse should succeed,
-        // but the file open will fail later. We only care it returns an error, not panics.
+        // Direct mode opens the local file before constructing a GCS client.
+        // A missing file must return an error, not panic in gcloud-metadata TLS.
         let config = direct_config();
         let result = upload_file(
             &config,
@@ -744,6 +747,12 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "Should error for missing file");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to open file") || err.contains("No such file"),
+            "Error should mention the missing file, not TLS/CA: {}",
+            err
+        );
     }
 
     #[tokio::test]

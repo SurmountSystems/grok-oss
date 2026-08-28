@@ -842,10 +842,15 @@ pub(super) fn dispatch_send_prompt_inner(
         }
 
         // Mid-turn composer Enter with text merges into the running turn
-        // (soft interject). Named `/queue` hold and empty Enter (plan
-        // Approve / force-send of a queued row) are other paths. Ctrl+Enter
-        // stays cancel-and-send (`SendPromptNow`).
-        if consume_input && agent.session.state.is_turn_running() {
+        // (soft interject). A parked sendable wait (task-output / wait-all)
+        // is send-now, not interject — the named tests encode immediate
+        // `SendPrompt`. Named `/queue` hold and empty Enter (plan Approve /
+        // force-send of a queued row) are other paths. Ctrl+Enter stays
+        // cancel-and-send (`SendPromptNow`).
+        if consume_input
+            && agent.session.state.is_turn_running()
+            && !agent.is_parked_on_sendable_wait()
+        {
             let images = agent.prompt.drain_images();
             agent.prompt.set_text("");
             return interject::dispatch_interject(app, text, images);

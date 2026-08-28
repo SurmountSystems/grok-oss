@@ -9,7 +9,7 @@ use std::path::Path;
 use syntect::{
     easy::HighlightLines,
     highlighting::{Theme as SyntectTheme, ThemeSet},
-    parsing::{SyntaxReference, SyntaxSet},
+    parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder},
 };
 
 /// Syntax highlighting configuration.
@@ -19,7 +19,7 @@ use syntect::{
 pub struct Syntect {
     /// The color theme for syntax highlighting.
     pub theme: SyntectTheme,
-    /// The syntax definitions (supports 250+ languages via two-face).
+    /// The syntax definitions (bundled `.sublime-syntax` files, yaml-load).
     pub syntax_set: SyntaxSet,
 }
 
@@ -27,7 +27,8 @@ impl Syntect {
     /// Create a new Syntect instance from theme bytes.
     ///
     /// The theme bytes should be a TextMate `.tmTheme` file.
-    /// Uses two-face's extended syntax set with 250+ languages.
+    /// Syntaxes come from the crate's bundled `.sublime-syntax` files
+    /// (yaml-load, no syntect dump-load / bincode).
     ///
     /// # Example
     ///
@@ -37,9 +38,10 @@ impl Syntect {
     pub fn new(theme_bytes: &[u8]) -> Self {
         let mut cursor = Cursor::new(theme_bytes);
         let theme = ThemeSet::load_from_reader(&mut cursor).expect("Failed to load theme");
-        // Use two-face's extended syntax set which includes 250+ languages from bat
-        let syntax_set = two_face::syntax::extra_newlines();
-        Self { theme, syntax_set }
+        Self {
+            theme,
+            syntax_set: bundled_syntax_set(),
+        }
     }
 
     /// Find a syntax definition by file path extension.
@@ -113,6 +115,76 @@ impl Syntect {
 /// [`Path::new`]. Paths with extra colons in the first two segments (e.g. some
 /// Windows `C:...` forms) are not supported; use a repo-relative or
 /// forward-slash form.
+/// Sublime syntax sources shipped in this crate. Loaded with syntect
+/// yaml-load so highlighting does not pull bincode dump-load.
+const BUNDLED_SYNTAXES: &[(&str, &str)] = &[
+    (
+        "Rust",
+        include_str!("../assets/syntaxes/Rust.sublime-syntax"),
+    ),
+    (
+        "JSON",
+        include_str!("../assets/syntaxes/JSON.sublime-syntax"),
+    ),
+    (
+        "Python",
+        include_str!("../assets/syntaxes/Python.sublime-syntax"),
+    ),
+    (
+        "JavaScript",
+        include_str!("../assets/syntaxes/JavaScript.sublime-syntax"),
+    ),
+    (
+        "TypeScript",
+        include_str!("../assets/syntaxes/TypeScript.sublime-syntax"),
+    ),
+    (
+        "Bash",
+        include_str!("../assets/syntaxes/Bash.sublime-syntax"),
+    ),
+    (
+        "TOML",
+        include_str!("../assets/syntaxes/TOML.sublime-syntax"),
+    ),
+    (
+        "YAML",
+        include_str!("../assets/syntaxes/YAML.sublime-syntax"),
+    ),
+    ("Go", include_str!("../assets/syntaxes/Go.sublime-syntax")),
+    (
+        "Markdown",
+        include_str!("../assets/syntaxes/Markdown.sublime-syntax"),
+    ),
+    (
+        "HTML",
+        include_str!("../assets/syntaxes/HTML.sublime-syntax"),
+    ),
+    ("CSS", include_str!("../assets/syntaxes/CSS.sublime-syntax")),
+    (
+        "Diff",
+        include_str!("../assets/syntaxes/Diff.sublime-syntax"),
+    ),
+    ("SQL", include_str!("../assets/syntaxes/SQL.sublime-syntax")),
+    ("XML", include_str!("../assets/syntaxes/XML.sublime-syntax")),
+];
+
+fn bundled_syntax_set() -> SyntaxSet {
+    use std::sync::OnceLock;
+    static SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SET.get_or_init(|| {
+        let mut builder = SyntaxSetBuilder::new();
+        for (name, src) in BUNDLED_SYNTAXES {
+            let def = SyntaxDefinition::load_from_str(src, true, Some(name)).unwrap_or_else(|e| {
+                panic!("bundled syntax {name} failed to load: {e}");
+            });
+            builder.add(def);
+        }
+        builder.add_plain_text_syntax();
+        builder.build()
+    })
+    .clone()
+}
+
 fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
     let mut it = info.splitn(3, ':');
     let start = it.next()?;
@@ -130,6 +202,54 @@ fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
     Some((start, end, path))
 }
 
+/// If pulldown left container indent on continuation lines of a fenced
+/// block (first line already stripped, later lines still prefixed), drop
+/// that common prefix. Inner relative indent stays.
+fn strip_leaked_fence_indent(text: &str) -> String {
+    let mut iter = text.split_inclusive('\n');
+    let Some(first) = iter.next() else {
+        return text.to_string();
+    };
+    let first_body = first.trim_end_matches(['\n', '\r']);
+    if first_body.starts_with(' ') || first_body.starts_with('\t') {
+        return text.to_string();
+    }
+    let rest: Vec<&str> = iter.collect();
+    if rest.is_empty() {
+        return text.to_string();
+    }
+    let min_ws = rest
+        .iter()
+        .map(|line| {
+            let body = line.trim_end_matches(['\n', '\r']);
+            if body.is_empty() {
+                usize::MAX
+            } else {
+                body.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+            }
+        })
+        .min()
+        .unwrap_or(0);
+    if min_ws == 0 || min_ws == usize::MAX {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(first);
+    for line in rest {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let stripped: String = body.chars().skip(min_ws).collect();
+        out.push_str(&stripped);
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Syntax highlight code, returning raw styled segments per line.
 ///
 /// `fence_info` is the fenced code block *info* string (language tag or
@@ -145,9 +265,13 @@ pub(crate) fn syntax_highlight_raw(
     use syntect::util::LinesWithEndings;
 
     let syn = syntect?;
-    let mut hl = syn.highlight_lines_for_fence_info(fence_info)?;
+    let mut hl = match syn.highlight_lines_for_fence_info(fence_info) {
+        Some(hl) => hl,
+        None => HighlightLines::new(syn.syntax_set.find_syntax_plain_text(), &syn.theme),
+    };
+    let text = strip_leaked_fence_indent(text);
     let mut lines = Vec::new();
-    for line in LinesWithEndings::from(text) {
+    for line in LinesWithEndings::from(&text) {
         let highlighted = hl.highlight_line(line, &syn.syntax_set).ok()?;
         lines.push(
             highlighted
@@ -207,5 +331,11 @@ mod tests {
     fn highlight_lines_for_fence_info_still_accepts_rust_token() {
         let s = super::test_syntect();
         assert!(s.highlight_lines_for_fence_info("rust").is_some());
+    }
+
+    #[test]
+    fn highlight_lines_for_token_json_from_bundled_syntax() {
+        let s = super::test_syntect();
+        assert!(s.highlight_lines_for_token("json").is_some());
     }
 }

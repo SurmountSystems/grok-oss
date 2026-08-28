@@ -197,6 +197,14 @@ impl PullDiagnostics {
         let pull = self.clone();
         tokio::spawn(async move {
             loop {
+                if !pull.worth_asking() {
+                    // Revealed as a publisher (or wrote itself off) while this
+                    // task was queued. Its own reports are the truth; do not
+                    // ask again, and free the slot so a later pull-only server
+                    // can use it after restart.
+                    pull.abandon(&key);
+                    break;
+                }
                 pull.resolve(&uri, &key).await;
                 if !pull.finish(&key) {
                     break;
@@ -273,6 +281,9 @@ impl PullDiagnostics {
     /// [`super::refresh`]: when the server finishes analyzing, it says so, and
     /// everything is asked again.
     async fn resolve(&self, uri: &Url, key: &str) {
+        if !self.worth_asking() {
+            return;
+        }
         // The revision we are asking about, read just before the request goes
         // out and used to describe the answer. `textDocument/diagnostic`
         // carries no version, so an answer to a request that predates an edit
@@ -507,6 +518,14 @@ impl PullDiagnostics {
         in_flight.running.remove(key);
         false
     }
+
+    /// Drop the pull slot without another round. Used when the server showed
+    /// it publishes (or wrote itself off) while this task was in flight.
+    fn abandon(&self, key: &str) {
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        in_flight.superseded.remove(key);
+        in_flight.running.remove(key);
+    }
 }
 
 impl std::fmt::Debug for PullDiagnostics {
@@ -587,5 +606,17 @@ mod tests {
         assert!(pull.finish("file:///a.cs"), "and asked for one more round");
         assert!(!pull.finish("file:///a.cs"), "which is the last");
         assert!(pull.begin("file:///a.cs"), "the slot is free again");
+    }
+
+    #[test]
+    fn abandon_frees_the_slot_without_another_round() {
+        let pull = detached_pull();
+        assert!(pull.begin("file:///a.cs"));
+        assert!(!pull.begin("file:///a.cs"), "queued behind the first");
+        pull.abandon("file:///a.cs");
+        assert!(
+            pull.begin("file:///a.cs"),
+            "abandon must drop both the running task and the queued round"
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Headless markdown analysis sharing Grok Build's exact `pulldown-cmark` config.
 //!
 //! This crate is intentionally lean -- it depends only on `pulldown-cmark` -- so it
-//! can be used without pulling in the terminal-rendering stack (syntect, ratatui,
-//! two-face). [`parser_options`] is the single source of truth for the parser
+//! can be used without pulling in the terminal-rendering stack (syntect, ratatui).
+//! [`parser_options`] is the single source of truth for the parser
 //! feature set, shared with `xai-grok-markdown` so analysis matches what Grok
 //! Build actually renders 1:1.
 //!

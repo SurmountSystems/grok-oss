@@ -47,15 +47,27 @@ fn host_platform() -> String {
 }
 
 const GOOD_SCRIPT: &str = "#!/bin/sh\nexit 0\n";
+/// Distinct from [`GOOD_SCRIPT`] so a refused install cannot false-green
+/// by overwriting previous-good with identical bytes.
+const PREV_SCRIPT: &str = "#!/bin/sh\nexit 0\n# prev\n";
+/// SHA-256 of [`GOOD_SCRIPT`] (lowercase hex). Not SHA-1.
+const GOOD_SCRIPT_SHA256: &str = "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb";
+const WRONG_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const INSTALLER_BLOCK_START: &str = "# >>> grok installer >>>";
 
 /// Write a fake `curl` that intercepts every download `install.sh` performs.
-/// `$FAKE_MODE` (full|truncate|garbage) selects the corruption.
+/// `$FAKE_MODE` (full|truncate|garbage|mismatch|no_checksum|bad_checksum)
+/// selects the corruption. `full` serves [`GOOD_SCRIPT`] plus a matching
+/// SHA-256 file. `mismatch` serves a runnable binary and a published
+/// checksum that does not match. `no_checksum` 404s the `.sha256` file.
+/// `bad_checksum` writes `$FAKE_CHECKSUM_BODY` as the checksum file.
 fn write_fake_curl(dir: &Path) {
     let body = format!(
-        r#"#!/bin/bash
+        r#"#!/bin/sh
 mode="${{FAKE_MODE:-full}}"
 fullsize={fullsize}
+good_sha={good_sha}
+wrong_sha={wrong_sha}
 head=0; out=""; want_code=0; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,13 +80,33 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -n "${{FAKE_URL_LOG:-}}" ] && [ -n "$url" ]; then echo "$url" >> "$FAKE_URL_LOG"; fi
+is_sha256=0
+case "$url" in *.sha256) is_sha256=1 ;; esac
 if [ "$head" = 1 ]; then
+  if [ "$is_sha256" = 1 ] && [ "$mode" = no_checksum ]; then
+    if [ "$want_code" = 1 ]; then printf '404'; else printf 'HTTP/1.1 404 Not Found\r\n\r\n'; fi
+    exit 0
+  fi
   if [ "$want_code" = 1 ]; then printf '200'; else printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\n\r\n' "$fullsize"; fi
+  exit 0
+fi
+if [ "$is_sha256" = 1 ]; then
+  if [ "$mode" = no_checksum ]; then
+    exit 22
+  fi
+  if [ "$mode" = bad_checksum ]; then
+    if [ -n "$out" ]; then printf '%s' "${{FAKE_CHECKSUM_BODY-}}" > "$out"; else printf '%s' "${{FAKE_CHECKSUM_BODY-}}"; fi
+    exit 0
+  fi
+  hash="$good_sha"
+  if [ "$mode" = mismatch ]; then hash="$wrong_sha"; fi
+  line="$hash  grok"
+  if [ -n "$out" ]; then printf '%s\n' "$line" > "$out"; else printf '%s\n' "$line"; fi
   exit 0
 fi
 if [ -n "$out" ]; then
   case "$mode" in
-    full)     printf '%s' '{good}' > "$out" ;;
+    full|mismatch|no_checksum|bad_checksum) printf '%s' '{good}' > "$out" ;;
     truncate) printf '\0\0\0\0' > "$out" ;;
     garbage)  head -c "$fullsize" /dev/zero | tr '\0' 'X' > "$out" ;;
   esac
@@ -85,6 +117,8 @@ exit 0
 "#,
         fullsize = GOOD_SCRIPT.len(),
         good = GOOD_SCRIPT,
+        good_sha = GOOD_SCRIPT_SHA256,
+        wrong_sha = WRONG_SHA256,
     );
     let path = dir.join("curl");
     std::fs::write(&path, body).unwrap();
@@ -98,7 +132,7 @@ fn seed_previous_good(home: &Path, platform: &str) -> PathBuf {
     std::fs::create_dir_all(&downloads).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let prev = downloads.join(format!("grok-{platform}"));
-    std::fs::write(&prev, GOOD_SCRIPT).unwrap();
+    std::fs::write(&prev, PREV_SCRIPT).unwrap();
     std::fs::set_permissions(&prev, std::fs::Permissions::from_mode(0o755)).unwrap();
     let link = bin.join("grok");
     let _ = std::fs::remove_file(&link);
@@ -126,10 +160,42 @@ fn assert_active_grok_runs(home: &Path) {
     assert!(ok, "active grok must run: {}", resolved.display());
 }
 
+/// Fake curl/uname first, then the process PATH so Nix quality has coreutils
+/// (`head`, `tr`, `mkdir`) instead of only `/usr/bin:/bin`.
+fn path_with_fakebin(fakebin: &Path) -> String {
+    let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    format!("{}:{rest}", fakebin.display())
+}
+
+/// Nix quality has `bash` on PATH, not `/bin/bash`.
+fn bash_program() -> &'static str {
+    if Path::new("/bin/bash").is_file() {
+        "/bin/bash"
+    } else {
+        "bash"
+    }
+}
+
 fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, shell: &str) -> bool {
-    let path_env = format!("{}:/usr/bin:/bin", fakebin.display());
-    let status = Command::new("/bin/bash")
-        .arg(install_sh)
+    run_installer_env(install_sh, home, fakebin, mode, shell, &[])
+}
+
+fn run_installer_env(
+    install_sh: &Path,
+    home: &Path,
+    fakebin: &Path,
+    mode: &str,
+    shell: &str,
+    extra: &[(&str, &str)],
+) -> bool {
+    let path_env = path_with_fakebin(fakebin);
+    let shell = if Path::new(shell).is_file() {
+        shell
+    } else {
+        bash_program()
+    };
+    let mut cmd = Command::new(bash_program());
+    cmd.arg(install_sh)
         .arg("0.1.181")
         .env_clear()
         .env("HOME", home)
@@ -137,10 +203,30 @@ fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, she
         .env("SHELL", shell)
         .env("GROK_BIN_DIR", home.join(".grok").join("bin"))
         .env("GROK_CHANNEL", "stable")
-        .env("FAKE_MODE", mode)
-        .status()
-        .expect("spawn bash install.sh");
+        .env("FAKE_MODE", mode);
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let status = cmd.status().expect("spawn bash install.sh");
     status.success()
+}
+
+fn assert_previous_good_payload(home: &Path, platform: &str) {
+    let path = home
+        .join(".grok")
+        .join("downloads")
+        .join(format!("grok-{platform}"));
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert_eq!(
+        bytes,
+        PREV_SCRIPT.as_bytes(),
+        "refused install must keep previous-good bytes, not the download"
+    );
+    assert_ne!(
+        bytes,
+        GOOD_SCRIPT.as_bytes(),
+        "previous-good must stay distinct from the download payload"
+    );
 }
 
 fn installer_block_count(body: &str) -> usize {
@@ -353,14 +439,14 @@ enum FakeHost {
 
 fn write_fake_macos_x86_host(dir: &Path, host: FakeHost) {
     let sysctl = if matches!(host, FakeHost::AppleSiliconRosetta) {
-        "#!/bin/bash\n[ \"$1\" = -n ] && [ \"$2\" = hw.optional.arm64 ] && { echo 1; exit 0; }\nexit 1\n"
+        "#!/bin/sh\n[ \"$1\" = -n ] && [ \"$2\" = hw.optional.arm64 ] && { echo 1; exit 0; }\nexit 1\n"
     } else {
-        "#!/bin/bash\nexit 1\n"
+        "#!/bin/sh\nexit 1\n"
     };
     for (name, body) in [
         (
             "uname",
-            "#!/bin/bash\ncase \"$1\" in -s) echo Darwin ;; -m) echo x86_64 ;; *) echo Darwin ;; esac\n",
+            "#!/bin/sh\ncase \"$1\" in -s) echo Darwin ;; -m) echo x86_64 ;; *) echo Darwin ;; esac\n",
         ),
         ("sysctl", sysctl),
     ] {
@@ -381,14 +467,14 @@ fn install_urls_on_fake_host(script: &str, host: FakeHost) -> Option<String> {
     let url_log = fakedir.path().join("urls.log");
 
     let home = tempfile::tempdir().unwrap();
-    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
-    let status = Command::new("/bin/bash")
+    let path_env = path_with_fakebin(fakedir.path());
+    let status = Command::new(bash_program())
         .arg(&script_file)
         .arg("0.1.181")
         .env_clear()
         .env("HOME", home.path())
         .env("PATH", path_env)
-        .env("SHELL", "/bin/bash")
+        .env("SHELL", bash_program())
         .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
         .env("GROK_CHANNEL", "stable")
         .env("GROK_DEPLOYMENT_KEY", "test-deployment-key")
@@ -499,5 +585,157 @@ fn install_sh_shell_rc_rewrite_matrix() {
 
     for case in &cases {
         run_shell_rc_case(case);
+    }
+}
+
+/// Named contract: a published SHA-256 that does not match the downloaded
+/// bytes must refuse the install. The binary may still run (`--version`
+/// would pass); SHA-256 is the pin, not the smoke test. Previous-good stays.
+#[test]
+fn install_scripts_refuse_when_sha256_does_not_match() {
+    for script in INSTALL_SCRIPTS {
+        let Some(path) = script_path(script) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        let platform = host_platform();
+        let fakedir = tempfile::tempdir().unwrap();
+        write_fake_curl(fakedir.path());
+        let home = tempfile::tempdir().unwrap();
+        let prev = seed_previous_good(home.path(), &platform);
+
+        let ok = run_installer(&path, home.path(), fakedir.path(), "mismatch", "/bin/bash");
+        assert!(
+            !ok,
+            "{script} must refuse a download whose SHA-256 does not match the published checksum"
+        );
+        assert_active_grok_runs(home.path());
+        let link = home.path().join(".grok").join("bin").join("grok");
+        let resolved = dunce::canonicalize(&link).unwrap();
+        assert_eq!(
+            resolved, prev,
+            "{script}: SHA-256 mismatch must keep the previous-good binary"
+        );
+        assert_previous_good_payload(home.path(), &platform);
+    }
+}
+
+/// Named contract: no published SHA-256 file means fail-closed. Do not
+/// install an unverified blob. Not SHA-1.
+#[test]
+fn install_scripts_refuse_when_sha256_checksum_file_is_missing() {
+    for script in INSTALL_SCRIPTS {
+        let Some(path) = script_path(script) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        let platform = host_platform();
+        let fakedir = tempfile::tempdir().unwrap();
+        write_fake_curl(fakedir.path());
+        let home = tempfile::tempdir().unwrap();
+        seed_previous_good(home.path(), &platform);
+
+        let ok = run_installer(
+            &path,
+            home.path(),
+            fakedir.path(),
+            "no_checksum",
+            "/bin/bash",
+        );
+        assert!(
+            !ok,
+            "{script} must refuse a download when the published SHA-256 file is missing"
+        );
+        assert_active_grok_runs(home.path());
+        assert_previous_good_payload(home.path(), &platform);
+    }
+}
+
+/// Named contract: an unreadable published checksum (empty, not 64 hex,
+/// tagged openssl form, 63-char hex) is fail-closed. Not SHA-1.
+#[test]
+fn install_scripts_refuse_when_sha256_checksum_file_is_unreadable() {
+    let bodies = [
+        "",
+        "not-a-digest\n",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n",
+        "SHA256 (grok) = 306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb\n",
+        "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\n",
+    ];
+    for script in INSTALL_SCRIPTS {
+        let Some(path) = script_path(script) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        for body in bodies {
+            let platform = host_platform();
+            let fakedir = tempfile::tempdir().unwrap();
+            write_fake_curl(fakedir.path());
+            let home = tempfile::tempdir().unwrap();
+            seed_previous_good(home.path(), &platform);
+
+            let ok = run_installer_env(
+                &path,
+                home.path(),
+                fakedir.path(),
+                "bad_checksum",
+                "/bin/bash",
+                &[("FAKE_CHECKSUM_BODY", body)],
+            );
+            assert!(
+                !ok,
+                "{script} must refuse an unreadable SHA-256 checksum file (body {body:?})"
+            );
+            assert_active_grok_runs(home.path());
+            assert_previous_good_payload(home.path(), &platform);
+        }
+    }
+}
+
+/// Happy path plus URL contract: matching SHA-256 installs, and both
+/// scripts fetch the published `.sha256` next to the binary.
+#[test]
+fn install_scripts_fetch_published_sha256_and_install_when_it_matches() {
+    for script in INSTALL_SCRIPTS {
+        let Some(path) = script_path(script) else {
+            eprintln!("skipping: {script} not found relative to crate; run under cargo");
+            return;
+        };
+        let platform = host_platform();
+        let fakedir = tempfile::tempdir().unwrap();
+        write_fake_curl(fakedir.path());
+        let url_log = fakedir.path().join("urls.log");
+        let home = tempfile::tempdir().unwrap();
+        seed_previous_good(home.path(), &platform);
+
+        let path_env = path_with_fakebin(fakedir.path());
+        let status = Command::new(bash_program())
+            .arg(&path)
+            .arg("0.1.181")
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", path_env)
+            .env("SHELL", bash_program())
+            .env("GROK_BIN_DIR", home.path().join(".grok").join("bin"))
+            .env("GROK_CHANNEL", "stable")
+            .env("GROK_DEPLOYMENT_KEY", "test-deployment-key")
+            .env("FAKE_MODE", "full")
+            .env("FAKE_URL_LOG", &url_log)
+            .status()
+            .expect("spawn bash install script");
+        assert!(
+            status.success(),
+            "{script} must install when the published SHA-256 matches"
+        );
+        assert_active_grok_runs(home.path());
+        let urls = std::fs::read_to_string(&url_log).unwrap_or_default();
+        assert!(
+            urls.contains(".sha256"),
+            "{script} must fetch a published SHA-256 checksum file, urls:\n{urls}"
+        );
+        assert!(
+            !urls.contains(".sha1"),
+            "{script} must not fetch SHA-1 checksums, urls:\n{urls}"
+        );
     }
 }

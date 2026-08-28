@@ -1058,6 +1058,22 @@ mod tests {
         detach_command(&mut cmd);
     }
 
+    const HANG_CHILD_ENV: &str = "__XAI_TTY_UTILS_HANG_CHILD";
+
+    /// Hang until killed. Spawned by
+    /// [`detach_search_command_kills_child_on_drop`] via `current_exe` so the
+    /// Nix sandbox does not need `/bin/sleep` on PATH.
+    #[cfg(unix)]
+    #[test]
+    fn detach_search_hang_body() {
+        if std::env::var(HANG_CHILD_ENV).is_err() {
+            return;
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
     /// Pins the mechanism every search-tool spawn site relies on: the child is
     /// detached into its own process group and killed when its `Child` drops.
     #[cfg(unix)]
@@ -1068,11 +1084,21 @@ mod tests {
             .build()
             .expect("runtime");
         rt.block_on(async {
-            let mut cmd = tokio::process::Command::new("/bin/sleep");
-            cmd.arg("30");
+            let exe = std::env::current_exe().expect("current_exe");
+            let mut cmd = tokio::process::Command::new(&exe);
+            cmd.arg("--exact")
+                .arg("tests::detach_search_hang_body")
+                .arg("--test-threads=1")
+                .env(HANG_CHILD_ENV, "1")
+                .env_remove("TEST_SHARD_INDEX")
+                .env_remove("TEST_TOTAL_SHARDS")
+                .env_remove("TEST_SHARD_STATUS_FILE")
+                .env_remove("TESTBRIDGE_TEST_ONLY")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
             detach_search_command(&mut cmd);
             #[allow(clippy::disallowed_methods)] // test child, killed on drop below
-            let child = cmd.spawn().expect("spawn sleep");
+            let child = cmd.spawn().expect("spawn hang child");
             let pid = child.id().expect("child pid");
 
             // The pre_exec setsid lands between fork and exec; poll until the
@@ -1084,7 +1110,7 @@ mod tests {
             {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "sleep (pid {pid}) stayed in our process group — not detached"
+                    "child (pid {pid}) stayed in our process group — not detached"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -1094,7 +1120,7 @@ mod tests {
             while !process_not_running(pid) {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "sleep (pid {pid}) still running 5s after its Child was dropped — leaked"
+                    "child (pid {pid}) still running 5s after its Child was dropped — leaked"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }

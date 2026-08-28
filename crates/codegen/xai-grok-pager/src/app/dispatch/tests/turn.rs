@@ -2537,10 +2537,13 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
 /// toast **Continuing interrupted turn** and emit SendPrompt of the marker
 /// text. This is continue interrupted turn, not `/resume` session pick.
 #[test]
+#[serial_test::serial(GROK_HOME)]
 fn session_loaded_applies_cancel_resume_marker_and_toasts() {
     use crate::app::actions::TaskResult;
     use agent_client_protocol as acp;
 
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let sid = "load-resume-sess";

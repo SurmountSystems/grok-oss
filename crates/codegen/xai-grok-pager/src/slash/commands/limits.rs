@@ -231,6 +231,13 @@ mod tests {
 
         let home = TempDir::new().expect("temp grok home");
         let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let store =
+            xai_grok_shell::auth::credentials_store::CredentialsStore::at_grok_home(home.path());
+        xai_grok_shell::auth::store_console_api_key(&store, "slash-share-words-console-key")
+            .expect("store console key so use-console can pin");
 
         let stay = crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK;
         let use_console = crate::limits_cmd::LIMITS_WORD_USE_CONSOLE;

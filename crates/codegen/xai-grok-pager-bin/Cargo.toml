@@ -71,13 +71,11 @@ libc = { workspace = true }
 # `stats` is binary-scoped only (not workspace-wide) so this CLI jemalloc
 # link gets --enable-stats for stats.allocated / stats.resident mallctl.
 tikv-jemallocator = { workspace = true, optional = true, features = ["stats"] }
-# Raw mallctl for the memory-cliff arena purge hook (see
-# `purge_jemalloc_retained_pages` + the `install_release_hook` call in
-# main.rs). Same version family as the
-# allocator; adds no new build units beyond what tikv-jemallocator pulls in.
+# Raw mallctl for arena purge, stats.*, epoch, and prof.* (see
+# `purge_jemalloc_retained_pages` and mallctl helpers in main.rs).
+# Same version family as the allocator; already pulled in by
+# tikv-jemallocator.
 tikv-jemalloc-sys = { workspace = true, optional = true }
-# Heap-profile / stats mallctl helpers (prof.active, prof.dump, epoch, stats.*).
-tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "use_std"] }
 
 [dev-dependencies]
 serial_test = { workspace = true }
@@ -96,7 +94,7 @@ default-bazel = [
     "sandbox-enforce",
     "local-workspace",
     ]
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 local-workspace = ["xai-grok-pager/local-workspace"]
 release-dist = ["xai-grok-pager/release-dist"]

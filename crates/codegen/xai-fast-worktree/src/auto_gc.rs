@@ -362,6 +362,7 @@ fn build_auto_gc_options_with_dry_run(
         protect_paths,
         skip_kinds: vec![],
         max_age_by_kind,
+        now_secs: None,
     }
 }
 
@@ -433,7 +434,10 @@ pub fn maybe_auto_gc(db: &WorktreeDb, auto_opts: &AutoGcOptions) -> Result<AutoG
         protect_paths.push(cwd);
     }
 
-    let gc_opts = build_auto_gc_options_with_dry_run(auto_opts, protect_paths, dry_run);
+    let mut gc_opts = build_auto_gc_options_with_dry_run(auto_opts, protect_paths, dry_run);
+    // Same clock as this pass's rebuild `last_accessed_at` so max_age=0 does
+    // not age-delete a just-registered tree after a slow discovery.
+    gc_opts.now_secs = Some(now);
     let age_expiry_enabled = age_path_enabled(&gc_opts);
     debug_assert!(!gc_opts.force);
 

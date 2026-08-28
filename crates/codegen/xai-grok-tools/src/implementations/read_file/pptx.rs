@@ -113,7 +113,9 @@ fn extract_drawingml_text(xml: &str) -> Result<String, String> {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"t" => in_text_run = true,
             Ok(Event::Text(e)) if in_text_run => {
-                let content = e.xml_content().map_err(|e| e.to_string())?;
+                // DrawingML is XML 1.0. quick-xml 0.40 made `xml_content` take
+                // `XmlVersion`; `xml10_content` is the same EOL rules as 0.38.
+                let content = e.xml10_content().map_err(|e| e.to_string())?;
                 text.push_str(&content);
             }
             // quick-xml ≥0.37 emits `&amp;` / `&#233;` as separate events

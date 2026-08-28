@@ -1,0 +1,27 @@
+name: Bash
+file_extensions: [sh, bash, zsh, ksh]
+scope: source.shell
+contexts:
+  main:
+    - match: '\b(if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|exit|export|local|readonly|source|alias|unset)\b'
+      scope: keyword.control.shell
+    - match: '#'
+      push: comment
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+  comment:
+    - meta_scope: comment.line.number-sign.shell
+    - match: '$'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.shell
+    - match: '\\.'
+      scope: constant.character.escape.shell
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.shell
+    - match: "'"
+      pop: true

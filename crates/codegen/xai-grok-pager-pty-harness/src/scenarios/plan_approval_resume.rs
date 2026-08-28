@@ -16,8 +16,9 @@
 //! into the composer or the plan pane box. Empty `?` still arms Clarify.
 //! Empty Enter never Approves. A live mid-turn `exit_plan_mode` still
 //! auto-opens the plan side panel. Resume / `--continue` parks the waiter
-//! and shows the idle click cue. Open the pane with `/view-plan` or a
-//! status click before Approve. Product approve path:
+//! without docking and without painting idle "Plan written. Click or
+//! /view-plan" while the pane is shut. Open the pane with `/view-plan` or
+//! a status click before Approve. Product approve path:
 //!
 //! 1. **Mouse** click on the painted footer **Approve** word (primary)
 //!
@@ -121,17 +122,20 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     .context("spawn resumed pager")?;
 
     // The shell re-parks `exit_plan_mode` on resume as a live waiter.
-    // Restore must not auto-dock the side panel. Success is the idle click
-    // cue (or `/view-plan`). Live mid-turn present still auto-opens.
-    wait_for_any_text(
-        &mut resumed,
-        &["Plan written. Click or /view-plan", "Plan ready for review"],
-        WELCOME_TIMEOUT,
-    )
-    .context("restored plan waiter after resume (idle cue, not Side panel open)")?;
+    // Restore must not auto-dock the side panel and must not paint the
+    // shut-panel idle click cue. Session restore is the ready signal;
+    // `/view-plan` binds Approve. Live mid-turn present still auto-opens.
+    wait_for_any_text(&mut resumed, &[SETUP_SENTINEL], WELCOME_TIMEOUT)
+        .context("restored session after resume (not idle Plan written chrome)")?;
     if resumed.contains_text("Plan ready. Side panel open") {
         bail!(
             "resume must not auto-dock the plan side panel\n{}",
+            resumed.screen_contents()
+        );
+    }
+    if resumed.contains_text("Plan written. Click or /view-plan") {
+        bail!(
+            "resume must not idle as Plan written. Click or /view-plan while the pane is shut\n{}",
             resumed.screen_contents()
         );
     }

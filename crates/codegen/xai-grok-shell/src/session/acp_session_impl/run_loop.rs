@@ -1182,7 +1182,7 @@ pub(super) async fn run_session(
                                                 false,
                                             )
                                         }
-                                        Err(()) => {
+                                        Err(_) => {
                                             crate::extensions::notification::PromptUsage::for_error_path(
                                                 None, true,
                                             )

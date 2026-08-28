@@ -100,42 +100,12 @@ fn fake_managed_install(version: &str) {
     .unwrap();
 }
 
-/// Fake `gh` that logs argv to `<dir>/gh-args.log`, answers
-/// `release list --exclude-pre-releases` from `<dir>/gh-stable-only-stdout`,
-/// and for `release download ... --output <path>` writes a smoke-passing
-/// artifact to the output path.
-fn fake_gh_serving_releases(dir: &std::path::Path) -> String {
-    let dq = format!("'{}'", dir.to_string_lossy().replace('\'', "'\\''"));
-    format!(
-        r#"#!/bin/sh
-echo "$@" >> {dq}/gh-args.log
-case "$*" in
-  *"release list"*)
-    if [ -f {dq}/gh-stable-only-stdout ]; then cat {dq}/gh-stable-only-stdout; fi
-    ;;
-  *"release download"*)
-    out=""
-    prev=""
-    for a in "$@"; do
-      if [ "$prev" = "--output" ]; then out="$a"; fi
-      prev="$a"
-    done
-    if [ -n "$out" ]; then
-      printf '#!/bin/sh\nexit 0\n' > "$out"
-      chmod +x "$out"
-    fi
-    ;;
-esac
-exit 0
-"#
-    )
-}
-
-/// Count `release download` invocations in the fake gh's argv log.
+/// Count binary `release download` invocations. The SHA-256 pin also
+/// fetches `${artifact}.sha256`; that extra download is not this count.
 fn gh_download_count(g: &FakeBinGuard) -> usize {
     g.args_log()
         .iter()
-        .filter(|l| l.contains("release download"))
+        .filter(|l| l.contains("release download") && !l.contains(".sha256"))
         .count()
 }
 
@@ -145,7 +115,7 @@ fn setup_gh_release(running_version: &str) -> FakeBinGuard {
     set_test_version(running_version);
     // SAFETY: serial_test ensures no race; reset_home clears this between tests.
     unsafe { std::env::set_var("GROK_INSTALLER", "gh-release") };
-    FakeBinGuard::install("gh", fake_gh_serving_releases)
+    FakeBinGuard::install_gh_serving_releases()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

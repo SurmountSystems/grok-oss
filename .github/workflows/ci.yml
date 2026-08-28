@@ -100,7 +100,7 @@ jobs:
           while true; do
             echo "==> quality attempt ${n}/${attempts}"
             set +e
-            nix shell .#just -c just flake-meta
+            nix shell .#just .#grok-nix-helper -c just flake-meta
             status=$?
             set -e
             if [[ "${status}" -ne 0 ]]; then
@@ -114,7 +114,7 @@ jobs:
               continue
             fi
             set +e
-            nix shell .#just -c just ci-prep
+            nix shell .#just .#grok-nix-helper -c just ci-prep
             status=$?
             set -e
             if [[ "${status}" -ne 0 ]]; then
@@ -132,6 +132,6 @@ jobs:
               continue
             fi
             # Cargo quality payload once (no outer retry of permanent fails).
-            nix shell .#just -c just test
+            nix shell .#just .#grok-nix-helper -c just test
             exit $?
           done

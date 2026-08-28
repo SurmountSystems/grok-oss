@@ -4,6 +4,10 @@
 //! **not** use the SpaceXAI auto-updater channel. Install default is
 //! `just install` → `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`.
 //!
+//! Identity SHA in `version (sha)` is a **git object id**, not a SHA-1
+//! security hash of a downloaded artifact. Verify is `binary --version`.
+//! Failed verify must not signal peers.
+//!
 //! After install it:
 //! 1. Soft-signals reachable leaders (`RelaunchForUpdate`).
 //! 2. Writes a cooperative rebuild-relaunch request under `$GROK_HOME`.
@@ -883,6 +887,9 @@ pub fn run_install_with_progress(
 }
 
 /// Run `binary --version` and parse an identity string (`0.1.100 (sha)`).
+///
+/// The parenthetical SHA is a git object id, not a SHA-1 digest of the
+/// binary bytes.
 pub fn verify_installed_identity(binary: &Path) -> Result<String> {
     let output = Command::new(binary)
         .arg("--version")
@@ -1822,6 +1829,7 @@ mod tests {
     }
 
     /// Contract: same package + different git SHA is a rebuild peers must accept.
+    /// The parenthetical tokens are fake git object ids, not SHA-1 download hashes.
     #[test]
     fn peer_relaunch_accepts_same_semver_different_sha() {
         let req = make_rebuild_relaunch_request(
@@ -1830,7 +1838,7 @@ mod tests {
             1_000,
         );
         assert!(should_peer_relaunch_for_request_with_current_exe(
-            "0.2.120 (oldsha1)",
+            "0.2.120 (oldgitsha)",
             &req,
             1_000,
             Some(Path::new("/tmp/grok-oss-new")),
@@ -1885,7 +1893,7 @@ mod tests {
         );
         let now = 1_000 + REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS + 1;
         assert!(!should_peer_relaunch_for_request_with_current_exe(
-            "0.2.120 (oldsha1)",
+            "0.2.120 (oldgitsha)",
             &req,
             now,
             Some(Path::new("/tmp/grok-oss-old")),

@@ -1322,8 +1322,10 @@ mod tests {
         let theme = Theme::current();
         const BODY: &str = "No timestamps visible here :(";
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt(BODY));
-        let mut appearance = AppearanceConfig::default();
-        appearance.show_timestamps = true;
+        let appearance = AppearanceConfig {
+            show_timestamps: true,
+            ..Default::default()
+        };
         let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
 
         let width: u16 = 160;
@@ -1381,8 +1383,10 @@ mod tests {
         let theme = Theme::current();
         const BODY: &str = "HELLOCOPYLAYOUT";
         let entry = ScrollbackEntry::new(RenderBlock::agent_message(BODY));
-        let mut appearance = AppearanceConfig::default();
-        appearance.show_timestamps = true;
+        let mut appearance = AppearanceConfig {
+            show_timestamps: true,
+            ..Default::default()
+        };
         appearance.scrollback.display.bubble_copy_buttons = true;
         let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
 
@@ -1438,8 +1442,10 @@ mod tests {
         fn assert_cluster(kind: &str, block: RenderBlock, content_row: u16) {
             let theme = Theme::current();
             let entry = ScrollbackEntry::new(block);
-            let mut appearance = AppearanceConfig::default();
-            appearance.show_timestamps = true;
+            let mut appearance = AppearanceConfig {
+                show_timestamps: true,
+                ..Default::default()
+            };
             appearance.scrollback.display.bubble_copy_buttons = true;
             let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
 

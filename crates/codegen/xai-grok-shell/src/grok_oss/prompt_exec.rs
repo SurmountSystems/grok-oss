@@ -138,11 +138,11 @@ impl HonestWorkClock {
     }
 
     pub(crate) fn work_ms_at(&self, now: DualClock) -> u64 {
-        let mut reconnect = self.reconnect_ms;
-        if let Some(paused) = self.reconnect_started {
-            reconnect = reconnect.saturating_add(honest_work_ms(paused, now, 0));
-        }
-        honest_work_ms(self.started, now, reconnect)
+        // Freeze at the pause instant. Subtracting two independently floored
+        // millis spans (started→now minus paused→now) can tick work_ms by 1
+        // while paused.
+        let end = self.reconnect_started.unwrap_or(now);
+        honest_work_ms(self.started, end, self.reconnect_ms)
     }
 }
 
@@ -537,6 +537,32 @@ mod tests {
             "3s reconnect while awake must not count as work"
         );
         assert_eq!(honest_work_ms(start, done, 3_000), 7_000);
+    }
+
+    /// Paused work_ms must freeze even when started→now millis and paused→now
+    /// millis truncate independently (`floor(x+y) - floor(y)` can be `floor(x)+1`).
+    #[test]
+    fn paused_work_ms_does_not_tick_across_millis_truncation() {
+        let start = DualClock::now();
+        let to_pause = Duration::from_micros(13_700);
+        let paused_gap = Duration::from_micros(50_400);
+        let pause = DualClock {
+            mono: start.mono + to_pause,
+            wall: start.wall + to_pause,
+        };
+        let later = DualClock {
+            mono: start.mono + to_pause + paused_gap,
+            wall: start.wall + to_pause + paused_gap,
+        };
+        let mut clock = HonestWorkClock::start_at(start);
+        clock.pause_reconnect_at(pause);
+        let paused_ms = clock.work_ms_at(pause);
+        assert_eq!(paused_ms, 13, "13.7ms truncates to 13ms at pause");
+        assert_eq!(
+            clock.work_ms_at(later),
+            paused_ms,
+            "toast-to-reload interval must not tick honest work_ms"
+        );
     }
 
     /// Start inserts a prompt_task ULID and finish writes exec metrics. Missing

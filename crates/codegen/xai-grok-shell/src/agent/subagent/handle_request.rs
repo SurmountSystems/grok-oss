@@ -1670,7 +1670,7 @@ pub(crate) async fn run_shell_child(
                     Some(total_tokens),
                 )
             }
-            Err(()) => (None, true, None, None),
+            Err(_) => (None, true, None, None),
         };
     result.total_tokens_used = total_tokens_used.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = task_budget_usage {

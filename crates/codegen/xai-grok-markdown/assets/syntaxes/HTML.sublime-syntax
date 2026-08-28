@@ -1,0 +1,25 @@
+name: HTML
+file_extensions: [html, htm]
+scope: text.html.basic
+contexts:
+  main:
+    - match: '<!--'
+      push: comment
+    - match: '</?[A-Za-z][\w:-]*'
+      scope: entity.name.tag.html
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+  comment:
+    - meta_scope: comment.block.html
+    - match: '-->'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.html
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.html
+    - match: "'"
+      pop: true

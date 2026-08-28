@@ -47,15 +47,16 @@ different.” **Expected.** Treat them as a **tree feed**, not shared ancestry.
 
 **Maintainer jobs** (do not confuse them):
 
-| Job | Script | Result |
-|-----|--------|--------|
-| **Import**: their tree into Surmount history | `./scripts/import-upstream-export.sh` | `import/*` review branch → PR to `main` |
-| **Stack on tip**: our product commits on their tip | `./scripts/put-history-on-xai.sh` | `onto-xai/*` (real **cherry-pick**; no `MODE=overlay`) |
-| **Join `main` into onto**: landable graph | `./scripts/join-main-into-onto.sh` | same tip; `main` becomes ancestor; **tree kept** (`-s ours`) → PR |
+| Job | Command | Result |
+|-----|---------|--------|
+| **Import**: their tree into Surmount history | `grok-nix-helper import-upstream-export` | `import/*` review branch → PR to `main` |
+| **Stack on tip**: our product commits on their tip | `grok-nix-helper put-history-on-xai` | `onto-xai/*` (real **cherry-pick**; no `MODE=overlay`) |
+| **Join `main` into onto**: landable graph | `grok-nix-helper join-main-into-onto` | same tip; `main` becomes ancestor; **tree kept** (`-s ours`) → PR |
 
 When histories keep breaking: **stack product on their tip**, then **join
 Surmount `main`** (`-s ours`) so GitHub compare/PR works, then PR to `main`.
-Detect: `./scripts/detect-upstream-export.sh` or `just upstream-detect`.
+Detect: `grok-nix-helper detect-upstream-export` or `just upstream-detect`.
+The helper prepares git state. A human TTY signs: `git commit -S`.
 
 Full process: [`docs/upstream-history.md`](docs/upstream-history.md)
 Import log: [`docs/upstream-import-log.md`](docs/upstream-import-log.md)
@@ -369,8 +370,11 @@ identifier that has no matching `fn`.
   `xai-`); cooldowns under `~/.grok/rate_limits/`; optional
   `GROK_DISABLE_SHARED_RATE_LIMIT=1`. Path-restored (`FORK_PATHS`).
 - [x] **Updates**: no xAI auto-update channel by default (wrong product).
-  `grok-oss update --check` compares to Surmount `main`. Escape hatch:
-  `GROK_OSS_ENABLE_XAI_UPDATER=1`. FORK claims; not a land class.
+  `grok-oss update --check` compares to Surmount `main` using **git object
+  ids** (40-hex SHA-1 on today's repos, or a future git SHA-256 object id).
+  That compare is not a SHA-1 security hash of a download or a Nix FOD.
+  Escape hatch: `GROK_OSS_ENABLE_XAI_UPDATER=1`. FORK claims; not a land
+  class.
 - [x] **`/rebuild` is SHA-aware peer relaunch**: local `just install`, not an
   xAI download. Verify package version plus git SHA. Same semver plus a
   different SHA is newer. Failed install must not replace the binary or
@@ -424,14 +428,19 @@ identifier that has no matching `fn`.
   Tests: `finish_empty_args_injects_postmortem_skill`,
   `finish_registered_in_builtins`,
   `finish_skill_copy_does_not_say_work_is_closed_forever`.
-- [x] **`/what` four-line restatement**: pager builtin injects the host
-  overlay skill `~/.agents/skills/what/SKILL.md` (User tier). Same shape as
-  `/finish` and `/reports`. Not a product skill pack in the grok-oss git
-  tree. Do not recreate repo `.agents/skills/what/`. Not an apology. Reply
-  shape is Job, State, You, Next. Not `/recap`, not `/finish`, not
-  `/reports`. Tests: `what_empty_args_injects_what_skill`,
-  `what_registered_in_builtin_commands`,
-  `what_registered_in_builtins`.
+- [x] **`/what` restatement (CATE, 2026-08-27):** default Grok OSS skill at
+  `crates/codegen/xai-grok-bundle/skills/what/SKILL.md`, installed into
+  `~/.grok/bundled/skills/what/`. Live cache is not the source. Do not
+  recreate repo `.agents/skills/what/`. Not an apology. Reply shape is
+  four complete thoughts: What we are doing, What is true right now,
+  What you need to do, What I will do next. Follow
+  `0005_CATE.md`. When the operator asks to revise a skill in grok-oss,
+  edit `crates/codegen/xai-grok-bundle/skills/` and keep named tests so
+  skill maintenance cannot drop it. Tests:
+  `what_empty_args_injects_what_skill`,
+  `what_registered_in_builtin_commands`, `what_registered_in_builtins`,
+  `default_product_skills_include_polish_and_subagent` (names include
+  `what`).
 - [x] **Queue `/compaction` / `/plan` / `/reports` / `/finish`**: named hold
   on the existing composer prompt queue (`/queue <slash>` or first-arg
   `queue`/`later`). Not a second queue. Immediate invoke stays. `/compaction`
@@ -776,33 +785,220 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 
 ### Packaging and build
 
+- [x] **syntect path patch drops dump-load bincode (RUSTSEC-2025-0141).**
+  Workspace `[patch.crates-io]` is `third_party/syntect` (5.3.0). `parsing`
+  does not enable dump-load/dump-create. yaml-load uses yaml-rust2. Markdown
+  ships `.sublime-syntax` files and yaml-loads them. two-face dump binaries
+  are gone. Named tests stay:
+  `highlight_lines_for_fence_info_still_accepts_rust_token`,
+  `highlight_lines_for_fence_info_resolves_citation_path_to_rust`,
+  `highlight_lines_for_token_json_from_bundled_syntax`. Advisory:
+  [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html)
+  (accessed: 2026-08-27).
+- [x] **async-openai path patch keeps `ReasoningEffort::Max` without `backoff`.**
+  Workspace `[patch.crates-io]` is `third_party/async-openai` (0.33.1 plus
+  Max from our-forks rev `95b52ebdedf42143083cf3d6f0e0be7c84e9c808`).
+  crates.io 0.41 dropped Max. Named tests stay:
+  `test_chat_completion_request_carries_reasoning_effort_top_level`,
+  `xai-grok-sampling-types` Responses/messages effort maps, pager
+  `effort_levels`. Retry 429 / 5xx uses `tokio::time`, not `backoff` 0.4
+  ([RUSTSEC-2025-0012](https://rustsec.org/advisories/RUSTSEC-2025-0012.html),
+  accessed: 2026-08-27) / `instant`
+  ([RUSTSEC-2024-0384](https://rustsec.org/advisories/RUSTSEC-2024-0384.html),
+  accessed: 2026-08-27). Not a workspace member. Operator can later push
+  this tree to our-forks and switch the patch back to git+rev.
 - [x] **AUR** sources under `packaging/aur/`
 - [x] **Nix flake**: `nix build .#grok-oss`, dev shells (human packaging, not
-  GHA release artifacts). `flake.nix` is in `FORK_PATHS`.
-- [x] **Rust 1.97.1 (file pin only; not cargo-proven)**: project
-  `rust-toolchain.toml` channel `1.97.1` plus matching fenix FOD in
-  `flake.nix`. After an upstream export that still lists 1.94.x, keep
-  Surmount **1.97.1** unless the operator chooses another channel.
+  GHA release artifacts). `flake.nix` and `flake/` are in `FORK_PATHS`.
+- [x] **Rust 1.98.0 (file pin only; not cargo-proven)**: project
+  `rust-toolchain.toml` channel `stable` (current rust-stable 1.98.0) plus
+  matching fenix FOD in `flake/rust-toolchain.nix` (`channel-rust-stable.toml`). After an
+  upstream export that still lists 1.94.x, keep Surmount **stable / 1.98.0**
+  unless the operator chooses another channel.
   **`rust-toolchain.toml` is not in `FORK_PATHS`.** Import can keep the flake
   and take upstream's toolchain file. There is no cargo `fn` that asserts
-  channel `1.97.1`. Do not add rustc 1.97.1 as a cargo land class until a
+  channel `1.98.0`. Do not add rustc 1.98.0 as a cargo land class until a
   named test or assert sniff exists. Report:
   [`.agents/reports/impl-toolchain-1971-2026-08-12.md`](.agents/reports/impl-toolchain-1971-2026-08-12.md)
 - [x] **justfile**: `just check` / `just ci` full quality gate; `just test`
-  for the cargo quality suite
+  for the cargo quality suite; `just update` refreshes the one workspace
+  `Cargo.lock` plus `flake.lock`
+- [x] **justfile helper bootstrap (pinned 2026-08-26).** `just require_system`
+  and `just current_system` are a justfile CI_SYSTEM/uname check. They must
+  not require a prebuilt `grok-nix-helper` and must not tell the operator to
+  realize `.#grok-nix-helper` first. `just check-remote` / `just
+  require_remote_builder` are justfile/uname/SSH preflight. They must not
+  `nix build .#grok-nix-helper` (that realize copies gigabytes and contends
+  the ssh-ng upload lock). **`just nix_retry` / `just flake-meta` / the
+  `just check-remote` metadata step must not require `grok_nix_helper_bin`.**
+  The live `nix_retry` body is the justfile recipe: argv exec of `"$@"`,
+  fail-fast on quality/SSH, force-remote flags when
+  `GROK_NIX_FORCE_REMOTE=1`. Missing helper must not fail `just
+  check-remote`. Do not tell the operator to realize `.#grok-nix-helper`
+  first. `grok_helper` assigns the helper path before exec
+  (bash `set -e` does not stop `exec "$(failing-cmd)"`; that became
+  `exec: : not found`). Locate order for later recipes that still need the
+  helper (`cargo-remote` / `test-remote`, recon): `GROK_NIX_HELPER`, PATH,
+  `result/bin`, crate target. Never cargo/rustc the helper on this laptop.
+  Never nix-build the helper from `grok_nix_helper_bin`. Named tests in
+  grok-nix-helper `justfile_contracts`:
+  `require_system_and_current_system_do_not_require_helper_binary`,
+  `nix_retry_flake_meta_and_check_remote_do_not_require_helper_binary`,
+  `grok_helper_does_not_exec_empty_helper_path`,
+  `grok_nix_helper_bin_locate_order_does_not_cargo_on_force_remote`,
+  `check_remote_exports_force_remote_before_require_remote_builder`,
+  `require_remote_builder_is_justfile_preflight_without_helper`,
+  `check_remote_and_require_remote_builder_do_not_nix_build_helper`.
 - [x] **release-dist debug sidecar**: `just build-dist` / `just install-dist`
   build with `--profile release-dist` (strip=false, debug=1), extract DWARF to
-  `grok-oss.debug` via `scripts/extract-debug-sidecar.sh`, strip the binary,
+  `grok-oss.debug` via `grok-nix-helper extract-debug-sidecar`, strip the binary,
   embed GNU debuglink. Plain `just install` stays local `--release` + strip
   (no sidecar).
+- [x] **Workspace lock matches member manifests; cargo-mem-guard and grok-nix-helper are members (pinned 2026-08-27).**
+  They are workspace members (not `exclude`). One root `Cargo.lock`. Isolated
+  crane builds stay fileset-rooted
+  ([`flake/grok-nix-helper.nix`](flake/grok-nix-helper.nix),
+  [`flake/cargo-mem-guard.nix`](flake/cargo-mem-guard.nix)) so crane never
+  loads the parent workspace `Cargo.toml`. Quality
+  `.#workspace-cargo-quality` deps (`workspaceCargoArtifacts`) runs
+  `cargo check --locked --all-targets` (and `cargo build --locked`). Do
+  **not** drop `--locked` to go green. When a workspace member
+  `Cargo.toml` adds a dependency, refresh the root `Cargo.lock` so that
+  check succeeds. Workspace `--workspace --all-targets` clippy and nextest
+  include those crates. Named tests in grok-nix-helper
+  `justfile_contracts`:
+  `workspace_root_members_include_cargo_mem_guard_and_grok_nix_helper`,
+  `workspace_quality_deps_cargo_check_stays_locked`,
+  `workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests`.
+- [x] **Vendored bm25 uses rustc-hash, not fxhash (pinned 2026-08-27).**
+  crates.io `bm25` 2.3.2 depends on unmaintained `fxhash` 0.2.1
+  ([RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057.html),
+  accessed: 2026-08-27). There is no published bm25 bump. Workspace
+  `[patch.crates-io]` points `bm25` at [`third_party/bm25`](third_party/bm25)
+  (library-only 2.3.2, token ids via `rustc-hash`). Shell tool-search
+  named tests stay. Do not `cargo audit --ignore RUSTSEC-2025-0057`.
+  Named test: grok-nix-helper `justfile_contracts`
+  `workspace_lockfile_has_no_unmaintained_fxhash`.
+- [x] **Vendored rhai uses compact_str, not smartstring (pinned 2026-08-27).**
+  crates.io `rhai` 1.25.1 and 1.26.0 depend on unmaintained `smartstring`
+  1.0.1
+  ([RUSTSEC-2026-0249](https://rustsec.org/advisories/RUSTSEC-2026-0249.html),
+  accessed: 2026-08-27). The menhera 10-day cooldown index has 1.25.1;
+  1.26.0 does not drop smartstring. Workspace `[patch.crates-io]` and
+  workspace `rhai` point at [`third_party/rhai`](third_party/rhai)
+  (library-only 1.25.1 from the cooldown cache, `SmartString` aliases
+  `compact_str::CompactString`). Not a workspace member. xai-workflow
+  named tests stay. Do not `cargo audit --ignore RUSTSEC-2026-0249`.
+  Named test: grok-nix-helper `justfile_contracts`
+  `workspace_lockfile_has_no_unmaintained_smartstring`.
+- [x] **Yanked aes / chacha20 / spin are gone from the lockfile (pinned 2026-08-27).**
+  `cargo audit` yanked rows were `aes` 0.9.0, `chacha20` 0.10.0, `spin`
+  0.9.8 and 0.10.0. Delayed-index bumps: `aes` 0.9.2 (pdf_oxide `aes = "0.9"`),
+  `spin` 0.9.9 (multer) and 0.10.1 (pprof, crc-fast). `chacha20` 0.10.2 is
+  not on the delayed index (0.10.0 / 0.10.1 yanked for SSE2 UB in RNG and
+  legacy 64-bit counter variants; see the
+  [chacha20 changelog](https://github.com/RustCrypto/stream-ciphers/blob/master/chacha20/CHANGELOG.md),
+  accessed: 2026-08-27). Workspace `[patch.crates-io]` pins `chacha20` to
+  git tag `chacha20-v0.10.2` on `RustCrypto/stream-ciphers` (rev
+  `6b236b758a0279f64d777797514813b2cb572c8b`). Not a grok-oss path copy.
+  Nix vendor of the yanked crates.io 0.10.x did not export `ChaCha12Rng`
+  for `rand` 0.10.2. No RUSTSEC/CVE id for that yank yet;
+  RUSTSEC-2019-0029 is a different bug, patched `>= 0.2.3`. Do not
+  `cargo update` against crates.io to skip the cooldown. Named test:
+  grok-nix-helper `justfile_contracts`
+  `workspace_lockfile_has_no_yanked_aes_chacha20_spin`.
+- [x] **`aws-sdk-s3` / `lru` bump is deferred to fargo (pinned 2026-08-27).**
+  Operator order: do not bump `aws-sdk-s3` 1.141.0 to 1.144.0 in this
+  grok-oss wave. Remaining `lru` 0.16.4 (`RUSTSEC-2026-0253`) is not
+  forgotten. Resume in fargo. The delayed crate index still tops at
+  1.142.0. Do not fetch crates.io to skip that wait. fargo is not
+  specified in this tree. Dual-pin: `AGENTS.md` hard constraint 20;
+  `RESIDUAL.md` Open cargo-audit.
+- [x] **fargo must unwind grok-oss path vendoring (pinned 2026-08-27).**
+  Operator does not want grok-oss to vendor crates. Audit-wave
+  `[patch.crates-io]` path copies under `third_party/` (async-openai,
+  syntect, bm25, rhai, pdf_oxide, ttf-parser) are temporary. `chacha20`
+  is a git tag pin, not a path copy.
+  fargo replaces each with a delayed-index bump, a Surmount git fork
+  that later enters that index, or dropping the parent. Do not add more
+  path vendoring. Older mermaid/dagre copies in `third_party/` are a
+  separate history. Dual-pin: `AGENTS.md` hard constraint 21;
+  `RESIDUAL.md` Open fargo unwind.
+- [x] **Test dependencies are supply chain (pinned 2026-08-27).** A
+  vulnerability in `[dev-dependencies]`, test JWT minting, or an unused
+  test crate is still in the developer lockfile and still in `build.rs`
+  reach. Never call it irrelevant. cargo-audit findings on test deps get
+  the same remove / replace / isolate work as product deps. The
+  menhera-cooldown registry delay is defense in depth against a malicious
+  new crate version, including one that only appears in tests. Do not
+  `cargo update` against crates.io to skip that delay. **cargo-audit is
+  the start of a security pass, not the end (pinned 2026-08-27).** Also
+  check yanked crates, RUSTSEC pages, and CVEs for every remaining row
+  (warnings included). Dual-pin: `AGENTS.md` hard constraints 17 and 19.
+- [x] **SHA-1 is git object ids only; no bash-in-nix (pinned 2026-08-25).**
+  SHA-1 in this tree is for git object ids (gix, the empty-tree constant,
+  40-hex commits, `/rebuild` identity `version (git-sha)`). It is **not** a
+  security hash for downloads or Nix FODs. Artifact verify is SHA-256 or
+  minisign. POSIX `install.sh` / `install-enterprise.sh` and PowerShell
+  `install.ps1` / `install-enterprise.ps1` pin SHA-256 of the published
+  `${artifact}.sha256` file (fail-closed on miss or mismatch). Windows
+  bootstrap uses built-in `Get-FileHash -Algorithm SHA256` so it works
+  without Nix. The SpaceXAI internal auto-updater (`xai-grok-update`
+  `auto_update.rs`) pins the same published SHA-256 file, then still
+  smoke-tests `--version`. The GitHub Releases installer
+  (`install_gh_release` in `auto_update.rs`) pins SHA-256 of the
+  published `${artifact}.sha256` GitHub release asset the same way.
+  Neither hashes those bytes with SHA-1. xAI CDN must publish the
+  `.sha256` files or curl-install fails closed. GitHub Releases must
+  publish `${artifact}.sha256` assets or `install_gh_release` fails
+  closed. Those publishes are operator-owned. npm installs still use
+  npm's own integrity pin, not this published `.sha256` file. POSIX
+  install stays so a host without Nix can curl-install. Hook examples under
+  `xai-grok-hooks/examples/hooks/bin/*.sh` stay `.sh` because operators
+  write hooks in shell. Those are not bash-in-nix. Git recon is
+  `grok-nix-helper` subcommands. The helper prepares git state. A human
+  TTY signs `git commit -S`. Do not wrap old `.sh` in
+  `writeShellApplication` (no bash-in-nix). Helper logs print command names
+  and exit classes only. They must not print tokens, API keys, or secret
+  env values. The operator owns `just check-remote`. File pin / process
+  pin; not one of the seven land classes. Named crate tests:
+  `crate_manifest_does_not_depend_on_sha1_hasher`,
+  `github_error_excerpt_redacts_token_shaped_fragments_not_git_object_ids`,
+  `update_config_debug_omits_secret_values`,
+  `install_scripts_refuse_when_sha256_does_not_match`,
+  `install_scripts_refuse_when_sha256_checksum_file_is_missing`,
+  `install_scripts_refuse_when_sha256_checksum_file_is_unreadable`,
+  `install_scripts_fetch_published_sha256_and_install_when_it_matches`,
+  `windows_install_scripts_pin_published_sha256_not_sha1`,
+  `parse_sha256_file_bytes_refuses_unreadable_and_sha1`,
+  `verify_file_against_digest_refuses_mismatch_and_keeps_previous_good`,
+  `install_internal_refuses_when_sha256_does_not_match`,
+  `install_internal_refuses_when_sha256_checksum_file_is_missing`,
+  `install_internal_refuses_when_sha256_checksum_file_is_unreadable`,
+  `install_internal_installs_when_published_sha256_matches`,
+  `install_gh_release_refuses_when_sha256_does_not_match`,
+  `install_gh_release_refuses_when_sha256_checksum_file_is_missing`,
+  `install_gh_release_refuses_when_sha256_checksum_file_is_unreadable`,
+  `install_gh_release_installs_when_published_sha256_matches`. See
+  [NIST retires SHA-1](https://www.nist.gov/news-events/news/2022/12/nist-retires-sha-1-cryptographic-algorithm)
+  (accessed: 2026-08-25) and
+  [Git hash function transition](https://git-scm.com/docs/hash-function-transition)
+  (accessed: 2026-08-25). Dual-pin: [`AGENTS.md`](AGENTS.md) hard
+  constraint 16.
 
 ### Process
 
 - [x] **Process docs hierarchy**: D0 residual open-only; D1 AGENTS; D2 logs
   under `docs/upstream-*` and `doc/dev/campaigns`; D3 research / skill
   `references/`
+- [x] **Document leftover residual same turn (pinned 2026-08-25).** When a
+  plan or slice ships a first wave, remaining later-wave work goes in
+  [`RESIDUAL.md`](RESIDUAL.md) Open that same turn, in complete thoughts.
+  Chat is not enough. Do not list finished work as open. Do not omit
+  sibling paths still unfixed (example: `install.ps1` after a POSIX-only
+  pin). Dual-pin: [`AGENTS.md`](AGENTS.md) § Residual.
 - [x] **Upstream tooling**: detect / import / put-history /
-  **join-main-into-onto** / sync scripts; scheduled export watch workflow
+  **join-main-into-onto** / sync via `grok-nix-helper`; scheduled export watch workflow
 - [x] **Onto land path**: after product is on their tip, join Surmount
   `main` with `merge -s ours` so the tip is PR-able
   (`docs/upstream-history.md`, `just upstream-join-main`)
@@ -853,7 +1049,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   1|2, `cleared_todos`, `/note`). Not land classes. Reports under
   `doc/dev/research/todo-*.md` and `notes-channel-2026-07-24.md`.
 - [x] **Git recon depth**: host skill `/git-recon`; product
-  `scripts/recon-status.sh` + `just recon-status` (read-only probe); pin in
+  `grok-nix-helper recon-status` + `just recon-status` (read-only probe); pin in
   `FORK_PATHS` + `assert-process-pins`.
 - [x] **Prefer Rust tools; product skills are not a Python runtime**:
   standing preference plus land class 7. Sanitize rejects junk `.py`; archive
@@ -922,6 +1118,12 @@ cargo-remote` / `just check-remote`). Agents must not run `cargo test`,
 `cargo clippy`, `cargo build`, or rustc on this laptop for grok-oss.
 Named filters: `just test-remote` (see the CI table). `GROK_SKIP_EDIT_VERIFY`
 is the kill switch, not the default.
+
+Quality `cargo fmt --all -- --check` (`workspace-cargo-quality`) is a hard
+miss. rustfmt `Diff in` is not a flake 502. File-level rustfmt on the
+written `.rs` is how a write stays on that gate (example: wrapping
+`Result` in MCP `servers.rs` so rustfmt does not emit `Diff in`).
+`nix_retry` does not retry that class.
 
 This is product behavior. Process law (do not prove the slice by
 spawning crate-wide cargo through extra subagents; named cargo on the
@@ -1040,7 +1242,7 @@ user-guide [`08-skills.md`](crates/codegen/xai-grok-pager/docs/user-guide/08-ski
 | Source | Role |
 |--------|------|
 | Project `.agents/skills`, `.grok/skills` | Git-trackable on the branch (supported; may be empty). Not the home for `/polish` or `/subagent`. |
-| `crates/codegen/xai-grok-bundle/skills/` | In-tree Grok OSS default skills (`polish`, `subagent`). Installed into `~/.grok/bundled/skills/` on startup and after network extract. Live cache is not the source. |
+| `crates/codegen/xai-grok-bundle/skills/` | In-tree Grok OSS default skills (`polish`, `subagent`, `what`). Installed into `~/.grok/bundled/skills/` on startup and after network extract. Live cache is not the source. When the operator asks to revise a skill in grok-oss, edit this tree. Named tests are the contract so skill maintenance and upgrades cannot drop it. |
 | `~/.agents/skills` then `~/.grok/skills` | Host operator overlay (agents wins) |
 | `[skills].paths` / server inject / plugins | Config and managed dirs |
 | `~/.grok/bundled/skills` | Platform cache from network bundle sync plus installed Grok OSS defaults |
@@ -1061,10 +1263,10 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. Fail-open: a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up. Named `/limits` words and `limits_pins.json`. grok-oss limits is not xAI billing truth. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`, `user_guide_limits_names_fail_open_and_named_commands`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. Nested L2/L3 overlay Esc dismisses the view and does not cancel. | Plan honesty `fn`s under Chrome. Overlay Esc: `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four lines (Job, State, You, Next) when chat is unclear (host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (What we are doing, What is true right now, What you need to do, What I will do next) when chat is unclear. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
-| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish` and `/subagent` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). `/what` is host overlay `~/.agents/skills/what` plus pager slash, not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
+| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, and `/what` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. |
@@ -1154,14 +1356,14 @@ Process law (plain English, no bad metaphors): host + project `AGENTS.md`
 
 | Path | Import | Put-history | Join (`-s ours`) |
 |------|--------|-------------|------------------|
-| Paths in `FORK_PATHS` (AGENTS, RESIDUAL, FORK, `docs/upstream-*`, join/hermetic/assert/`recon-status` scripts, `.grok/workflows`, `.agents/skills`, `doc/dev`, `flake.nix`, ...) | **Restored** from base; post-restore `assert-process-pins` | Via cherry-picks | Tip tree kept |
+| Paths in `FORK_PATHS` (AGENTS, RESIDUAL, FORK, `docs/upstream-*`, `crates/codegen/grok-nix-helper`, `.grok/workflows`, `.agents/skills`, `doc/dev`, `flake.nix`, `flake/`, ...) | **Restored** from base; post-restore `assert-process-pins` | Via cherry-picks | Tip tree kept |
 | Product commits after seed | N/A (tree = xAI + restore) | Cherry-picked onto tip | Tip tree kept |
 | Paths **not** in `FORK_PATHS` and absent from xAI | **Dropped** | Only if stacked | Cannot backfill missing |
 | Shared user-guide / crate seams | xAI base | Conflict resolve | Tip tree only |
 | Host `~/.agents/skills`, `~/.grok/AGENTS.md` | Untouched | Untouched | Untouched |
 | `rust-toolchain.toml` | **Not** in `FORK_PATHS`; import can take upstream's file | Only if stacked | Tip tree only |
 
-Assert: `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins`.
+Assert: `grok-nix-helper assert-process-pins` or `just upstream-assert-process-pins`.
 That command proves **files exist**. It does **not** prove product contracts
 inside `xai-grok-*`. Detail: `doc/dev/research/fork-paths-hardening-2026-07-24.md`,
 `doc/dev/research/skills-survive-upstream-recon-2026-07-24.md`,
@@ -1187,7 +1389,7 @@ things that stay aligned:
    cherry-pick plus those tests.
 
 **Import restores docs and scripts only** (`FORK_PATHS`). It does not restore
-crate tests. `scripts/assert-process-pins.sh` proves files exist. It does not
+crate tests. `grok-nix-helper assert-process-pins` proves files exist. It does not
 prove contracts. **`just check` cannot fail a deleted catalog test.** A
 chrome-only inventory is a failed land. Paint-only bubble copy is a failed
 land. Reintroducing non-excepted Python under product skills is a failed land.
@@ -1197,11 +1399,22 @@ land. Reintroducing non-excepted Python under product skills is a failed land.
 Do not claim "Surmount seams survived" until this list is done. `just check`
 is quality only. It cannot fail a deleted catalog test.
 
+### Named tests are contracts (pinned 2026-08-25)
+
+A named cargo `fn` is intended product behavior. Do not reshape asserts to
+match code. Do not skip Nix-sandbox S3, MCP, or bwrap tests to go green.
+Hermeticity fixes keep that contract: PATH includes bash, `$GROK_HOME` is
+writable, TLS uses webpki roots when the OS store is empty, bwrap
+placeholders exist without dropping deny binds, and grok argv0 fixtures
+work on Nix coreutils (a multi-call binary). Land proof is those named
+`fn`s below, not a skipped subset. Process: [`AGENTS.md`](AGENTS.md) hard
+constraint 15.
+
 **Rules (not product class numbers):**
 
 - **`FORK_PATHS` restore is docs and scripts only.** Product seams inside
   `xai-grok-*` survive onto only via cherry-pick plus cargo tests.
-  `scripts/assert-process-pins.sh` proves files exist. It does not prove
+  `grok-nix-helper assert-process-pins` proves files exist. It does not prove
   contracts.
 - **A chrome-only inventory is a failed land.** Paint screenshots of rails
   and four idle plan CTAs do not prove hop keys, `/spend` ingest, unread config,
@@ -1218,7 +1431,7 @@ is quality only. It cannot fail a deleted catalog test.
 **Steps** (procedure; do not mix these into the 1-7 product count):
 
 1. Run `just upstream-assert-process-pins` (or
-   `./scripts/assert-process-pins.sh HEAD`). Files and light sniffs only.
+   `grok-nix-helper assert-process-pins HEAD`). Files and light sniffs only.
 2. Run the named cargo filters for the **seven product classes** below, plus
    the extra proven restack-droppable classes. Use existing test names. Do
    not invent a filter that is not in the tree. Do not list an identifier
@@ -1386,7 +1599,7 @@ that drops them while keeping the seven is still a seam loss):
   `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both`).
   Rank `hop_*` helpers are still not hop.
 
-**Not a cargo land class:** rustc 1.97.1 (file pin only;
+**Not a cargo land class:** rustc 1.98.0 (file pin only;
 `rust-toolchain.toml` not in `FORK_PATHS`). Stuck-retry **pager** chrome is
 not fully proven. Token Economy `/settings` table rows were not re-proven on
 2026-08-15. CLI `grok-oss rebuild` is not clap-wired. `/economic-mode` is
@@ -1417,7 +1630,7 @@ a matching `fn` first:
 
 ```bash
 just upstream-assert-process-pins
-./scripts/assert-process-pins.sh HEAD   # or onto tip
+grok-nix-helper assert-process-pins HEAD   # or onto tip
 
 # 1. CLI identity (first token grok-oss; substring "grok" is not enough)
 cargo test -p xai-grok-pager --lib -- product_version_line_uses_grok_oss_not_bare_grok \
@@ -1636,16 +1849,82 @@ Actions (supply-chain boundary). Humans package from a trusted tree when ready.
 | Command | Role |
 |---------|------|
 | **`just check`** or **`just ci`** | Full local gate (flake-meta + prep + fmt/clippy/tests): **run before push**. Stays on this machine. |
-| **`just check-remote`** | Optional. Realizes flake metadata and `.#workspace-cargo-quality` (the same full cargo gate as `just check` / `just test`: fmt, clippy, workspace nextest execution, doctests, and cargo-mem-guard, as a Nix derivation) on this host's existing remote builder. rustc requires that builder's `surmount-remote` feature (and `big-parallel`) and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. `--option system-features` that omit `big-parallel` does not stop local nixbld (the daemon still advertises `big-parallel`). Force-remote nix also passes `--cores 64` so that rustc can use the builder's cores. Workspace cargo passes `--jobs` from those cores, capped at 32 (an OOM hedge; not 2 from the package sandbox, and not a full 64 rustc processes). `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping Nix `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. That derivation uses the same cargo **dev** profile as local `just test-clippy`, not crane's default `--release` check (one rustc thread at opt-level 3; codegen-units does not parallelize `cargo check` / clippy). Nix jobs (machines-file `max-jobs`: how many derivations) are not cargo/rustc workers (jobs inside one derivation). Do not raise Nix max-jobs to fix a single busy rustc. Tiny crane vendor unpacks that prefer a local build may run here. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. |
-| **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. |
+| **`just check-remote`** | Optional. Realizes flake metadata and `.#workspace-cargo-quality` (the same full cargo gate as `just check` / `just test`: fmt, then workspace clippy `--all-targets` (members include cargo-mem-guard and grok-nix-helper), then workspace nextest execution, then doctests, as a Nix derivation) on this host's existing remote builder. rustc requires that builder's `surmount-remote` feature (and `big-parallel`) and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. `--option system-features` that omit `big-parallel` does not stop local nixbld (the daemon still advertises `big-parallel`). Force-remote nix also passes `--cores 64` so that rustc can use the builder's cores. Workspace cargo passes `--jobs` from those cores, capped at 32 (an OOM hedge; not 2 from the package sandbox, and not a full 64 rustc processes). `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping Nix `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. That derivation uses the same cargo **dev** profile as local `just test-clippy`, not crane's default `--release` check (one rustc thread at opt-level 3; codegen-units does not parallelize `cargo check` / clippy). Nix jobs (machines-file `max-jobs`: how many derivations) are not cargo/rustc workers (jobs inside one derivation). Do not raise Nix max-jobs to fix a single busy rustc. Force-remote nix passes `--option max-jobs 0` on the caller so this laptop does not build: crates.io FODs, static.rust-lang.org toolchain tarballs (the builder instruction-set architecture, not extra cores), and crane vendor unpacks go to the remote builder. The VPS fetches those itself (`builders-use-substitutes`). Force-remote `nix build` uses `--store` with the machines-file ssh-ng URI and `--eval-store auto` so cargo-package, cargo-src, and toolchain store paths stay on the VPS. Default `nix build` realizes into the local store, then copies each remote output back over SSH (that is local store close, not a remote-builder miss). `--no-link` skips a local result symlink. `-L` logs still stream as text. This laptop must not substitute those NARs from cache.nixos.org either. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. |
+| **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. Agents must not run `just check-remote` / `just test-remote` / `just cargo-remote` either. The operator owns the VPS builder (pinned 2026-08-25). |
 | **`just test`** | Quality suite without re-running full flake prep |
 | **`just build` / install** | Optional release-style package (not CI) |
 
 GHA quality job: flake-meta → ci-prep → `just test` (see `.github/workflows/ci.yml`).
 There is **no** `ci-quick` or `ci-host` recipe.
 
+**The operator owns the VPS builder (pinned 2026-08-25).** Agents do not
+invoke `just check-remote`, `just test-remote`, `just cargo-remote`, or
+force-remote `nix build` to nixbuilder / surmount-1. Agents implement
+product and tests in the tree. When the operator pastes a quality fail,
+that paste is the contract. Do not start a second gate on the same leftover
+list. Dual-pin: [`AGENTS.md`](AGENTS.md) hard constraint 3b-remote.
+
+**`just require_system` does not need a prebuilt grok-nix-helper (pinned
+2026-08-26).** It is a justfile CI_SYSTEM/uname check, the same map as
+parse-time `system :=`. **`just check-remote` / `just require_remote_builder`
+must not `nix build .#grok-nix-helper`.** Preflight is justfile/uname/SSH
+(builders file, known_hosts, inject `GROK_NIX_REMOTE_SYSTEM_FEATURES` or
+live BatchMode). **`just nix_retry` / `just flake-meta` / the `just
+check-remote` metadata step must not require `grok_nix_helper_bin`.** The
+live `nix_retry` body is the justfile recipe (argv exec of `"$@"`,
+fail-fast on quality/SSH, force-remote flags). Missing helper must not
+fail `just check-remote`. The operator can run that gate on a dirty tree
+without first realizing the helper and without `GROK_NIX_HELPER` set. Do
+not tell them to realize the package first. `just check-remote` exports
+`GROK_NIX_FORCE_REMOTE=1` before `require_remote_builder` so later
+`nix_retry` is force-remote. `grok_helper` must not exec an empty path.
+Later recipes that still need the helper (`cargo-remote` / `test-remote`,
+recon) locate `GROK_NIX_HELPER`, PATH, `result/bin`, or crate target only.
+
+**Quality nextest compile/link jobs (pinned 2026-08-26).** Workspace
+clippy/check stay at cargo jobs 32. `cargo nextest run` compile and
+link uses `--build-jobs` capped at 4 (`CARGO_LINK_JOBS`). Named
+`just test-remote` nextest and `cargo test` use that same cap. 32
+parallel mold links of workspace test binaries were SIGKILL'd
+(`ld returned 137`, 128+9) under the builder nix-daemon 32GiB
+MemoryMax. Host MemAvailable is larger; cargo-mem-guard reads
+`/proc/meminfo` and would not restart. `just nix_retry` retries that
+linker SIGKILL as infra; a real rustc `could not compile` without
+`ld returned 137` still fail-fasts. Do not drop `--locked`. Do not
+skip `test_leader_death_repro`. Raising nix-daemon MemoryMax is
+operator-owned on the VPS.
+
+**Quality order: cargo fmt, then clippy, then tests (pinned 2026-08-26).**
+`workspace-cargo-quality` (`just check-remote`) and local `just test`
+run in this order. First `cargo fmt --all -- --check`. Then clippy on
+everything the gate compiles: workspace `--all-targets` (members include
+`cargo-mem-guard` and `grok-nix-helper`, so a helper `E0106` fails here,
+not in a late `cargo test`). Quality clippy stays `cargo check`
+with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under the GNU make
+jobserver (not the `cargo clippy` dispatcher). Local `just test-clippy`
+uses `cargo clippy --workspace --all-targets`. Then workspace
+`cargo nextest run`, then `cargo test --workspace --doc`. Workspace
+nextest covers those member crate tests. Do not add a late
+`cargo test --manifest-path`. Do not allow-lint. `--locked` stays.
+Named-test (`just test-remote` / `just cargo-remote`) is one cargo kind
+plus a filter, not this full chain. Named tests in grok-nix-helper
+`justfile_contracts`:
+`workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests`,
+`workspace_quality_source_matches_just_test`,
+`just_test_clippy_lints_all_targets`.
+
+**`just update` (pinned 2026-08-27).** Refresh locks without compiling:
+the one workspace `Cargo.lock`, then `flake.lock`. Does not run
+`just check-remote`. Quality still runs `--locked` after that. Named
+test: `just_update_refreshes_workspace_and_flake_locks`.
+
+**Quality `cargo fmt --check` is a hard miss.** `workspace-cargo-quality`
+runs `cargo fmt --all -- --check` first. rustfmt `Diff in` is a quality
+fail, not a flake 502. File-level rustfmt on the written `.rs` is how
+agents keep that gate green. See § *File-level infer-from-path verify*.
+
 **PATH hermeticity (CI / low-mem):** with `CI_LOW_MEM=1`, `cargo-ci` enters
-`nix develop .#ci`, then `scripts/with-ci-hermetic-path.sh` rebuilds `PATH`
+`nix develop .#ci`, then `grok-nix-helper hermetic-path` rebuilds `PATH`
 from **`/nix/store` bins only** (ci-tools + stdenv: rustc, nextest, mold, git,
 python3, coreutils, ...). Host desktop tools (`pw-record` / `parec` / `arecord`,
 ...) are not visible to quality tests, matches headless GHA. Interactive
@@ -1659,7 +1938,7 @@ Closest GHA repro: `CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci`.
 | Idea | Practice |
 |------|----------|
 | **Upstream owns the package version number** | Keep lockstep with the upstream tree we track (`CARGO_PKG_VERSION`) |
-| **Our identity is the git revision** | Binary shows **upstream version + short git SHA** |
+| **Our identity is the git revision** | Binary shows **upstream version + short git SHA** (a git object id, not a download FOD hash) |
 | **No second release train** | No Surmount stable/alpha channel mirroring SpaceXAI |
 | **No default xAI auto-update** | Would advertise official `grok` builds |
 
@@ -1677,6 +1956,9 @@ grok-oss update --check --json
 
 `SOURCE_REV` at the repo root is a **monorepo export pin** (full upstream-side
 SHA recorded for the tree we absorbed), not a substitute for “what is HEAD.”
+That SHA is a git object id. It is not SHA-1 hashing of a tarball and not a
+Nix FOD pin. New download / FOD verify is SHA-256 or minisign. `/rebuild`
+checks the installed binary with `--version`, then compares that identity.
 
 If behind: from a checkout run TUI **`/rebuild`** (wired, SHA-aware peer
 relaunch), or rebuild/reinstall by hand. CLI **`grok-oss rebuild`** is

@@ -242,8 +242,6 @@ pub(super) fn handle_exit_plan_mode(
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
-    } else {
-        agent.prompt.set_text("");
     }
 
     agent.casual_commenting_range = None;

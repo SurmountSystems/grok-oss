@@ -610,15 +610,16 @@ mod tests {
         assert!(
             skills.content.contains("default Grok OSS skill")
                 || skills.content.contains("default product skills"),
-            "08-skills.md must say polish/subagent are default Grok OSS skills"
+            "08-skills.md must say polish/subagent/what are default Grok OSS skills"
         );
         assert!(
             skills
                 .content
                 .contains("crates/codegen/xai-grok-bundle/skills/")
                 && skills.content.contains("/polish")
-                && skills.content.contains("/subagent"),
-            "08-skills.md must name the in-tree default skill source and /polish /subagent"
+                && skills.content.contains("/subagent")
+                && skills.content.contains("/what"),
+            "08-skills.md must name the in-tree default skill source and /polish /subagent /what"
         );
         assert!(
             skills
@@ -640,8 +641,11 @@ mod tests {
                     .contains("crates/codegen/xai-grok-bundle/skills/polish/")
                 && slash
                     .content
-                    .contains("crates/codegen/xai-grok-bundle/skills/subagent/"),
-            "04-slash-commands.md must describe /polish and /subagent as default Grok OSS skills"
+                    .contains("crates/codegen/xai-grok-bundle/skills/subagent/")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/what"),
+            "04-slash-commands.md must describe /polish /subagent /what as default Grok OSS skills"
         );
         assert!(
             !slash

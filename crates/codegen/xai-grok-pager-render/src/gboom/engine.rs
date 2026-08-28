@@ -98,7 +98,7 @@ impl FrameBuffer {
         for y in 0..self.h {
             let vy = self.vig_y[y];
             let row = &mut self.pixels[y * self.w * 3..(y + 1) * self.w * 3];
-            for (x, px) in row.chunks_exact_mut(3).enumerate() {
+            for (x, px) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let f = self.vig_x[x] * vy;
                 px[0] = (px[0] as f32 * f) as u8;
                 px[1] = (px[1] as f32 * f) as u8;
@@ -170,7 +170,7 @@ impl Renderer {
         // with `damage_flash`. Reads clearly even at low resolutions.
         if game.player.damage_flash > 0.0 {
             let t = (game.player.damage_flash * 0.45).min(0.45);
-            for px in fb.pixels.chunks_exact_mut(3) {
+            for px in fb.pixels.as_chunks_mut::<3>().0 {
                 px[0] = (px[0] as f32 + (220.0 - px[0] as f32) * t) as u8;
                 px[1] = (px[1] as f32 * (1.0 - t * 0.8)) as u8;
                 px[2] = (px[2] as f32 * (1.0 - t * 0.8)) as u8;
@@ -179,7 +179,7 @@ impl Renderer {
         // Low-health vignette pulse.
         if game.player.hp <= 25 && !game.dead() {
             let pulse = 0.10 + 0.06 * (game.time * 5.0).sin();
-            for px in fb.pixels.chunks_exact_mut(3) {
+            for px in fb.pixels.as_chunks_mut::<3>().0 {
                 px[0] = (px[0] as f32 + (160.0 - px[0] as f32) * pulse) as u8;
             }
         }
@@ -603,7 +603,7 @@ impl FireSim {
 
 /// Fill the framebuffer with a flat color.
 pub(super) fn clear(fb: &mut FrameBuffer, c: Rgb) {
-    for px in fb.pixels.chunks_exact_mut(3) {
+    for px in fb.pixels.as_chunks_mut::<3>().0 {
         px.copy_from_slice(&c);
     }
 }

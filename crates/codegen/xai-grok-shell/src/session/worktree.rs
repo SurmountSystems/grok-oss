@@ -968,6 +968,13 @@ mod tests {
     }
     /// Test helper: Initialize a git repo at the given path
     fn init_git_repo(path: &std::path::Path) {
+        if std::env::var_os("GROK_HOME").is_none() {
+            let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&home);
+            unsafe {
+                std::env::set_var("GROK_HOME", home);
+            }
+        }
         run_git(path, &["-c", "init.defaultBranch=main", "init"]);
         run_git(path, &["config", "user.email", "test@test.com"]);
         run_git(path, &["config", "user.name", "Test"]);

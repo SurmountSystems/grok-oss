@@ -31,6 +31,87 @@ fn session_rpc_timeout_copy_uses_minutes_not_raw_seconds() {
         "raw second budget must not leak: {msg}"
     );
 }
+
+#[tokio::test]
+async fn session_rpc_timeout_wait_or_warn_then_keep_returns_the_value() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let _ = tx.send("loaded");
+    });
+    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let warned_flag = warned.clone();
+    let out = wait_or_warn_then_keep(
+        async { rx.await.expect("oneshot") },
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(200),
+        || {
+            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .await;
+    assert_eq!(out, Some("loaded"));
+    assert!(
+        warned.load(std::sync::atomic::Ordering::SeqCst),
+        "the timeout warning must fire without dropping the in-flight wait"
+    );
+}
+
+#[tokio::test]
+async fn session_rpc_hard_cap_gives_up_if_the_rpc_never_returns() {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let warned_flag = warned.clone();
+    let started = std::time::Instant::now();
+    let out = wait_or_warn_then_keep(
+        async {
+            rx.await.ok();
+            "never"
+        },
+        std::time::Duration::from_millis(15),
+        std::time::Duration::from_millis(40),
+        || {
+            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .await;
+    drop(tx);
+    assert!(
+        out.is_none(),
+        "a stuck session/load must give up, not hang the spinner"
+    );
+    assert!(
+        warned.load(std::sync::atomic::Ordering::SeqCst),
+        "the 3m-style warning must still fire before give-up"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "give-up must be the hard cap, not an unbounded wait: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn session_rpc_gave_up_copy_is_not_the_keep_waiting_timeout() {
+    let msg = format_session_rpc_gave_up("Session loading", std::time::Duration::from_secs(360));
+    assert!(
+        msg.contains("gave up after 6m0s"),
+        "hard cap must print as minutes, got: {msg}"
+    );
+    assert!(
+        !is_session_rpc_timeout_error(&msg),
+        "give-up must clear the loading placeholder (not keep-waiting copy)"
+    );
+}
+
+#[test]
+fn session_rpc_timeout_error_is_detected() {
+    let msg = format_session_rpc_timeout("Session loading", std::time::Duration::from_secs(180));
+    assert!(is_session_rpc_timeout_error(&msg));
+    assert!(!is_session_rpc_timeout_error("transient"));
+    assert!(!is_session_rpc_timeout_error("Couldn't load session: boom"));
+}
+
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]

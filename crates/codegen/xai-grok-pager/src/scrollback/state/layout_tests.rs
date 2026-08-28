@@ -1471,8 +1471,10 @@ fn removal_above_wrapped_park_keeps_row_inside_wrapping_entry() {
             .estimate_height(state.entry_area_width(W)) as usize
     };
     // Park deeper into the entry than the estimate reaches, so a clamp
-    // against the transient estimate would provably move the row.
-    let rows_into = exact - 2;
+    // against the transient estimate would provably move the row. Use
+    // exact-1 (not exact-2) so a 2-row undershoot still satisfies
+    // estimate < park depth.
+    let rows_into = exact.saturating_sub(1);
     assert!(
         estimate < rows_into,
         "precondition: rebuild estimate ({estimate}) must undershoot the \
@@ -2380,8 +2382,10 @@ fn scrolling_up_past_inline_image_reaches_messages_above() {
     std::fs::write(&image_path, make_test_png_bytes(3456, 2160)).unwrap();
 
     let mut state = ScrollbackState::new();
-    let mut appearance = crate::appearance::AppearanceConfig::default();
-    appearance.show_timestamps = false;
+    let appearance = crate::appearance::AppearanceConfig {
+        show_timestamps: false,
+        ..Default::default()
+    };
     state.set_appearance(appearance);
 
     state.push_block(user_block("first prompt, well above the image"));
@@ -2466,8 +2470,10 @@ fn scrolling_up_past_image_survives_overestimate_shrink() {
     std::fs::write(&image_path, make_test_png_bytes(3456, 2160)).unwrap();
 
     let mut state = ScrollbackState::new();
-    let mut appearance = crate::appearance::AppearanceConfig::default();
-    appearance.show_timestamps = false;
+    let appearance = crate::appearance::AppearanceConfig {
+        show_timestamps: false,
+        ..Default::default()
+    };
     state.set_appearance(appearance);
 
     state.push_block(user_block("prompt above the tall markdown"));

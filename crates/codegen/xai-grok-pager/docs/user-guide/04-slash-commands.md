@@ -174,11 +174,11 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled lines only: **Job** (what this session is trying to do), **State** (what is actually happening), **You** (what you must do, or `nothing`), **Next** (the next concrete step the agent will take). Optional focus text is passed through.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **What we are doing**, **What is true right now**, **What you need to do** (or `nothing`), **What I will do next**. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
 
-This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Plain American English. No residual codes or board ids as the body.
+This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 
-The host skill lives at `~/.agents/skills/what/SKILL.md`. The pager builtin `/what` keeps that slash name; a same-named skill cannot steal the bare command. Immediate `/what` injects that skill now. This is not a product skill pack in the grok-oss git tree.
+`/what` is a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`; not host overlay as the grok-oss source, not a pager-only prompt, not a project `.agents/skills/what` pack). The pager builtin `/what` keeps that slash name; a same-named skill cannot steal the bare command. Immediate `/what` injects that skill now. When you ask to revise a skill in grok-oss, edit `crates/codegen/xai-grok-bundle/skills/`. The live cache is not the source.
 
 ```
 /what

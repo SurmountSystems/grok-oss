@@ -386,6 +386,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
 fn plan_row_click_does_not_enter_commenting() {
     let mut agent = agent_with_scrollable_plan();
     agent.prompt.set_text("keep typing");
+    agent.prompt.set_cursor(agent.prompt.text().len());
     let registry = ActionRegistry::defaults();
 
     let _ = agent.handle_input(
@@ -410,10 +411,16 @@ fn plan_row_click_does_not_enter_commenting() {
         &registry,
     );
     let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_eq!(
+    assert_ne!(
         pav.focus,
         PlanApprovalFocus::Commenting,
-        "`c` remains the explicit line-comment gesture"
+        "a live Preview draft must type `c`, not stash-and-wipe into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typingc",
+        "typed `c` must stay in the Human box, got {:?}",
+        agent.prompt.text()
     );
 }
 
@@ -660,6 +667,183 @@ fn plan_md_preview_empty_printable_goes_to_composer() {
         agent.prompt.text(),
         "h",
         "printable keys go to the composer while plan.md is open, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Ctrl+Backspace deletes the previous word in the plan composer even
+/// while Preview owns Tab/?/y.
+#[test]
+fn plan_md_preview_ctrl_backspace_deletes_word_in_composer() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("hello world");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let chord = Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    let _ = agent.handle_input(&chord, &ActionRegistry::defaults());
+    assert_eq!(
+        agent.prompt.text(),
+        "hello ",
+        "Ctrl+Backspace must word-delete in the plan composer, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Ctrl+Backspace must not dismiss plan.md"
+    );
+}
+
+fn type_plan_chars(agent: &mut AgentView, text: &str) {
+    let registry = ActionRegistry::defaults();
+    for ch in text.chars() {
+        let modifiers = if ch.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers)),
+            &registry,
+        );
+    }
+}
+
+fn composer_undos_until_empty(agent: &mut AgentView) -> usize {
+    let mut n = 0;
+    while !agent.prompt.text().is_empty() && agent.prompt.textarea.can_undo() {
+        assert!(
+            agent.prompt.textarea.undo(),
+            "can_undo was true but undo returned false"
+        );
+        n += 1;
+        if n > 50 {
+            break;
+        }
+    }
+    n
+}
+
+fn composer_redo_n(agent: &mut AgentView, n: usize) {
+    for _ in 0..n {
+        assert!(
+            agent.prompt.textarea.redo(),
+            "redo must restore the draft we just undid"
+        );
+    }
+}
+
+/// Empty-prompt `c` is still the line-comment gesture. A mid-type `c` is not.
+#[test]
+fn empty_preview_c_enters_line_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "empty-prompt `c` remains the explicit line-comment gesture"
+    );
+    assert!(
+        pav.commenting_range.is_some(),
+        "empty-prompt `c` must arm a line range"
+    );
+}
+
+/// Typed Preview/Prompt text must survive the letter `c`, a panel reopen, and
+/// must not grow a wipe-to-empty undo frame (one accidental wipe used to need
+/// several Ctrl-Z).
+#[test]
+fn plan_preview_typed_text_survives_c_reopen_without_wipe_undo() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.prompt.clear_history();
+
+    type_plan_chars(&mut agent, "because");
+    assert_eq!(
+        agent.prompt.text(),
+        "because",
+        "Preview must type a word that contains `c`, not stash-and-wipe, got {:?}",
+        agent.prompt.text()
+    );
+    assert_ne!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Commenting,
+        "typing `c` inside a live draft must not enter Commenting"
+    );
+
+    let undos_before = composer_undos_until_empty(&mut agent);
+    composer_redo_n(&mut agent, undos_before);
+    assert_eq!(agent.prompt.text(), "because");
+
+    agent.reopen_plan_approval();
+    assert_eq!(
+        agent.prompt.text(),
+        "because",
+        "reopen must not replace the live draft, got {:?}",
+        agent.prompt.text()
+    );
+
+    let undos_after = composer_undos_until_empty(&mut agent);
+    assert_eq!(
+        undos_after, undos_before,
+        "reopen must not push extra undo frames (a wipe-to-empty used to stack Ctrl-Z)"
+    );
+    composer_redo_n(&mut agent, undos_after);
+    assert_eq!(agent.prompt.text(), "because");
+}
+
+/// Tab leaving Commenting must restore the pre-comment Human-box draft, not
+/// leave an empty wipe that takes several Ctrl-Z to undo.
+#[test]
+fn tab_leave_commenting_restores_stashed_composer() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("live draft");
+    agent.prompt.set_cursor(10);
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let _ = agent.enter_plan_commenting();
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Commenting
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "entering Commenting clears the box for the line note, got {:?}",
+        agent.prompt.text()
+    );
+    type_plan_chars(&mut agent, "nit");
+    assert_eq!(agent.prompt.text(), "nit");
+
+    let tab = Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let _ = agent.handle_input(&tab, &ActionRegistry::defaults());
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Preview
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "live draft",
+        "leaving Commenting without save must restore the stashed Human box, got {:?}",
         agent.prompt.text()
     );
 }

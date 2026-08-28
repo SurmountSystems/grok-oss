@@ -864,10 +864,20 @@ fn only_thinking_spends_the_accent_column() {
         .chrome_width()
     };
 
+    // Default thinking is Collapsed; that mode reclaims the rail so the
+    // header is not indented over a blank gutter (`hide_accent` in
+    // `minimal_renderer`). Expanded reasoning is what spends the column.
+    let mut expanded = ScrollbackEntry::new(RenderBlock::thinking("reasoning"));
+    expanded.set_display_mode(DisplayMode::Expanded);
+    assert_eq!(
+        chrome(&expanded),
+        1,
+        "expanded reasoning reserves the 1-col accent gutter"
+    );
     assert_eq!(
         chrome(&ScrollbackEntry::new(RenderBlock::thinking("reasoning"))),
-        1,
-        "reasoning reserves the 1-col accent gutter"
+        0,
+        "collapsed reasoning does not reserve a blank gutter"
     );
 
     for block in [

@@ -119,9 +119,8 @@ mod tests {
             "invalid key",
         ));
         assert_eq!(store.remaining(&key), Duration::ZERO);
-        match prev {
-            Some(v) => unsafe { std::env::set_var(crate::DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(crate::DISABLE_ENV, v) };
         }
     }
 
@@ -138,18 +137,21 @@ mod tests {
             &store,
             &key,
             429,
-            Some("2"),
+            Some("10"),
             None,
             "rate limited",
         ));
+        let rem = store.remaining(&key);
         assert!(
-            store.remaining(&key) >= Duration::from_millis(500),
-            "remaining={:?}",
-            store.remaining(&key)
+            rem > Duration::ZERO,
+            "429 must write a cooldown, remaining={rem:?}"
         );
-        match prev {
-            Some(v) => unsafe { std::env::set_var(crate::DISABLE_ENV, v) },
-            None => {}
+        assert!(
+            rem < Duration::from_secs(10),
+            "must honor Retry-After 10s, not the 60s default, remaining={rem:?}"
+        );
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(crate::DISABLE_ENV, v) };
         }
     }
 }

@@ -61,36 +61,39 @@ less than product code and tests. Do not invent long essays or git nags.
    Product, not a process slogan: after ACP `search_replace` / `apply_patch`,
    the edit tool formats and lints that `.rs` file (infer from path). See
    [`FORK.md`](FORK.md) § *File-level infer-from-path verify*. Kill switch:
-   `GROK_SKIP_EDIT_VERIFY=1`. Host dual-pin: `~/.grok/AGENTS.md` §
+   `GROK_SKIP_EDIT_VERIFY=1`. Quality `cargo fmt --check` is a hard miss
+   (rustfmt `Diff in` is not a flake 502). Host dual-pin: `~/.grok/AGENTS.md` §
    *Structured Rust edits*.
 3b. **Do not prove product work with crate-wide cargo via subagents (pinned 2026-08-15).**
    Do not launch **local** crate-wide cargo (`cargo clippy -p ... --lib`,
    `cargo fmt -p`, `just check`) through extra subagents to prove a product
    slice on this laptop. One agent per job. No duplicate red-test pairs. No
    extra file-level edit-verify swarm. Implement-time proof is the
-   named fixture tests (`just test-remote -p xai-grok-tools --lib rust_edit_verify`).
+   named fixture tests the operator runs on the VPS (`just test-remote -p xai-grok-tools --lib rust_edit_verify`).
    Ordinary post-impl mop stays one L2 after a finished slice (not a swarm;
    that L2 spawns L3). Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove
    product work with crate-wide cargo via subagents*.
-3b-remote. **`just check-remote` may run whenever useful (pinned 2026-08-22).**
-   The only reason agents avoided the full gate was laptop burden. rustc (and
-   the matching `just check` gate, once landed) runs on **surmount-1**. That
-   does not burden this machine. Agents may run `just check-remote` whenever
-   the full gate is useful. GitHub Actions must not call `check-remote`.
-   `just check` / `just ci` stay local. Host dual-pin: `~/.grok/AGENTS.md`.
-3b-remote-named. **Named cargo test, clippy, and build run on the remote
-   builder (pinned 2026-08-22).** Agents must not run `cargo test`,
-   `cargo clippy`, `cargo build`, or rustc on this laptop for grok-oss.
-   Use `just check-remote` for the full gate. Use `just test-remote` for a
-   named filter (example: `just test-remote -p xai-grok-pager --lib --
-   actions::defaults`). That is `nix build --impure .#workspace-cargo-named-test`
-   on the same builder as `just check-remote` (`surmount-remote`, `--cores 64`,
-   cargo jobs cap 32). `just cargo-remote` is the same path for `test`,
-   `nextest`, `clippy`, `build`, or `check`. File-level rustfmt-only may stay
-   local if it does not invoke rustc. File-level clippy that compiles belongs
-   on the remote builder too. `GROK_SKIP_EDIT_VERIFY` is the kill switch for
-   the edit-tool verify, not the default. GitHub Actions must not call
-   `test-remote` or `cargo-remote`. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-remote. **The operator owns the VPS builder (pinned 2026-08-25).**
+   Agents must not invoke `just check-remote`, `just test-remote`,
+   `just cargo-remote`, or force-remote `nix build` to `nixbuilder` /
+   surmount-1. That host is the operator's. Agents implement product and
+   tests in the tree. When the operator pastes a quality fail, that paste
+   is the contract. Do not start a second gate on the same drv or the
+   same leftover list. Agents still must not run `cargo test`,
+   `cargo clippy`, `cargo build`, or rustc on this laptop. File-level
+   rustfmt-only may stay local if it does not invoke rustc. GitHub
+   Actions must not call `check-remote`, `test-remote`, or `cargo-remote`.
+   The 2026-08-22 "agents may run `just check-remote` whenever useful" line
+   is superseded. Force-remote recipe details (max-jobs 0, `--store`
+   ssh-ng, `--eval-store auto`, `--cores 64`, cargo jobs cap 32) still
+   describe how the operator's recipes work. Host dual-pin:
+   `~/.grok/AGENTS.md`.
+3b-remote-named. **Named cargo on the VPS is operator-run (pinned
+   2026-08-22; operator-owns 2026-08-25).** The recipes stay
+   `just test-remote` / `just cargo-remote` on surmount-1. Agents do not
+   run them. Agents do not run cargo/rustc on this laptop either.
+   `GROK_SKIP_EDIT_VERIFY` is the kill switch for the edit-tool verify,
+   not the default. Host dual-pin: `~/.grok/AGENTS.md`.
 3b-remote-clippy. **Remote quality clippy must use many workers (pinned
    2026-08-23).** Do not invoke `cargo clippy` on `workspace-cargo-quality`.
    That external binary lets the outer cargo start a 1-token jobserver;
@@ -105,6 +108,23 @@ less than product code and tests. Do not invent long essays or git nags.
    2026-08-23).** When the operator complains twice about the same broken
    chrome or gate, fix the thing they can see. Do not answer the second
    complaint with "we already set jobs." Host dual-pin: `~/.grok/AGENTS.md`.
+3b-say-the-other-path. **Tell the operator when it is a different path
+   (pinned 2026-08-23).** If the right fix is not a patch in this tree,
+   say that in the same-turn status, on **You**, with evidence. Name the
+   other path in ordinary English: this laptop's Nix install, the VPS
+   builder host, wait until not on cellular, rebuild `grok-oss` to see
+   a TUI change, an operator TTY. Do not send them to the VPS for a
+   local PATH miss. Do not pretend a grok-build edit will fix a host
+   they must repair. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-do-not-get-overwhelmed. **Large red lists: methodical, not overwhelmed
+   (pinned 2026-08-23).** A long nextest or clippy list is not a reason to
+   rush, weaken tests, or bulk-rewrite. Work one documented contract at a
+   time against [`FORK.md`](FORK.md) and the named test's intended
+   behavior (hard constraint 15: do not fit tests to code). Group fails
+   by contract. Distinguish product misses this session caused from a
+   known Nix-sandbox nextest class (S3, MCP, bwrap). Do not treat 177
+   red rows as 177 independent panics. Do not allow-lint or delete asserts to shrink
+   the list. Host dual-pin: `~/.grok/AGENTS.md`.
 3c. **Implementer ↔ reviewer swap each feature.** For each **new** feature or
    independent implement slice, swap who implements and who reviews (roles
    fixed within one feature’s fix/re-review loop). Host dual-pin:
@@ -250,9 +270,11 @@ less than product code and tests. Do not invent long essays or git nags.
    clauses (not "room/headroom"). Config and wire names may follow the plain
    thought in parentheses. Operator corrections about incomplete phrasing are
    permanent law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
-   **Job / State / You / Next, with evidence for You (pinned 2026-08-21):**
+   **Job / State / You / Next, with evidence for You (pinned 2026-08-21;
+   other path 2026-08-23):**
    Keep the four-line restatement. On **You**, always say why the
-   operator must act, or why they need not. Name the evidence. Do not
+   operator must act, or why they need not. Name the evidence. If the
+   work is not this tree, say the other path there. Do not
    use an unexplained heuristic. Maximally truthseeking. Host dual-pin:
    `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
    **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
@@ -394,10 +416,12 @@ less than product code and tests. Do not invent long essays or git nags.
    or “soft-429 hop = No” are **defaults that can be wrong** for new intent.
    Verify code; if the operator names a real need (e.g. rate-limit failover),
    plan it — do not dismiss as out of scope from stale residual text.
-10. **Ambiguity → park** (pinned 2026-07-26). Do not invent intent. Track
-    clarification (`ask:*` / plan open question / residual) and ask in **plain
-    freeform** — no plan questionnaire modals. Host: `~/.grok/AGENTS.md` §
-    *Ambiguity → park*.
+10. **Ambiguity → park** (pinned 2026-07-26; pencils-down 2026-08-25). When
+    intent is ambiguous, **pencils down**: stop working, ask the operator in
+    **plain freeform**, do not assume. A contradiction (two names, two homes)
+    is ambiguous. Do not resolve it silently. Track `ask:*` / plan open
+    question / residual. No plan questionnaire modals. Host: `~/.grok/AGENTS.md`
+    § *Ambiguity → park*.
 11. **Git silence** (pinned 2026-07-26). No nags about stage/commit/push/PR/
     uncommitted trees in ordinary status. Engage git only for **complex**
     recon/upstream/onto/put-history when asked. Still never `git commit`.
@@ -431,9 +455,64 @@ less than product code and tests. Do not invent long essays or git nags.
     product fix so the **same** test passes. Do not claim TDD without a red
     log line. Exceptions: pure docs/typos/format; operator says skip. Host:
     `~/.grok/AGENTS.md` § *Red/green TDD* + § *User-reported bugs & features*.
-15. **Do not fit tests to code** (pinned 2026-07-26). Changing a test needs a
-    named contract + evidence + stronger/equal assert; park if intent unclear.
-    False-green → stricter assert, not weaker. Host: § *Test intent*.
+15. **Do not fit tests to code** (pinned 2026-07-26; named tests are
+    contracts 2026-08-25; do not naively update tests 2026-08-27). Changing a
+    test needs a named contract + evidence + stronger/equal assert; park if
+    intent unclear. False-green → stricter assert, not weaker. Do **not**
+    rewrite a failing assert so it matches the code. Reconcile the named
+    contract with FORK and process first, then fix the product. Do not skip Nix-sandbox S3, MCP, or bwrap tests to
+    go green. Hermeticity fixes (PATH bash, writable `$GROK_HOME`, webpki
+    roots, bwrap placeholders, grok argv0 on Nix coreutils) keep the named
+    contract. Dual-pin: [`FORK.md`](FORK.md) Land checklist **Named tests
+    are contracts**. Host: § *Test intent*.
+16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
+    Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
+    bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules
+    and `grok-nix-helper`, not copied bash inside Nix. Git recon is
+    `grok-nix-helper` subcommands. Hand `git commit -S` to a human TTY.
+    SHA-1 is for git object ids (gix, empty-tree, 40-hex commits) only. It
+    is not a security hash for downloads or FODs. Artifact verify is
+    SHA-256 or minisign. Helper logs must not print tokens, API keys, or
+    secret env values. The operator owns `just check-remote`. Dual-pin:
+    [`FORK.md`](FORK.md) Packaging **SHA-1 is git object ids only**.
+17. **Test dependencies are supply chain (pinned 2026-08-27).** Never treat a
+    cargo-audit finding, yanked crate, or unmaintained crate as irrelevant
+    because it is only a dev-dependency, `[dev-dependencies]`, test helper,
+    or unused in production. Supply-chain attacks target developer machines.
+    Rust `build.rs` and other build scripts can hide malicious work. Defense
+    in depth. The **menhera-cooldown** crates.io replacement (delay before a
+    new crate version is eligible) is that policy, not a reason to fetch
+    crates.io directly to skip the wait. Do not park “test-only rsa” or
+    similar in residual. Dual-pin: [`FORK.md`](FORK.md) Packaging; host
+    `~/.grok/AGENTS.md` § *Test dependencies are supply chain*.
+19. **cargo-audit is the start of a security pass, not the end (pinned
+    2026-08-27).** Start with `cargo audit`. Also check yanked crates,
+    RUSTSEC pages, and CVEs for every remaining row (warnings included).
+    Do not treat an unmaintained or unsound warning as acceptable. Do not
+    skip the delayed crate index (menhera-cooldown) by talking to crates.io
+    directly. Dual-pin: [`FORK.md`](FORK.md) Packaging; host
+    `~/.grok/AGENTS.md` § *Test dependencies are supply chain*.
+18. **Grok OSS skill revisions live in the product tree (pinned 2026-08-27).**
+    When the operator asks to revise a skill while this session is grok-oss,
+    edit `crates/codegen/xai-grok-bundle/skills/`, document it in
+    [`FORK.md`](FORK.md), and keep named tests as the contract so skill
+    maintenance and bundle upgrades cannot drop it. The live cache
+    `~/.grok/bundled/skills/` is not the source. Do not treat host overlay
+    `~/.agents/skills/` as the grok-oss source. Do not add a project
+    `.agents/skills/<name>` copy unless the operator asked for a project
+    override. Dual-pin: [`FORK.md`](FORK.md) Skills (multi-source).
+20. **`aws-sdk-s3` / `lru` bump is deferred to fargo (pinned 2026-08-27).**
+    Do not bump `aws-sdk-s3` 1.141.0 in this grok-oss wave to clear
+    `lru` 0.16.4 (`RUSTSEC-2026-0253`). Resume that work in fargo. Do
+    not skip the delayed crate index. Dual-pin: [`RESIDUAL.md`](RESIDUAL.md)
+    Open cargo-audit; [`FORK.md`](FORK.md) Packaging.
+21. **Do not vendor crates into grok-oss as the long-term fix (pinned
+    2026-08-27).** Path copies under `third_party/` for audit patches are
+    debt. fargo must replace them: bump the parent on the delayed crate
+    index, or a Surmount git fork that later enters that index, or drop
+    the parent. Do not add more `[patch.crates-io]` path vendoring. Do
+    not fetch crates.io to skip the delay. Dual-pin: [`FORK.md`](FORK.md)
+    Packaging; [`RESIDUAL.md`](RESIDUAL.md) Open fargo unwind.
 
 ## Subagents — parent is HITL UX only (hard)
 
@@ -664,11 +743,11 @@ implement, multi-file diagnosis, CI, and regressions, plus the
 half the window” rule),
 [`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md),
 [`docs/upstream-history.md`](docs/upstream-history.md) + sibling logs, upstream
-scripts (`put-history`, import, join, hermetic PATH, assert pins, …).
+helper (`put-history`, import, join, hermetic PATH, assert pins, …).
 
 ```bash
-./scripts/assert-process-pins.sh          # worktree
-./scripts/assert-process-pins.sh HEAD     # or a tip tree-ish
+grok-nix-helper assert-process-pins          # worktree
+grok-nix-helper assert-process-pins HEAD     # or a tip tree-ish
 just upstream-assert-process-pins
 ```
 
@@ -691,9 +770,13 @@ cannot fail a deleted catalog test. Catalog:
 - Ship product work: short hierarchical note in [`FORK.md`](FORK.md); link out.
 - **CI is checks only** — never a release package build in GHA. Local gate:
   **`just check`** / **`just ci`**. No `ci-quick` / `ci-host`.
+  The operator owns **`just check-remote`** / **`just test-remote`** on
+  surmount-1 (pinned 2026-08-25). Agents do not invoke those recipes.
   Optional **`just check-remote`** realizes flake metadata and the workspace
   cargo quality derivation (the same full gate as `just check` / `just test`:
-  fmt, clippy, workspace nextest execution, doctests, cargo-mem-guard) on the
+  fmt, then workspace clippy `--all-targets` (members include
+  grok-nix-helper and cargo-mem-guard), then workspace
+  nextest execution, then doctests) on the
   existing trusted-user remote builder. rustc requires that builder's `surmount-remote`
   feature (and `big-parallel`) and must not run on the caller. This laptop
   never auto-detects `surmount-remote`; the host machines file must advertise
@@ -707,18 +790,28 @@ cannot fail a deleted catalog test. Catalog:
   `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make
   `-j$CARGO_BUILD_JOBS` after dropping Nix MAKEFLAGS/CARGO_MAKEFLAGS, and uses
   the same **dev** profile as local `just test-clippy`
-  (not crane `--release` check/clippy).
+  (not crane `--release` check/clippy). Workspace `--all-targets` clippy
+  and nextest include grok-nix-helper and cargo-mem-guard. Do not
+  compile helper tests only in a late `cargo test --manifest-path` after
+  workspace clippy.
   **Nix jobs are not cargo/rustc workers (pinned 2026-08-18).** Nix jobs
   are how many derivations a builder may take at once (machines-file
   `max-jobs`, nix-daemon `max-jobs`). Workers are cargo/rustc parallelism
   *inside one derivation* (`CARGO_BUILD_JOBS`, cargo `--jobs`,
   `NIX_BUILD_CORES` / nix `--cores`). Do not treat machines-file 64 jobs as
   rustc workers. Do not raise Nix max-jobs to fix a single busy rustc.
-  Laptop local max-jobs stay this laptop's cores. Host machines max-jobs is
-  how many jobs we send to the remote. `--cores 64` sets `NIX_BUILD_CORES`
-  inside a derivation. Cargo jobs 32 is an OOM hedge, not 64 Nix jobs.
-  Tiny crane vendor unpacks that prefer a
-  local build may run on the caller. Named filters use **`just test-remote`**
+  Laptop local max-jobs stay this laptop's cores for `just check` / `just ci`.
+  Host machines max-jobs is how many jobs we send to the remote. `--cores 64`
+  sets `NIX_BUILD_CORES` inside a derivation. Cargo jobs 32 is an OOM hedge
+  for clippy/check, not 64 Nix jobs. nextest compile/link uses
+  `--build-jobs` capped at 4 (`CARGO_LINK_JOBS`): 32 parallel mold links
+  were SIGKILL'd (`ld returned 137`) under the builder nix-daemon 32GiB
+  MemoryMax. Host MemAvailable is larger; cargo-mem-guard reads
+  `/proc/meminfo` and would not restart. Force-remote recipes pass `--option max-jobs 0` on the
+  caller so this laptop does not curl crates.io or static.rust-lang.org
+  for that gate. They also pass `--store` ssh-ng (the machines-file
+  builder) and `--eval-store auto` so cargo-package NARs stay on the VPS
+  instead of copying back into the local store. Named filters use **`just test-remote`**
   (or **`just cargo-remote`**) which realizes `.#workspace-cargo-named-test`
   the same force-remote way; rustc still requires `surmount-remote` and must
   not run on this laptop. Default `just check` / `just ci` and
@@ -729,8 +822,8 @@ cannot fail a deleted catalog test. Catalog:
 
 ## Upstream (xAI)
 
-Prefer **product commits on their current tip** (`scripts/put-history-on-xai.sh`
-— cherry-pick), then **join Surmount `main`** (`scripts/join-main-into-onto.sh`,
+Prefer **product commits on their current tip** (`grok-nix-helper put-history-on-xai`,
+real cherry-pick), then **join Surmount `main`** (`grok-nix-helper join-main-into-onto`,
 `merge -s ours`). **Import** is a different job (absorb tree into Surmount
 history). Detail: [`docs/upstream-history.md`](docs/upstream-history.md).
 
@@ -751,6 +844,19 @@ writes short reports on disk. Every continue/join merge = human `git commit -S`.
 - [`RESIDUAL.md`](RESIDUAL.md) holds **open** human-intent or unfinished honesty
   items only (D0). When finished, move lasting truth into FORK or process docs;
   campaign closed writeups → `doc/dev/campaigns/`.
+- **Operator-asked in-tree work is not residual (pinned 2026-08-27).** If the
+  operator asked to do it and the fix lives in this tree (bump, replace,
+  remove, include a crate), do it. Do not hide it in `RESIDUAL.md`. Residual
+  is for blockers outside the tree (CDN publish, VPS daemon MemoryMax, a
+  human `git commit -S`). "No patched crate on crates.io" is still agent
+  work: remove, replace, or isolate the dependency.
+- **Document leftover residual same turn (pinned 2026-08-25).** When a plan
+  or slice ships a first wave, same turn add remaining later-wave work to
+  `RESIDUAL.md` Open in complete thoughts. Chat is not enough. Do not
+  invent parked/optional for named leftover. Dual residual honesty: do not
+  list finished work as open; do not omit sibling paths still unfixed
+  (example: `install.ps1` after a POSIX-only pin). Host dual-pin:
+  `~/.grok/AGENTS.md` § Residual honesty.
 
 ## Operator orchestration (session board L0–L2)
 

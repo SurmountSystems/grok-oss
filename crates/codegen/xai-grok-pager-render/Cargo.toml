@@ -40,7 +40,7 @@ documented = { workspace = true }
 vte = { workspace = true }
 
 # System appearance detection (dark/light mode)
-dark-light = "2"
+dark-light = "3"
 
 # Utilities
 strum = { workspace = true }

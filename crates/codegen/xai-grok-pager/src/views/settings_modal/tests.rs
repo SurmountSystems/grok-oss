@@ -700,6 +700,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "fork_secondary_model",
             // Session category.
             "resume_canceled_turn_on_restart",
+            "ulid_session_ids",
             "notifications.session_recap",
             "notifications.session_recap_threshold_secs",
             "features.session_recap",

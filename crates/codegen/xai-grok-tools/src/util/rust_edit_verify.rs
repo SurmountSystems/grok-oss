@@ -1470,9 +1470,11 @@ mod tests {
         let out_dir = argv
             .windows(2)
             .find_map(|w| (w[0] == "--out-dir").then_some(PathBuf::from(w[1].as_str())));
-        let out_dir = out_dir.expect(&format!(
-            "clippy-driver must pass --out-dir so rustc metadata does not land at the workspace root: {argv:?}"
-        ));
+        let out_dir = out_dir.unwrap_or_else(|| {
+            panic!(
+                "clippy-driver must pass --out-dir so rustc metadata does not land at the workspace root: {argv:?}"
+            )
+        });
         assert_ne!(
             cwd,
             tmp.path(),

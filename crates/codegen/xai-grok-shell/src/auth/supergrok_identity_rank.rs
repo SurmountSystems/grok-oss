@@ -412,7 +412,7 @@ pub fn role_settles_as_team_oauth(role: SupergrokAccountRole) -> bool {
 fn personal_supergrok_login_present(candidates: &[SupergrokSessionCandidate]) -> bool {
     candidates
         .iter()
-        .any(|c| c.headroom.role == SupergrokAccountRole::Personal)
+        .any(|c| c.headroom.role == SupergrokAccountRole::Personal && !c.hard_expired)
 }
 
 /// Included remaining that sampling hop may spend. Team remaining is not a

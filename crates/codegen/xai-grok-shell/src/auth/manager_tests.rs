@@ -511,8 +511,10 @@ fn dual_supergrok_sticky_team_store(base_scope: &str) -> (GrokAuth, GrokAuth, Au
 fn align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal() {
     let dir = tempfile::tempdir().unwrap();
     // auto_use off so AuthManager::new does not auto-align; we test explicit align.
-    let mut cfg = GrokComConfig::default();
-    cfg.auto_use_included_limits = false;
+    let cfg = GrokComConfig {
+        auto_use_included_limits: false,
+        ..Default::default()
+    };
     let base_scope = cfg.auth_scope();
     let (personal, team, _) = dual_supergrok_sticky_team_store(&base_scope);
     let mut map = AuthStore::default();
@@ -607,8 +609,10 @@ fn align_after_billing_switches_sticky_personal_full_to_business_included() {
 
     clear_included_billing_cache();
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = GrokComConfig::default();
-    cfg.auto_use_included_limits = false;
+    let cfg = GrokComConfig {
+        auto_use_included_limits: false,
+        ..Default::default()
+    };
     let base_scope = cfg.auth_scope();
     // dual_supergrok_sticky_team_store upserts personal then Team (sticky Team).
     // Re-order so personal is the sticky base (last upsert).
@@ -3652,7 +3656,7 @@ async fn enrich_auth_inline_unreachable_server_leaves_auth_unchanged() {
 /// `jsonwebtoken` needs a process-level CryptoProvider; tests that encode
 /// JWTs can't rely on another test having installed it first.
 fn ensure_crypto_provider() {
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 }
 
 /// A signed (HS256) access token carrying a `Team` principal, matching the

@@ -5,8 +5,8 @@ fork contracts against xAI **import** / **put-history** / **join**.
 **Not D0 residual.** RESIDUAL § *Validate honesty* may demote; this file +
 [`FORK.md`](../../FORK.md) § *Upstream regression filters* keep the commands.
 
-**Authority for path restore:** `scripts/import-upstream-export.sh` (`FORK_PATHS`)
-+ `scripts/assert-process-pins.sh`.
+**Authority for path restore:** `grok-nix-helper import-upstream-export` (`FORK_PATHS`)
++ `grok-nix-helper assert-process-pins`.
 **Authority for product seams inside `xai-grok-*`:** cherry-picks on onto +
 **these tests** (assert does not run them).
 
@@ -36,7 +36,7 @@ recon cannot ship a hollow tree without a red test.
 
 | Gate | How |
 |------|-----|
-| Process pins present | `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins` (+ optional `HEAD` / onto tip) |
+| Process pins present | `grok-nix-helper assert-process-pins` or `just upstream-assert-process-pins` (+ optional `HEAD` / onto tip) |
 
 Assert checks required files/dirs and light content sniffs (AGENTS coordinator
 pin, FORK upstream words, README Grok OSS). It does **not** check DOGE default,
@@ -306,7 +306,7 @@ User-guide `08-skills.md` must keep that sentence. The host overlay under
 | `xai-grok-bundle` `sanitize_rejects_non_excepted_skill_python` | Bundle path sanitize rejects junk `.py`; keep only intercept CLI stubs and office/docx/pptx/xlsx/pdf |
 | `xai-grok-bundle` `extract_archive_skips_non_excepted_skill_python` | Network archive extract does not write non-excepted `.py` into the bundled cache |
 | `xai-grok-bundle` `product_repo_skill_roots_have_no_non_excepted_python` | Project `.agents/skills` and `.grok/skills` have no junk `.py` |
-| `xai-grok-bundle` `default_product_skills_include_polish_and_subagent` | In-tree Grok OSS default skills include polish and subagent |
+| `xai-grok-bundle` `default_product_skills_include_polish_and_subagent` | In-tree Grok OSS default skills include polish, subagent, and what |
 | `xai-grok-pager` `docs::user_guide_skills_are_not_a_python_runtime` | User-guide `08-skills.md` says skills are not a Python runtime and names the exceptions. `/polish` and `/subagent` are default Grok OSS skills, not project `.agents/skills` packs. |
 | `xai-grok-tools` `implement_memory_snapshot_intercept_does_not_spawn_shell` | `memory.py` CLI is Rust; no Python process |
 | `xai-grok-tools` `plan_validate_intercept_does_not_spawn_shell` | `validate-plan.py` CLI is Rust; no Python process |
@@ -1033,7 +1033,7 @@ cargo test -p xai-grok-shell --lib -- usage_log record_response_token_usage
 
 # 10–11. Full gate + process pins
 just check
-./scripts/assert-process-pins.sh
+grok-nix-helper assert-process-pins
 ```
 
 ---
@@ -1047,7 +1047,7 @@ replace the cargo blocks or `just check`.
 
 ```bash
 just upstream-assert-process-pins
-./scripts/assert-process-pins.sh HEAD   # or onto tip
+grok-nix-helper assert-process-pins HEAD   # or onto tip
 just upstream-land-filters              # assert + reminder; then run this sheet
 
 # 1. CLI identity (first token grok-oss; substring "grok" is not enough)
@@ -1236,6 +1236,43 @@ Resolve conflicts for `/limits`, DOGE default, window titles / `title.enabled`
 vs `hide_header`, and Grok OSS branding sections; do not wholesale-pin the
 guide to Surmount. A guide with zero `/limits` hits is a failed land.
 
+#### Vendored bm25 has no fxhash
+
+crates.io `bm25` 2.3.2 pulled unmaintained `fxhash` 0.2.1
+([RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057.html),
+accessed: 2026-08-27). Land must keep the path patch and lockfile without
+that package.
+
+| path::test | Contract |
+|------------|----------|
+| grok-nix-helper `justfile_contracts` `workspace_lockfile_has_no_unmaintained_fxhash` | `Cargo.lock` has no `fxhash` package; workspace patches `bm25` to `third_party/bm25` (rustc-hash) |
+
+```bash
+cargo test -p grok-nix-helper --lib -- workspace_lockfile_has_no_unmaintained_fxhash
+```
+
+Shell haystack ranking tests stay named (`haystack_bm25_*` in
+`xai-grok-shell` `session/tool_index_tests.rs`). Do not
+`cargo audit --ignore RUSTSEC-2025-0057`.
+
+#### Vendored rhai has no smartstring
+
+crates.io `rhai` 1.25.1 / 1.26.0 pulled unmaintained `smartstring` 1.0.1
+([RUSTSEC-2026-0249](https://rustsec.org/advisories/RUSTSEC-2026-0249.html),
+accessed: 2026-08-27). Land must keep the path patch and lockfile without
+that package.
+
+| path::test | Contract |
+|------------|----------|
+| grok-nix-helper `justfile_contracts` `workspace_lockfile_has_no_unmaintained_smartstring` | `Cargo.lock` has no `smartstring` package; workspace patches `rhai` to `third_party/rhai` (compact_str) |
+
+```bash
+cargo test -p grok-nix-helper --lib -- workspace_lockfile_has_no_unmaintained_smartstring
+```
+
+xai-workflow named tests stay. Do not
+`cargo audit --ignore RUSTSEC-2026-0249`.
+
 ---
 
 ## Related
@@ -1245,8 +1282,8 @@ guide to Surmount. A guide with zero `/limits` hits is a failed land.
 | [`FORK.md`](../../FORK.md) § *Upstream regression filters* | D1 one-page cheat + recon table |
 | [`RESIDUAL.md`](../../RESIDUAL.md) § *Validate honesty* | D0 open residual mirror (may demote) |
 | [`docs/upstream-history.md`](../../docs/upstream-history.md) | Import review checklist |
-| `scripts/assert-process-pins.sh` | Path presence gate (catalog file + seven class titles; not crate `fn`s) |
+| `grok-nix-helper assert-process-pins` | Path presence gate (catalog file + seven class titles; not crate `fn`s) |
 | `just upstream-land-filters` | Assert plus reminder to walk this catalog. Not a second inventory. |
-| `doc/dev/research/fork-paths-hardening-2026-07-24.md` | Why FORK_PATHS + assert (list authority = import script) |
+| `doc/dev/research/fork-paths-hardening-2026-07-24.md` | Why FORK_PATHS + assert (list authority = grok-nix-helper import-upstream-export) |
 
 *Catalog created 2026-07-30 from explore join inventory.*

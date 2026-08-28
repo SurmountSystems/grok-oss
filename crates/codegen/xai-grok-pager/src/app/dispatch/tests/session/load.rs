@@ -1436,6 +1436,133 @@ fn resume_after_load_failed_reissues_load() {
     );
     assert_eq!(app.agents.len(), count_before + 1);
 }
+
+/// Named contract: a client-side session/load RPC timeout is not a dead
+/// session. Replay may still be running on the agent; sending a prompt
+/// then hangs on `Waiting for the model` until that load finishes.
+/// Keep `loading_replay` so the queue does not drain into `session/prompt`.
+#[test]
+fn session_load_timeout_keeps_replay_gate_and_does_not_send() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-slow".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    assert!(app.agents[&id].session.loading_replay);
+    let send = dispatch(Action::SendPrompt("look at this".into()), &mut app);
+    assert!(
+        !send.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "load in flight must not send, got {send:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-slow"),
+            error: "Session loading timed out after 3m0s. It may still finish in the background; retrying right away can run into the same delay.".into(),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "timeout must not drain the queued prompt, got {effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.session.loading_replay,
+        "timeout is a warning; the load may still finish"
+    );
+    assert_eq!(agent.session.queue_len(), 1, "prompt stays queued");
+    assert!(agent.loading_placeholder_id.is_some());
+    let has_turn_failed = agent
+        .scrollback
+        .entries_in_range(0..agent.scrollback.len())
+        .iter()
+        .any(|e| {
+            matches!(
+                &e.block,
+                RenderBlock::SessionEvent(b) if matches!(b.event, SessionEvent::TurnFailed { .. })
+            )
+        });
+    assert!(
+        !has_turn_failed,
+        "timeout must not mark the turn failed while load can still finish"
+    );
+    let has_warning = agent
+        .scrollback
+        .entries_in_range(0..agent.scrollback.len())
+        .iter()
+        .any(|e| {
+            matches!(
+                &e.block,
+                RenderBlock::System(s) if s.text.contains("may still finish in the background")
+            )
+        });
+    assert!(has_warning, "operator still sees the timeout warning");
+    let send_again = dispatch(Action::SendPrompt("also this".into()), &mut app);
+    assert!(
+        !send_again.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "a second submit after timeout must stay queued, got {send_again:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 2);
+}
+
+/// After a timeout warning, a late `SessionLoaded` must open the gate and
+/// drain the queued prompts instead of leaving chrome stuck on loading.
+#[test]
+fn session_loaded_after_timeout_warning_drains_queued_prompt() {
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-slow".into(), None, false),
+        &mut app,
+    );
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("look at this".into()), &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-slow"),
+            error: "Session loading timed out after 3m0s. It may still finish in the background; retrying right away can run into the same delay.".into(),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].session.loading_replay);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-slow"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        !app.agents[&id].session.loading_replay,
+        "late load success must close the replay gate"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "late load success must drain the queued prompt, got {effects:?}"
+    );
+}
+
 #[test]
 fn session_restored_clears_stale_session_id() {
     let mut app = test_app();

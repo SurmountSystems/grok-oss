@@ -356,6 +356,13 @@ pub fn interrupted_resume_failed_toast(reason: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use xai_grok_test_support::EnvGuard;
+
+    fn isolate_grok_home() -> (TempDir, EnvGuard) {
+        let home = TempDir::new().unwrap();
+        let env = EnvGuard::set("GROK_HOME", home.path());
+        (home, env)
+    }
 
     #[test]
     fn build_rejects_empty_prompt() {
@@ -373,7 +380,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn round_trip_write_load_clear() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         // Point sessions root at temp by using an absolute cwd under temp.
         let cwd = dir.path().join("proj");
@@ -425,7 +434,9 @@ mod tests {
     /// Named contract: armed process-shutdown payload writes the same marker
     /// without AppView (signal hard-exit / first SIGTERM before Quit).
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn armed_process_shutdown_writes_cancel_resume_marker() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -451,7 +462,9 @@ mod tests {
     /// Named contract: turn-start arm+persist leaves a marker without waiting
     /// for SIGTERM / Action::Quit (killall race dogfood).
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn arm_and_persist_writes_cancel_resume_marker_eagerly() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();

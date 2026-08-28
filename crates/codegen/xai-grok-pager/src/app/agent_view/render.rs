@@ -1014,10 +1014,11 @@ impl AgentView {
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
+        // Plan present keeps the composer typeable (letter keys). Paint the
+        // Human box caret even while Preview owns Tab/?/y so typing is not
+        // caret-less. Overlay key routing still uses Preview vs Commenting.
         let prompt_focused = if self.plan_approval_view.is_some() {
-            self.plan_approval_view
-                .as_ref()
-                .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview)
+            true
         } else if casual_commenting {
             true
         } else {
@@ -4899,6 +4900,93 @@ mod voice_recording_overlay_tests {
         );
     }
 
+    /// Letter keys type into the plan composer while Preview still owns
+    /// Tab/?/y. The Human box caret must paint in that state (screenshot:
+    /// typed comment, no caret).
+    #[test]
+    fn plan_approval_preview_paints_composer_box_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+
+        let mut agent = plan_approval_agent();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().expect("plan view").focus,
+            PlanApprovalFocus::Preview
+        );
+        agent
+            .prompt
+            .set_text("I'll be honest, I don't understand your plan.");
+        agent.prompt.set_cursor(agent.prompt.text().len());
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(700);
+        let mut last_text = String::new();
+        let mut found_caret = false;
+        while std::time::Instant::now() < deadline {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if !crate::glyphs::cursor_box_filled_phase(now_ms) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            let reg = ActionRegistry::defaults();
+            let area = Rect::new(0, 0, 100, 40);
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                &BundleState::default(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            found_caret = false;
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                        && cell.bg == theme.accent_user
+                    {
+                        found_caret = true;
+                    }
+                }
+            }
+            last_text = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect();
+            break;
+        }
+        assert!(
+            last_text.contains("I'll be honest"),
+            "composer must still show the typed comment:\n{last_text}"
+        );
+        assert!(
+            found_caret,
+            "Preview plan park must paint the Human box caret on the typeable composer:\n{last_text}"
+        );
+    }
+
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
     /// Same 1.0.3 leftover the live screenshot still shows until rebuild:
     /// `request changes` / `c comment` / `copy plan` / `quit plan` plus
@@ -7176,7 +7264,9 @@ mod plan_turn_row_revising_copy_tests {
     /// `plan_decision_resolved` on plan_mode.json; do not infer from the
     /// leftover markdown body alone.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn rebuild_or_resume_does_not_represent_resolved_plan_as_plan_ready() {
+        let _grok_home = crate::test_util::GrokHomeFixture::new();
         let proj = tempfile::tempdir().unwrap();
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();

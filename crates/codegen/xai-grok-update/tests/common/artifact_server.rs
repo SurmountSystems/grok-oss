@@ -29,9 +29,25 @@ pub enum Mode {
     Hang(usize),
 }
 
+/// Published `${artifact}.sha256` next to the binary. Default matches the
+/// bytes actually served so a Garbage payload still reaches the `--version`
+/// smoke test. Not SHA-1.
+#[derive(Clone, Copy, Debug)]
+pub enum ChecksumMode {
+    /// SHA-256 of the bytes this GET of the artifact would send.
+    MatchServed,
+    /// 404 — fail-closed missing pin.
+    Missing,
+    /// HTTP 200 whose body is not a 64-hex digest.
+    Unreadable,
+    /// 64-zero digest — fail-closed mismatch.
+    Mismatch,
+}
+
 struct ServerState {
     body: Arc<Vec<u8>>,
     mode: Mode,
+    checksum: ChecksumMode,
 }
 
 pub struct ArtifactServer {
@@ -50,6 +66,7 @@ impl ArtifactServer {
         let state = Arc::new(Mutex::new(ServerState {
             body: Arc::new(body),
             mode: Mode::Full,
+            checksum: ChecksumMode::MatchServed,
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
         let gets = Arc::new(AtomicUsize::new(0));
@@ -94,6 +111,11 @@ impl ArtifactServer {
         self.state.lock().unwrap().mode = mode;
     }
 
+    #[allow(dead_code)]
+    pub fn set_checksum_mode(&self, checksum: ChecksumMode) {
+        self.state.lock().unwrap().checksum = checksum;
+    }
+
     /// Number of body-serving GET requests handled so far (HEAD probes from
     /// the parallel-download path are excluded). Tests use this to assert
     /// how many downloads actually happened — e.g. that a sequential updater
@@ -119,6 +141,67 @@ impl Drop for ArtifactServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
+}
+
+fn request_path(request: &str) -> &str {
+    request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+}
+
+fn garbage_payload(len: usize) -> Vec<u8> {
+    let mut bad = b"#!/bin/sh\nexit 1\n".to_vec();
+    bad.resize(len, b'\n');
+    bad
+}
+
+fn checksum_body(body: &[u8], mode: Mode, checksum: ChecksumMode) -> Option<Vec<u8>> {
+    match checksum {
+        ChecksumMode::Missing => None,
+        ChecksumMode::Unreadable => Some(b"not-a-digest\n".to_vec()),
+        ChecksumMode::Mismatch => Some(
+            b"0000000000000000000000000000000000000000000000000000000000000000  grok\n".to_vec(),
+        ),
+        ChecksumMode::MatchServed => {
+            let bytes = match mode {
+                Mode::Garbage => garbage_payload(body.len()),
+                _ => body.to_vec(),
+            };
+            let hash = xai_grok_update::artifact_sha256::sha256_hex(&bytes);
+            Some(format!("{hash}  grok\n").into_bytes())
+        }
+    }
+}
+
+fn serve_checksum(
+    stream: &mut TcpStream,
+    is_head: bool,
+    body: &[u8],
+    mode: Mode,
+    checksum: ChecksumMode,
+) {
+    match checksum_body(body, mode, checksum) {
+        None => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+        Some(payload) => {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            if stream.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            if !is_head {
+                let _ = stream.write_all(&payload);
+            }
+        }
+    }
+    let _ = stream.flush();
 }
 
 /// Parse `Range: bytes=a-b` from a raw request header block (case-insensitive).
@@ -169,16 +252,20 @@ fn handle_connection(
     }
     let request = String::from_utf8_lossy(&buf).to_string();
     let is_head = request.starts_with("HEAD");
+    let path = request_path(&request);
+    let (body, mode, checksum) = {
+        let st = state.lock().unwrap();
+        (st.body.clone(), st.mode, st.checksum)
+    };
+    if path.ends_with(".sha256") {
+        serve_checksum(&mut stream, is_head, &body, mode, checksum);
+        return;
+    }
     // Count only body-serving GETs; the parallel path's HEAD probe is excluded.
     if !is_head {
         gets.fetch_add(1, Ordering::Relaxed);
     }
     let range = parse_range(&request);
-
-    let (body, mode) = {
-        let st = state.lock().unwrap();
-        (st.body.clone(), st.mode)
-    };
     let total = body.len();
     let body: &[u8] = &body;
 
@@ -200,11 +287,7 @@ fn handle_connection(
     // `payload` is what we actually transmit before any early close; for the
     // truncated modes it may be shorter than the advertised `claimed_len`.
     let payload: Vec<u8> = match mode {
-        Mode::Garbage => {
-            let mut bad = b"#!/bin/sh\nexit 1\n".to_vec();
-            bad.resize(claimed_len, b'\n');
-            bad
-        }
+        Mode::Garbage => garbage_payload(claimed_len),
         _ => body[slice_start..send_end].to_vec(),
     };
 

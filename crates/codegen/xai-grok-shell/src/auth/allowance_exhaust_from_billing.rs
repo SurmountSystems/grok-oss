@@ -2556,6 +2556,12 @@ mod tests {
     }
 
     /// Remembered billing headroom + reset_at flow into load → rank order.
+    ///
+    /// Same-role SuperGrok identities: sooner `reset_at` wins. A Team JWT is
+    /// not a SuperGrok included paying source while a live personal login
+    /// exists (auth.json has one personal multi-slot per base), so this
+    /// fixture is two Team principals and no personal. Matching nextReset
+    /// is still two pools.
     #[test]
     #[serial_test::serial]
     fn load_candidates_picks_up_remembered_billing_sooner_reset() {
@@ -2571,7 +2577,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = "https://auth.x.ai::billing-rank";
         let mut map = AuthStore::default();
-        // Personal (user-p) resets later; business (team-biz) sooner.
+        // team-late resets later; team-soon sooner. Team-only login.
         upsert_supergrok_session(
             &mut map,
             base,
@@ -2579,6 +2585,8 @@ mod tests {
                 key: "tok-p-bill".into(),
                 auth_mode: AuthMode::Oidc,
                 user_id: "user-p".into(),
+                principal_type: Some("Team".into()),
+                team_id: Some("team-late".into()),
                 ..Default::default()
             },
         );
@@ -2590,21 +2598,20 @@ mod tests {
                 auth_mode: AuthMode::Oidc,
                 user_id: "user-b".into(),
                 principal_type: Some("Team".into()),
-                team_id: Some("team-biz".into()),
+                team_id: Some("team-soon".into()),
                 ..Default::default()
             },
         );
         write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
 
-        // identity_id for personal = user-p; business = team-biz
         remember_supergrok_included_billing(
-            "user-p",
+            "team-late",
             40.0,
             Some("2026-08-01T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
         remember_supergrok_included_billing(
-            "team-biz",
+            "team-soon",
             80.0,
             Some("2026-07-30T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
@@ -2616,22 +2623,24 @@ mod tests {
             .iter()
             .map(|c| (c.headroom.identity_id.as_str(), c))
             .collect();
-        let personal = by_id.get("user-p").expect("personal");
-        let business = by_id.get("team-biz").expect("business");
-        assert!(personal.headroom.included_remaining > 0);
-        assert!(business.headroom.included_remaining > 0);
-        assert!(personal.headroom.reset_at.is_some());
-        assert!(business.headroom.reset_at.is_some());
+        let later = by_id.get("team-late").expect("later-reset Team");
+        let sooner = by_id.get("team-soon").expect("sooner-reset Team");
+        assert_eq!(later.headroom.role, SupergrokAccountRole::Business);
+        assert_eq!(sooner.headroom.role, SupergrokAccountRole::Business);
+        assert!(later.headroom.included_remaining > 0);
+        assert!(sooner.headroom.included_remaining > 0);
+        assert!(later.headroom.reset_at.is_some());
+        assert!(sooner.headroom.reset_at.is_some());
         assert!(
-            business.headroom.reset_at.unwrap() < personal.headroom.reset_at.unwrap(),
-            "fixture: business resets sooner"
+            sooner.headroom.reset_at.unwrap() < later.headroom.reset_at.unwrap(),
+            "fixture: remembered billing must give team-soon a sooner reset"
         );
 
         let order = order_credentials_for_preferred_auto(&candidates, &["console-k".into()]);
         assert_eq!(
             order.primary.as_deref(),
             Some("tok-b-bill"),
-            "sooner-reset business before personal; got {:?}",
+            "sooner-reset Team from remembered billing before later-reset Team; got {:?}",
             order
         );
         assert!(order.primary_is_supergrok_included);

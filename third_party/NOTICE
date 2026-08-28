@@ -6,6 +6,17 @@ Full license texts are next to each crate. Local modifications (if any) are
 documented in each crate's Cargo.toml header.
 
 --------------------------------------------------------------------------------
+rhai
+--------------------------------------------------------------------------------
+Path:       third_party/rhai/
+License:    MIT OR Apache-2.0
+License files: third_party/rhai/LICENSE-MIT.txt
+               third_party/rhai/LICENSE-APACHE.txt
+Upstream:   https://github.com/rhaiscript/rhai
+Version:    1.25.1 (library-only; compact_str instead of smartstring)
+crates.io:  https://crates.io/crates/rhai/1.25.1
+
+--------------------------------------------------------------------------------
 mermaid-to-svg
 --------------------------------------------------------------------------------
 Path:       third_party/mermaid-to-svg/
@@ -16,6 +27,26 @@ Copyright:  Copyright (c) 2025-2026 Denver Technologies, Inc. (see LICENSE)
 
 Further ancestry (mermaid.js, dagre.js, and related) is listed in:
   third_party/mermaid-to-svg/THIRD_PARTY_NOTICES
+
+--------------------------------------------------------------------------------
+bm25
+--------------------------------------------------------------------------------
+Path:       third_party/bm25/
+License:    MIT
+License file: third_party/bm25/LICENSE
+Upstream:   https://github.com/Michael-JB/bm25
+Version:    2.3.2
+crates.io:  https://crates.io/crates/bm25/2.3.2
+
+--------------------------------------------------------------------------------
+syntect
+--------------------------------------------------------------------------------
+Path:       third_party/syntect/
+License:    MIT
+License file: third_party/syntect/LICENSE.txt
+Upstream:   https://github.com/trishume/syntect
+Version:    5.3.0 (dump-load/dump-create optional; yaml-rust2)
+crates.io:  https://crates.io/crates/syntect/5.3.0
 
 --------------------------------------------------------------------------------
 dagre_rust
@@ -47,6 +78,26 @@ License file: third_party/ordered_hashmap/LICENCE
 Upstream:   https://github.com/r3alst/ordered-hashmap
 Version:    0.0.3
 crates.io:  https://crates.io/crates/ordered_hashmap/0.0.3
+
+--------------------------------------------------------------------------------
+async-openai
+--------------------------------------------------------------------------------
+Path:       third_party/async-openai/
+License:    MIT
+License file: third_party/async-openai/LICENSE
+Upstream:   https://github.com/our-forks/async-openai
+            (fork of https://github.com/64bit/async-openai)
+Version:    0.33.1 plus ReasoningEffort::Max
+rev:        95b52ebdedf42143083cf3d6f0e0be7c84e9c808
+
+--------------------------------------------------------------------------------
+async-openai-macros
+--------------------------------------------------------------------------------
+Path:       third_party/async-openai-macros/
+License:    MIT
+License file: third_party/async-openai-macros/LICENSE
+Upstream:   same snapshot as async-openai
+Version:    0.1.1
 
 --------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.

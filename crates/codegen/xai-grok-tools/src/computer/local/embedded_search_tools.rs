@@ -563,15 +563,34 @@ mod tests {
         );
     }
 
+    /// Stand-in that ignores argv0. Nix `echo` is a coreutils multi-call
+    /// binary; `exec -a find` then prints `unknown program 'find'`.
+    fn argv0_agnostic_echo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("echo-standin");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nprintf '%s' \"$1\"; shift; for a; do printf ' %s' \"$a\"; done; printf '\\n'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, bin)
+    }
+
     /// Regression: a bare `$ZSH_VERSION` probe aborted the shadow under `set -u`
     /// ("unbound variable"), killing find/grep and dropping the state dump. Runs
-    /// the generated function with `/bin/echo` standing in for the binary.
+    /// the generated function with an argv0-agnostic stand-in for the binary.
     #[test]
     fn shadow_runs_under_nounset_bash() {
         let Ok(bash) = which::which("bash") else {
             return;
         };
-        let inject = shell_function("find", "bfs", Some(Path::new("/bin/echo")), &[]);
+        let (_keep, echo) = argv0_agnostic_echo();
+        let inject = shell_function("find", "bfs", Some(echo.as_path()), &[]);
         let script = format!("set -euo pipefail; {inject}; find hello world");
         let out = std::process::Command::new(&bash)
             .args(["-c", &script])
@@ -594,7 +613,8 @@ mod tests {
         let Ok(bash) = which::which("bash") else {
             return;
         };
-        let inject = shell_function("find", "bfs", Some(Path::new("/bin/echo")), &[]);
+        let (_keep, echo) = argv0_agnostic_echo();
+        let inject = shell_function("find", "bfs", Some(echo.as_path()), &[]);
         let script =
             format!("set -euo pipefail; {inject}; printf '[%s]' \"$(find sub shell)\"; echo ALIVE");
         let out = std::process::Command::new(&bash)
@@ -616,7 +636,8 @@ mod tests {
         let Ok(zsh) = which::which("zsh") else {
             return;
         };
-        let inject = shell_function("grep", "ugrep", Some(Path::new("/bin/echo")), &[]);
+        let (_keep, echo) = argv0_agnostic_echo();
+        let inject = shell_function("grep", "ugrep", Some(echo.as_path()), &[]);
         let script = format!("setopt nounset errexit pipefail; {inject}; grep hi there");
         let out = std::process::Command::new(&zsh)
             .args(["-c", &script])
@@ -660,7 +681,8 @@ mod tests {
         let Ok(bash) = which::which("bash") else {
             return;
         };
-        let shadow = shell_function("find", "bfs", Some(Path::new("/bin/echo")), &[]);
+        let (_keep, echo) = argv0_agnostic_echo();
+        let shadow = shell_function("find", "bfs", Some(echo.as_path()), &[]);
         let restore = restore_command("find");
         let script = format!("set -euo pipefail; {shadow}; {restore}; type -t find || echo NOFUNC");
         let out = std::process::Command::new(&bash)

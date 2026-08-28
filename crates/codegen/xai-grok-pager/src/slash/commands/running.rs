@@ -55,9 +55,9 @@ mod tests {
     fn running_slash_lists_sibling_fixture_row() {
         let dir = tempfile::tempdir().unwrap();
         let self_pid = std::process::id();
-        let mut sibling = spawn_live_grok_named();
+        let (mut sibling, sibling_scope, sibling_group) = spawn_live_grok_named();
         let sibling_pid = sibling.id();
-        let mut not_grok = spawn_live_not_grok();
+        let (mut not_grok, not_grok_scope, not_grok_group) = spawn_live_not_grok();
         let not_grok_pid = not_grok.id();
 
         let fixture = format!(
@@ -103,6 +103,10 @@ mod tests {
         let _ = sibling.wait();
         let _ = not_grok.kill();
         let _ = not_grok.wait();
+        drop(sibling_group);
+        drop(sibling_scope);
+        drop(not_grok_group);
+        drop(not_grok_scope);
 
         assert!(
             text.contains("sibling-fixture-row") || text.contains("sibling-"),
@@ -149,25 +153,59 @@ mod tests {
         }
     }
 
-    fn spawn_live_grok_named() -> std::process::Child {
-        use std::os::unix::process::CommandExt;
-        std::process::Command::new("sleep")
-            .arg0("grok-oss-sibling")
-            .arg("60")
+    fn spawn_live_grok_named() -> (
+        std::process::Child,
+        xai_tty_utils::ProcessScope,
+        std::sync::Arc<xai_tty_utils::ProcessGroup>,
+    ) {
+        // Nix coreutils is a multi-call binary: arg0("grok-oss-sibling") on
+        // sleep exits unknown-program. bash $0 plants grok on cmdline.
+        // No setsid: reparent hides /proc cmdline from is_grok_process.
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg("sleep 60")
+            .arg("grok-oss-sibling")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+        let child = cmd
             .spawn()
-            .expect("spawn grok-named sleep as a sibling pid")
+            .expect("spawn grok-named sleep as a sibling pid");
+        wait_until_grok_process(child.id());
+        let scope = xai_tty_utils::ProcessScope::new();
+        let group = scope.enroll_std(&child).expect("enroll grok-named sleep");
+        (child, scope, group)
     }
 
-    fn spawn_live_not_grok() -> std::process::Child {
-        std::process::Command::new("sleep")
-            .arg("60")
+    fn wait_until_grok_process(pid: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if xai_grok_shell::util::is_grok_process(pid) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("planted grok-named pid {pid} never matched is_grok_process");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn spawn_live_not_grok() -> (
+        std::process::Child,
+        xai_tty_utils::ProcessScope,
+        std::sync::Arc<xai_tty_utils::ProcessGroup>,
+    ) {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("60")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sleep as a live non-grok pid")
+            .stderr(std::process::Stdio::null());
+        // Same as spawn_live_grok_named: no setsid; ProcessScope still enrolls.
+        #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+        let child = cmd.spawn().expect("spawn sleep as a live non-grok pid");
+        let scope = xai_tty_utils::ProcessScope::new();
+        let group = scope.enroll_std(&child).expect("enroll sleep");
+        (child, scope, group)
     }
 }

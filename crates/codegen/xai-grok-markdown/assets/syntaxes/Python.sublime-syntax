@@ -1,0 +1,43 @@
+name: Python
+file_extensions: [py, pyw]
+scope: source.python
+contexts:
+  main:
+    - match: '\b(def|class|if|elif|else|for|while|return|import|from|as|try|except|finally|with|yield|async|await|pass|break|continue|raise|lambda|in|not|and|or|is|global|nonlocal|assert)\b'
+      scope: keyword.control.python
+    - match: '#'
+      push: comment
+    - match: '"""'
+      push: triple_double
+    - match: "'''"
+      push: triple_single
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.python
+  comment:
+    - meta_scope: comment.line.number-sign.python
+    - match: '$'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.python
+    - match: '\\.'
+      scope: constant.character.escape.python
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.python
+    - match: '\\.'
+      scope: constant.character.escape.python
+    - match: "'"
+      pop: true
+  triple_double:
+    - meta_scope: string.quoted.triple.python
+    - match: '"""'
+      pop: true
+  triple_single:
+    - meta_scope: string.quoted.triple.python
+    - match: "'''"
+      pop: true

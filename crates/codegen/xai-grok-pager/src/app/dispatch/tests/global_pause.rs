@@ -229,7 +229,7 @@ fn assert_over_window_compact_unstick(app: &AppView, effects: &[Effect], toast: 
         .iter()
         .map(|p| p.text.as_str())
         .collect();
-    let continued_real = queue.iter().any(|t| *t == "keep going on the compiler")
+    let continued_real = queue.contains(&"keep going on the compiler")
         || effects.iter().any(
             |e| matches!(e, Effect::SendPrompt { text, .. } if text == "keep going on the compiler"),
         );
@@ -531,7 +531,10 @@ fn drain_blocked_while_paused() {
 /// interrupted prompt after this process is gone. The in-memory pause
 /// gate is still RAM-only; this is only the interrupted-prompt marker.
 #[test]
+#[serial_test::serial(GROK_HOME)]
 fn pause_mid_turn_writes_cancel_resume_marker_for_restart() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let proj = tempfile::tempdir().unwrap();
     let cwd = proj.path().to_path_buf();
     let cwd_str = cwd.to_string_lossy().into_owned();
@@ -659,7 +662,7 @@ fn idle_pause_after_http_502_does_not_skip_leftover_implement() {
                     if text.contains("/implement") && text.contains("leftover after 502")
             )
         });
-    let continued_prior = queue.iter().any(|t| *t == "keep going on the compiler")
+    let continued_prior = queue.contains(&"keep going on the compiler")
         || effects.iter().any(
             |e| matches!(e, Effect::SendPrompt { text, .. } if text == "keep going on the compiler"),
         );

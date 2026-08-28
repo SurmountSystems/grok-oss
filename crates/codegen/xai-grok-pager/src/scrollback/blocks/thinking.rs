@@ -1,6 +1,6 @@
 //! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
 
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthStr;
 
@@ -495,9 +495,14 @@ impl BlockContent for ThinkingBlock {
         }
     }
 
-    fn collapse_mode(&self, _is_running: bool) -> DisplayMode {
+    fn collapse_mode(&self, is_running: bool) -> DisplayMode {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
+        } else if is_running {
+            // Match `next_fold_mode`: skip Collapsed while streaming so
+            // explicit collapse from Expanded lands on Truncated (the
+            // running min-fold), not a header-only Collapsed.
+            DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
         }
@@ -681,8 +686,13 @@ mod tests {
             );
             assert_eq!(
                 block.collapse_mode(true),
+                DisplayMode::Truncated,
+                "[ui] always_expand_thinking off: running thinking min-fold is Truncated, not a Collapsed header"
+            );
+            assert_eq!(
+                block.collapse_mode(false),
                 DisplayMode::Collapsed,
-                "[ui] always_expand_thinking off must collapse running thinking too"
+                "[ui] always_expand_thinking off: finished thinking collapses to a header"
             );
         })
         .join()

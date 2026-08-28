@@ -26,7 +26,7 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         StreamableHttpClientTransport, Transport,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
     },
 };
 
@@ -43,20 +43,6 @@ use xai_grok_tools::util::{ProcessGroup, ProcessScope};
 /// Canonical definition lives in `xai_grok_workspace_types`; re-exported here
 /// for callers that historically imported it from this module.
 pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
-
-/// Reqwest 0.13 adapter over `xai_grok_extra_ca::extra_root_ders` (DER is version-neutral).
-fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    for der in xai_grok_extra_ca::extra_root_ders() {
-        match reqwest::Certificate::from_der(der) {
-            Ok(cert) => builder = builder.add_root_certificate(cert),
-            Err(e) => tracing::warn!(
-                error = %e,
-                "GROK_EXTRA_CA_BUNDLE: validated DER rejected by reqwest 0.13; skipping cert"
-            ),
-        }
-    }
-    builder
-}
 
 /// Normalize an MCP server URL for comparison: strip trailing slashes.
 /// Must match the normalization the host's managed-config layer uses
@@ -1827,7 +1813,7 @@ async fn discover_and_prepare_auth(
     let adapter =
         crate::credentials::McpCredentialStoreAdapter::new(server_name.to_string(), parsed_url);
 
-    let mut manager = match rmcp::transport::auth::AuthorizationManager::new(server_url).await {
+    let mut manager = match crate::mcp_http_client::authorization_manager(server_url).await {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(server = server_name, %e, "Failed to create OAuth manager");
@@ -2548,6 +2534,140 @@ fn restorable_transport(pending: &PendingTransport) -> Option<PendingTransport> 
         }),
         PendingTransport::Stdio(_) => None,
     }
+}
+
+/// True when an HTTP handshake failed because the TCP connect never
+/// reached a listening peer (TEST-NET blackhole, no default route,
+/// Nix sandbox `EPERM`). `ConnectionRefused` is excluded: a closed
+/// loopback port is a fail-fast config miss.
+///
+/// Callers stay in [`ClientState::Initializing`] for the remaining
+/// startup budget so concurrent `ensure_initialized` waiters can park
+/// and a cancelled holder still runs [`InitGuard`].
+fn handshake_connect_never_reached_peer(err: &McpError) -> bool {
+    let McpError::HandshakeFailed { source, .. } = err else {
+        return false;
+    };
+    match source.as_ref() {
+        ClientInitializeError::TransportError { error, .. } => {
+            error_chain_is_unrouteable_connect(error)
+                || error_chain_is_unrouteable_connect(error.error.as_ref())
+        }
+        other => error_chain_is_unrouteable_connect(other),
+    }
+}
+
+fn io_kind_is_unrouteable_connect(kind: std::io::ErrorKind) -> Option<bool> {
+    match kind {
+        std::io::ErrorKind::ConnectionRefused => Some(false),
+        std::io::ErrorKind::NetworkUnreachable
+        | std::io::ErrorKind::HostUnreachable
+        | std::io::ErrorKind::PermissionDenied => Some(true),
+        _ => None,
+    }
+}
+
+fn reqwest_connect_is_refused(err: &reqwest::Error) -> bool {
+    if !err.is_connect() {
+        return false;
+    }
+    let mut cur: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = cur {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return true;
+        }
+        if e.to_string()
+            .to_ascii_lowercase()
+            .contains("connection refused")
+        {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+fn error_chain_is_unrouteable_connect(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(err);
+    let mut combined = String::new();
+    let mut saw_connect = false;
+    while let Some(e) = cur {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && let Some(decision) = io_kind_is_unrouteable_connect(io.kind())
+        {
+            return decision;
+        }
+        if let Some(http_err) = e.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
+            match http_err {
+                StreamableHttpError::Io(io) => {
+                    if let Some(decision) = io_kind_is_unrouteable_connect(io.kind()) {
+                        return decision;
+                    }
+                }
+                StreamableHttpError::Client(re) if re.is_connect() => {
+                    if reqwest_connect_is_refused(re) {
+                        return false;
+                    }
+                    saw_connect = true;
+                }
+                _ => {}
+            }
+        }
+        if let Some(re) = e.downcast_ref::<reqwest::Error>()
+            && re.is_connect()
+        {
+            if reqwest_connect_is_refused(re) {
+                return false;
+            }
+            saw_connect = true;
+        }
+        combined.push_str(&e.to_string());
+        combined.push('\n');
+        cur = e.source();
+    }
+    let l = combined.to_ascii_lowercase();
+    if l.contains("connection refused") {
+        return false;
+    }
+    l.contains("network is unreachable")
+        || l.contains("networkunreachable")
+        || l.contains("no route to host")
+        || l.contains("host is unreachable")
+        || l.contains("hostunreachable")
+        || l.contains("operation not permitted")
+        || l.contains("permission denied")
+        || l.contains("address unreachable")
+        // Last resort: a connect-class failure that was not refused.
+        // Nix sandbox often wraps EPERM as reqwest `is_connect` only.
+        || saw_connect
+}
+
+/// After an unrouteable HTTP connect, keep the holder inside
+/// `try_handshake` until the startup budget expires or the task is
+/// cancelled. A no-network sandbox completes `connect()` in one poll
+/// (`ENETUNREACH` / `EPERM`); without this wait, `Initializing` is
+/// invisible and [`InitGuard`] never runs.
+async fn hold_unrouteable_connect_for_startup_budget(
+    server: &str,
+    budget: std::time::Duration,
+    started: std::time::Instant,
+    result: Result<rmcp::service::RunningService<RoleClient, GrokClientHandler>, McpError>,
+) -> Result<rmcp::service::RunningService<RoleClient, GrokClientHandler>, McpError> {
+    if !result
+        .as_ref()
+        .err()
+        .is_some_and(handshake_connect_never_reached_peer)
+    {
+        return result;
+    }
+    let remaining = budget.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return result;
+    }
+    tokio::time::sleep(remaining).await;
+    Err(McpError::timeout(server, budget))
 }
 
 /// Monotonic source for [`McpClient::client_id`]. Process-global so every
@@ -3345,6 +3465,11 @@ impl McpClient {
             restore: restore_for_guard,
         };
 
+        // Initializing is published and the lock is dropped. Yield so
+        // concurrent callers can park, and so abort() can fire with
+        // InitGuard armed, before try_handshake runs.
+        tokio::task::yield_now().await;
+
         let handshake_start = std::time::Instant::now();
         let mut result = self.try_handshake(pending).await;
 
@@ -3472,13 +3597,15 @@ impl McpClient {
                 let transport =
                     Self::build_http_transport(&config, name, self.warn_budget.clone())?;
                 let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(transport))
+                let started = std::time::Instant::now();
+                let result = tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
                     .map_err(|e| McpError::HandshakeFailed {
                         server: name.to_string(),
                         source: Box::new(e),
-                    })
+                    });
+                hold_unrouteable_connect_for_startup_budget(name, timeout, started, result).await
             }
             PendingTransport::HttpAuth {
                 config,
@@ -3497,16 +3624,17 @@ impl McpClient {
                     }
                 }
                 ensure_figma_user_agent(&mut headers, name, &config.url);
-                let http_client = with_extra_root_certificates(
-                    reqwest::Client::builder().default_headers(headers),
-                )
-                .build()
-                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+                let http_client = crate::mcp_http_client::reqwest_client_builder()
+                    .default_headers(headers)
+                    .build()
+                    .map_err(|e| {
+                        McpError::ClientError(format!("Failed to build HTTP client: {e}"))
+                    })?;
                 // `AuthClient::new` wants an owned manager, but ours is shared
                 // (`Arc`) with the OAuth flow; the struct is non_exhaustive, so
                 // build with a throwaway manager and swap in the shared one.
                 let placeholder_manager =
-                    rmcp::transport::auth::AuthorizationManager::new(config.url.as_str())
+                    crate::mcp_http_client::authorization_manager(config.url.as_str())
                         .await
                         .map_err(|e| {
                             McpError::ClientError(format!("Failed to build OAuth client: {e}"))
@@ -3524,13 +3652,15 @@ impl McpClient {
                 let transport =
                     StreamableHttpClientTransport::with_client(mcp_http_client, transport_config);
                 let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(transport))
+                let started = std::time::Instant::now();
+                let result = tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
                     .map_err(|e| McpError::HandshakeFailed {
                         server: name.to_string(),
                         source: Box::new(e),
-                    })
+                    });
+                hold_unrouteable_connect_for_startup_budget(name, timeout, started, result).await
             }
             PendingTransport::Acp { server_id, invoker } => {
                 // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: the larger of the
@@ -3706,10 +3836,10 @@ impl McpClient {
             }
         }
         ensure_figma_user_agent(&mut headers, server_name, &config.url);
-        let client =
-            with_extra_root_certificates(reqwest::Client::builder().default_headers(headers))
-                .build()
-                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+        let client = crate::mcp_http_client::reqwest_client_builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
         let mcp_http_client =
             crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget);
         let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());

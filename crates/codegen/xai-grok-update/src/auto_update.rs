@@ -1,3 +1,12 @@
+//! SpaceXAI auto-updater (optional Grok OSS escape hatch).
+//!
+//! The internal (CDN) download and the GitHub Releases installer pin
+//! SHA-256 of the published `${artifact}.sha256` file (fail-closed on miss
+//! or mismatch). Internal still smoke-tests `--version` after the pin.
+//! Not SHA-1. POSIX `install.sh` and PowerShell `install.ps1` use the same
+//! digest rules. Git SHAs in version identity strings are git object ids.
+//! Do not add SHA-1 as a download FOD hash.
+
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -10,6 +19,10 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
+use crate::artifact_sha256::{
+    ChecksumVerifyFailure, artifact_checksum_url, parse_sha256_file_bytes, sha256_hex_file,
+    verify_file_against_digest,
+};
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
@@ -150,10 +163,11 @@ enum InstallPhaseError {
     Activate(anyhow::Error),
 }
 
-/// Smoke failures stay unwrapped — already typed, and the base-retry abort
-/// in [`install_internal_from_bases`] must still downcast them.
+/// Smoke and SHA-256 pin failures stay unwrapped (already typed), and the
+/// base-retry abort in [`install_internal_from_bases`] must still downcast
+/// them. They are a property of the published artifact, not the CDN.
 fn wrap_download_err(e: anyhow::Error) -> anyhow::Error {
-    if e.is::<SmokeTestFailure>() {
+    if e.is::<SmokeTestFailure>() || e.is::<ChecksumVerifyFailure>() {
         e
     } else {
         InstallPhaseError::Download(e).into()
@@ -168,6 +182,9 @@ pub fn classify_install_error(err: &anyhow::Error) -> CliUpdateErrorKind {
             SmokeTestFailure::Spawn(_) => CliUpdateErrorKind::SmokeSpawn,
             SmokeTestFailure::NonZero { .. } => CliUpdateErrorKind::SmokeNonzero,
         };
+    }
+    if err.is::<ChecksumVerifyFailure>() {
+        return CliUpdateErrorKind::Download;
     }
     match err.downcast_ref::<InstallPhaseError>() {
         Some(InstallPhaseError::Download(_)) => CliUpdateErrorKind::Download,
@@ -1342,12 +1359,14 @@ async fn remove_stale_pager(bin_dir: &std::path::Path) {
 
 /// Fetch a CLI object from GCS. On Windows the public bucket may use a `.exe`
 /// suffix; try that first, then the extensionless name used on macOS/Linux.
+/// Returns the URL that actually served the bytes so the published
+/// `${url}.sha256` pin can be fetched next to it.
 async fn download_cli_artifact_from_gcs(
     gcs_base_url: &str,
     object_name: &str,
     dest: &std::path::Path,
     with_progress: bool,
-) -> Result<()> {
+) -> Result<String> {
     let base = gcs_base_url.trim_end_matches('/');
     #[cfg(windows)]
     {
@@ -1358,16 +1377,105 @@ async fn download_cli_artifact_from_gcs(
             download_silent(&with_exe, dest).await
         };
         match r {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(with_exe),
             Err(e) => tracing::debug!("{with_exe} not found, trying extensionless: {e}"),
         }
     }
     let url = format!("{}/{}", base, object_name);
     if with_progress {
-        download_with_progress(&url, dest).await
+        download_with_progress(&url, dest).await?;
     } else {
-        download_silent(&url, dest).await
+        download_silent(&url, dest).await?;
     }
+    Ok(url)
+}
+
+/// Fail-closed SHA-256 pin. Downloads `${artifact}.sha256`, requires a
+/// 64-hex digest, and refuses a miss, unreadable file, or mismatch. Does
+/// not log tokens. Not SHA-1.
+async fn verify_downloaded_sha256(
+    artifact: &std::path::Path,
+    checksum_url: &str,
+) -> Result<(), ChecksumVerifyFailure> {
+    let client = reqwest::Client::builder()
+        .timeout(DOWNLOAD_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| ChecksumVerifyFailure::Io(e.to_string()))?;
+    let resp =
+        client
+            .get(checksum_url)
+            .send()
+            .await
+            .map_err(|_| ChecksumVerifyFailure::Missing {
+                url: checksum_url.to_string(),
+            })?;
+    if !resp.status().is_success() {
+        return Err(ChecksumVerifyFailure::Missing {
+            url: checksum_url.to_string(),
+        });
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| ChecksumVerifyFailure::Unreadable {
+            url: checksum_url.to_string(),
+        })?;
+    let expected =
+        parse_sha256_file_bytes(&bytes).ok_or_else(|| ChecksumVerifyFailure::Unreadable {
+            url: checksum_url.to_string(),
+        })?;
+    let artifact = artifact.to_path_buf();
+    let actual = tokio::task::spawn_blocking(move || sha256_hex_file(&artifact))
+        .await
+        .map_err(|e| ChecksumVerifyFailure::Io(e.to_string()))?
+        .map_err(|e| ChecksumVerifyFailure::Io(e.to_string()))?;
+    if actual != expected {
+        return Err(ChecksumVerifyFailure::Mismatch);
+    }
+    eprintln!("  SHA-256 verified.");
+    Ok(())
+}
+
+/// Fail-closed SHA-256 pin for GitHub Releases. Downloads the published
+/// `${artifact}.sha256` release asset via `gh`, requires a 64-hex digest,
+/// and refuses a miss, unreadable file, or mismatch. Uses
+/// [`parse_sha256_file_bytes`] / [`verify_file_against_digest`]. Not SHA-1.
+async fn verify_gh_release_sha256(
+    artifact: &std::path::Path,
+    tag: &str,
+    checksum_pattern: &str,
+) -> Result<(), ChecksumVerifyFailure> {
+    let checksum_dest = unique_temp_sibling(artifact, "sha256.tmp");
+    if gh_release_download(tag, checksum_pattern, &checksum_dest)
+        .await
+        .is_err()
+        || !checksum_dest.exists()
+    {
+        let _ = tokio::fs::remove_file(&checksum_dest).await;
+        return Err(ChecksumVerifyFailure::Missing {
+            url: checksum_pattern.to_string(),
+        });
+    }
+    let bytes = match tokio::fs::read(&checksum_dest).await {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&checksum_dest).await;
+            return Err(ChecksumVerifyFailure::Unreadable {
+                url: checksum_pattern.to_string(),
+            });
+        }
+    };
+    let _ = tokio::fs::remove_file(&checksum_dest).await;
+    let expected =
+        parse_sha256_file_bytes(&bytes).ok_or_else(|| ChecksumVerifyFailure::Unreadable {
+            url: checksum_pattern.to_string(),
+        })?;
+    let artifact = artifact.to_path_buf();
+    tokio::task::spawn_blocking(move || verify_file_against_digest(&artifact, &expected))
+        .await
+        .map_err(|e| ChecksumVerifyFailure::Io(e.to_string()))??;
+    eprintln!("  SHA-256 verified.");
+    Ok(())
 }
 
 /// Returns the version that was actually activated.
@@ -1385,10 +1493,11 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
 ///
 /// Download-phase side effects (download dir creation, binary fetch) are
 /// idempotent, so retrying with a different base after a partial failure is
-/// safe. Smoke-test failures ([`SmokeTestFailure`]) are a property of the
-/// published artifact, not the CDN — retrying another base will not help.
+/// safe. Smoke-test failures ([`SmokeTestFailure`]) and SHA-256 pin
+/// failures ([`ChecksumVerifyFailure`]) are a property of the published
+/// artifact, not the CDN. Retrying another base will not help.
 /// Local activation ([`activate_verified_download`]: link swap, cleanup,
-/// config persist) runs once after the first successful download — its
+/// config persist) runs once after the first successful download. Its
 /// failures are not base-dependent, so they abort the install instead of
 /// triggering a pointless re-download from the next base.
 #[doc(hidden)]
@@ -1406,10 +1515,11 @@ pub async fn install_internal_from_bases(
                     .map(|()| download.version)
                     .map_err(|e| InstallPhaseError::Activate(e).into());
             }
-            Err(e) if e.is::<SmokeTestFailure>() => {
+            Err(e) if e.is::<SmokeTestFailure>() || e.is::<ChecksumVerifyFailure>() => {
                 // Same published artifact on every base — retrying will not
-                // change a --version timeout or crash. Left unwrapped so
-                // telemetry classification sees the typed failure.
+                // change a --version timeout, crash, or SHA-256 pin miss.
+                // Left unwrapped so telemetry classification sees the typed
+                // failure.
                 return Err(e);
             }
             Err(e) => {
@@ -1544,17 +1654,20 @@ pub async fn install_internal_from_base(
         .map_err(|e| InstallPhaseError::Activate(e).into())
 }
 
-/// A downloaded and smoke-tested binary in `~/.grok/downloads/`, not yet
-/// activated as the managed `grok`/`agent`.
+/// A downloaded binary in `~/.grok/downloads/` whose SHA-256 matched the
+/// published checksum file and that passed `--version`, not yet activated
+/// as the managed `grok`/`agent`.
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
 }
 
 /// Base-dependent install phase: resolve the version (per base when no
-/// target is pinned), download the binary, and smoke-test it. Network /
-/// fetch failures here are worth retrying against another base URL.
-/// [`SmokeTestFailure`] is not — see [`install_internal_from_bases`].
+/// target is pinned), download the binary, pin SHA-256 of the published
+/// checksum file, then smoke-test `--version`. Network / fetch failures
+/// here are worth retrying against another base URL.
+/// [`SmokeTestFailure`] and [`ChecksumVerifyFailure`] are not. See
+/// [`install_internal_from_bases`].
 async fn download_verified_from_base(
     target: Option<&str>,
     update_config: &UpdateConfig,
@@ -1584,11 +1697,20 @@ async fn download_verified_from_base(
 
     eprintln!("  Downloading grok v{} ({})...", version, platform);
 
-    // Published already +x (see `publish_downloaded_artifact`).
-    download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
+    // Download onto a pending sibling so a failed pin cannot replace
+    // previous-good at `binary_path`. Published already +x (see
+    // `publish_downloaded_artifact`).
+    let pending = tmp_download_path(&binary_path);
+    let artifact_url =
+        download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &pending, true).await?;
+    let checksum_url = artifact_checksum_url(&artifact_url);
+    if let Err(fail) = verify_downloaded_sha256(&pending, &checksum_url).await {
+        let _ = tokio::fs::remove_file(&pending).await;
+        return Err(fail.into());
+    }
+    publish_downloaded_artifact(&pending, &binary_path).await?;
 
-    // Smoke-test: run the binary before activating it. A truncated or
-    // corrupt download is caught here and never becomes the active grok.
+    // `--version` is a second run-check after the SHA-256 pin. Not SHA-1.
     if let Err(fail) = smoke_test_binary(&binary_path).await {
         let _ = tokio::fs::remove_file(&binary_path).await;
         // No prefix: run_install_script's wrap adds "Auto-update failed:".
@@ -2384,10 +2506,14 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
 
 /// Download and install grok from GitHub Releases (xai-org-shared/grok-build).
 ///
-/// Uses `gh release download` to fetch the binary matching the current platform.
-/// This works anywhere the `gh` CLI is authenticated, without needing npm or
+/// Uses `gh release download` to fetch the binary matching the current
+/// platform and the published `${artifact}.sha256` release asset. Pins
+/// SHA-256 of downloaded bytes (fail-closed on miss, unreadable digest, or
+/// mismatch). Does not replace previous-good until verify succeeds. Not
+/// SHA-1. Works anywhere the `gh` CLI is authenticated, without npm or
 /// internal network access.
-async fn install_gh_release(target: Option<&str>) -> Result<()> {
+#[doc(hidden)]
+pub async fn install_gh_release(target: Option<&str>) -> Result<()> {
     let (os, arch) = detect_platform()?;
     let platform = format!("{}-{}", os, arch);
 
@@ -2411,14 +2537,16 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         version, platform
     );
 
-    gh_release_download(&tag, &binary_name, &binary_path).await?;
-
-    // chmod +x
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
+    // Download onto a pending sibling so a failed pin cannot replace
+    // previous-good at `binary_path`.
+    let pending = tmp_download_path(&binary_path);
+    gh_release_download(&tag, &binary_name, &pending).await?;
+    let checksum_pattern = artifact_checksum_url(&binary_name);
+    if let Err(fail) = verify_gh_release_sha256(&pending, &tag, &checksum_pattern).await {
+        let _ = tokio::fs::remove_file(&pending).await;
+        return Err(fail.into());
     }
+    publish_downloaded_artifact(&pending, &binary_path).await?;
 
     // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
     swap_managed_bin_links(&binary_path, &bin_dir).await?;
@@ -2469,6 +2597,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
 /// Creates a temporary .npmrc file with the NPM token if present.
 /// Returns the path to the created file, or None if no token was set.
+/// Writes the token to a 0600 file so it is not in argv. Do not log the
+/// token value; log only that a temp userconfig path was used.
 fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<std::path::PathBuf>> {
     if let Ok(token) = std::env::var("NPM_TOKEN") {
         let token = token.trim();

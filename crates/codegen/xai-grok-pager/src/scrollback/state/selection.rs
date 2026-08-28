@@ -217,17 +217,20 @@ impl ScrollbackState {
         None
     }
 
-    /// Collapse selected entry (no-op if already at minimum fold mode or not foldable).
+    /// Collapse selected entry (no-op if already at or below minimum fold mode
+    /// or not foldable).
     ///
     /// Uses the block's `collapse_mode` to determine the target mode, which may be
-    /// `Truncated` for running blocks (e.g., execute) instead of `Collapsed`.
+    /// `Truncated` for running blocks (e.g., execute, thinking) instead of
+    /// `Collapsed`. Only folds down by `display_rank`; never promotes a
+    /// header-only `Collapsed` entry up to `Truncated`.
     pub fn collapse_selected(&mut self) {
         if let Some(i) = self.selected
             && let Some((_, entry)) = self.entries.get_index(i)
             && entry.is_foldable()
         {
             let target_mode = entry.block.collapse_mode(entry.is_running);
-            if entry.display_mode != target_mode {
+            if display_rank(entry.display_mode) > display_rank(target_mode) {
                 self.fold_selected_impl(|entry| {
                     let target = entry.block.collapse_mode(entry.is_running);
                     entry.set_display_mode(target);

@@ -875,11 +875,14 @@ mod tests {
     /// and the re-exec SessionLoaded path must auto-continue that prompt.
     /// Silent idle or a lost session is a miss.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn() {
         use crate::app::actions::{Action, Effect, TaskResult};
         use crate::app::agent::{AgentId, AgentState};
         use agent_client_protocol as acp;
 
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
         let proj = tempfile::tempdir().unwrap();
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
@@ -1247,12 +1250,14 @@ mod tests {
     /// interrupt must be dropped on session load when the primary user turn
     /// already finished successfully. Do not re-fire a completed prompt.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully() {
         use crate::app::actions::{Action, Effect, TaskResult};
         use crate::app::agent::{AgentId, AgentState};
         use crate::scrollback::blocks::SessionEvent;
         use agent_client_protocol as acp;
 
+        let _grok_home = crate::test_util::GrokHomeFixture::new();
         let proj = tempfile::tempdir().unwrap();
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();

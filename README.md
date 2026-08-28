@@ -124,7 +124,7 @@ artifact is **`grok-oss`**.
 | License | Apache-2.0 | Apache-2.0 |
 
 Sync and versioning: [`FORK.md`](FORK.md), [`docs/upstream-history.md`](docs/upstream-history.md).  
-Users: `grok-oss update --check`. Maintainers: `just upstream-detect` / import or put-history scripts (never blind-merge xAI force-exports).
+Users: `grok-oss update --check`. Maintainers: `just upstream-detect` / `grok-nix-helper put-history-on-xai` or import (never blind-merge xAI force-exports).
 
 ## Documentation
 

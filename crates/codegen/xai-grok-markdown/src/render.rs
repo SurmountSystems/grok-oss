@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use anstyle::{Effects, Reset, Style};
 use ratatui::text::{Line, Span};
-use syntect::highlighting::Style as SyntectStyle;
+use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle};
 
 use crate::buffers::{MarkdownBuffers, RenderEvent, RenderEventKind, unicode_display_width};
 use crate::checkpoint::Checkpoint;
@@ -24,6 +24,27 @@ use crate::style::{all_hidden, merge_styles};
 /// Trait for converting anstyle to ratatui style.
 trait StyleInto<T> {
     fn style_into(self) -> T;
+}
+
+fn syntect_style_to_anstyle(style: SyntectStyle) -> Style {
+    let mut effects = Effects::new();
+    if style.font_style.contains(FontStyle::BOLD) {
+        effects |= Effects::BOLD;
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        effects |= Effects::ITALIC;
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        effects |= Effects::UNDERLINE;
+    }
+    Style::new()
+        .fg_color(Some(syntect_color_to_anstyle(style.foreground)))
+        .bg_color(Some(syntect_color_to_anstyle(style.background)))
+        .effects(effects)
+}
+
+fn syntect_color_to_anstyle(color: SyntectColor) -> anstyle::Color {
+    anstyle::Color::Rgb(anstyle::RgbColor(color.r, color.g, color.b))
 }
 
 impl StyleInto<ratatui::style::Style> for Style {
@@ -98,7 +119,7 @@ fn render_replace_ansi(highlighted: &[Vec<(SyntectStyle, String)>]) -> String {
             if text.is_empty() {
                 continue;
             }
-            let full_style = anstyle_syntect::to_anstyle(*style);
+            let full_style = syntect_style_to_anstyle(*style);
             let fg_only = full_style.bg_color(None);
             let adapted = adapt_style(fg_only);
             if adapted != Style::new() {
@@ -797,7 +818,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                             current_source_line = code_start_source_line + line_idx;
 
                             for (syn_style, text) in line_spans {
-                                let full_style = anstyle_syntect::to_anstyle(*syn_style);
+                                let full_style = syntect_style_to_anstyle(*syn_style);
                                 let with_bg =
                                     full_style.bg_color(self.ms.code_background.get_bg_color());
                                 // This is the only legitimate inline adapt_style call

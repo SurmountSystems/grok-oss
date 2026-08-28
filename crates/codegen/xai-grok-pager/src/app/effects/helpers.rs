@@ -46,6 +46,61 @@ where
         }
     }
 }
+/// Wait `warn_after` for `fut`. On expiry, run `on_warn` and keep waiting
+/// until `hard_after` (total elapsed). If the future is still pending at
+/// `hard_after`, return `None`.
+///
+/// Session/load uses this: a 3m backstop must warn, not drop the RPC,
+/// because a large `updates.jsonl` replay can outlive the floor. A second
+/// equal window is the give-up: an eternal spinner is not a load.
+pub(super) async fn wait_or_warn_then_keep<F, T>(
+    fut: F,
+    warn_after: std::time::Duration,
+    hard_after: std::time::Duration,
+    on_warn: impl FnOnce(),
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let mut fut = std::pin::pin!(fut);
+    tokio::select! {
+        result = &mut fut => return Some(result),
+        () = tokio::time::sleep(warn_after) => {
+            on_warn();
+        }
+    }
+    let rest = hard_after.saturating_sub(warn_after);
+    tokio::select! {
+        result = &mut fut => Some(result),
+        () = tokio::time::sleep(rest) => None,
+    }
+}
+/// Same as [`acp_send_bounded`], but a timeout warns via `on_timeout` and
+/// keeps waiting for the RPC instead of returning an error.
+pub(super) async fn acp_send_keep_waiting_after_timeout<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+    on_timeout: impl FnOnce(String),
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    let hard = timeout + timeout;
+    match wait_or_warn_then_keep(acp_send(request, tx), timeout, hard, || {
+        on_timeout(format_session_rpc_timeout(action, timeout));
+    })
+    .await
+    {
+        Some(result) => result,
+        None => Err(acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            format_session_rpc_gave_up(action, hard),
+        )),
+    }
+}
 /// Operator-facing session RPC timeout copy.
 pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Duration) -> String {
     format!(
@@ -53,6 +108,20 @@ pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Durat
          retrying right away can run into the same delay.",
         xai_tty_utils::format_human_duration(timeout)
     )
+}
+/// Operator-facing copy when the session RPC never completed after the
+/// warn window plus an equal keep-waiting window.
+pub(super) fn format_session_rpc_gave_up(action: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "{action} gave up after {}. The session did not finish loading.",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+/// True when `error` is the client-side session RPC timeout copy: the
+/// request may still finish, so the pager must not treat the session as
+/// dead or drain prompts into `session/prompt`.
+pub(crate) fn is_session_rpc_timeout_error(error: &str) -> bool {
+    error.contains("timed out after") && error.contains("may still finish in the background")
 }
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.

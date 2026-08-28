@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(suggestion.full_text, "finish the schema slice");
         assert_eq!(suggestion.kind, StoredPromptKind::Draft);
         assert_eq!(
-            suggestion.ghost_remainder("fin").as_deref(),
+            suggestion.ghost_remainder("fin"),
             Some("ish the schema slice")
         );
     }

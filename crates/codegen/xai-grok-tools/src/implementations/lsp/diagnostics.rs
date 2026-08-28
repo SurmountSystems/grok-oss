@@ -18,9 +18,9 @@
 //! arrival order — it is credited with the newest version we had sent when it
 //! arrived.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_lsp::lsp_types::Diagnostic;
 
@@ -71,6 +71,13 @@ pub struct DiagnosticsStore {
 struct Inner {
     documents: RwLock<HashMap<String, Answer>>,
     publishes: AtomicBool,
+    /// URIs whose latest nonempty push has not yet been taken by a drain.
+    ///
+    /// An empty pull can settle pending before the first `publishDiagnostics`
+    /// lands. The push is still the report the reader is owed (rust-analyzer
+    /// leaves `cargo check` on that channel). The drain has to be able to
+    /// find it after pending is already gone.
+    fresh_nonempty_pushes: Mutex<HashSet<String>>,
 }
 
 impl DiagnosticsStore {
@@ -164,7 +171,32 @@ impl DiagnosticsStore {
             (_, None) => NO_VERSION,
         };
         // A push replaces the whole set for the document, and carries no id.
-        self.install(uri, Answer::new(items, covers, None))
+        let nonempty = !items.is_empty();
+        let landed = self.install(uri, Answer::new(items, covers, None));
+        if landed && nonempty {
+            self.fresh_nonempty_pushes().insert(uri.to_string());
+        }
+        landed
+    }
+
+    /// URIs with a nonempty push the drain has not yet taken. Sorted so what
+    /// a reader sees does not depend on hash-map layout.
+    pub fn take_fresh_nonempty_pushes(&self) -> Vec<String> {
+        let mut uris: Vec<String> = self.fresh_nonempty_pushes().drain().collect();
+        uris.sort_unstable();
+        uris
+    }
+
+    /// The pending drain already reported this URI; do not report it twice.
+    pub fn forget_fresh_push(&self, uri: &str) {
+        self.fresh_nonempty_pushes().remove(uri);
+    }
+
+    fn fresh_nonempty_pushes(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.inner
+            .fresh_nonempty_pushes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Record that the server stands by its previous answer for `uri`, as an
@@ -364,6 +396,22 @@ mod tests {
         let store = DiagnosticsStore::new();
         assert!(!store.confirm_unchanged(A, 1, "id".into(), || true));
         assert_eq!(store.covers(A), None);
+    }
+
+    #[test]
+    fn a_nonempty_push_after_an_empty_pull_is_still_owed_to_the_drain() {
+        let store = DiagnosticsStore::new();
+        store.install(A, Answer::new(vec![], 1, Some("pull-clean".into())));
+        store.record_push(A, vec![diagnostic("cargo check")], Some(1), Some(1));
+        assert_eq!(
+            store.take_fresh_nonempty_pushes(),
+            vec![A.to_string()],
+            "the drain has to find the push after pending was settled as clean"
+        );
+        assert!(
+            store.take_fresh_nonempty_pushes().is_empty(),
+            "a taken push is not reported twice"
+        );
     }
 
     #[test]

@@ -3194,7 +3194,7 @@ async fn implement_loop_effort_two_without_operator_ask_admits_one_review_descri
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,
@@ -3357,7 +3357,7 @@ async fn spawn_admits_one_review_at_implement_loop_effort(effort: u8) {
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row at effort {effort}"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,

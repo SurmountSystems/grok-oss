@@ -88,6 +88,13 @@ fn app_draw_drains_deferred_release_after_flush() {
     );
 }
 pub(crate) fn test_app() -> AppView {
+    if std::env::var_os("GROK_HOME").is_none() {
+        let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+        }
+    }
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
         pending_startup: None,

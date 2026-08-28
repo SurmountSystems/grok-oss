@@ -368,7 +368,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the agent's reasoning (thinking) blocks. Same Ctrl+T chord as the scrollback and composer, including inside a nested overlay.",
+                "Shows or hides the agent's reasoning (thinking) blocks.\nSame Ctrl+T chord as the scrollback and composer, including inside a nested overlay.",
             ),
         },
         ActionDef {

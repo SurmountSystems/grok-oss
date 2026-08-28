@@ -781,10 +781,9 @@ impl AgentView {
         if let Some(pid) = self.loading_placeholder_id.take() {
             self.scrollback.remove_entry(pid);
         }
-        let dropped_heavy;
-        if success && reload.saw_replay {
+        let dropped_heavy = if success && reload.saw_replay {
             self.scrollback.end_batch();
-            dropped_heavy = true;
+            true
         } else if success {
             let tail = std::mem::replace(&mut self.scrollback, reload.scrollback);
             self.scrollback.append_entries_from(tail);
@@ -819,7 +818,7 @@ impl AgentView {
             if !reload.saw_todo_update {
                 self.todo = reload.todo;
             }
-            dropped_heavy = false;
+            false
         } else {
             let floor = self.scrollback.id_floor();
             let staging_generations = self.scrollback.invalidation_generations();
@@ -836,8 +835,8 @@ impl AgentView {
             self.last_seen_event_id = reload.last_seen_event_id;
             self.last_applied_event_seq = reload.last_applied_event_seq;
             self.last_applied_xai_event_seq = reload.last_applied_xai_event_seq;
-            dropped_heavy = true;
-        }
+            true
+        };
         self.session.loading_replay = false;
         if success {
             self.arm_late_replay_grace();
@@ -915,9 +914,11 @@ impl AgentView {
                 return Some(TurnActivity::Waiting(WaitingReason::subagent()));
             }
             // A pending get_command_or_subagent_output wait is not a healthy
-            // wait once every waited-on nested agent / bg task has completed.
-            // Overlay title otherwise stays `Waiting on task output` with a
-            // climbing timer after the child already exited.
+            // wait once every *known* waited-on nested agent / bg task has
+            // completed. Overlay title otherwise stays `Waiting on task
+            // output` with a climbing timer after the child already exited.
+            // Named ids that are not in the maps yet still count as live:
+            // a blocking wait tool outranks generic Model wait.
             if let TurnActivity::Waiting(WaitingReason::TaskOutput {
                 ref task_ids,
                 waits: true,
@@ -963,10 +964,11 @@ impl AgentView {
                 })
             }
             TurnActivity::Waiting(WaitingReason::Subagent { .. }) => {
+                // Foreground wait: description only. Empty/whitespace stays
+                // the generic "Waiting on subagent…" label. Id fallback is
+                // for unnamed TaskOutput / Model waits (live_specialist).
                 TurnActivity::Waiting(WaitingReason::Subagent {
-                    display: self
-                        .subagent_wait_subject()
-                        .or_else(|| self.live_specialist_wait_subject()),
+                    display: self.subagent_wait_subject(),
                 })
             }
             TurnActivity::Waiting(WaitingReason::Model) => {
@@ -1054,8 +1056,9 @@ impl AgentView {
             .find(|info| info.subagent_id.as_ref() == task_id)
             .and_then(specialist_lookup_subject)
     }
-    /// Wait chrome stays only while at least one named id (or, when ids miss,
-    /// any live specialist / running bg task) is still running.
+    /// Wait chrome stays while at least one named id is still running, or is
+    /// not in the bg-task / subagent maps yet (no completion evidence). When
+    /// ids miss, any live specialist / running bg task keeps the wait.
     fn waited_work_still_running(&self, task_ids: &[String]) -> bool {
         use crate::app::agent::BgTaskStatus;
         if task_ids.is_empty() {
@@ -1077,9 +1080,15 @@ impl AgentView {
         if let Some(info) = self.subagent_sessions.get(id) {
             return info.is_running();
         }
-        self.subagent_sessions
+        match self
+            .subagent_sessions
             .values()
-            .any(|info| info.subagent_id.as_ref() == id && info.is_running())
+            .find(|info| info.subagent_id.as_ref() == id)
+        {
+            Some(info) => info.is_running(),
+            // Wait tool is still pending; missing maps is not "completed."
+            None => true,
+        }
     }
 
     /// Drop tracker task-output waits whose waited-on children have all
@@ -2646,6 +2655,31 @@ mod resolve_turn_activity_tests {
                 Some(TurnActivity::Waiting(WaitingReason::TaskOutput { .. }))
             ),
             "named wait chrome must end after that nested agent completed, got {activity:?}"
+        );
+    }
+
+    /// A live wait tool that names an id not yet in bg_tasks / subagent maps
+    /// still advertises TaskOutput. Unknown is not completed.
+    #[test]
+    fn named_task_output_wait_outranks_model_when_id_is_unknown() {
+        let mut view = running_view();
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["bg-not-registered"],
+                "timeout_ms": 30_000,
+            }),
+        );
+        let activity = view.resolve_turn_activity();
+        assert!(
+            matches!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+                    waits: true,
+                    ..
+                }))
+            ),
+            "blocking wait tool must outrank Waiting(Model), got {activity:?}"
         );
     }
 

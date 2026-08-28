@@ -2462,7 +2462,7 @@ mod tests {
             crate::syntax::get_syntect()
                 .highlight_lines_for_token("json")
                 .is_some(),
-            "JSON syntax missing from the two-face syntax set"
+            "JSON syntax missing from the bundled syntax set"
         );
     }
 

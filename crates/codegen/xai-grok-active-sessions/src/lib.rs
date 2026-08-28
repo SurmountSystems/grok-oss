@@ -599,21 +599,29 @@ mod tests {
         assert_eq!(list_in(dir.path()).unwrap().len(), 1);
     }
 
-    fn spawn_live_child() -> std::process::Child {
-        std::process::Command::new("sleep")
-            .arg("60")
+    fn spawn_live_child() -> (
+        std::process::Child,
+        xai_tty_utils::ProcessScope,
+        std::sync::Arc<xai_tty_utils::ProcessGroup>,
+    ) {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("60")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sleep as a second live pid")
+            .stderr(std::process::Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+        let child = cmd.spawn().expect("spawn sleep as a second live pid");
+        let scope = xai_tty_utils::ProcessScope::new();
+        let group = scope.enroll_std(&child).expect("enroll sleep");
+        (child, scope, group)
     }
 
     #[test]
     fn list_live_includes_two_windows_on_the_same_session_id() {
         let dir = TempDir::new().unwrap();
         let self_pid = std::process::id();
-        let mut child = spawn_live_child();
+        let (mut child, scope, group) = spawn_live_child();
         let child_pid = child.id();
         let session_id = "shared-conversation";
         register_in(dir.path(), make_session(session_id, self_pid)).unwrap();
@@ -621,6 +629,8 @@ mod tests {
         let live = list_live_in(dir.path()).unwrap();
         let _ = child.kill();
         let _ = child.wait();
+        drop(group);
+        drop(scope);
         assert_eq!(
             live.len(),
             2,
@@ -649,7 +659,7 @@ mod tests {
     fn unregister_one_window_leaves_sibling_on_the_same_session_id() {
         let dir = TempDir::new().unwrap();
         let self_pid = std::process::id();
-        let mut child = spawn_live_child();
+        let (mut child, scope, group) = spawn_live_child();
         let child_pid = child.id();
         let sid = acp::SessionId::new("shared-conversation");
         register_in(dir.path(), make_session("shared-conversation", self_pid)).unwrap();
@@ -658,6 +668,8 @@ mod tests {
         let remaining = list_in(dir.path()).unwrap();
         let _ = child.kill();
         let _ = child.wait();
+        drop(group);
+        drop(scope);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].pid, self_pid);
         assert_eq!(&*remaining[0].session_id.0, "shared-conversation");

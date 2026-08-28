@@ -1509,23 +1509,59 @@ fn purge_jemalloc_retained_pages() {
         });
     }
 }
+
+/// `tikv-jemalloc-ctl` 0.7 still depends on unmaintained `paste`
+/// (RUSTSEC-2024-0436). Stats and heap-profile only need mallctl
+/// read/write of fixed names, which `tikv-jemalloc-sys` already exposes.
+#[cfg(all(feature = "jemalloc", unix))]
+unsafe fn mallctl_read<T: Copy>(name: &[u8]) -> Option<T> {
+    debug_assert!(!name.is_empty() && name.last() == Some(&0));
+    let mut value = std::mem::MaybeUninit::<T>::uninit();
+    let mut len = std::mem::size_of::<T>();
+    let ret = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            name.as_ptr().cast(),
+            value.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || len != std::mem::size_of::<T>() {
+        None
+    } else {
+        Some(unsafe { value.assume_init() })
+    }
+}
+
+#[cfg(all(feature = "jemalloc", unix))]
+unsafe fn mallctl_write<T>(name: &[u8], mut value: T) -> bool {
+    debug_assert!(!name.is_empty() && name.last() == Some(&0));
+    let ret = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            name.as_ptr().cast(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            (&raw mut value).cast(),
+            std::mem::size_of::<T>(),
+        )
+    };
+    ret == 0
+}
+
 /// Allocator gauges for the memory trace (`memory_trace` seam): advance the
 /// jemalloc epoch so the `stats.*` reads are current, then read each gauge.
-/// Returns `None` if any mallctl fails (trace records the absence). Rides
-/// the `tikv-jemalloc-ctl` raw helpers (introduced by the heap-profile
-/// hooks below) instead of hand-rolled mallctl.
+/// Returns `None` if any mallctl fails (trace records the absence).
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorStats> {
     /// SAFETY: callers pass fixed NUL-terminated `stats.*` size_t ctl names.
     unsafe fn gauge(name: &[u8]) -> Option<u64> {
-        unsafe {
-            tikv_jemalloc_ctl::raw::read::<usize>(name)
-                .ok()
-                .map(|v| v as u64)
-        }
+        unsafe { mallctl_read::<usize>(name).map(|v| v as u64) }
     }
     unsafe {
-        tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).ok()?;
+        if !mallctl_write(b"epoch\0", 1u64) {
+            return None;
+        }
         Some(xai_grok_pager::memory_trace::AllocatorStats {
             allocated: gauge(b"stats.allocated\0")?,
             active: gauge(b"stats.active\0")?,
@@ -1538,9 +1574,8 @@ fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorS
 }
 /// Full jemalloc statistics dump for threshold snapshots
 /// (`malloc_stats_print` default human-readable format, arena detail
-/// included) — the artifact the GCS memory-trace upload ships for offline
-/// analysis. Raw `tikv_jemalloc_sys` because jemalloc-ctl has no
-/// callback-form stats_print.
+/// included). The GCS memory-trace upload ships this for offline
+/// analysis. `malloc_stats_print` is on `tikv_jemalloc_sys` only.
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_stats_dump() -> String {
     unsafe extern "C" fn append(opaque: *mut std::ffi::c_void, msg: *const std::ffi::c_char) {
@@ -1562,9 +1597,11 @@ fn jemalloc_stats_dump() -> String {
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> {
     unsafe {
-        tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).ok()?;
-        let allocated = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.allocated\0").ok()? as u64;
-        let resident = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.resident\0").ok()? as u64;
+        if !mallctl_write(b"epoch\0", 1u64) {
+            return None;
+        }
+        let allocated = mallctl_read::<usize>(b"stats.allocated\0")? as u64;
+        let resident = mallctl_read::<usize>(b"stats.resident\0")? as u64;
         Some(xai_grok_shell::heap_profile::JemallocStats {
             allocated,
             resident,
@@ -1573,15 +1610,15 @@ fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> 
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_set_prof_active(active: bool) -> bool {
-    unsafe { tikv_jemalloc_ctl::raw::write(b"prof.active\0", active).is_ok() }
+    unsafe { mallctl_write(b"prof.active\0", active) }
 }
 #[cfg(all(test, feature = "jemalloc", unix))]
 fn jemalloc_read_prof_active() -> Option<bool> {
-    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0").ok() }
+    unsafe { mallctl_read::<bool>(b"prof.active\0") }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_prof_available() -> bool {
-    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0").unwrap_or(false) }
+    unsafe { mallctl_read::<bool>(b"opt.prof\0").unwrap_or(false) }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
@@ -1590,7 +1627,11 @@ fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
         return Err("opt.prof false".into());
     }
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c.as_ptr()) }.map_err(|e| e.to_string())
+    if unsafe { mallctl_write(b"prof.dump\0", c.as_ptr()) } {
+        Ok(())
+    } else {
+        Err("prof.dump mallctl failed".into())
+    }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn install_heap_profile_hooks() {
@@ -2487,6 +2528,18 @@ mod tests {
     #[serial_test::serial(jemalloc_heap_profile)]
     fn jemalloc_stats_readable_after_epoch() {
         assert_stats_sane(jemalloc_heap_stats().expect("stats readable"));
+    }
+    #[cfg(all(feature = "jemalloc", unix))]
+    #[test]
+    #[serial_test::serial(jemalloc_heap_profile)]
+    fn jemalloc_allocator_stats_readable_after_epoch() {
+        let stats = jemalloc_allocator_stats().expect("allocator gauges readable");
+        assert_stats_sane(xai_grok_shell::heap_profile::JemallocStats {
+            allocated: stats.allocated,
+            resident: stats.resident,
+        });
+        assert!(stats.active >= stats.allocated, "active={}", stats.active);
+        assert!(stats.mapped >= stats.resident, "mapped={}", stats.mapped);
     }
     #[cfg(all(feature = "jemalloc", unix))]
     #[test]

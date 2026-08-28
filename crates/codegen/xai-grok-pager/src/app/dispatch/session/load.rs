@@ -1383,6 +1383,12 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
         }
+        if crate::app::effects::is_session_rpc_timeout_error(&error) {
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Couldn't load session: {error}"
+            )));
+            return vec![];
+        }
         agent.pending_extensions_fetch = false;
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();

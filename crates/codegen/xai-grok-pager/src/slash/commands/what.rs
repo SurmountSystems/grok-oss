@@ -14,23 +14,25 @@ pub fn what_instruction(focus: &str) -> String {
     };
     format!(
         "{focus_line}\
-Follow the host skill at ~/.agents/skills/what/SKILL.md (slash /what). \
+Follow the default Grok OSS skill at crates/codegen/xai-grok-bundle/skills/what/SKILL.md \
+(installed into ~/.grok/bundled/skills/what/). Slash /what. \
+The live cache is not the source. Do not use a repo or host overlay skill pack for this slash. \
 The operator cannot parse the last agent chat. Restate. Do not apologize. \
 Do not write a file. Do not spawn. \
-Reply with this shape only, four labeled lines, nothing fluffier: \
-Job: one sentence, what this session is trying to do right now. \
-State: what is actually happening (running, waiting, blocked, done). Name the real product thing. No process jargon unless the operator already used it. \
-You: what the operator must do, or the word nothing if they do not need to do anything. Then say why. Name the evidence. Do not use an unexplained heuristic. \
-Next: the next concrete step the agent will take. \
-Plain American English. Short sentences. \
-No residual codes, board ids, or implement-run hex as the body. \
+Reply with this shape only, four labeled complete thoughts, nothing fluffier: \
+What we are doing: one sentence, the real product outcome this session is trying to finish right now. \
+What is true right now: running, waiting, blocked, or done. Name the real file, command, crate, or test. Translate leftover jargon into ordinary words. \
+What you need to do: the operator action, or the word nothing if they do not need to act. Then say why. Name the evidence. Do not leave a bare nothing. \
+What I will do next: the next concrete agent step. \
+Complete American English thoughts. Short sentences. \
+No leftover board ids or hex run ids in the body. \
 No say the word if you want me to continue when the next step is already clear. \
-If the last assistant message was jargon (nix_retry, quality-deps, NAR, L2/L3 unless they asked), translate it. \
+Follow Concise American Technical English as specified in Surmount 0005_CATE.md. \
 This is not /recap (chat recap), not /finish (post-mortem), and not /reports (checkpoint file)."
     )
 }
 
-/// Restate this session in four labeled lines.
+/// Restate this session in four complete thoughts.
 pub struct WhatCommand;
 
 impl SlashCommand for WhatCommand {
@@ -39,7 +41,7 @@ impl SlashCommand for WhatCommand {
     }
 
     fn description(&self) -> &str {
-        "Restate job, state, what you must do, and next"
+        "Restate what we are doing, what is true, what you need to do, and what I will do next"
     }
 
     fn usage(&self) -> &str {
@@ -118,25 +120,29 @@ mod tests {
         }
         let text = text_of(&result);
         assert!(
-            text.contains("~/.agents/skills/what/SKILL.md"),
-            "inject host overlay skill, not repo .agents/skills/what; got {text}"
+            text.contains("crates/codegen/xai-grok-bundle/skills/what"),
+            "inject the in-tree Grok OSS skill, not repo .agents/skills/what; got {text}"
         );
         assert!(
-            text.contains("host skill"),
-            "must name the host overlay, not a repo skill pack; got {text}"
+            text.contains("bundled/skills/what"),
+            "must name the bundled install path; got {text}"
         );
         assert!(
-            !text.contains("product skill at .agents/skills/what"),
-            "must not point at the repo skill pack; got {text}"
+            text.contains("default Grok OSS skill"),
+            "must name the default product skill; got {text}"
         );
-        assert!(text.contains("Job:"), "{text}");
-        assert!(text.contains("State:"), "{text}");
-        assert!(text.contains("You:"), "{text}");
+        assert!(
+            !text.contains(".agents/skills/what"),
+            "must not point at repo or host .agents/skills/what as the grok-oss source; got {text}"
+        );
+        assert!(text.contains("What we are doing:"), "{text}");
+        assert!(text.contains("What is true right now:"), "{text}");
+        assert!(text.contains("What you need to do:"), "{text}");
         assert!(
             text.contains("Name the evidence"),
-            "You must require evidence, not a bare heuristic; got {text}"
+            "What you need to do must require evidence; got {text}"
         );
-        assert!(text.contains("Next:"), "{text}");
+        assert!(text.contains("What I will do next:"), "{text}");
         assert!(text.contains("not /recap"), "{text}");
         assert!(text.contains("not /finish"), "{text}");
         assert!(text.contains("not /reports"), "{text}");

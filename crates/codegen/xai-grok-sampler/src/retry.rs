@@ -978,12 +978,12 @@ mod tests {
                 "unlimited budget must still stop 502 after a small transport cap, got {other:?}"
             ),
         }
-        match classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::RetryWithBackoff {
-                is_rate_limited: true,
-                ..
-            } => panic!("502 must not take the 429 hop/wait path"),
-            _ => {}
+        if let RetryDecision::RetryWithBackoff {
+            is_rate_limited: true,
+            ..
+        } = classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD)
+        {
+            panic!("502 must not take the 429 hop/wait path");
         }
     }
 

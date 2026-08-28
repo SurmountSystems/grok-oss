@@ -1,0 +1,41 @@
+name: JavaScript
+file_extensions: [js, mjs, cjs, jsx]
+scope: source.js
+contexts:
+  main:
+    - match: '\b(function|const|let|var|if|else|for|while|return|class|import|export|from|async|await|new|this|try|catch|finally|throw|switch|case|break|continue|typeof|instanceof|in|of|yield|default)\b'
+      scope: keyword.control.js
+    - match: '//.*'
+      scope: comment.line.double-slash.js
+    - match: '/\*'
+      push: block_comment
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '`'
+      push: template
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.js
+  block_comment:
+    - meta_scope: comment.block.js
+    - match: '\*/'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.js
+    - match: '\\.'
+      scope: constant.character.escape.js
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.js
+    - match: '\\.'
+      scope: constant.character.escape.js
+    - match: "'"
+      pop: true
+  template:
+    - meta_scope: string.quoted.other.template.js
+    - match: '\\.'
+      scope: constant.character.escape.js
+    - match: '`'
+      pop: true

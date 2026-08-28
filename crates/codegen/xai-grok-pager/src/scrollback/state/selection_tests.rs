@@ -912,7 +912,7 @@ fn expand_all_thinking_opens_truncated_thinking() {
 fn verb_group_hidden_thinking_is_transparent() {
     let mut state = verb_state();
     push_reads(&mut state, 1);
-    state.push_block(RenderBlock::thinking("hmm"));
+    let thought = state.push_block(RenderBlock::thinking("hmm"));
     push_reads(&mut state, 1);
     state.prepare_layout(80, 40);
 
@@ -922,8 +922,12 @@ fn verb_group_hidden_thinking_is_transparent() {
     assert_eq!(cached_height_at(&state, 2), 0);
 
     // Shown non-collapsed thinking keeps its own rows; the run folds
-    // around it instead of splitting.
+    // around it instead of splitting. Default thinking is Collapsed.
     crate::appearance::cache::set_show_thinking_blocks(true);
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
     state.rebuild_layout();
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));

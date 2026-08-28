@@ -14,6 +14,20 @@ use crate::types::{
     TurnCapture,
 };
 
+/// The chat-state actor did not answer a query (channel closed or dropped).
+/// Distinct from an empty prompt ledger (`Ok(None)`): an unreadable bill
+/// must not be mistaken for a free prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatStateActorUnreachable;
+
+impl std::fmt::Display for ChatStateActorUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chat-state actor did not answer")
+    }
+}
+
+impl std::error::Error for ChatStateActorUnreachable {}
+
 /// Handle to communicate with ChatStateActor.
 /// This is cheap to clone and can be shared across tasks.
 #[derive(Clone)]
@@ -418,24 +432,30 @@ impl ChatStateHandle {
     }
 
     /// Fail-closed prompt bill read.
-    /// `Ok(None)` means the actor answered "no ledger"; `Err(())` means it did
-    /// not answer at all. Never collapse `Err` to `None`: an unreadable bill
-    /// must not be mistaken for a free prompt.
-    pub async fn try_get_prompt_usage(&self) -> Result<Option<crate::usage::UsageLedger>, ()> {
+    /// `Ok(None)` means the actor answered "no ledger";
+    /// [`Err(ChatStateActorUnreachable)`](ChatStateActorUnreachable) means it
+    /// did not answer at all. Never collapse `Err` to `None`: an unreadable
+    /// bill must not be mistaken for a free prompt.
+    pub async fn try_get_prompt_usage(
+        &self,
+    ) -> Result<Option<crate::usage::UsageLedger>, ChatStateActorUnreachable> {
         self.query("GetPromptUsage", |reply| ChatStateCommand::GetPromptUsage {
             reply,
         })
         .await
-        .ok_or(())
+        .ok_or(ChatStateActorUnreachable)
     }
 
-    /// Fail-closed session bill read. `Err(())` if the actor is dead.
-    pub async fn try_get_session_usage(&self) -> Result<crate::usage::UsageLedger, ()> {
+    /// Fail-closed session bill read. [`Err`](ChatStateActorUnreachable) if the
+    /// actor did not answer.
+    pub async fn try_get_session_usage(
+        &self,
+    ) -> Result<crate::usage::UsageLedger, ChatStateActorUnreachable> {
         self.query("GetSessionUsage", |reply| {
             ChatStateCommand::GetSessionUsage { reply }
         })
         .await
-        .ok_or(())
+        .ok_or(ChatStateActorUnreachable)
     }
 
     /// `total_tokens` plus bytes/4 of items pushed since the last model

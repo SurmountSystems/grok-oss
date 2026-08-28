@@ -1354,9 +1354,7 @@ impl SessionActor {
                     incomplete,
                 )
             }
-            Err(()) => {
-                crate::extensions::notification::PromptUsage::project_from_ledger(None, true)
-            }
+            Err(_) => crate::extensions::notification::PromptUsage::project_from_ledger(None, true),
         }
     }
     /// When freeze did not attach: incomplete if billed or may under-count; else omit.
@@ -1372,7 +1370,7 @@ impl SessionActor {
                 ledger.as_ref(),
                 may_undercount,
             ),
-            Err(()) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
+            Err(_) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
         }
     }
     /// Sticky incomplete for `prompt_id`, or the live pin when `None`.

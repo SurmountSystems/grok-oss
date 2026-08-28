@@ -13,6 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::theme::Theme;
+use crate::views::limits_honesty::NOTE_LIMITS_PRINTOUT_NOT_USAGE;
 use crate::views::limits_snapshot::{
     AllowanceMeterTone, LimitsSnapshot, countdown_is_zero, earliest_reset_at,
     format_limits_detail_with_meter_source, format_reset_countdown,
@@ -222,36 +223,35 @@ pub fn render_limits_modal(
 
     // Word-wrap plain content to content width so long notes do not mid-word
     // truncate at the chrome edge (dogfood: shared-pool note cut at "person").
+    // Detect the included-allowance meter on the unwrapped line: wrap can
+    // split "Included ... allowance:" from "% used" and would skip the bar.
     let width = content.width as usize;
-    let mut display_lines: Vec<String> = Vec::new();
-    for raw in state.content_lines_emphasizing_meter_source(
-        now,
-        xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
-    ) {
-        display_lines.extend(wrap_plain_line(&raw, width));
-    }
-
-    // Progress bar under primary included allowance when known. Inject a
-    // sentinel into the display stream so scroll max and viewport layout
-    // reserve a row for the bar (painting only after the text line left the
-    // bar off-screen when the allowance line was the last content row).
     let primary_bar = state.snapshot.primary.included.as_ref().map(|inc| {
         let rem = inc.remaining_fraction();
         let tone = AllowanceMeterTone::from_used_pct(inc.used_pct);
         (rem, tone)
     });
-    if primary_bar.is_some() {
-        let mut with_bar = Vec::with_capacity(display_lines.len() + 1);
-        let mut injected = false;
-        for line in display_lines {
-            let is_allowance_meter = is_included_allowance_used_line(&line);
-            with_bar.push(line);
-            if !injected && is_allowance_meter {
-                with_bar.push(REMAINING_BAR_SENTINEL.to_string());
-                injected = true;
-            }
+    let mut display_lines: Vec<String> = Vec::new();
+    let mut injected_bar = false;
+    for raw in state.content_lines_emphasizing_meter_source(
+        now,
+        xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
+    ) {
+        let is_allowance_meter = is_included_allowance_used_line(&raw);
+        // The fail-open printout note is required in the body text (CLI /
+        // agents) before percents. Full wrap at modal width is ~15 rows and
+        // buries the remaining bar under the fold. TUI shows a one-sentence
+        // banner; the full note stays in content_lines.
+        let display_src = if raw.as_str() == NOTE_LIMITS_PRINTOUT_NOT_USAGE {
+            TUI_PRINTOUT_BANNER
+        } else {
+            raw.as_str()
+        };
+        display_lines.extend(wrap_plain_line(display_src, width));
+        if primary_bar.is_some() && !injected_bar && is_allowance_meter {
+            display_lines.push(REMAINING_BAR_SENTINEL.to_string());
+            injected_bar = true;
         }
-        display_lines = with_bar;
     }
 
     let max_scroll = display_lines.len().saturating_sub(content.height as usize) as u16;
@@ -292,6 +292,10 @@ pub fn render_limits_modal(
 
 /// Sentinel row for the primary remaining bar (not user-visible text).
 const REMAINING_BAR_SENTINEL: &str = "\u{0}limits-remaining-bar";
+
+/// One-sentence TUI stand-in for [`NOTE_LIMITS_PRINTOUT_NOT_USAGE`].
+const TUI_PRINTOUT_BANNER: &str =
+    "Note: grok-oss limits is a client printout, not xAI billing truth.";
 
 /// True when a wrapped display line is the SuperGrok included allowance meter
 /// (has used %), not the "no data yet" placeholder.

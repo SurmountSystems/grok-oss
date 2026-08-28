@@ -18,9 +18,13 @@ use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::{reset_home, test_home};
+use common::{
+    previous_good_artifact, reset_home, small_good_artifact, small_good_artifact_sha256,
+    small_good_artifact_sha256_line, test_home,
+};
 use xai_grok_telemetry::events::CliUpdateErrorKind;
 use xai_grok_update::UpdateConfig;
+use xai_grok_update::artifact_sha256::sha256_hex;
 use xai_grok_update::auto_update::{
     classify_install_error, install_internal_from_base, install_internal_from_bases,
 };
@@ -65,10 +69,15 @@ async fn mount_gcs(version: &str, platform: &str) -> MockServer {
         .mount(&server)
         .await;
 
-    // Main grok binary download.
+    // Main grok binary download plus the published SHA-256 pin.
     Mock::given(method("GET"))
         .and(path(format!("/grok-{version}-{platform}")))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-{version}-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(small_good_artifact_sha256_line()))
         .mount(&server)
         .await;
 
@@ -349,7 +358,12 @@ async fn install_internal_alpha_channel_resolves_max_of_alpha_and_stable() {
         .await;
     Mock::given(method("GET"))
         .and(path(format!("/grok-0.1.181-{platform}")))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(small_good_artifact_sha256_line()))
         .mount(&server)
         .await;
 
@@ -581,9 +595,17 @@ async fn install_internal_from_bases_does_not_fallback_on_smoke_failure() {
         .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
         .mount(&primary)
         .await;
+    let garbage = b"#!/bin/sh\nexit 1\n".to_vec();
     Mock::given(method("GET"))
         .and(path(format!("/grok-0.1.181-{platform}")))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 1\n".to_vec()))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(garbage.clone()))
+        .mount(&primary)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(format!("{}  grok\n", sha256_hex(&garbage))),
+        )
         .mount(&primary)
         .await;
 
@@ -717,4 +739,291 @@ async fn install_internal_from_bases_does_not_redownload_on_local_swap_failure()
         "local swap failure must not fall through to the next base: {} request(s)",
         fallback_requests.len()
     );
+}
+
+fn seed_previous_good(platform: &str) {
+    let home = test_home();
+    let downloads = home.join("downloads");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let prev = downloads.join(format!("grok-0.1.100-{platform}"));
+    std::fs::write(&prev, previous_good_artifact()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&prev, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let rel = format!("../downloads/grok-0.1.100-{platform}");
+    std::os::unix::fs::symlink(&rel, bin.join("grok")).unwrap();
+    std::os::unix::fs::symlink(&rel, bin.join("agent")).unwrap();
+}
+
+fn assert_previous_good_stays(platform: &str) {
+    let home = test_home();
+    let grok = std::fs::read_link(home.join("bin").join("grok")).unwrap();
+    assert!(
+        grok.to_string_lossy().contains("0.1.100"),
+        "SHA-256 refuse must keep previous-good, got {grok:?}"
+    );
+    let path = home
+        .join("downloads")
+        .join(format!("grok-0.1.100-{platform}"));
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        bytes,
+        previous_good_artifact(),
+        "refused install must keep previous-good bytes, not the download"
+    );
+    assert_ne!(
+        bytes,
+        small_good_artifact(),
+        "previous-good must stay distinct from the download payload"
+    );
+}
+
+/// Named contract: a published SHA-256 that does not match the downloaded
+/// bytes must refuse the install. `--version` would pass; SHA-256 is the
+/// pin. Previous-good stays. Not SHA-1.
+#[tokio::test]
+#[serial]
+async fn install_internal_refuses_when_sha256_does_not_match() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    seed_previous_good(&platform);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/stable"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "0000000000000000000000000000000000000000000000000000000000000000  grok\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let cfg = make_config("stable");
+    let err = install_internal_from_base(Some("0.1.181"), &cfg, &server.uri())
+        .await
+        .expect_err("SHA-256 mismatch must refuse the install");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("SHA-256 mismatch"),
+        "expected mismatch refuse, got: {msg}"
+    );
+    assert_eq!(classify_install_error(&err), CliUpdateErrorKind::Download);
+    assert_previous_good_stays(&platform);
+}
+
+/// Named contract: no published SHA-256 file means fail-closed. Do not
+/// install an unverified blob. Not SHA-1.
+#[tokio::test]
+#[serial]
+async fn install_internal_refuses_when_sha256_checksum_file_is_missing() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    seed_previous_good(&platform);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/stable"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let cfg = make_config("stable");
+    let err = install_internal_from_base(Some("0.1.181"), &cfg, &server.uri())
+        .await
+        .expect_err("missing SHA-256 file must refuse the install");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("checksum file missing") || msg.contains("SHA-256 checksum file missing"),
+        "expected missing checksum refuse, got: {msg}"
+    );
+    assert_eq!(classify_install_error(&err), CliUpdateErrorKind::Download);
+    assert_previous_good_stays(&platform);
+}
+
+/// Named contract: an unreadable published checksum (empty, not 64 hex,
+/// tagged openssl form, 63-char hex, 40-hex SHA-1) is fail-closed.
+#[tokio::test]
+#[serial]
+async fn install_internal_refuses_when_sha256_checksum_file_is_unreadable() {
+    let bodies = [
+        "",
+        "not-a-digest\n",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n",
+        "SHA256 (grok) = 306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb\n",
+        "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\n",
+        "0123456789abcdef0123456789abcdef01234567\n",
+    ];
+    let platform = host_platform();
+    let cfg = make_config("stable");
+    for body in bodies {
+        let _ = test_home();
+        reset_home();
+        seed_previous_good(&platform);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/stable"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/grok-0.1.181-{platform}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let err = install_internal_from_base(Some("0.1.181"), &cfg, &server.uri())
+            .await
+            .expect_err("unreadable SHA-256 file must refuse the install");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a SHA-256 hex digest"),
+            "expected unreadable checksum refuse for {body:?}, got: {msg}"
+        );
+        assert_eq!(classify_install_error(&err), CliUpdateErrorKind::Download);
+        assert_previous_good_stays(&platform);
+    }
+}
+
+/// Happy path plus URL contract: matching SHA-256 installs, and the
+/// updater fetches the published `.sha256` next to the binary.
+#[tokio::test]
+#[serial]
+async fn install_internal_installs_when_published_sha256_matches() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    seed_previous_good(&platform);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/stable"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(small_good_artifact_sha256_line()))
+        .mount(&server)
+        .await;
+
+    let cfg = make_config("stable");
+    install_internal_from_base(Some("0.1.181"), &cfg, &server.uri())
+        .await
+        .unwrap();
+
+    let home = test_home();
+    let downloaded = home
+        .join("downloads")
+        .join(format!("grok-0.1.181-{platform}"));
+    assert_eq!(std::fs::read(&downloaded).unwrap(), small_good_artifact());
+    let target = std::fs::read_link(home.join("bin").join("grok")).unwrap();
+    assert!(
+        target.to_string_lossy().contains("0.1.181"),
+        "matching SHA-256 must activate the new binary: {target:?}"
+    );
+    assert_eq!(
+        small_good_artifact_sha256(),
+        sha256_hex(&small_good_artifact())
+    );
+
+    let reqs = server
+        .received_requests()
+        .await
+        .expect("request recording enabled");
+    let urls: Vec<String> = reqs.iter().map(|r| r.url.to_string()).collect();
+    assert!(
+        urls.iter().any(|u| u.contains(".sha256")),
+        "must fetch a published SHA-256 checksum file, urls:\n{urls:?}"
+    );
+    assert!(
+        urls.iter().all(|u| !u.contains(".sha1")),
+        "must not fetch SHA-1 checksums, urls:\n{urls:?}"
+    );
+}
+
+/// SHA-256 mismatch is a property of the published pin, not the CDN.
+/// Do not retry another base.
+#[tokio::test]
+#[serial]
+async fn install_internal_from_bases_does_not_fallback_on_sha256_mismatch() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+    seed_previous_good(&platform);
+
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/stable"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("0.1.181"))
+        .mount(&primary)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(small_good_artifact()))
+        .mount(&primary)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.1.181-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "0000000000000000000000000000000000000000000000000000000000000000  grok\n",
+        ))
+        .mount(&primary)
+        .await;
+
+    let fallback = MockServer::start().await;
+    let cfg = make_config("stable");
+    let err = install_internal_from_bases(
+        Some("0.1.181"),
+        &cfg,
+        &[primary.uri().as_str(), fallback.uri().as_str()],
+    )
+    .await
+    .expect_err("SHA-256 mismatch must not install");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("SHA-256 mismatch"),
+        "expected mismatch refuse, got: {msg}"
+    );
+    assert!(
+        fallback
+            .received_requests()
+            .await
+            .expect("request recording enabled")
+            .is_empty(),
+        "SHA-256 mismatch must not trigger a fallback-base retry"
+    );
+    assert_previous_good_stays(&platform);
 }

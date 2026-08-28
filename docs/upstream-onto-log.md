@@ -7,12 +7,12 @@ chain includes the xAI tip — so `git log xai-org/main..<onto tip>` shows our
 work. Surmount `main` remains the product archive. These branches are disposable
 and rebuilt after force-exports.
 
-**Current mechanics:** real `git cherry-pick -x` via `scripts/put-history-on-xai.sh`,
-then optional `scripts/join-main-into-onto.sh` (`merge -s ours`) so `main` is an
+**Current mechanics:** real `git cherry-pick -x` via `grok-nix-helper put-history-on-xai`,
+then optional `grok-nix-helper join-main-into-onto` (`merge -s ours`) so `main` is an
 ancestor and GitHub PR compare works. Full HITL runbook:
 [`docs/upstream-history.md`](upstream-history.md) § *HITL runbook*.
 
-There is **no** `MODE=overlay` / commit-tree mode in the current scripts.
+There is **no** `MODE=overlay` / commit-tree mode in the current helper.
 
 **Live stack (SHAs / mid-work):** canonical home is
 [`docs/upstream-history.md`](upstream-history.md) § *Live stack*. Project
@@ -34,11 +34,11 @@ Import used to restore a minimal fork list and **silently drop** project
 `AGENTS.md`, `RESIDUAL.md`, `README.md` branding, `scripts/join-main-into-onto.sh`,
 `scripts/with-ci-hermetic-path.sh`, research under `doc/dev/` + `docs/dev/`, and
 Surmount `ci.yml`. Those are now in `FORK_PATHS` in
-`scripts/import-upstream-export.sh`. After restore (and anytime post-onto):
+`grok-nix-helper` (`fork_paths.rs`). After restore (and anytime post-onto):
 
 ```bash
-./scripts/assert-process-pins.sh          # worktree
-./scripts/assert-process-pins.sh HEAD     # or a tip tree-ish
+grok-nix-helper assert-process-pins          # worktree
+grok-nix-helper assert-process-pins HEAD     # or a tip tree-ish
 just upstream-assert-process-pins
 ```
 
@@ -56,10 +56,10 @@ echo "| $(date -u +%Y-%m-%d) | \`<xai-sha>\` | \`<xai-tree>\` | \`<surmount-sha>
 
 ```bash
 git fetch xai-org main --force
-FORCE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+FORCE=1 SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai
 # resolve conflicts carefully; signed cherry-pick --continue on TTY
-./scripts/join-main-into-onto.sh
-git commit -S …   # human
+grok-nix-helper join-main-into-onto
+git commit -S ...   # human
 just check && git push -u origin HEAD
 ```
 

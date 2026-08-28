@@ -22,6 +22,13 @@ pub(crate) fn set_unix_mode(path: &std::path::Path, mode: u32) {
 /// homes instead.
 #[ctor::ctor]
 fn redirect_unified_log_for_tests() {
+    if std::env::var_os("GROK_HOME").is_none() {
+        let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+        }
+    }
     xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
 }
 

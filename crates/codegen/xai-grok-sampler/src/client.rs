@@ -2158,9 +2158,9 @@ impl SamplingClient {
                 crate::stream::collect_response(events).await
             }
         };
-        result
-            .map(|(response, _metrics)| response)
-            .map_err(|info| SamplingError::Api {
+        result.map(|(response, _metrics)| response).map_err(|info| {
+            let info = *info;
+            SamplingError::Api {
                 status: info
                     .status_code
                     .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
@@ -2170,7 +2170,8 @@ impl SamplingClient {
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
                 error_code: info.error_code,
-            })
+            }
+        })
     }
 }
 

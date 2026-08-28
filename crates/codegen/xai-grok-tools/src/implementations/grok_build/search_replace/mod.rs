@@ -1693,6 +1693,8 @@ mod tests {
     /// Legal but unformatted Rust must be rustfmt'd before the tool returns.
     /// FileWritten.content must be the formatted bytes on disk.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_formats_rust_file_after_write() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
@@ -1749,6 +1751,8 @@ mod tests {
     /// Clippy findings after a structured write stay in the verify report.
     /// The write is not rolled back.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_clippy_findings_do_not_rollback_write() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
@@ -1802,6 +1806,8 @@ mod tests {
 
     /// Session plan.md is not Rust. rustfmt / clippy must not run.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_skips_verify_on_session_plan_file() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_pending_verify_paths();

@@ -511,6 +511,7 @@ impl AgentView {
         let notes = self.prompt.text_without_image_chips();
         let notes = notes.trim();
         let images = self.prompt.drain_images();
+        let consumed_composer = !notes.is_empty() || !images.is_empty();
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
@@ -531,7 +532,17 @@ impl AgentView {
             None
         };
         let sent_acp = pav.send_approved();
+        if consumed_composer {
+            // Notes were the live composer (keep-draft stash is the same
+            // snapshot). Drop that stash so close cannot restore it into a
+            // second prompt after Interject paints the wrapped review line.
+            let _ = std::mem::take(&mut pav.stashed_prompt);
+        }
         self.close_plan_review(pav, "build");
+        if consumed_composer {
+            self.prompt.set_text("");
+            self.persist_unsent_composer_draft();
+        }
         // Idle (no waiter) must start implement. Images-only must not
         // Interject empty text. Live-waiter Approve continues via the
         // shell tool result; notes/images still Interject when present.
@@ -731,7 +742,6 @@ impl AgentView {
         let keep_draft = !self.prompt.text().trim().is_empty();
         let live_cursor = self.prompt.cursor();
         if let Some(ref mut pav) = self.plan_approval_view {
-            pav.stashed_prompt = self.prompt.stash();
             pav.focus = if keep_draft {
                 PlanApprovalFocus::Prompt
             } else {
@@ -740,8 +750,6 @@ impl AgentView {
         }
         if keep_draft {
             self.prompt.set_cursor(live_cursor);
-        } else {
-            self.prompt.set_text("");
         }
         self.show_plan_preview_if_available();
         if self.line_viewer.is_none() {
@@ -752,17 +760,22 @@ impl AgentView {
             viewer.plan_mut().feedback_active = true;
         }
     }
-    /// Discard an in-progress comment draft: clear the prompt text and
-    /// drop the selected line range + pending edit + stashed feedback.
-    /// Used whenever focus leaves the prompt without an explicit save
-    /// or cancel (e.g. Tab back to Preview, click into the modal).
-    fn discard_in_progress_comment(&mut self) {
-        if let Some(ref mut pav) = self.plan_approval_view {
+    /// Discard an in-progress line-comment draft: restore the Human box
+    /// that Commenting stashed. Used when focus leaves the prompt without
+    /// save (Tab back to Preview, click into the modal). Same restore as Esc.
+    pub(super) fn discard_in_progress_comment(&mut self) {
+        let stashed = if let Some(ref mut pav) = self.plan_approval_view {
             pav.commenting_range = None;
             pav.editing_comment_id = None;
-            pav.stashed_feedback_prompt = None;
+            pav.stashed_feedback_prompt.take()
+        } else {
+            None
+        };
+        if let Some(stashed) = stashed {
+            self.prompt.restore(stashed);
+        } else {
+            self.prompt.set_text_preserving("");
         }
-        self.prompt.set_text("");
     }
     /// Submit the live composer as a normal agent prompt. Does not Approve
     /// or Revise a parked plan.
@@ -979,7 +992,7 @@ impl AgentView {
             pav.editing_comment_id = None;
             pav.focus = PlanApprovalFocus::Commenting;
         }
-        self.prompt.set_text("");
+        self.prompt.set_text_preserving("");
         InputOutcome::Changed
     }
     fn save_plan_comment(&mut self) -> InputOutcome {
@@ -2557,6 +2570,169 @@ mod plan_pane_letter_a_contract_tests {
             }
             other => panic!("comment plus Approve must Interject notes; got {other:?}"),
         }
+    }
+
+    fn click_plan_approve(agent: &mut AgentView) -> InputOutcome {
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().approve_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+        agent.handle_line_viewer_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn user_prompt_texts(agent: &AgentView) -> Vec<String> {
+        (0..agent.scrollback.len())
+            .filter_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+                Some(crate::scrollback::RenderBlock::UserPrompt(b)) => Some(b.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn apply_approve_outcome_to_scrollback(agent: &mut AgentView, outcome: InputOutcome) {
+        match outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::RenderBlock::interjection_prompt(text));
+            }
+            InputOutcome::Action(Action::SendPrompt(text))
+            | InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::RenderBlock::user_prompt(text));
+            }
+            _ => {}
+        }
+        match agent.send_composer_as_normal_prompt() {
+            InputOutcome::Action(Action::SendPrompt(text))
+            | InputOutcome::Action(Action::SendPromptNow { text, .. })
+            | InputOutcome::Action(Action::Interject { text, .. }) => {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::RenderBlock::user_prompt(text));
+            }
+            _ => {}
+        }
+    }
+
+    /// Clickable Approve with typed composer comments must produce one
+    /// wrapped review line. The raw comment must not remain in the
+    /// composer for a second send (keep-draft stash is the same snapshot).
+    #[test]
+    fn approve_with_composer_comments_sends_one_human_line() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nApprove once");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        type_chars(
+            &mut agent,
+            "All this is sensible. Execute with this loop please:",
+        );
+        let notes = agent.prompt.text().to_string();
+        assert!(
+            notes.contains("All this is sensible"),
+            "fixture must type the review comment, got {notes:?}"
+        );
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.stashed_prompt.text = notes.clone();
+        }
+
+        let outcome = click_plan_approve(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Approve must close the review"
+        );
+        match &outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("approved the plan with the following review comments")
+                        && text.contains("All this is sensible"),
+                    "Approve must wrap the comment once; got {text:?}"
+                );
+                let raw_only = text.trim() == notes.trim();
+                assert!(
+                    !raw_only,
+                    "the wrapped review line is the intended human copy, not a raw second prompt"
+                );
+            }
+            other => panic!("Approve with comments must Interject once; got {other:?}"),
+        }
+        apply_approve_outcome_to_scrollback(&mut agent, outcome);
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "Approve must consume the comment so persist/send cannot post it again, got {:?}",
+            agent.prompt.text()
+        );
+        let hits: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains("All this is sensible"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one human/scrollback entry must contain the comment; got {hits:?}"
+        );
+        assert!(
+            hits[0].contains("approved the plan with the following review comments"),
+            "the one entry must be the wrapped review, got {:?}",
+            hits[0]
+        );
+        assert!(
+            matches!(
+                agent.send_composer_as_normal_prompt(),
+                InputOutcome::Changed
+            ),
+            "leftover composer must not be sendable after Approve"
+        );
+    }
+
+    /// Empty-composer Approve is one Approve. It must not invent a
+    /// second human line from leftover keep-draft stash.
+    #[test]
+    fn empty_approve_does_not_send_composer_as_second_prompt() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEmpty Approve");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        let outcome = click_plan_approve(&mut agent);
+        assert!(agent.plan_approval_view.is_none());
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { text, .. })
+                    if text.contains("review comments")
+            ),
+            "empty Approve must not wrap review comments; got {outcome:?}"
+        );
+        apply_approve_outcome_to_scrollback(&mut agent, outcome);
+        let hits: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains("review comments"))
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "empty Approve must not grow a review-comment human line; got {hits:?}"
+        );
+        assert!(
+            matches!(
+                agent.send_composer_as_normal_prompt(),
+                InputOutcome::Changed
+            ),
+            "empty Approve must not leave a sendable composer"
+        );
     }
 
     /// Comment plus Clarify is read-only answers, not a rewrite.

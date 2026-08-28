@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -674,16 +675,45 @@ pub(crate) async fn close_all() {
     }
 }
 
+/// PATH lookup for a basename (`bash`, `sh`) when `/bin/bash` is missing
+/// (Nix quality / NixOS).
+fn unix_shell_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(name);
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    })
+}
+
+/// If `requested` is not on disk, use PATH `bash`/`sh`. Prefer a real file.
+fn existing_unix_shell(requested: &str) -> String {
+    let path = Path::new(requested);
+    if path.is_file() {
+        return requested.to_string();
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("bash");
+    unix_shell_on_path(name)
+        .or_else(|| unix_shell_on_path("bash"))
+        .or_else(|| unix_shell_on_path("sh"))
+        .unwrap_or_else(|| requested.to_string())
+}
+
 /// Explicit `shell` param, then `$SHELL`, then the platform default. Windows
 /// has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
 fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell {
-        return (s.to_string(), vec![]);
+        return (existing_unix_shell(s), vec![]);
     }
 
     #[cfg(unix)]
     {
-        let path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let path = std::env::var("SHELL")
+            .ok()
+            .filter(|p| Path::new(p).is_file())
+            .or_else(|| unix_shell_on_path("bash"))
+            .unwrap_or_else(|| "/bin/bash".to_string());
         (path, vec!["-l".to_string()])
     }
 
@@ -1041,11 +1071,26 @@ mod tests {
                 pixel_height: 0,
             })
             .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("sleep 300");
+        // Same spawn as [`create_pty`]: resolved PATH bash + login args +
+        // TERM. A raw `sleep` store path ENOENTs under portable_pty here;
+        // `create_test_pty` already proves this CommandBuilder shape works.
+        let (shell_path, shell_args) = resolve_pty_shell(Some("/bin/bash"));
+        let mut cmd = CommandBuilder::new(&shell_path);
+        for arg in &shell_args {
+            cmd.arg(arg);
+        }
+        if let Ok(dir) = std::env::current_dir() {
+            cmd.cwd(dir);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("LC_ALL", "en_US.UTF-8");
         #[allow(clippy::disallowed_methods)]
-        let child = pair.slave.spawn_command(cmd).expect("spawn shell");
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .unwrap_or_else(|e| panic!("spawn {shell_path}: {e}"));
         let pid = child.process_id().expect("shell pid") as i32;
 
         drop(UnregisteredShell::new(child));
