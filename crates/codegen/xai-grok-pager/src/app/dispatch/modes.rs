@@ -7,6 +7,14 @@ use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
+/// Stick `/view-plan` until SessionLoaded / restore can dock Approve.
+/// Resume still does not auto-dock; this is an explicit open request.
+pub(super) fn stick_view_plan_request(app: &mut AppView) {
+    for agent in app.agents.values_mut() {
+        agent.view_plan_requested = true;
+    }
+}
+
 /// Show the current plan: if a plan file exists, open it in the preview
 /// overlay popover. If no plan has been written yet, show a toast.
 ///
@@ -14,8 +22,25 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// get a second local preview whose Approve ignores a live
 /// `exit_plan_mode` waiter on the parent.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
+    // `/view-plan` after `--continue` can race SessionLoaded. Flush a restore
+    // that arrived before bind so the slash can dock Approve. Idle resume
+    // still does not auto-dock; this path is an explicit open.
+    let _ = crate::app::acp_handler::flush_pending_exit_plan_mode(app);
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        ActiveView::AgentDashboard => match app.dashboard.as_ref().and_then(|d| d.attached_agent) {
+            Some(id) => id,
+            None => {
+                stick_view_plan_request(app);
+                return vec![];
+            }
+        },
+        ActiveView::Welcome => {
+            // `--continue` can still be on welcome while a placeholder
+            // agent exists. Dropping the slash here leaves Approve unbound.
+            stick_view_plan_request(app);
+            return vec![];
+        }
     };
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];

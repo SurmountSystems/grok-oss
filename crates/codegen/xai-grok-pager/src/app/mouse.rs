@@ -1359,6 +1359,45 @@ mod tests {
     fn click_send_now(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.send_now_click(c, r))
     }
+    /// Mouse Down on [Send now] of the top shared-queue row, without
+    /// focusing the pane or selecting the row first.
+    #[test]
+    fn mouse_send_now_click_submits_top_queued_server_row() {
+        let mut agent = make_running_agent();
+        agent.queue.overlay.focused = false;
+        agent.active_pane = AgentPane::Prompt;
+        let ids = agent.queue.entry_ids();
+        let top = ids[0];
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        agent
+            .queue
+            .render(area, &mut buf, false, &layout_cfg, None, true);
+        agent.pane_areas.queue = area;
+        let mut found = None;
+        'find: for row in area.y..area.y + area.height {
+            for col in area.x..area.x + area.width {
+                if agent.queue.send_now_click(col, row) == Some(top) {
+                    found = Some((col, row));
+                    break 'find;
+                }
+            }
+        }
+        let (col, row) = found.expect("top row Send now must paint without focus");
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        match outcome {
+            InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
+                assert_eq!(id, "p1", "click must submit the top queued server prompt");
+            }
+            other => panic!("expected QueueInterjectShared from a Send now click, got {other:?}"),
+        }
+    }
     /// Left-click the row's `[cancel]` (delete) button.
     fn click_delete(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.delete_click(c, r))

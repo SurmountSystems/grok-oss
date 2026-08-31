@@ -54,6 +54,8 @@ pub struct RebuildReport {
     pub peer_outcomes: Vec<PeerRelaunchOutcome>,
     /// Alive active_sessions rows after optional crash hygiene.
     pub live_sessions: Vec<ActiveSession>,
+    /// Sibling copy of the previous `grok-oss` binary, when one existed.
+    pub previous_binary_backup: Option<PathBuf>,
     /// Lines suitable for operator scrollback / stdout.
     pub summary_lines: Vec<String>,
 }
@@ -126,6 +128,181 @@ pub fn resolve_source_root(start: &Path) -> Result<PathBuf> {
 
 fn looks_like_grok_oss_root(dir: &Path) -> bool {
     dir.join(JUSTFILE_NAME).is_file() && dir.join(PAGER_BIN_MANIFEST).is_file()
+}
+
+/// Sibling path of the previous `grok-oss` binary (`grok-oss.prev` next to the install).
+pub fn previous_grok_oss_backup_path(install_path: &Path) -> PathBuf {
+    let name = install_path
+        .file_name()
+        .map(|n| {
+            let mut s = n.to_os_string();
+            s.push(".prev");
+            s
+        })
+        .unwrap_or_else(|| std::ffi::OsString::from("grok-oss.prev"));
+    match install_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// Copy the live install to [`previous_grok_oss_backup_path`] when it exists.
+pub fn backup_previous_grok_oss_binary(install_path: &Path) -> Result<Option<PathBuf>> {
+    if !install_path.is_file() {
+        return Ok(None);
+    }
+    let dest = previous_grok_oss_backup_path(install_path);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create backup dir {}", parent.display()))?;
+    }
+    std::fs::copy(install_path, &dest).with_context(|| {
+        format!(
+            "copy previous grok-oss {} → {}",
+            install_path.display(),
+            dest.display()
+        )
+    })?;
+    Ok(Some(dest))
+}
+
+fn git_command(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+/// True when `dir` is inside a git work tree.
+pub fn git_work_tree_is_present(dir: &Path) -> bool {
+    git_command(dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+}
+
+/// Export the git index (staged files) to `dest`. Unstaged working-tree bytes
+/// are not copied.
+pub fn export_git_index_to(source_root: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("create staged compile dir {}", dest.display()))?;
+    let dest_abs = dunce::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
+    let mut prefix = dest_abs.to_string_lossy().replace('\\', "/");
+    if !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    let output = git_command(source_root)
+        .args(["checkout-index", "--all", "--force"])
+        .arg(format!("--prefix={prefix}"))
+        .output()
+        .with_context(|| format!("git checkout-index in {}", source_root.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git checkout-index --all failed in {}:\n{}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Stash unstaged and untracked files so the working tree matches the git index.
+///
+/// Returns whether a stash entry was created (caller must pop).
+pub fn stash_unstaged_keep_index(source_root: &Path) -> Result<bool> {
+    if !git_work_tree_is_present(source_root) {
+        return Ok(false);
+    }
+    let output = git_command(source_root)
+        .args([
+            "stash",
+            "push",
+            "--keep-index",
+            "--include-untracked",
+            "--message",
+            "grok-oss rebuild: compile from staged files",
+        ])
+        .output()
+        .with_context(|| format!("git stash push --keep-index in {}", source_root.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.contains("No local changes to save") || stderr.contains("No local changes to save") {
+        return Ok(false);
+    }
+    if !output.status.success() {
+        bail!(
+            "git stash push --keep-index failed in {}:\n{stderr}",
+            source_root.display()
+        );
+    }
+    Ok(true)
+}
+
+/// Restore unstaged files saved by [`stash_unstaged_keep_index`].
+pub fn stash_pop_rebuild_unstaged(source_root: &Path) -> Result<()> {
+    let output = git_command(source_root)
+        .args(["stash", "pop"])
+        .output()
+        .with_context(|| format!("git stash pop in {}", source_root.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git stash pop failed after the staged rebuild compile in {}:\n{}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn pid_cmdline_and_exe(pid: u32) -> (String, Option<String>) {
+    #[cfg(target_os = "linux")]
+    {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        (cmdline, exe)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        (String::new(), None)
+    }
+}
+
+/// Live PID is grok-oss (product CLI / exe path), not a stock `grok` comm.
+pub fn pid_is_grok_oss_product(pid: u32) -> bool {
+    let (cmdline, exe) = pid_cmdline_and_exe(pid);
+    if active_sessions::is_grok_oss_cli_identity(&cmdline, exe.as_deref()) {
+        return true;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Non-Linux: exe/cmdline may be empty. Fall back to comm via `ps`.
+        if let Ok(out) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            let comm = String::from_utf8_lossy(&out.stdout);
+            if active_sessions::is_grok_oss_cli_identity(comm.trim(), None) {
+                return true;
+            }
+        }
+        if let Ok(out) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+        {
+            let args = String::from_utf8_lossy(&out.stdout);
+            return active_sessions::is_grok_oss_cli_identity(args.trim(), None);
+        }
+    }
+    false
 }
 
 /// Default install destination for `just install` / cargo install path.
@@ -794,6 +971,33 @@ pub fn run_install_with_progress(
     on_progress: &mut dyn FnMut(RebuildProgressEvent),
 ) -> Result<(InstallBackend, PathBuf)> {
     let install_path = default_install_path();
+    if let Err(e) = backup_previous_grok_oss_binary(&install_path) {
+        tracing::warn!(
+            error = %e,
+            path = %install_path.display(),
+            "failed to copy previous grok-oss to the sibling rollback path"
+        );
+    }
+    let stashed = stash_unstaged_keep_index(source_root)?;
+    let result = run_install_with_progress_from_worktree(source_root, &install_path, on_progress);
+    if stashed {
+        if let Err(e) = stash_pop_rebuild_unstaged(source_root) {
+            tracing::warn!(
+                error = %e,
+                "failed to restore unstaged files after staged rebuild compile"
+            );
+            result?;
+            return Err(e);
+        }
+    }
+    result
+}
+
+fn run_install_with_progress_from_worktree(
+    source_root: &Path,
+    install_path: &Path,
+    on_progress: &mut dyn FnMut(RebuildProgressEvent),
+) -> Result<(InstallBackend, PathBuf)> {
     let mut engine = RebuildProgressEngine::new();
 
     if just_available() {
@@ -812,7 +1016,7 @@ pub fn run_install_with_progress(
         // just install already stripped + installed; nudge bar to install end.
         engine.mark_verify();
         on_progress(engine.event());
-        return Ok((InstallBackend::JustInstall, install_path));
+        return Ok((InstallBackend::JustInstall, install_path.to_path_buf()));
     }
 
     // Match justfile install recipe (no wild linker; release; locked).
@@ -872,18 +1076,18 @@ pub fn run_install_with_progress(
     }
     engine.mark_install_bin();
     on_progress(engine.event());
-    std::fs::copy(&built, &install_path)
+    std::fs::copy(&built, install_path)
         .with_context(|| format!("install {} → {}", built.display(), install_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&install_path)?.permissions();
+        let mut perms = std::fs::metadata(install_path)?.permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&install_path, perms)?;
+        std::fs::set_permissions(install_path, perms)?;
     }
     engine.mark_verify();
     on_progress(engine.event());
-    Ok((InstallBackend::CargoFixedArgv, install_path))
+    Ok((InstallBackend::CargoFixedArgv, install_path.to_path_buf()))
 }
 
 /// Run `binary --version` and parse an identity string (`0.1.100 (sha)`).
@@ -1101,10 +1305,15 @@ pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe
 ///
 /// Walks every row, then dedupes with a `BTreeSet` of PIDs. Two windows on the
 /// same `session_id` are two rows and both PIDs stay. Duplicate rows for one
-/// PID collapse to one. Skips the invoker, dead PIDs, and non-grok processes.
-/// Does not send a signal.
+/// PID collapse to one. Skips the invoker, dead PIDs, and processes that are
+/// not grok-oss. Does not send a signal.
 pub fn collect_rebuild_signal_pids(
-    sessions: &[(u32, String, bool /* alive */, bool /* is_grok */)],
+    sessions: &[(
+        u32,
+        String,
+        bool, /* alive */
+        bool, /* is_grok_oss */
+    )],
     except_pid: Option<u32>,
 ) -> std::collections::BTreeSet<u32> {
     let mut pids = std::collections::BTreeSet::new();
@@ -1199,7 +1408,7 @@ pub fn signal_active_sessions_to_relaunch(
                 pid,
                 s.session_id.0.to_string(),
                 active_sessions::is_pid_alive(pid),
-                xai_grok_shell::util::is_grok_process(pid),
+                pid_is_grok_oss_product(pid),
             )
         })
         .collect();
@@ -1242,7 +1451,7 @@ pub fn signal_active_sessions_to_relaunch(
             outcomes.push(PeerRelaunchOutcome::Skipped {
                 pid,
                 session_id,
-                reason: "not a grok product process".into(),
+                reason: "not a grok-oss process".into(),
             });
         }
     }
@@ -1357,6 +1566,11 @@ where
         on_progress(engine.event());
     }
 
+    let previous_binary_backup = {
+        let p = previous_grok_oss_backup_path(&installed_path);
+        p.is_file().then_some(p)
+    };
+
     let summary_lines = format_rebuild_summary(
         &source_root,
         &installed_path,
@@ -1365,6 +1579,7 @@ where
         &leader_outcomes,
         &peer_outcomes,
         &live_sessions,
+        previous_binary_backup.as_deref(),
     );
 
     Ok(RebuildReport {
@@ -1375,6 +1590,7 @@ where
         leader_outcomes,
         peer_outcomes,
         live_sessions,
+        previous_binary_backup,
         summary_lines,
     })
 }
@@ -1388,6 +1604,7 @@ pub fn format_rebuild_summary(
     leader_outcomes: &[LeaderRelaunchOutcome],
     peer_outcomes: &[PeerRelaunchOutcome],
     live_sessions: &[ActiveSession],
+    previous_binary_backup: Option<&Path>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("Rebuild complete.".to_string());
@@ -1395,6 +1612,17 @@ pub fn format_rebuild_summary(
     lines.push(format!("  Backend:   {}", backend.label()));
     lines.push(format!("  Installed: {}", installed_path.display()));
     lines.push(format!("  Identity:  {installed_identity}"));
+    if let Some(backup) = previous_binary_backup {
+        lines.push(format!(
+            "  Previous:  {} (copy this file over grok-oss to roll back)",
+            backup.display()
+        ));
+    } else {
+        lines.push(format!(
+            "  Previous:  {} (sibling rollback path; no prior binary was copied)",
+            previous_grok_oss_backup_path(installed_path).display()
+        ));
+    }
 
     let relaunched = leader_outcomes
         .iter()
@@ -1809,6 +2037,103 @@ mod tests {
         assert!(!targets.contains(&non_grok));
     }
 
+    /// Contract: production classifier uses grok-oss CLI / exe path, not a
+    /// comm prefix `grok`. A stock `grok` PID must not be in the SIGUSR1 set.
+    #[test]
+    fn collect_rebuild_signal_pids_skips_stock_grok_cli_identity() {
+        let stock = active_sessions::is_grok_oss_cli_identity("grok", Some("/usr/bin/grok"));
+        let product = active_sessions::is_grok_oss_cli_identity(
+            "/home/me/.cargo/bin/grok-oss",
+            Some("/home/me/.cargo/bin/grok-oss"),
+        );
+        assert!(!stock, "stock grok must classify as not grok-oss");
+        assert!(product, "grok-oss exe must classify as grok-oss");
+        let sessions = vec![
+            (100, "sess-oss".into(), true, product),
+            (200, "sess-stock".into(), true, stock),
+        ];
+        let targets = collect_rebuild_signal_pids(&sessions, None);
+        assert!(
+            targets.contains(&100),
+            "live grok-oss PID must still be signaled"
+        );
+        assert!(
+            !targets.contains(&200),
+            "stock grok PID must not be in collect_rebuild_signal_pids: {targets:?}"
+        );
+    }
+
+    /// Contract: `/rebuild` copies the previous grok-oss binary to a sibling
+    /// `grok-oss.prev` path before overwrite.
+    #[test]
+    fn backup_previous_grok_oss_copies_to_sibling_prev() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("grok-oss");
+        fs::write(&bin, b"old-bytes").unwrap();
+        let dest = backup_previous_grok_oss_binary(&bin)
+            .expect("backup")
+            .expect("previous binary existed");
+        assert_eq!(dest, previous_grok_oss_backup_path(&bin));
+        assert_eq!(
+            dest.file_name().and_then(|n| n.to_str()),
+            Some("grok-oss.prev")
+        );
+        assert_eq!(fs::read(&dest).unwrap(), b"old-bytes");
+        assert!(
+            backup_previous_grok_oss_binary(&dir.path().join("missing"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn init_git_repo(root: &Path) {
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "rebuild-test@example.com"]);
+        git(&["config", "user.name", "Rebuild Test"]);
+    }
+
+    /// Contract: unstaged dirty working-tree bytes are not in the staged
+    /// compile snapshot. `/rebuild` compiles the git index, not WIP.
+    #[test]
+    fn export_git_index_omits_unstaged_dirty_file() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        init_git_repo(root);
+        fs::write(root.join("src.txt"), b"staged\n").unwrap();
+        let stage = Command::new("git")
+            .args(["add", "src.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(stage.success());
+        fs::write(root.join("src.txt"), b"unstaged-wip\n").unwrap();
+        let dest = root.join("staged-export");
+        export_git_index_to(root, &dest).expect("export index");
+        let exported = fs::read_to_string(dest.join("src.txt")).expect("exported src");
+        assert_eq!(
+            exported, "staged\n",
+            "staged compile snapshot must be the index, not unstaged WIP"
+        );
+        assert_ne!(exported, "unstaged-wip\n");
+        let worktree = fs::read_to_string(root.join("src.txt")).unwrap();
+        assert_eq!(
+            worktree, "unstaged-wip\n",
+            "export must not rewrite the work tree"
+        );
+    }
+
     /// Contract: rebuild must schedule restart of **all** other live product
     /// sessions, not only the invoker. Pure PID filter excludes self / dead /
     /// non-grok.
@@ -1954,6 +2279,7 @@ mod tests {
             &[],
             &peers,
             &[],
+            None,
         );
         let joined = lines.join("\n");
         assert!(

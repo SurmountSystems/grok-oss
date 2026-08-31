@@ -490,6 +490,143 @@ async fn maybe_start_blocked_while_awaiting_plan_approval() {
         .await;
 }
 
+/// Resident reconnect: in-memory awaiting is false, but `plan_mode.json`
+/// on disk was parked after the client left. Resume must re-issue the
+/// reverse-request so `/view-plan` can bind Approve.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_adopts_disk_awaiting_when_memory_is_clear() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("plan.md"), "# Seeded after quit\n\nBody\n").unwrap();
+            std::fs::write(
+                dir.path().join("plan_mode.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "state": "Active",
+                    "was_previously_active": true,
+                    "reminder_count": 0,
+                    "pending_exit_reminder": false,
+                    "awaiting_plan_approval": true,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                assert!(
+                    !tracker.is_awaiting_plan_approval(),
+                    "fixture: resident memory never parked"
+                );
+            }
+
+            let responder = tokio::task::spawn_local(async move {
+                let mut seen = false;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            seen = &*args.request.method == "x.ai/exit_plan_mode";
+                            let _ = args
+                                .response_tx
+                                .send(Ok(acp::ExtResponse::new(ext_response("abandoned"))));
+                            break;
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+                seen
+            });
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().resume_plan_approval(completion_tx).await;
+            assert!(
+                responder.await.unwrap(),
+                "resume must re-issue x.ai/exit_plan_mode after adopting disk awaiting"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "abandoned decision must clear the adopted awaiting flag"
+            );
+        })
+        .await;
+}
+
+/// Reconnect flush can persist Inactive over a seeded `plan_mode.json`.
+/// `RestorePlanApproval` still carries the pre-flush snapshot.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_uses_pre_flush_snapshot_when_disk_was_clobbered() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("plan.md"), "# Seeded after quit\n\nBody\n").unwrap();
+            std::fs::write(
+                dir.path().join("plan_mode.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "state": "Inactive",
+                    "was_previously_active": true,
+                    "reminder_count": 0,
+                    "pending_exit_reminder": false,
+                    "awaiting_plan_approval": false,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+            }
+
+            let responder = tokio::task::spawn_local(async move {
+                let mut seen = false;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            seen = &*args.request.method == "x.ai/exit_plan_mode";
+                            let _ = args
+                                .response_tx
+                                .send(Ok(acp::ExtResponse::new(ext_response("abandoned"))));
+                            break;
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+                seen
+            });
+
+            actor.adopt_parked_plan_snapshot(crate::session::plan_mode::PlanModeSnapshot {
+                state: crate::session::plan_mode::PlanModeState::Active,
+                was_previously_active: true,
+                reminder_count: 0,
+                pending_exit_reminder: false,
+                awaiting_plan_approval: true,
+                plan_decision_resolved: false,
+            });
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().resume_plan_approval(completion_tx).await;
+            assert!(
+                responder.await.unwrap(),
+                "resume must re-issue x.ai/exit_plan_mode from the pre-flush snapshot"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "abandoned decision must clear the adopted awaiting flag"
+            );
+        })
+        .await;
+}
+
 /// Resume after Approve/Quit must not re-issue the reverse-request.
 #[tokio::test(flavor = "current_thread")]
 async fn resume_skips_when_plan_decision_resolved() {
@@ -527,6 +664,64 @@ async fn resume_skips_when_plan_decision_resolved() {
             assert!(
                 gateway_rx.try_recv().is_err(),
                 "no reverse-request should be sent when the plan is already decided"
+            );
+        })
+        .await;
+}
+
+/// A first reverse-request that fails to reach the pager must retry after bind.
+/// The second round-trip uses abandoned so this test does not start an
+/// implement turn.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_retries_reverse_request_after_bind_failure() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("plan.md"), "# Retry\n\nBody\n").unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                tracker.activate_from_tool();
+                tracker.set_awaiting_plan_approval(true);
+            }
+
+            let responder = tokio::task::spawn_local(async move {
+                let mut ext_seen = 0usize;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            ext_seen += 1;
+                            if ext_seen == 1 {
+                                drop(args);
+                                continue;
+                            }
+                            let _ = args
+                                .response_tx
+                                .send(Ok(acp::ExtResponse::new(ext_response("abandoned"))));
+                            break;
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+                ext_seen
+            });
+
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().resume_plan_approval(completion_tx).await;
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "retry decision must clear the awaiting flag"
+            );
+            assert_eq!(
+                responder.await.unwrap(),
+                2,
+                "resume must retry the reverse-request after the first send fails"
             );
         })
         .await;

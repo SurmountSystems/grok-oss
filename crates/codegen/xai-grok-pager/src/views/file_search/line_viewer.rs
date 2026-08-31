@@ -689,8 +689,8 @@ pub struct PlanViewerExtras {
     pub approve_notes_hovered: bool,
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
-    /// Prompt is the comment composer (Comment CTA or focused plan box).
-    /// Idle present is false. Comment-flow footer paints Clarify.
+    /// Comment-flow footer paints Clarify. Idle present (Preview or a
+    /// focused Revise/Approve box) stays Comment, not Clarify.
     pub comment_flow_active: bool,
     pub abandon_button_area: Option<Rect>,
     pub abandon_hovered: bool,

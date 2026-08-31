@@ -184,6 +184,32 @@ fn merge_tool_params(
         }
     }
 }
+
+/// Restricted toolsets without Agent cannot observe or cancel background
+/// work. Force every bash background mode off so finalize does not keep
+/// `auto_background_on_timeout` true while `enabled_background` is false.
+fn disable_all_background_bash_modes(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+) {
+    let mut disabled = serde_json::Map::new();
+    disabled.insert("enabled_background".into(), serde_json::Value::Bool(false));
+    disabled.insert(
+        "auto_background_on_timeout".into(),
+        serde_json::Value::Bool(false),
+    );
+    disabled.insert(
+        "allow_background_operator".into(),
+        serde_json::Value::Bool(false),
+    );
+    merge_tool_params(
+        tool_config,
+        &[
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuildConcise:run_terminal_cmd",
+        ],
+        &disabled,
+    );
+}
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
@@ -1030,13 +1056,17 @@ impl AgentBuilder {
             }
         }
         if definition.allowed_subagent_types.as_deref() == Some(&[]) {
-            // Strip spawn only. Keep bash background, auto-background on
-            // timeout, and get_task_output/kill_task/wait_tasks so a
-            // still-running command at the wait cap can be handed to
-            // background instead of SIGKILL.
+            // Spawning is blocked: disable every bash background mode and
+            // drop get_task_output/kill_task/wait_tasks so finalize does
+            // not require a background-capable bash tool. Nested grok-oss
+            // with an unrestricted toolset (empty tools allowlist) does
+            // not take this branch and still auto-backgrounds at the wait
+            // cap when background is allowed.
+            disable_all_background_bash_modes(&mut tool_config);
+            let lifecycle = ["task", "get_task_output", "wait_tasks", "kill_task"];
             tool_config
                 .tools
-                .retain(|tc| short_tool_name(&tc.id) != "task");
+                .retain(|tc| !lifecycle.contains(&short_tool_name(&tc.id)));
         }
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();

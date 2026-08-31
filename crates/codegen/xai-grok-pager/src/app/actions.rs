@@ -2343,7 +2343,8 @@ impl RenameSessionRequest {
 /// pager must finalize the subagent row itself.
 #[derive(Debug)]
 pub enum SubagentKillOutcome {
-    /// Shell stopped a live subagent — a real `SubagentFinished` is coming.
+    /// Shell stopped a live subagent. Chrome finalizes the row so Subagents
+    /// **X** cannot sit on `killing...` if `SubagentFinished` is delayed.
     StoppedLive,
     /// Nothing live to stop (orphan / already finished) — no finish coming, so
     /// the pager finalizes the row. `status` = the real terminal status for an

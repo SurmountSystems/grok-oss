@@ -1707,6 +1707,100 @@ impl SessionActor {
             ));
         }
     }
+    /// Re-issue `x.ai/exit_plan_mode` after resume. A successful send waits
+    /// for the user. Transport failure retries with backoff so the pager can
+    /// bind before the reverse-request is dropped. Does not auto-dock.
+    async fn request_plan_approval_after_resume(
+        &self,
+        tool_call_id: &acp::ToolCallId,
+        plan_content: String,
+    ) -> Result<
+        xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse,
+        acp::Error,
+    > {
+        const BACKOFF_MS: [u64; 6] = [0, 50, 100, 200, 400, 800];
+        const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        let started = std::time::Instant::now();
+        let mut attempt = 0usize;
+        loop {
+            let delay_ms = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            match self
+                .request_plan_approval(tool_call_id, Some(plan_content.clone()))
+                .await
+            {
+                Ok(parsed) => return Ok(parsed),
+                Err(err) => {
+                    tracing::debug!(
+                        %err,
+                        attempt,
+                        delay_ms,
+                        "resume exit_plan_mode reverse-request failed; retry after bind"
+                    );
+                    attempt = attempt.saturating_add(1);
+                    if started.elapsed() >= RETRY_BUDGET {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resident `--continue` can leave in-memory `awaiting_plan_approval`
+    /// false after the client writes `plan_mode.json` while disconnected
+    /// (the pager PTY seeds that file after quit). Disk parked approval is
+    /// the resume source of truth.
+    pub(super) fn adopt_parked_plan_snapshot(
+        &self,
+        snapshot: crate::session::plan_mode::PlanModeSnapshot,
+    ) {
+        if self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        if !snapshot.awaiting_plan_approval && !snapshot.plan_decision_resolved {
+            return;
+        }
+        let Some(session_dir) = self
+            .plan_mode
+            .lock()
+            .plan_file_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        *self.plan_mode.lock() =
+            crate::session::plan_mode::PlanModeTracker::from_snapshot(session_dir, snapshot);
+        self.persist_plan_mode_state();
+    }
+
+    pub(super) fn adopt_parked_plan_approval_from_disk(&self) {
+        if self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        let Some(session_dir) = self
+            .plan_mode
+            .lock()
+            .plan_file_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let path = session_dir.join("plan_mode.json");
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        let Ok(snapshot) =
+            serde_json::from_slice::<crate::session::plan_mode::PlanModeSnapshot>(&bytes)
+        else {
+            return;
+        };
+        self.adopt_parked_plan_snapshot(snapshot);
+    }
+
     /// Resume hook: re-issue the parked `exit_plan_mode` approval
     /// after a session restored with `awaiting_plan_approval == true`, so the
     /// client re-shows approval chrome over a real live waiter. Handles the
@@ -1717,6 +1811,7 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        self.adopt_parked_plan_approval_from_disk();
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
             return;
         }
@@ -1730,6 +1825,13 @@ impl SessionActor {
         {
             tracing::debug!("[exit_plan_mode] resume: approval already pending; skip re-park");
             return;
+        }
+        if self.plan_mode.lock().is_active() {
+            *self.current_prompt_mode.lock() = PromptMode::Plan;
+            *self.turn_prompt_mode.lock() = PromptMode::Plan;
+            self.enqueue_current_mode_update(acp::SessionModeId::new(
+                xai_grok_tools::types::SessionMode::Plan.as_id(),
+            ));
         }
         let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
         let plan_content = match tokio::fs::read_to_string(&plan_path).await {
@@ -1749,7 +1851,7 @@ impl SessionActor {
             "[exit_plan_mode] re-parking approval after resume"
         );
         let parsed = match self
-            .request_plan_approval(&tool_call_id, Some(plan_content))
+            .request_plan_approval_after_resume(&tool_call_id, plan_content)
             .await
         {
             Ok(parsed) => parsed,

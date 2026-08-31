@@ -114,20 +114,28 @@ pub(crate) fn spawn_workflow_host_service(
             agent_slots: tokio::sync::Semaphore::new(params.max_concurrent_agents.max(1)),
             params,
         });
+        // Stay on the host channel until the executor drops it. Breaking on
+        // cancel leaves `run_workflow`'s blocking_recv hanging on
+        // ReleaseAgentCalls / spawn replies, so cancel never completes the
+        // run outcome.
         loop {
-            let req = tokio::select! {
+            tokio::select! {
                 req = rx.recv() => match req {
-                    Some(req) => req,
+                    Some(req) => {
+                        if service.params.cancel.is_cancelled() {
+                            reply_cancelled(req);
+                        } else {
+                            service.clone().dispatch(req);
+                        }
+                    }
                     None => break,
                 },
-                _ = service.params.cancel.cancelled() => {
+                _ = service.params.cancel.cancelled(), if !service.params.cancel.is_cancelled() => {
                     while let Ok(req) = rx.try_recv() {
                         reply_cancelled(req);
                     }
-                    break;
                 }
-            };
-            service.clone().dispatch(req);
+            }
         }
         let drain_outcome = service.cancel_and_drain_children().await;
         let _ = drained_tx.send(drain_outcome);
@@ -417,6 +425,10 @@ impl HostService {
                         }
                     }
                 };
+                if self.params.cancel.is_cancelled() {
+                    drop(permit);
+                    return Err(HostError::Cancelled);
+                }
                 let waited_ms =
                     u64::try_from(wait_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let stats = &self.params.stats;
@@ -1223,6 +1235,108 @@ mod tests {
 
         drop(host_tx);
         cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_replies_to_later_host_calls_so_the_executor_is_not_stuck() {
+        let run_id = "wf_cancel_keeps_host_channel".to_string();
+        let mut tracker = WorkflowTracker::default();
+        tracker.start_run(
+            run_id.clone(),
+            "demo".into(),
+            "objective".into(),
+            vec![],
+            Some(1000),
+            None,
+        );
+        tracker.reserve_agents(&run_id, 2).unwrap();
+        let tracker = Arc::new(parking_lot::Mutex::new(tracker));
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let (params, _persist_rx) = test_host_params(
+            &run_id,
+            1,
+            "wf-scratch-cancel-keeps-channel",
+            tracker.clone(),
+            subagent_tx,
+        );
+        let cancel = params.cancel.clone();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (handle, _drained) = spawn_workflow_host_service(params, host_rx);
+
+        let (live_tx, live_rx) = oneshot::channel();
+        host_tx
+            .send(WorkflowHostRequest::SpawnAgent {
+                opts: AgentOpts {
+                    prompt: "live".into(),
+                    ..Default::default()
+                },
+                reply: live_tx,
+            })
+            .unwrap();
+        let (queued_tx, queued_rx) = oneshot::channel();
+        host_tx
+            .send(WorkflowHostRequest::SpawnAgent {
+                opts: AgentOpts {
+                    prompt: "queued".into(),
+                    ..Default::default()
+                },
+                reply: queued_tx,
+            })
+            .unwrap();
+
+        let live_spawn = tokio::time::timeout(Duration::from_secs(2), subagent_rx.recv())
+            .await
+            .expect("live agent reaches the coordinator")
+            .expect("subagent channel open");
+        let SubagentEvent::Spawn(live_spawn) = live_spawn else {
+            panic!("expected a spawn event");
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), subagent_rx.recv())
+                .await
+                .is_err(),
+            "queued agent must not reach the coordinator before cancel"
+        );
+
+        cancel.cancel();
+        let live_result = tokio::time::timeout(Duration::from_secs(2), live_rx)
+            .await
+            .expect("live spawn must reply on cancel");
+        assert!(
+            matches!(live_result, Ok(Err(HostError::Cancelled))),
+            "live spawn replies Cancelled, got {live_result:?}"
+        );
+        assert!(live_spawn.cancel_token.is_cancelled());
+        let queued_result = tokio::time::timeout(Duration::from_secs(2), queued_rx)
+            .await
+            .expect("queued spawn must reply on cancel");
+        assert!(
+            matches!(queued_result, Ok(Err(HostError::Cancelled))),
+            "queued spawn replies Cancelled, got {queued_result:?}"
+        );
+        assert!(
+            subagent_rx.try_recv().is_err(),
+            "queued agent must not reach the coordinator after cancel"
+        );
+
+        let (release_tx, release_rx) = oneshot::channel();
+        host_tx
+            .send(WorkflowHostRequest::ReleaseAgentCalls {
+                count: 2,
+                reply: release_tx,
+            })
+            .unwrap();
+        let release = tokio::time::timeout(Duration::from_secs(2), release_rx)
+            .await
+            .expect("ReleaseAgentCalls must not hang after cancel")
+            .expect("release reply channel");
+        assert!(
+            matches!(release, Err(HostError::Cancelled)),
+            "post-cancel host calls are Cancelled, got {release:?}"
+        );
+
+        drop(host_tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 }

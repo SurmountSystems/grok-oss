@@ -1,11 +1,13 @@
 //! Plan-approval chrome restored by the shell after quit + resume.
 //!
 //! When `exit_plan_mode` is parked and the user quits, the shell persists
-//! `awaiting_plan_approval = true` in `plan_mode.json`. On `--continue` the
-//! shell re-issues the `x.ai/exit_plan_mode` reverse-request — a real live ACP
-//! waiter — so the pager re-shows approval chrome through its normal path with
-//! no pager-side disk logic. Approving then leaves plan mode and starts the
-//! implement turn.
+//! `awaiting_plan_approval = true` in `plan_mode.json`. The first session
+//! scripts that tool call through mock inference so the bundled shell parks
+//! a live waiter (ContentController is not ACP and cannot answer
+//! `x.ai/exit_plan_mode`). On `--continue` the shell re-issues the reverse-
+//! request — a real live ACP waiter — so the pager re-shows approval chrome
+//! through its normal path with no pager-side disk logic. Approving then
+//! leaves plan mode and starts the implement turn.
 //!
 //! This FAILS without the shell re-park (PR2 product change): no reverse-request
 //! reaches the resumed pager, so no approval chrome appears.
@@ -35,11 +37,17 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use super::wait_for_welcome;
-use crate::{ContentController, MousePoint, PtyHarness, pager_binary};
+use crate::{ContentController, MousePoint, PtyHarness, ScriptedResponse, SseEvent, pager_binary};
 
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
+/// Direct pager↔shell ACP so resume reverse-requests are not dropped by a
+/// leader with no ExtMethod waiter. `--trust` skips the folder-trust gate
+/// that can stall `--continue` on the welcome recap. `--yolo` skips a
+/// permission card on the live `exit_plan_mode` park (mid-turn still
+/// auto-docks).
+const PAGER_E2E_ARGS: &[&str] = &["--yolo", "--trust", "--no-leader"];
 /// Distinct per-turn sentinels: turn 1 seeds the session before quit; turn 2 is
 /// the implement turn the shell injects after the resumed approval is approved.
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
@@ -72,6 +80,11 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         "initial plan-drafting turn",
         format!("{SETUP_SENTINEL}: drafted a plan for the user to review."),
     );
+    // ContentController is mock inference, not ACP. A text-only first turn
+    // never intercepts `exit_plan_mode`, so resume has no reverse-request
+    // waiter even if `plan_mode.json` is seeded. Script the tool call so
+    // the bundled shell parks a live waiter before quit.
+    let _park_turn = expect_exit_plan_mode_turn(&content, "call_gbt3703_park");
     let mut implement_turn = content.expect_agent_turn(
         "implementation after approval",
         format!("{IMPLEMENT_SENTINEL}: implementing the approved plan."),
@@ -86,7 +99,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &[],
+        PAGER_E2E_ARGS,
         Some(project.path()),
     )
     .context("spawn first pager")?;
@@ -101,6 +114,16 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         .await
         .context("setup turn expectation timeout")?;
 
+    let sessions_root = content.sandbox().grok_home().join("sessions");
+    write_plan_md_in_sessions(&sessions_root).context("write plan.md before park")?;
+
+    first
+        .inject_keys(b"present the plan\r")
+        .context("submit exit_plan_mode park turn")?;
+    first
+        .wait_for_text("Plan ready. Side panel open", Duration::from_secs(30))
+        .context("live exit_plan_mode must park (auto-dock) before quit")?;
+
     // Quit and reap BEFORE seeding so the still-live shell cannot re-persist
     // and clobber the seeded state.
     first.inject_keys(b"\x11").context("ctrl-q once")?;
@@ -108,15 +131,18 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     first.inject_keys(b"\x11").context("ctrl-q confirm")?;
     first.quit().context("reap first pager")?;
 
-    let seeded = seed_parked_approval(content.home()).context("seed parked approval")?;
+    let seeded = seed_parked_approval(&content.sandbox().grok_home().join("sessions"))
+        .context("seed parked approval")?;
     assert!(seeded > 0, "no session dir seeded");
 
+    let mut continue_args = PAGER_E2E_ARGS.to_vec();
+    continue_args.insert(0, "--continue");
     let mut resumed = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--continue"],
+        &continue_args,
         Some(project.path()),
     )
     .context("spawn resumed pager")?;
@@ -125,7 +151,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // Restore must not auto-dock the side panel and must not paint the
     // shut-panel idle click cue. Session restore is the ready signal;
     // `/view-plan` binds Approve. Live mid-turn present still auto-opens.
-    wait_for_any_text(&mut resumed, &[SETUP_SENTINEL], WELCOME_TIMEOUT)
+    wait_for_restored_session(&mut resumed)
         .context("restored session after resume (not idle Plan written chrome)")?;
     if resumed.contains_text("Plan ready. Side panel open") {
         bail!(
@@ -140,19 +166,13 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         );
     }
 
-    resumed
-        .inject_keys(b"/view-plan\r")
-        .context("open restored waiter via /view-plan")?;
-    wait_for_any_text(
-        &mut resumed,
-        &[
-            LABELED_FOOTER_STRIP,
-            NARROW_FOOTER_STRIP,
-            LABELED_APPROVE_CTA,
-        ],
-        WELCOME_TIMEOUT,
-    )
-    .context("/view-plan must bind Approve to the restored waiter")?;
+    // Restore can land after the first slash. Keep sending `/view-plan`
+    // until the parked waiter binds Approve (Plan ready. Side panel open).
+    // The four-word footer alone is not enough: view-only plan.md paints
+    // the same strip and Approve is a no-op. Do not auto-dock. Do not wait
+    // on idle Plan written chrome.
+    wait_for_restored_approve_footer(&mut resumed)
+        .context("/view-plan must bind Approve to the restored waiter")?;
     let screen = resumed.screen_contents();
     // History was seeded before quit; plan body from disk is a stronger signal
     // that the session was restored when chrome already covers the transcript.
@@ -208,19 +228,74 @@ fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
     )
 }
 
-/// Poll until any of `needles` appears on the screen (or timeout).
-fn wait_for_any_text(harness: &mut PtyHarness, needles: &[&str], timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
+/// Open the restored waiter with `/view-plan` until Approve is bound.
+///
+/// Success is live-park status after an explicit open: "Plan ready. Side
+/// panel open". The word-only footer can paint for view-only plan.md
+/// without `plan_approval_view`, and clicking Approve then does nothing.
+/// One Enter can race the shell re-park. Retry the slash. Do not treat
+/// idle "Plan written. Click or /view-plan" as success.
+fn wait_for_restored_approve_footer(harness: &mut PtyHarness) -> Result<()> {
+    const SLASH_RETRY: Duration = Duration::from_millis(400);
+    const BOUND_APPROVE_STATUS: &str = "Plan ready. Side panel open";
+    let deadline = Instant::now() + WELCOME_TIMEOUT;
+    let mut last_slash = Instant::now() - SLASH_RETRY;
     loop {
         harness.update(Duration::from_millis(50));
         let screen = harness.screen_contents();
-        if needles.iter().any(|n| screen.contains(n)) {
+        let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+            || screen.contains(NARROW_FOOTER_STRIP)
+            || screen.contains(LABELED_APPROVE_CTA);
+        if screen.contains(BOUND_APPROVE_STATUS) && footer_painted {
             return Ok(());
         }
         if Instant::now() >= deadline {
             bail!(
-                "timed out after {:?} waiting for any of {needles:?}\n{screen}",
-                timeout
+                "timed out after {:?} waiting for {BOUND_APPROVE_STATUS:?} with Approve footer\n{screen}",
+                WELCOME_TIMEOUT,
+            );
+        }
+        if last_slash.elapsed() >= SLASH_RETRY {
+            let composer_holds_slash = screen
+                .lines()
+                .rev()
+                .take(8)
+                .any(|line| matches!(line.trim(), "/view-plan" | "/show-plan" | "/plan-view"));
+            if composer_holds_slash {
+                harness
+                    .inject_keys(b"\r")
+                    .context("submit in-composer /view-plan")?;
+            } else {
+                harness
+                    .inject_keys(b"/view-plan\r")
+                    .context("open restored waiter via /view-plan")?;
+            }
+            last_slash = Instant::now();
+        }
+    }
+}
+
+/// `--continue` must be inside the restored session, not the welcome recap.
+/// Welcome lists "Resume session" and can show the last-turn snippet, which
+/// is not a bound waiter.
+fn wait_for_restored_session(harness: &mut PtyHarness) -> Result<()> {
+    let deadline = Instant::now() + WELCOME_TIMEOUT;
+    loop {
+        harness.update(Duration::from_millis(50));
+        let screen = harness.screen_contents();
+        // Welcome recap can show the last-turn snippet (setup sentinel)
+        // without the exact "Resume session" label. "New worktree" is
+        // welcome-menu only. `/view-plan` on welcome never binds Approve.
+        if screen.contains(SETUP_SENTINEL)
+            && !screen.contains("Resume session")
+            && !screen.contains("New worktree")
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {:?} waiting for restored session (setup sentinel, not welcome Resume session / New worktree)\n{screen}",
+                WELCOME_TIMEOUT
             );
         }
     }
@@ -282,11 +357,171 @@ fn sgr_mouse(button: u16, row: u16, col: u16, suffix: char) -> String {
     format!("\x1b[<{button};{};{}{suffix}", col + 1, row + 1)
 }
 
+/// Scripted model turn that invokes `exit_plan_mode` (both pager backends).
+fn expect_exit_plan_mode_turn(
+    content: &ContentController,
+    call_id: &str,
+) -> crate::AgentTurnExpectation {
+    content.expect_agent_turn_with_responses(
+        format!("exit_plan_mode park {call_id}"),
+        ScriptedResponse::sse(responses_api_tool_call_events(
+            call_id,
+            "exit_plan_mode",
+            "{}",
+        )),
+        ScriptedResponse::sse(chat_completions_tool_call_events(
+            call_id,
+            "exit_plan_mode",
+            "{}",
+        )),
+    )
+}
+
+fn responses_api_tool_call_events(call_id: &str, name: &str, arguments: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    let mut seq = 0u64;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.created",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_plan_park",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": "test-model",
+                "status": "in_progress",
+                "output": []
+            }
+        })
+        .to_string(),
+    ));
+    seq += 1;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": seq,
+            "item_id": call_id,
+            "output_index": 0,
+            "delta": arguments
+        })
+        .to_string(),
+    ));
+    seq += 1;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_plan_park",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": "test-model",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments
+                }],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "total_tokens": 30,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                    "output_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }
+        })
+        .to_string(),
+    ));
+    events.push(SseEvent::data("[DONE]".to_string()));
+    events
+}
+
+fn chat_completions_tool_call_events(call_id: &str, name: &str, arguments: &str) -> Vec<SseEvent> {
+    let tool_calls = vec![serde_json::json!({
+        "index": 0,
+        "id": call_id,
+        "type": "function",
+        "function": { "name": name, "arguments": arguments }
+    })];
+    vec![
+        SseEvent::data(
+            serde_json::json!({
+                "id": "chatcmpl-plan-park",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+        ),
+        SseEvent::data(
+            serde_json::json!({
+                "id": "chatcmpl-plan-park",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            })
+            .to_string(),
+        ),
+        SseEvent::data("[DONE]".to_string()),
+    ]
+}
+
+fn write_plan_md_in_sessions(sessions_root: &Path) -> Result<usize> {
+    if !sessions_root.is_dir() {
+        bail!(
+            "expected sessions under {} after first turn",
+            sessions_root.display()
+        );
+    }
+    let mut written = 0usize;
+    for cwd_ent in std::fs::read_dir(sessions_root).context("read sessions root")? {
+        let cwd_ent = cwd_ent.context("cwd entry")?;
+        if !cwd_ent.file_type().context("ft")?.is_dir() {
+            continue;
+        }
+        for sess_ent in std::fs::read_dir(cwd_ent.path()).context("read cwd sessions")? {
+            let sess_ent = sess_ent.context("session entry")?;
+            if !sess_ent.file_type().context("ft")?.is_dir() {
+                continue;
+            }
+            std::fs::write(sess_ent.path().join("plan.md"), PLAN_BODY).context("write plan.md")?;
+            written += 1;
+        }
+    }
+    if written == 0 {
+        bail!(
+            "expected at least one session dir under {}",
+            sessions_root.display()
+        );
+    }
+    Ok(written)
+}
+
 /// Mark the persisted session as having a parked plan approval: write `plan.md`
 /// and flip `awaiting_plan_approval` to `true` in `plan_mode.json` for every
-/// session dir under the sandbox home.
-fn seed_parked_approval(home: &Path) -> Result<usize> {
-    let sessions_root = home.join(".grok").join("sessions");
+/// session dir under the sandbox `$GROK_HOME/sessions`.
+fn seed_parked_approval(sessions_root: &Path) -> Result<usize> {
     if !sessions_root.is_dir() {
         bail!(
             "expected sessions under {} after first turn",
@@ -294,7 +529,7 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
         );
     }
     let mut seeded = 0usize;
-    for cwd_ent in std::fs::read_dir(&sessions_root).context("read sessions root")? {
+    for cwd_ent in std::fs::read_dir(sessions_root).context("read sessions root")? {
         let cwd_ent = cwd_ent.context("cwd entry")?;
         if !cwd_ent.file_type().context("ft")?.is_dir() {
             continue;
@@ -345,6 +580,12 @@ fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
     obj.insert(
         "awaiting_plan_approval".into(),
         serde_json::Value::Bool(true),
+    );
+    // A leftover resolved bit would make the shell skip re-park. This seed
+    // is an outstanding decision, not Approve/Quit.
+    obj.insert(
+        "plan_decision_resolved".into(),
+        serde_json::Value::Bool(false),
     );
     std::fs::write(path, serde_json::to_vec_pretty(&value)?).context("write plan_mode.json")?;
     Ok(())

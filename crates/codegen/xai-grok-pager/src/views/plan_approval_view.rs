@@ -151,6 +151,9 @@ pub struct PlanApprovalViewState {
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+    /// Last non-slash Revise / Comment box text. Survives `/view-plan`,
+    /// pane close, and resume replace. Not the pre-panel agent-prompt stash.
+    pub feedback_draft: Option<String>,
     /// Local idle decision park: no live `exit_plan_mode` reverse-request.
     /// Approve / Revise / Quit still work; Revise Interjects a rewrite.
     pub is_local_idle_decision: bool,
@@ -192,6 +195,7 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            feedback_draft: None,
             is_local_idle_decision: false,
         }
     }
@@ -217,6 +221,7 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            feedback_draft: None,
             is_local_idle_decision: true,
         }
     }
@@ -492,6 +497,7 @@ mod tests {
         assert!(state.editing_comment_id.is_none());
         assert!(state.commenting_range.is_none());
         assert!(state.stashed_feedback_prompt.is_none());
+        assert!(state.feedback_draft.is_none());
     }
 
     fn make_empty_plan_state() -> (

@@ -2905,7 +2905,7 @@ impl PromptWidget {
 /// as a second green prompt glyph under DOGE). Mid-buffer spaces use this
 /// path (`allow_block_glyph=false`) so arrow navigation never paints a green
 /// control-looking block mid-line.
-fn paint_composer_box_cursor(
+pub(crate) fn paint_composer_box_cursor(
     buf: &mut Buffer,
     cx: u16,
     cy: u16,

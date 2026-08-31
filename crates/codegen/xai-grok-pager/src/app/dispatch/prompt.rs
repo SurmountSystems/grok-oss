@@ -181,6 +181,42 @@ pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effec
     )
 }
 
+/// Mid-turn Enter interjects when the turn can take it. If interject
+/// produces no effect (no session, L3 overlay refuse), enqueue locally
+/// instead of clearing the composer into nowhere. Ctrl-Z recovering a
+/// vanished draft is the failure this avoids.
+fn enqueue_if_interject_dropped(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    let effects = interject::dispatch_interject(app, text.clone(), images.clone());
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    if effects.is_empty() {
+        agent.start_pending_live_prompt_task(&text);
+        let qid = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::agent::QueuedPrompt {
+                images,
+                ..crate::app::agent::QueuedPrompt::plain(
+                    qid,
+                    text,
+                    crate::app::agent::QueueEntryKind::Prompt,
+                )
+            });
+        agent.persist_pending_prompts();
+    }
+    agent.prompt.set_text("");
+    agent.persist_unsent_composer_draft();
+    effects
+}
+
 /// Clear the active prompt and record non-empty text in prompt history (Esc Esc).
 pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
@@ -448,12 +484,13 @@ pub(super) fn dispatch_send_prompt_inner(
     );
     let text = implement_rewrite.command;
 
-    if app.reconnect_pending {
-        app.show_toast("Reconnecting, please wait...");
-        return vec![];
-    }
-
     let ActiveView::Agent(id) = app.active_view else {
+        // `/view-plan` after `--continue` can land while welcome still owns
+        // the view. Stick the request so SessionLoaded / restore docks
+        // Approve. Other prompts stay a no-op off the agent view.
+        if matches!(text.trim(), "/view-plan" | "/show-plan" | "/plan-view") {
+            super::modes::stick_view_plan_request(app);
+        }
         return vec![];
     };
     // Capture app-level fields before the mut-borrow on `agent`.
@@ -472,6 +509,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
+    let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -652,6 +690,19 @@ pub(super) fn dispatch_send_prompt_inner(
             }
         };
 
+        if reconnect_pending
+            && matches!(
+                exec_result,
+                CommandResult::PassThrough(_)
+                    | CommandResult::QueueCommand(_)
+                    | CommandResult::QueueLater { .. }
+                    | CommandResult::InjectSkill { .. }
+            )
+        {
+            agent.show_toast("Reconnecting, please wait...");
+            return vec![];
+        }
+
         // Map CommandResult to pager behavior. (MRU persistence is queued
         // off-thread inside `record_command_use` above.)
         match exec_result {
@@ -698,6 +749,9 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
+                // Local slash actions (including `/view-plan`) must run even
+                // while a leader reconnect is in progress. The reconnect
+                // guard below only blocks model prompts and PassThrough.
                 return dispatch(action, app);
             }
             CommandResult::QueueCommand(cmd_text) => {
@@ -782,8 +836,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 // `/queue /finish` is QueueLater above, not this arm.
                 if consume_input && agent.session.state.is_turn_running() {
                     let images = agent.prompt.drain_images();
-                    agent.prompt.set_text("");
-                    return interject::dispatch_interject(app, pass_text, images);
+                    return enqueue_if_interject_dropped(app, id, pass_text, images);
                 }
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
@@ -807,6 +860,10 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         return dispatch(Action::Quit, app);
     } else {
+        if reconnect_pending {
+            agent.show_toast("Reconnecting, please wait...");
+            return vec![];
+        }
         // ── Composer Enter while a turn is running: soft interject ──
         // Freeform text (and slash PassThrough that is not a named hold) is
         // merged into this turn via `x.ai/interject`. It must not wait on
@@ -852,8 +909,7 @@ pub(super) fn dispatch_send_prompt_inner(
             && !agent.is_parked_on_sendable_wait()
         {
             let images = agent.prompt.drain_images();
-            agent.prompt.set_text("");
-            return interject::dispatch_interject(app, text, images);
+            return enqueue_if_interject_dropped(app, id, text, images);
         }
 
         // If the user queues a follow-up while a turn is already running, surface
@@ -961,6 +1017,9 @@ pub(super) fn dispatch_send_prompt_inner(
             if queued_while_running && let Some(agent) = app.agents.get_mut(&id) {
                 agent.maybe_toast_plan_feedback_queue();
             }
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.persist_pending_prompts();
+            }
             return vec![Effect::SendPrompt {
                 agent_id,
                 session_id,
@@ -1016,6 +1075,9 @@ pub(super) fn dispatch_send_prompt_inner(
             }
         }
         app.show_toast("Queued on the prompt queue. It will not run this turn.");
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.persist_pending_prompts();
+        }
         return vec![];
     }
 
@@ -1044,6 +1106,9 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.persist_pending_prompts();
+    }
     effects
 }
 

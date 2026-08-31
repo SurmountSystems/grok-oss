@@ -1,5 +1,7 @@
 //! Tip after queuing a follow-up while a turn is running: advertise that
-//! bare Enter on an empty prompt force-sends the top queued item ("send now").
+//! bare Enter on an **empty** composer force-sends the top queued item
+//! ("send now"). A non-empty composer is `Enter:interject`; the turn-status
+//! running row must not reuse this Enter copy (see `views/turn_status.rs`).
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};

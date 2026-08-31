@@ -99,6 +99,16 @@ mod tests {
         file.flush().unwrap();
 
         let text = crate::running_sessions::slash_report_in(dir.path(), Some(self_pid));
+        let sibling_cmdline = std::fs::read(format!("/proc/{sibling_pid}/cmdline"))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let sibling_exe = std::fs::read_link(format!("/proc/{sibling_pid}/exe"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+        let sibling_is_grok_oss = xai_grok_active_sessions::is_grok_oss_cli_identity(
+            &sibling_cmdline,
+            sibling_exe.as_deref(),
+        );
         let _ = sibling.kill();
         let _ = sibling.wait();
         let _ = not_grok.kill();
@@ -109,12 +119,25 @@ mod tests {
         drop(not_grok_scope);
 
         assert!(
+            !sibling_is_grok_oss,
+            "fixture is a grok-named bash $0, not grok-oss; SIGUSR1 must still skip stock grok \
+             (cmdline={sibling_cmdline:?} exe={sibling_exe:?})"
+        );
+        assert!(
             text.contains("sibling-fixture-row") || text.contains("sibling-"),
             "slash report must list the planted sibling session id; got {text:?}"
         );
         assert!(
             text.contains("/tmp/running-slash-sibling-cwd"),
             "slash report must list the sibling cwd; got {text:?}"
+        );
+        assert!(
+            text.contains("fixture summary title"),
+            "slash report must list the sibling title; got {text:?}"
+        );
+        assert!(
+            text.contains("idle") && text.contains("turn paused"),
+            "slash report must list the sibling activity; got {text:?}"
         );
         assert!(
             text.contains(&sibling_pid.to_string()),
@@ -158,13 +181,16 @@ mod tests {
         xai_tty_utils::ProcessScope,
         std::sync::Arc<xai_tty_utils::ProcessGroup>,
     ) {
-        // Nix coreutils is a multi-call binary: arg0("grok-oss-sibling") on
-        // sleep exits unknown-program. bash $0 plants grok on cmdline.
-        // No setsid: reparent hides /proc cmdline from is_grok_process.
+        // Nix coreutils is a multi-call binary: arg0("grok") on sleep exits
+        // unknown-program. bash $0 plants grok on cmdline. `bash -c 'sleep 60'`
+        // execs sleep as the last command and grok leaves /proc/cmdline, so
+        // keep this bash pid in a loop. No setsid: reparent hides /proc
+        // cmdline from is_grok_process. This is grok-named for `/running`,
+        // not grok-oss CLI identity (`/rebuild` SIGUSR1 must still skip it).
         let mut cmd = std::process::Command::new("bash");
         cmd.arg("-c")
-            .arg("sleep 60")
-            .arg("grok-oss-sibling")
+            .arg("while :; do sleep 1; done")
+            .arg("grok")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

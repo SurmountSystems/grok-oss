@@ -25,6 +25,86 @@
         );
     }
 
+    /// Restore that arrives before the session is bound must not drop the
+    /// reverse-request. SessionLoaded flush parks the waiter. `/view-plan`
+    /// during reconnect must dock on that SessionLoaded, not a later manual open.
+    #[test]
+    fn resume_restore_held_until_session_binds() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.unbind_session_id();
+        }
+        app.reconnect_pending = true;
+        let slash = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+        assert!(
+            slash.is_empty(),
+            "/view-plan is a local slash during reconnect, got {slash:?}"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().view_plan_requested,
+            "/view-plan during reconnect must stick until SessionLoaded"
+        );
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Held until bind"),
+        );
+        assert!(!handle_exit_plan_mode(ext, &mut app));
+        assert!(
+            app.pending_exit_plan_mode.is_some(),
+            "restore with no local view must hold the reverse-request"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().plan_approval_view.is_none(),
+            "must not park until the session is bound"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().line_viewer.is_none(),
+            "held restore must not dock before SessionLoaded"
+        );
+
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new("sess-1"),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "SessionLoaded flush after bind must park the live waiter"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "SessionLoaded must dock Approve for /view-plan requested during reconnect"
+            );
+            agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the held waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
     /// Restore / resume re-park must keep the live waiter and must not dock.
     #[test]
     fn resume_restore_parks_waiter_without_docking_side_panel() {
@@ -90,6 +170,258 @@
                 "/view-plan must bind Approve to the restored waiter"
             );
             agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `/view-plan` can open the pane before the resume reverse-request
+    /// lands. Restore must keep that pane and bind Approve to the live waiter.
+    #[test]
+    fn resume_restore_keeps_already_open_plan_pane_and_binds_approve() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.latest_inline_plan_content = Some("# Already open\n\nBind the waiter\n".into());
+            agent.show_plan_preview();
+            assert!(
+                agent.line_viewer.is_some(),
+                "fixture: /view-plan opened the pane before restore"
+            );
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| p.is_local_idle_decision),
+                "fixture: open pane is a local idle park until restore"
+            );
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must keep the already-open plan pane"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve on the open pane"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert_eq!(
+                pav.focus,
+                PlanApprovalFocus::Preview,
+                "restore must leave Preview so the composer stays the agent prompt"
+            );
+            agent.approve_plan();
+            assert_eq!(
+                agent.prompt.text(),
+                "",
+                "empty-composer Approve must not invent review notes"
+            );
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `/view-plan` can run before the restore waiter and fail to leave a pane
+    /// (no body yet, or a later stale dismiss). Restore must still dock and
+    /// bind Approve. Idle `--continue` without that slash must not auto-dock.
+    #[test]
+    fn resume_restore_docks_when_view_plan_already_requested() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.open_plan_from_view_plan_or_status();
+            agent.line_viewer = None;
+            assert!(
+                agent.view_plan_requested,
+                "fixture: /view-plan ran and still wants the pane"
+            );
+            assert!(agent.plan_approval_view.is_none() || agent.line_viewer.is_none());
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter after slash"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must open the pane the slash already asked for"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve after a racing /view-plan"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            agent.approve_plan();
+            assert_eq!(agent.prompt.text(), "");
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Restore can land while `/view-plan` is still in the composer (Enter
+    /// not processed). That slash is a command, not keep-draft review notes.
+    #[test]
+    fn resume_restore_docks_when_composer_holds_view_plan_slash() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("/view-plan");
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter from in-flight slash"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must dock for an in-flight /view-plan slash"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve for an in-flight /view-plan slash"
+            );
+            assert_eq!(
+                agent.prompt.text(),
+                "",
+                "/view-plan in the composer is the slash, not a draft"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            assert_ne!(
+                pav.stashed_prompt.text.trim(),
+                "/view-plan",
+                "Approve must not treat the slash as keep-draft review notes"
+            );
+            agent.approve_plan();
+            assert_eq!(agent.prompt.text(), "");
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `--continue` restore must keep typed Revise-box text and must not
+    /// wrap it as Approve review notes (isolated present stays Preview).
+    #[test]
+    fn resume_restore_keeps_revise_box_draft() {
+        use crate::app::app_view::InputOutcome;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# First park"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            if let Some(ref mut pav) = agent.plan_approval_view {
+                pav.focus = PlanApprovalFocus::Prompt;
+                pav.prompt_intent = crate::views::plan_approval_view::PlanPromptIntent::Revise;
+            }
+            agent.prompt.set_text("please add auth middleware");
+            agent.snapshot_or_clear_plan_feedback_draft();
+            agent.cancel_line_viewer();
+            assert_eq!(agent.prompt.text(), "please add auth middleware");
+        }
+
+        seed_pending_tool(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "exit-plan-mode-resume-sess-1",
+            "CreatePlan",
+        );
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.prompt.text(),
+                "please add auth middleware",
+                "--continue restore must keep the Revise box text, got {:?}",
+                agent.prompt.text()
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            assert_eq!(
+                pav.feedback_draft.as_deref(),
+                Some("please add auth middleware")
+            );
+            let outcome = agent.approve_plan();
+            assert_eq!(
+                agent.prompt.text(),
+                "please add auth middleware",
+                "Approve must not consume a later composer draft as review notes"
+            );
+            assert!(
+                !matches!(
+                    &outcome,
+                    InputOutcome::Action(crate::app::actions::Action::Interject { text, .. })
+                        if text.contains("review comments")
+                ),
+                "isolated present Approve must not wrap the restored draft; got {outcome:?}"
+            );
         }
         let response = rx.blocking_recv().expect("Approve must complete the live waiter");
         let raw = response.expect("waiter response Ok");

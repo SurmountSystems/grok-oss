@@ -139,6 +139,7 @@ fn terminal_notification_base(notif: &ToolNotification) -> Option<&BashNotificat
 /// newer keys to older *or* newer servers without finalize failures. Typos in
 /// `params_json` will silently no-op — prefer pin-matched servers in CI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "BashParamsDe")]
 pub struct BashParams {
     /// Default command timeout in seconds. None → 120s.
     pub timeout_secs: Option<f64>,
@@ -210,6 +211,51 @@ pub struct BashParams {
     /// not match the reminder wording.
     #[serde(default = "default_true")]
     pub surface_bg_completion_reminders: bool,
+}
+
+/// Wire form for [`BashParams`]. Omitted `auto_background_on_timeout`
+/// follows `enabled_background` so `{ "enabled_background": false }`
+/// finalizes without requiring an extra `auto_background_on_timeout: false`.
+/// An explicit `true` with background disabled is still rejected in
+/// `validate_params_value`.
+#[derive(serde::Deserialize)]
+struct BashParamsDe {
+    timeout_secs: Option<f64>,
+    #[serde(default)]
+    max_timeout_secs: Option<f64>,
+    output_byte_limit: Option<usize>,
+    cmd_prefix: Option<String>,
+    #[serde(default = "default_true")]
+    enabled_background: bool,
+    #[serde(default)]
+    auto_background_on_timeout: Option<bool>,
+    #[serde(default)]
+    foreground_block_budget_ms: Option<u64>,
+    #[serde(default)]
+    max_block_until_ms: Option<u64>,
+    #[serde(default = "default_true")]
+    allow_background_operator: bool,
+    #[serde(default = "default_true")]
+    surface_bg_completion_reminders: bool,
+}
+
+impl From<BashParamsDe> for BashParams {
+    fn from(raw: BashParamsDe) -> Self {
+        Self {
+            timeout_secs: raw.timeout_secs,
+            max_timeout_secs: raw.max_timeout_secs,
+            output_byte_limit: raw.output_byte_limit,
+            cmd_prefix: raw.cmd_prefix,
+            enabled_background: raw.enabled_background,
+            auto_background_on_timeout: raw
+                .auto_background_on_timeout
+                .unwrap_or(raw.enabled_background),
+            foreground_block_budget_ms: raw.foreground_block_budget_ms,
+            max_block_until_ms: raw.max_block_until_ms,
+            allow_background_operator: raw.allow_background_operator,
+            surface_bg_completion_reminders: raw.surface_bg_completion_reminders,
+        }
+    }
 }
 
 impl Default for BashParams {
@@ -2291,7 +2337,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 let summary = if auto_backgrounded {
                     format!(
                         "Command \"{}\" exceeded the default timeout and was automatically moved to background. \
-                         Process is still running.",
+                         Process is still running. Do not start the same command again; use the task id to check output.",
                         input.command,
                     )
                 } else {
@@ -3270,6 +3316,11 @@ mod tests {
                 assert!(
                     bg.summary.contains("still running"),
                     "auto-bg summary must say the process is still running: {}",
+                    bg.summary
+                );
+                assert!(
+                    bg.summary.contains("Do not start the same command again"),
+                    "auto-bg summary must not teach retrying the same command: {}",
                     bg.summary
                 );
                 let outcome = backend.kill_task(&bg.task_id).await;
@@ -4355,6 +4406,12 @@ mod tests {
             assert!(
                 params.enabled_background && params.auto_background_on_timeout,
                 "default bash params must auto-background a still-running command at the wait cap"
+            );
+            let deserialized: BashParams =
+                serde_json::from_str(r#"{"timeout_secs":null,"enabled_background":true}"#).unwrap();
+            assert!(
+                deserialized.auto_background_on_timeout,
+                "omitted auto_background_on_timeout in params JSON must not fall back to killing at the wait cap"
             );
         }
 

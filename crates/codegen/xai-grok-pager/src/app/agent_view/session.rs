@@ -18,6 +18,79 @@ use crate::views::todo_pane::TodoPane;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+
+use crate::app::agent::{QueueEntryKind, QueuedPrompt};
+use crate::app::prompt_queue::QueueEntryWire;
+use crate::scrollback::EntryId;
+use crate::views::queue_pane::visible_held_server_row;
+
+fn kind_from_persist_label(kind: &str) -> QueueEntryKind {
+    match kind {
+        "bash_command" | "bash" => QueueEntryKind::BashCommand,
+        "command" => QueueEntryKind::Command,
+        "cron" => QueueEntryKind::Cron,
+        _ => QueueEntryKind::Prompt,
+    }
+}
+
+/// Snapshot local rows plus visible held server rows (not `prompt_tasks`).
+pub(crate) fn persisted_pending_prompt_rows(
+    local: &std::collections::VecDeque<QueuedPrompt>,
+    server: &[QueueEntryWire],
+    running_id: Option<&str>,
+    send_now_id: Option<&str>,
+    painted_pending: &HashMap<String, (EntryId, bool)>,
+) -> Vec<PersistedQueuedPrompt> {
+    let mut rows = Vec::new();
+    for wire in server {
+        if !visible_held_server_row(&wire.id, running_id, send_now_id, painted_pending) {
+            continue;
+        }
+        rows.push(PersistedQueuedPrompt {
+            id: 0,
+            text: wire.text.clone(),
+            kind: wire.kind.clone(),
+        });
+    }
+    for prompt in local {
+        rows.push(PersistedQueuedPrompt {
+            id: prompt.id,
+            text: prompt.text.clone(),
+            kind: prompt.kind.as_label().to_string(),
+        });
+    }
+    rows
+}
+
+/// Restore into an empty local queue. Does not touch `prompt_tasks`.
+pub(crate) fn apply_persisted_pending_prompts(
+    session: &mut AgentSession,
+    rows: Vec<PersistedQueuedPrompt>,
+) {
+    if !session.pending_prompts.is_empty() {
+        return;
+    }
+    for row in rows {
+        if row.text.trim().is_empty() {
+            continue;
+        }
+        let id = if row.id >= session.next_queue_id {
+            session.next_queue_id = row.id.saturating_add(1);
+            row.id
+        } else {
+            let id = session.next_queue_id;
+            session.next_queue_id += 1;
+            id
+        };
+        session.pending_prompts.push_back(QueuedPrompt::plain(
+            id,
+            row.text,
+            kind_from_persist_label(&row.kind),
+        ));
+    }
+}
+
 impl AgentView {
     /// Live mutation of the turn-summary display field. Always bumps
     /// [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that
@@ -42,6 +115,7 @@ impl AgentView {
         }
         self.session.session_id = Some(session_id);
         self.restore_unsent_composer_draft();
+        self.restore_pending_prompts();
     }
 
     /// Named restore rule: never clobber a non-empty live composer.
@@ -89,8 +163,73 @@ impl AgentView {
         let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
             &cwd,
             session_id.0.as_ref(),
-            self.prompt.text(),
+            &self.unsent_composer_draft_to_persist(),
         );
+    }
+
+    /// Slash `/view-plan` is a command, not the Revise / Comment draft.
+    /// Persist the last plan-box snapshot so `--continue` does not restore
+    /// the slash or an empty composer over revision notes.
+    pub(crate) fn unsent_composer_draft_to_persist(&self) -> String {
+        let live = self.prompt.text();
+        if live.trim().starts_with('/') || live.trim().is_empty() {
+            if let Some(draft) = self
+                .plan_approval_view
+                .as_ref()
+                .and_then(|pav| pav.feedback_draft.as_deref())
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+            {
+                return draft.to_string();
+            }
+        }
+        live.to_string()
+    }
+
+    /// Snapshot the local pager queue so a kill does not depend on
+    /// `prompt_tasks` coincidentally holding the same bodies.
+    pub(crate) fn persist_pending_prompts(&self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let rows = persisted_pending_prompt_rows(
+            &self.session.pending_prompts,
+            &self.shared_queue,
+            self.session.current_prompt_id.as_deref(),
+            self.expect_send_now_cancel.as_deref(),
+            &self.send_now_painted_blocks,
+        );
+        let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts(
+            &cwd,
+            session_id.0.as_ref(),
+            &rows,
+        );
+    }
+
+    /// Reload the durable pager queue after bind/rebuild when memory is empty.
+    pub(crate) fn restore_pending_prompts(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        if !self.session.pending_prompts.is_empty() || !self.shared_queue.is_empty() {
+            return;
+        }
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Ok(rows) = xai_grok_shell::session::pending_prompts::load_pending_prompts(
+            &cwd,
+            session_id.0.as_ref(),
+        ) else {
+            return;
+        };
+        apply_persisted_pending_prompts(&mut self.session, rows);
+        self.sync_queue_pane();
     }
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
@@ -355,6 +494,7 @@ impl AgentView {
             permission_stashed_pane: None,
             permission_pattern_edit: None,
             plan_approval_view: None,
+            view_plan_requested: false,
             latest_inline_plan_content: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
@@ -913,6 +1053,17 @@ impl AgentView {
             {
                 return Some(TurnActivity::Waiting(WaitingReason::subagent()));
             }
+            // A stale Preparing / write-argument snapshot must not mask a
+            // live nested specialist. Overlay title and turn-status would
+            // otherwise sit on Preparing search_replace for minutes.
+            if matches!(activity, TurnActivity::WritingToolCall(_))
+                && self.running_live_specialists().next().is_some()
+            {
+                // Model wait enrichment names background specialists. A
+                // Subagent wait only names foreground rows, so it would
+                // keep the generic label while an L3 is still running.
+                return Some(TurnActivity::Waiting(WaitingReason::Model));
+            }
             // A pending get_command_or_subagent_output wait is not a healthy
             // wait once every *known* waited-on nested agent / bg task has
             // completed. Overlay title otherwise stays `Waiting on task
@@ -1134,6 +1285,84 @@ impl AgentView {
             .values()
             .filter(|s| s.is_running() && s.workflow_run_id.is_none())
     }
+    /// True when this view still has a live nested specialist or an animating
+    /// pane. A TurnRunning overlay child on an idle parent parks; cancel
+    /// resend and nested jobs keep Fast ticks.
+    pub(crate) fn has_live_work_animation(&self) -> bool {
+        self.scrollback.needs_animation()
+            || self.tasks.needs_tick()
+            || self.running_live_specialists().next().is_some()
+    }
+    /// Nested-agent **X** that sat on `killing...` past
+    /// [`crate::app::agent::PENDING_KILL_TIMEOUT_SECS`] is cancelled in chrome.
+    /// Background-task kills still clear `pending_kill` so the operator can retry.
+    pub(crate) fn finalize_overdue_pending_kills(&mut self) -> bool {
+        use crate::app::agent::PENDING_KILL_TIMEOUT_SECS;
+        use std::sync::Arc;
+        let now = Instant::now();
+        let mut overdue: Vec<(String, std::time::Duration)> = Vec::new();
+        for info in self.subagent_sessions.values_mut() {
+            if info.finished {
+                continue;
+            }
+            let Some(requested) = info.kill_requested_at else {
+                continue;
+            };
+            if now.duration_since(requested).as_secs() < PENDING_KILL_TIMEOUT_SECS {
+                continue;
+            }
+            let elapsed = info.display_elapsed();
+            info.finished = true;
+            info.status = Some(Arc::from("cancelled"));
+            info.pending_kill = false;
+            info.kill_requested_at = None;
+            info.activity_label = None;
+            info.duration_ms = Some(elapsed.as_millis() as u64);
+            overdue.push((info.child_session_id.to_string(), elapsed));
+        }
+        let mut changed = !overdue.is_empty();
+        for (child_sid, elapsed) in overdue {
+            if let Some(child) = self.subagent_views.get_mut(&child_sid) {
+                child.session.state = crate::app::agent::AgentState::Idle;
+                crate::app::subagent::finalize_finished_child_view(child, elapsed);
+                changed = true;
+            }
+        }
+        for task in self.session.bg_tasks.values_mut() {
+            if let Some(requested) = task.kill_requested_at
+                && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
+            {
+                task.pending_kill = false;
+                task.kill_requested_at = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+    /// Wall-clock elapsed for the live-work sparkler. Frame choice must not
+    /// depend on a parked tasks-pane tick counter (that counter aliases onto
+    /// one density glyph).
+    pub(crate) fn live_work_sparkler_elapsed_ms(&self) -> u64 {
+        let mut elapsed_ms = 0u64;
+        if !self.session.state.is_idle()
+            && let Some(started) = self.activity_started_at
+        {
+            elapsed_ms = elapsed_ms.max(started.elapsed().as_millis() as u64);
+        }
+        for info in self.subagent_sessions.values() {
+            if info.is_running() && info.workflow_run_id.is_none() {
+                elapsed_ms = elapsed_ms.max(info.display_elapsed().as_millis() as u64);
+            }
+        }
+        for task in self.session.bg_tasks.values() {
+            if task.status == crate::app::agent::BgTaskStatus::Running
+                && let Ok(elapsed) = task.start_time.elapsed()
+            {
+                elapsed_ms = elapsed_ms.max(elapsed.as_millis() as u64);
+            }
+        }
+        elapsed_ms
+    }
     /// Name a live specialist (description, else id) plus last tool/progress
     /// when the registry has it. Used when a task-output wait has no resolved
     /// subject, including background L3s the nested overlay is blocked on.
@@ -1183,14 +1412,18 @@ impl AgentView {
             });
         let generic_wait = matches!(
             child_activity,
-            Some(TurnActivity::Waiting(
-                WaitingReason::TaskOutput { .. }
-                    | WaitingReason::Model
-                    | WaitingReason::Subagent { .. }
-            ))
+            Some(
+                TurnActivity::Waiting(
+                    WaitingReason::TaskOutput { .. }
+                        | WaitingReason::Model
+                        | WaitingReason::Subagent { .. }
+                ) | TurnActivity::WritingToolCall(_)
+            )
         ) || child_label.as_deref().is_some_and(|s| {
             let lower = s.to_ascii_lowercase();
-            lower.contains("waiting on task output") || lower.contains("waiting for the model")
+            lower.contains("waiting on task output")
+                || lower.contains("waiting for the model")
+                || lower.starts_with("preparing ")
         });
         if generic_wait {
             let mut live: Vec<&crate::app::subagent::SubagentInfo> = self
@@ -1205,6 +1438,21 @@ impl AgentView {
             if !live.is_empty() {
                 live.sort_by_key(|info| info.started_at);
                 return overlay_specialist_wait_label(&live);
+            }
+            if let Some(progress) = self
+                .subagent_sessions
+                .get(child_sid)
+                .and_then(|info| info.wait_progress_label())
+            {
+                return Some(format!("{progress}…"));
+            }
+            if let Some(name) = self.subagent_views.get(child_sid).and_then(|cv| {
+                match cv.session.tracker.activity() {
+                    Some(TurnActivity::WritingToolCall(w)) => w.tool_name.clone(),
+                    _ => None,
+                }
+            }) {
+                return Some(name);
             }
         }
         child_label
@@ -2531,6 +2779,32 @@ mod resolve_turn_activity_tests {
         );
     }
 
+    /// A frozen Preparing search_replace snapshot must yield to a live
+    /// nested specialist. Overlay title and footer stay on that snapshot
+    /// for minutes when the tracker still thinks arguments are streaming.
+    #[test]
+    fn nested_l2_preparing_tool_yields_to_live_background_specialist() {
+        let mut view = running_view();
+        view.session
+            .tracker
+            .note_tool_call_arguments_delta(Some("search_replace"), 0);
+        let mut specialist = running_child("remote compile");
+        specialist.is_background = true;
+        specialist.child_session_id = std::sync::Arc::from("l3-impl");
+        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        view.subagent_sessions.insert("l3-impl".into(), specialist);
+        let activity = view.resolve_turn_activity().expect("activity");
+        let label = crate::app::subagent::format_activity_label(&activity);
+        assert!(
+            label.contains("remote compile"),
+            "preparing chrome must name the live nested job, got {label}"
+        );
+        assert!(
+            !label.to_ascii_lowercase().contains("preparing"),
+            "stale Preparing search_replace must not outrank a live nested job, got {label}"
+        );
+    }
+
     fn mark_specialist_completed(info: &mut crate::app::subagent::SubagentInfo) {
         use std::sync::Arc;
         info.finished = true;
@@ -2928,5 +3202,83 @@ mod reconnect_workflow_maps_tests {
                 .map(|r| r.status.as_str()),
             Some("complete")
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_prompts_persist_tests {
+    use super::*;
+    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+
+    fn empty_session() -> crate::app::agent::AgentSession {
+        crate::app::agent_view::test_agent_view(
+            Some("test-session"),
+            std::path::PathBuf::from("/tmp"),
+        )
+        .session
+    }
+
+    #[test]
+    fn apply_persisted_pending_prompts_restores_empty_queue() {
+        let mut session = empty_session();
+        apply_persisted_pending_prompts(
+            &mut session,
+            vec![
+                PersistedQueuedPrompt {
+                    id: 3,
+                    text: "first queued".into(),
+                    kind: "prompt".into(),
+                },
+                PersistedQueuedPrompt {
+                    id: 4,
+                    text: "second queued".into(),
+                    kind: "prompt".into(),
+                },
+            ],
+        );
+        assert_eq!(session.pending_prompts.len(), 2);
+        assert_eq!(session.pending_prompts[0].text, "first queued");
+        assert_eq!(session.pending_prompts[1].text, "second queued");
+        assert!(session.next_queue_id > 4);
+    }
+
+    #[test]
+    fn apply_persisted_pending_prompts_does_not_clobber_live_queue() {
+        let mut session = empty_session();
+        session.enqueue_prompt("already here".into());
+        apply_persisted_pending_prompts(
+            &mut session,
+            vec![PersistedQueuedPrompt {
+                id: 9,
+                text: "from disk".into(),
+                kind: "prompt".into(),
+            }],
+        );
+        assert_eq!(session.pending_prompts.len(), 1);
+        assert_eq!(session.pending_prompts[0].text, "already here");
+    }
+
+    #[test]
+    fn snapshot_includes_visible_server_rows_not_running() {
+        let local = std::collections::VecDeque::from([QueuedPrompt::plain(
+            1,
+            "local row",
+            QueueEntryKind::Prompt,
+        )]);
+        let server = vec![QueueEntryWire {
+            id: "srv-1".into(),
+            version: 0,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "server queued".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+        let rows =
+            persisted_pending_prompt_rows(&local, &server, Some("running"), None, &HashMap::new());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "server queued");
+        assert_eq!(rows[1].text, "local row");
     }
 }

@@ -468,8 +468,13 @@ pub struct QueuePane {
     pub overlay: OverlayState,
     /// Previous queue length — used for auto-show detection.
     prev_len: usize,
-    /// `[Send now]` (force-interject) action button.
+    /// `[Send now]` (force-interject) action button for the hovered or
+    /// focused-selected row (hover brighten + existing single-rect tests).
     send_now: RowActionButton,
+    /// `[Send now]` hit rects for every visible row while a turn is running.
+    /// Clicks must not depend on last-frame hover: a Down on a queue row's
+    /// Send now must resolve even when that row was not the prior hover.
+    send_now_hits: Vec<(Rect, u64)>,
     /// `[cancel]` (row delete) action button.
     delete_button: RowActionButton,
     /// `[edit]` (queued-row edit) action button.
@@ -512,6 +517,7 @@ impl QueuePane {
             overlay: OverlayState::hidden(),
             prev_len: 0,
             send_now: RowActionButton::default(),
+            send_now_hits: Vec::new(),
             delete_button: RowActionButton::default(),
             edit_button: RowActionButton::default(),
             hovered_row_id: None,
@@ -752,10 +758,15 @@ impl QueuePane {
             .handle_mouse_event(kind, col, row, area, &self.entries)
     }
 
-    /// Hit-test the action-row `[Interject]` button. Returns the id of the row
-    /// the button belongs to (the hovered row, else the selected row).
+    /// Hit-test a row `[Send now]` button. Prefers per-visible-row rects
+    /// painted while a turn is running so a click does not need last-frame
+    /// hover. Falls back to the hovered/selected single-rect bind.
     pub fn send_now_click(&self, col: u16, row: u16) -> Option<u64> {
-        self.send_now.hit(col, row, self.selected_id())
+        self.send_now_hits
+            .iter()
+            .find(|(rect, _)| rect.contains((col, row).into()))
+            .map(|(_, id)| *id)
+            .or_else(|| self.send_now.hit(col, row, self.selected_id()))
     }
 
     /// Hit-test the action-row `[cancel]` button (removes the row).
@@ -957,11 +968,12 @@ impl QueuePane {
         }
 
         // Action buttons (optional [Send now], then [edit], then [cancel],
-        // right-aligned). They render for the row under the mouse (hover
-        // affordance) or, when the pane is focused, the selected row. Hover
-        // takes precedence so mouse users can act on any row without
-        // focusing/selecting it first.
+        // right-aligned). [edit]/[cancel] render for the row under the mouse
+        // or, when the pane is focused, the selected row. While a turn is
+        // running, every visible row also paints [Send now] so a click does
+        // not depend on last-frame hover (screenshot Send now on a queue row).
         self.send_now.reset();
+        self.send_now_hits.clear();
         self.delete_button.reset();
         self.edit_button.reset();
         let action_idx = self
@@ -974,29 +986,57 @@ impl QueuePane {
                     None
                 }
             });
+        use crate::render::SafeBuf;
+        let theme = Theme::current();
+        let btn_style = Style::default().fg(theme.gray);
+        let cancel_label = "[cancel]";
+        let cancel_w = cancel_label.len() as u16;
+        let edit_label = "[edit]";
+        let edit_w = edit_label.len() as u16;
+        let interject_label = "[Send now]";
+        let interject_w = interject_label.len() as u16;
+        let fits = |right: u16, w: u16| right.checked_sub(w).filter(|&x| x >= inner.x);
+        let scroll = self.list_state.scroll_offset();
+        let inner_h = inner.height as usize;
+        if is_turn_running {
+            for (idx, entry) in self.entries.iter().enumerate() {
+                let item_y = self.list_state.layout().virtual_y(idx);
+                let Some(rel) = item_y.checked_sub(scroll).filter(|rel| *rel < inner_h) else {
+                    continue;
+                };
+                let screen_y = inner.y + rel as u16;
+                let mut right = inner.x + inner.width;
+                if fits(right, cancel_w).is_none() {
+                    continue;
+                }
+                right -= cancel_w;
+                if fits(right, edit_w).is_none() {
+                    continue;
+                }
+                right -= edit_w;
+                let Some(interject_x) = fits(right, interject_w) else {
+                    continue;
+                };
+                let interject_style = if self.send_now.is_hovered_for(entry.id) {
+                    Style::default().fg(theme.text_primary)
+                } else {
+                    btn_style
+                };
+                buf.set_string_safe(interject_x, screen_y, interject_label, interject_style);
+                let rect = Rect::new(interject_x, screen_y, interject_w, 1);
+                self.send_now_hits.push((rect, entry.id));
+                if action_idx == Some(idx) {
+                    self.send_now.bind(rect, entry.id);
+                }
+            }
+        }
         if let Some(idx) = action_idx
             && let Some(entry) = self.entries.get(idx)
         {
-            use crate::render::SafeBuf;
-            let theme = Theme::current();
-            // Skip when the action row is scrolled outside the viewport; a plain
-            // saturating_sub would otherwise bind the buttons to row 0 and
-            // mis-route clicks to an off-screen entry.
             let item_y = self.list_state.layout().virtual_y(idx);
-            if let Some(rel) = item_y.checked_sub(self.list_state.scroll_offset())
-                && rel < inner.height as usize
-            {
+            if let Some(rel) = item_y.checked_sub(scroll).filter(|rel| *rel < inner_h) {
                 let screen_y = inner.y + rel as u16;
-                let btn_style = Style::default().fg(theme.gray);
-                // Right-to-left walk. A button renders only when its whole
-                // label fits at or right of `inner.x`: saturating toward 0
-                // would paint into the left gutter and overlap already-placed
-                // buttons (checked_sub underflow = "doesn't fit", not x = 0).
                 let mut right = inner.x + inner.width;
-                let fits = |right: u16, w: u16| right.checked_sub(w).filter(|&x| x >= inner.x);
-
-                let cancel_label = "[cancel]";
-                let cancel_w = cancel_label.len() as u16;
                 if let Some(cancel_x) = fits(right, cancel_w) {
                     right = cancel_x;
                     let cancel_style = if self.delete_button.is_hovered_for(entry.id) {
@@ -1008,14 +1048,7 @@ impl QueuePane {
                     self.delete_button
                         .bind(Rect::new(cancel_x, screen_y, cancel_w, 1), entry.id);
 
-                    // [edit] sits flush against [cancel] (no gap) — a gap
-                    // would let the queued message behind the row leak through
-                    // the seam. Unlike [Send now] it renders regardless of
-                    // turn state — the keyboard `e` edit works either way.
-                    let edit_label = "[edit]";
-                    let edit_w = edit_label.len() as u16;
                     if let Some(edit_x) = fits(right, edit_w) {
-                        right = edit_x;
                         let edit_style = if self.edit_button.is_hovered_for(entry.id) {
                             Style::default().fg(theme.text_primary)
                         } else {
@@ -1024,31 +1057,6 @@ impl QueuePane {
                         buf.set_string_safe(edit_x, screen_y, edit_label, edit_style);
                         self.edit_button
                             .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
-                    }
-
-                    if is_turn_running {
-                        // Compact action wording; same mouse hit-test as before
-                        // (force-interject). Leftmost in the chain, flush
-                        // against [edit] for the same no-seam reason.
-                        let interject_label = "[Send now]";
-                        let interject_w = interject_label.len() as u16;
-                        if let Some(interject_x) = fits(right, interject_w) {
-                            // Brighten the fg on hover (same hover color as the
-                            // [Dashboard] button) so it reads as clickable.
-                            let interject_style = if self.send_now.is_hovered_for(entry.id) {
-                                Style::default().fg(theme.text_primary)
-                            } else {
-                                btn_style
-                            };
-                            buf.set_string_safe(
-                                interject_x,
-                                screen_y,
-                                interject_label,
-                                interject_style,
-                            );
-                            self.send_now
-                                .bind(Rect::new(interject_x, screen_y, interject_w, 1), entry.id);
-                        }
                     }
                 }
             }
@@ -1744,11 +1752,17 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
 
-        // Unfocused with no hover → no action buttons at all.
+        // Unfocused with no hover → [edit]/[cancel] stay hidden, but every
+        // visible row still paints [Send now] while a turn is running.
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
         assert!(pane.delete_button.rect.is_none());
         assert!(pane.send_now.rect.is_none());
         assert!(pane.edit_button.rect.is_none());
+        assert_eq!(
+            pane.send_now_hits.len(),
+            2,
+            "Send now must be clickable on every visible row without last-frame hover"
+        );
 
         // Hover the second row → its buttons appear (still unfocused).
         let inner = pane.last_inner.expect("inner area recorded during render");
@@ -1772,6 +1786,45 @@ mod tests {
         assert!(pane.delete_button.rect.is_none());
         assert!(pane.send_now.rect.is_none());
         assert!(pane.edit_button.rect.is_none());
+        assert_eq!(
+            pane.send_now_hits.len(),
+            2,
+            "clearing hover must not drop running-turn Send now hits"
+        );
+    }
+
+    /// A mouse Down on [Send now] of the top row must resolve that row's id
+    /// without selecting or hovering first (the live click path).
+    #[test]
+    fn send_now_click_hits_top_row_without_hover_or_focus() {
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "top queued prompt"));
+        local.push_back(local_prompt(2, "second"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        let ids = pane.entry_ids();
+        let area = Rect::new(0, 0, 80, 2);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        pane.render(area, &mut buf, false, &layout_cfg, None, true);
+        let (col, row, id) = pane
+            .send_now_hits
+            .iter()
+            .find(|(_, id)| *id == ids[0])
+            .map(|(r, id)| (r.x, r.y, *id))
+            .expect("top row Send now must paint");
+        assert_eq!(
+            pane.send_now_click(col, row),
+            Some(id),
+            "click must submit the top queued row, not require Ctrl+Enter"
+        );
+        let (col2, row2) = pane
+            .send_now_hits
+            .iter()
+            .find(|(_, id)| *id == ids[1])
+            .map(|(r, _)| (r.x, r.y))
+            .expect("second row Send now must paint");
+        assert_eq!(pane.send_now_click(col2, row2), Some(ids[1]));
     }
 
     /// Hovering a row paints the dim hover bg across that row (matching the

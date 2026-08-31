@@ -375,32 +375,34 @@ pub fn fingerprint_secret(secret: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Serialize tests that read/write `GROK_DISABLE_SHARED_RATE_LIMIT` or assume
+/// shared limits are enabled. Cargo runs tests multi-threaded by default.
+/// Tokio mutex so the async sleep test can hold exclusivity across `.await`
+/// without a `std::sync::MutexGuard` crossing an await (clippy).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Hold the env lock for the duration of a store test (limits must stay enabled).
+#[cfg(test)]
+pub(crate) fn with_shared_limits_enabled<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = ENV_LOCK.blocking_lock();
+    // Another test may have left the kill-switch set; clear while we hold the lock.
+    let prev = std::env::var_os(DISABLE_ENV);
+    if prev.is_some() {
+        // SAFETY: exclusive via ENV_LOCK; restored before unlock.
+        unsafe { std::env::remove_var(DISABLE_ENV) };
+    }
+    let out = f();
+    if let Some(v) = prev {
+        unsafe { std::env::set_var(DISABLE_ENV, v) };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    /// Serialize tests that read/write `GROK_DISABLE_SHARED_RATE_LIMIT` or assume
-    /// shared limits are enabled. Cargo runs tests multi-threaded by default.
-    /// Tokio mutex so the async sleep test can hold exclusivity across `.await`
-    /// without a `std::sync::MutexGuard` crossing an await (clippy).
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Hold the env lock for the duration of a store test (limits must stay enabled).
-    fn with_shared_limits_enabled<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.blocking_lock();
-        // Another test may have left the kill-switch set; clear while we hold the lock.
-        let prev = std::env::var_os(DISABLE_ENV);
-        if prev.is_some() {
-            // SAFETY: exclusive via ENV_LOCK; restored before unlock.
-            unsafe { std::env::remove_var(DISABLE_ENV) };
-        }
-        let out = f();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var(DISABLE_ENV, v) };
-        }
-        out
-    }
 
     #[test]
     fn provider_key_sanitizes() {

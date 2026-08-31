@@ -1099,9 +1099,13 @@ pub fn build_hints(
                 if def.id == ActionId::EnableVoiceMode || def.id == ActionId::VoiceToggle {
                     continue;
                 }
-                if def.id == ActionId::ExpandAllThinking
-                    && crate::appearance::cache::load_always_expand_thinking()
-                {
+                if def.id == ActionId::ExpandAllThinking {
+                    if crate::appearance::cache::load_always_expand_thinking() {
+                        continue;
+                    }
+                    let mut item = def.hint();
+                    item.label = std::borrow::Cow::Borrowed(thinking_label);
+                    hints.push(item);
                     continue;
                 }
                 hints.push(def.hint());
@@ -1999,6 +2003,72 @@ mod tests {
             shift_enter_unavailable,
             None,
         )
+    }
+    /// Ctrl+T is a toggle. The composer footer must name the next action from
+    /// current thinking state, not a slash-joined "expand/collapse" label.
+    fn prompt_hints_with_thinking_label(thinking_label: &'static str) -> Vec<HintItem> {
+        let mut prompt = PromptWidget::default();
+        prompt.textarea.insert_str("hello");
+        let registry = ActionRegistry::defaults();
+        build_hints(
+            ActivePane::Prompt,
+            prompt_focus_hint(),
+            &prompt,
+            &registry,
+            false,
+            None,
+            None,
+            thinking_label,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+    }
+    #[test]
+    fn prompt_ctrl_t_hint_names_the_next_thinking_action() {
+        for (thinking_label, forbidden) in [
+            ("expand thinking", "collapse thinking"),
+            ("collapse thinking", "expand thinking"),
+        ] {
+            let hints = prompt_hints_with_thinking_label(thinking_label);
+            let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
+            let thinking = hints
+                .iter()
+                .find(|h| h.label == thinking_label)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "composer footer must advertise {thinking_label} as the next Ctrl+T action; got {labels:?}"
+                    )
+                });
+            assert_eq!(
+                thinking.keys,
+                vec![crate::key!('t', CONTROL)],
+                "thinking toggle stays on Ctrl+T; got {:?}",
+                thinking.keys
+            );
+            assert!(
+                !labels.iter().any(|l| l.contains("expand/collapse")),
+                "slash-joined expand/collapse must not be the composer thinking hint; got {labels:?}"
+            );
+            assert!(
+                !labels.contains(&forbidden),
+                "composer footer must not advertise {forbidden} while the next action is {thinking_label}; got {labels:?}"
+            );
+        }
     }
     #[test]
     fn prompt_idle_submit_hint_is_send() {

@@ -213,11 +213,23 @@ pub enum SessionCommand {
     ReplaceSystemPrompt {
         system_prompt: String,
     },
+    /// Merge disk `plan_mode.json` into a resident actor before reconnect
+    /// flush. In-memory Inactive must not clobber a parked approval the
+    /// client wrote after quit. `respond_to` fires after the adopt so
+    /// flush cannot run first.
+    AdoptParkedPlanApprovalFromDisk {
+        respond_to: oneshot::Sender<()>,
+    },
     /// Resume hook: after a session is restored with
     /// `awaiting_plan_approval == true`, re-issue the `exit_plan_mode`
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
-    RestorePlanApproval,
+    ///
+    /// `snapshot` is the `plan_mode.json` load_light just read. Resident
+    /// reconnect must apply it: in-memory awaiting can still be false.
+    RestorePlanApproval {
+        snapshot: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    },
     GetToolOverrides {
         respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
     },

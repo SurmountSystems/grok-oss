@@ -247,3 +247,197 @@ mod tests {
         assert!(!path.exists());
     }
 }
+
+/// Durable pager prompt queue (`pending_prompts.json` next to the unsent draft).
+/// Not `prompt_tasks` and not `prompt_history.jsonl`.
+pub mod pending_prompts {
+    use super::sanitize_session_id;
+    use serde::{Deserialize, Serialize};
+    use std::fs::OpenOptions;
+    use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
+
+    const PENDING_PROMPTS_FILE: &str = "pending_prompts.json";
+
+    /// One queued follow-up restored after grok-oss exits.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct PersistedQueuedPrompt {
+        pub id: u64,
+        pub text: String,
+        pub kind: String,
+    }
+
+    /// Path for this session's pending prompt queue under the CWD sessions directory.
+    pub fn pending_prompts_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
+        let sid = sanitize_session_id(session_id)?;
+        Some(
+            crate::util::grok_home::sessions_cwd_dir(cwd)
+                .join(sid)
+                .join(PENDING_PROMPTS_FILE),
+        )
+    }
+
+    /// Write `rows` to `path` (mode `0600` on Unix). An empty list deletes the file.
+    pub fn write_pending_prompts_at(path: &Path, rows: &[PersistedQueuedPrompt]) -> io::Result<()> {
+        if rows.is_empty() {
+            return clear_pending_prompts_at(path);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        let body = serde_json::to_vec_pretty(rows).map_err(io::Error::other)?;
+        {
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp)?;
+            file.write_all(&body)?;
+            file.sync_all()?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load queued prompts from `path`. Missing or empty → `Ok(vec![])`.
+    pub fn load_pending_prompts_at(path: &Path) -> io::Result<Vec<PersistedQueuedPrompt>> {
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.trim().is_empty() => Ok(Vec::new()),
+            Ok(s) => serde_json::from_str(&s).map_err(io::Error::other),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Remove the pending-prompts file if present.
+    pub fn clear_pending_prompts_at(path: &Path) -> io::Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write the pending prompt queue for `(cwd, session_id)`. Empty clears.
+    pub fn write_pending_prompts(
+        cwd: &str,
+        session_id: &str,
+        rows: &[PersistedQueuedPrompt],
+    ) -> io::Result<()> {
+        let Some(path) = pending_prompts_path(cwd, session_id) else {
+            return Ok(());
+        };
+        let _ = crate::util::grok_home::ensure_sessions_cwd_dir(cwd)?;
+        write_pending_prompts_at(&path, rows)
+    }
+
+    /// Load the pending prompt queue for `(cwd, session_id)`.
+    pub fn load_pending_prompts(
+        cwd: &str,
+        session_id: &str,
+    ) -> io::Result<Vec<PersistedQueuedPrompt>> {
+        let Some(path) = pending_prompts_path(cwd, session_id) else {
+            return Ok(Vec::new());
+        };
+        load_pending_prompts_at(&path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tempfile::TempDir;
+
+        fn queue_path(tmp: &TempDir, session_id: &str) -> PathBuf {
+            tmp.path().join(session_id).join(PENDING_PROMPTS_FILE)
+        }
+
+        fn row(id: u64, text: &str) -> PersistedQueuedPrompt {
+            PersistedQueuedPrompt {
+                id,
+                text: text.into(),
+                kind: "prompt".into(),
+            }
+        }
+
+        #[test]
+        fn pending_prompts_survive_restart_without_prompt_tasks() {
+            let tmp = TempDir::new().unwrap();
+            let path = queue_path(&tmp, "sess-a");
+            write_pending_prompts_at(&path, &[row(1, "first queued"), row(2, "second queued")])
+                .unwrap();
+            let restored = load_pending_prompts_at(&path).unwrap();
+            assert_eq!(restored.len(), 2);
+            assert_eq!(restored[0].text, "first queued");
+            assert_eq!(restored[1].text, "second queued");
+            assert!(
+                !path.to_string_lossy().contains("prompt_tasks"),
+                "pager queue must not live in grok_oss.db prompt_tasks: {path:?}"
+            );
+        }
+
+        #[test]
+        fn empty_queue_clears_file() {
+            let tmp = TempDir::new().unwrap();
+            let path = queue_path(&tmp, "sess-a");
+            write_pending_prompts_at(&path, &[row(1, "temp")]).unwrap();
+            write_pending_prompts_at(&path, &[]).unwrap();
+            assert!(load_pending_prompts_at(&path).unwrap().is_empty());
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn write_does_not_touch_prompt_history_or_unsent_draft() {
+            let tmp = TempDir::new().unwrap();
+            let cwd_dir = tmp.path().join("enc-cwd");
+            std::fs::create_dir_all(&cwd_dir).unwrap();
+            let history = cwd_dir.join("prompt_history.jsonl");
+            let draft = cwd_dir.join("sess-a").join("unsent_prompt_draft");
+            std::fs::write(&history, b"").unwrap();
+            std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
+            std::fs::write(&draft, b"composer draft").unwrap();
+            let before_hist = std::fs::read(&history).unwrap();
+            let before_draft = std::fs::read(&draft).unwrap();
+            let queue = cwd_dir.join("sess-a").join(PENDING_PROMPTS_FILE);
+            write_pending_prompts_at(&queue, &[row(1, "queued body")]).unwrap();
+            assert_eq!(std::fs::read(&history).unwrap(), before_hist);
+            assert_eq!(std::fs::read(&draft).unwrap(), before_draft);
+            assert!(queue.exists());
+        }
+
+        #[test]
+        fn different_session_id_does_not_cross_restore() {
+            let tmp = TempDir::new().unwrap();
+            let path_a = queue_path(&tmp, "sess-a");
+            let path_b = queue_path(&tmp, "sess-b");
+            write_pending_prompts_at(&path_a, &[row(1, "only A")]).unwrap();
+            assert!(load_pending_prompts_at(&path_b).unwrap().is_empty());
+        }
+
+        #[test]
+        fn path_includes_session_id_component() {
+            let path = pending_prompts_path("/tmp/proj", "abc-123").expect("safe id");
+            let s = path.to_string_lossy();
+            assert!(s.contains("abc-123"), "path must key by session_id: {s}");
+            assert!(
+                s.ends_with(PENDING_PROMPTS_FILE),
+                "leaf must be {PENDING_PROMPTS_FILE}: {s}"
+            );
+        }
+
+        #[test]
+        fn unsafe_session_id_yields_no_path() {
+            assert!(pending_prompts_path("/tmp/p", "").is_none());
+            assert!(pending_prompts_path("/tmp/p", "../escape").is_none());
+            assert!(pending_prompts_path("/tmp/p", "a/b").is_none());
+        }
+    }
+}

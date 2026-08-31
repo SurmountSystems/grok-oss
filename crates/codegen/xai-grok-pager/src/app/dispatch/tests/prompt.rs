@@ -1074,6 +1074,39 @@ fn send_prompt_while_running_queues_without_drain() {
     );
 }
 
+/// Composer Enter must not vanish a draft when interject cannot land (no
+/// session). Enqueue locally instead of leaving Ctrl-Z as the only recovery.
+#[test]
+fn send_prompt_while_running_without_session_enqueues_instead_of_vanishing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.session_id = None;
+        agent.prompt.set_text("draft that must not vanish");
+    }
+    let effects = dispatch(
+        Action::SendPrompt("draft that must not vanish".into()),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "no session cannot interject, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.prompt.text(),
+        "",
+        "composer is consumed because the draft was enqueued"
+    );
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent.session.pending_prompts[0].text,
+        "draft that must not vanish"
+    );
+}
+
 /// Already-queued serial rows stay queued. Mid-turn Enter with new text
 /// interjects this turn instead of joining behind them as the next prompt.
 #[test]
@@ -2520,6 +2553,75 @@ fn bash_before_the_session_binds_is_queued_and_recorded() {
 }
 
 // ── Reconnect-pending dispatch guards ─────────────────────────────
+
+#[test]
+fn view_plan_slash_on_welcome_sticks_request() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.active_view = ActiveView::Welcome;
+
+    let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "/view-plan on welcome is a local slash, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].view_plan_requested,
+        "/view-plan typed on welcome must stick until SessionLoaded binds Approve"
+    );
+}
+
+#[test]
+fn view_plan_slash_runs_during_reconnect() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.reconnect_pending = true;
+    app.agents.get_mut(&id).unwrap().plan_mode_active = true;
+
+    let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "/view-plan is a local slash, got {effects:?}"
+    );
+    {
+        let agent = &app.agents[&id];
+        assert!(
+            agent.view_plan_requested,
+            "/view-plan during reconnect must stick the pane request until SessionLoaded"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "no plan body yet: SessionLoaded, not the slash, must dock"
+        );
+        assert!(
+            agent
+                .toast
+                .as_ref()
+                .is_none_or(|(msg, _)| !msg.contains("Reconnecting")),
+            "local /view-plan must not be dropped as Reconnecting, please wait"
+        );
+    }
+
+    app.agents.get_mut(&id).unwrap().latest_inline_plan_content =
+        Some("# After reconnect bind\n".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].line_viewer.is_some(),
+        "SessionLoaded must dock the pane /view-plan requested during reconnect"
+    );
+}
 
 #[test]
 fn send_prompt_blocked_during_reconnect() {

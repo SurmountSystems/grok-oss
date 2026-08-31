@@ -900,6 +900,41 @@ fn confirmation_required_builds_plugins_confirmation_with_confirmed_true() {
     }
 }
 
+/// Coordinator accepted the cancel (`StoppedLive`). Chrome must drop the
+/// live row so Subagents **X** cannot sit on `killing...` waiting for a
+/// finish notification that never arrives.
+#[test]
+fn kill_stopped_live_finalizes_list_row() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = acp::SessionId::new("test-session".to_owned());
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = make_test_subagent("child-1", "sa-1");
+        info.pending_kill = true;
+        info.activity_label = Some("Responding".into());
+        agent.subagent_sessions.insert("child-1".into(), info);
+    }
+
+    dispatch_task_result(
+        TaskResult::KillSubagentComplete {
+            session_id: sid,
+            subagent_id: "sa-1".into(),
+            outcome: SubagentKillOutcome::StoppedLive,
+        },
+        &mut app,
+    );
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .all(|info| info.subagent_id.as_ref() != "sa-1"),
+        "StoppedLive must drop the live nested-agent row"
+    );
+    let info = &app.agents[&id].subagent_sessions["child-1"];
+    assert!(info.finished, "StoppedLive must finalize the row");
+    assert_eq!(info.status.as_deref(), Some("cancelled"));
+}
+
 /// Regression (Bugbot): a failed `x.ai/subagent/cancel` RPC must NOT
 /// finalize the row — the subagent may still be running. Only a shell
 /// response of "nothing live" finalizes it.

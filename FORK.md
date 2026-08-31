@@ -824,9 +824,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   channel `1.98.0`. Do not add rustc 1.98.0 as a cargo land class until a
   named test or assert sniff exists. Report:
   [`.agents/reports/impl-toolchain-1971-2026-08-12.md`](.agents/reports/impl-toolchain-1971-2026-08-12.md)
-- [x] **justfile**: `just check` / `just ci` full quality gate; `just test`
+- [x] **justfile**: `just check` / `just ci` full Nix quality gate; `just check-local`
+  host cargo (fmt, clippy, nextest, doctest) when the VPS is down; `just test`
   for the cargo quality suite; `just update` refreshes the one workspace
-  `Cargo.lock` plus `flake.lock`
+  `Cargo.lock` plus `flake.lock`. Named test: grok-nix-helper
+  `justfile_contracts` `just_check_local_is_cargo_only_and_does_not_nix`.
 - [x] **justfile helper bootstrap (pinned 2026-08-26).** `just require_system`
   and `just current_system` are a justfile CI_SYSTEM/uname check. They must
   not require a prebuilt `grok-nix-helper` and must not tell the operator to
@@ -1852,9 +1854,10 @@ Actions (supply-chain boundary). Humans package from a trusted tree when ready.
 
 | Command | Role |
 |---------|------|
-| **`just check`** or **`just ci`** | Full local gate (flake-meta + prep + fmt/clippy/tests): **run before push**. Stays on this machine. |
+| **`just check`** or **`just ci`** | Full Nix local gate (flake-meta + prep + fmt/clippy/tests): **run before push**. Uses Nix on this machine or configured builders. This is not host cargo. The remote gate is `just check-remote`. |
+| **`just check-local`** | Host cargo gate when the VPS is down. Runs `cargo fmt --all -- --check`, then workspace `cargo clippy --all-targets --locked` with `-D warnings`, then `cargo nextest run --workspace --locked`, then `cargo test --doc --workspace --locked`. Nextest compile and link, and doctest `--jobs`, cap at 4 (`CARGO_LINK_JOBS`). The recipe body does not run flake-meta, nix build, or the remote recipes. `just check` / `just ci` still use Nix. Remote remains `just check-remote`. Named test: grok-nix-helper `justfile_contracts` `just_check_local_is_cargo_only_and_does_not_nix`. |
 | **`just check-remote`** | Optional. Realizes flake metadata and `.#workspace-cargo-quality` (the same full cargo gate as `just check` / `just test`: fmt, then workspace clippy `--all-targets` (members include cargo-mem-guard and grok-nix-helper), then workspace nextest execution, then doctests, as a Nix derivation) on this host's existing remote builder. rustc requires that builder's `surmount-remote` feature (and `big-parallel`) and must not run on the caller. This laptop never auto-detects `surmount-remote`; the host machines file must advertise it. `--option system-features` that omit `big-parallel` does not stop local nixbld (the daemon still advertises `big-parallel`). Force-remote nix also passes `--cores 64` so that rustc can use the builder's cores. Workspace cargo passes `--jobs` from those cores, capped at 32 (an OOM hedge; not 2 from the package sandbox, and not a full 64 rustc processes). `--jobs` is after the subcommand (`cargo check --jobs`). cargo 1.97 has no global `cargo --jobs`. Quality does **not** run `cargo clippy` (external dispatcher; a 1-token jobserver then ignores `--jobs`). Workspace lint is `cargo check` with `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under GNU make `-j$CARGO_BUILD_JOBS` (after dropping Nix `MAKEFLAGS` / `CARGO_MAKEFLAGS` / `MFLAGS`). One clippy-driver is still one typeck thread; independent crates share that jobserver. That derivation uses the same cargo **dev** profile as local `just test-clippy`, not crane's default `--release` check (one rustc thread at opt-level 3; codegen-units does not parallelize `cargo check` / clippy). Nix jobs (machines-file `max-jobs`: how many derivations) are not cargo/rustc workers (jobs inside one derivation). Do not raise Nix max-jobs to fix a single busy rustc. Force-remote nix passes `--option max-jobs 0` on the caller so this laptop does not build: crates.io FODs, static.rust-lang.org toolchain tarballs (the builder instruction-set architecture, not extra cores), and crane vendor unpacks go to the remote builder. The VPS fetches those itself (`builders-use-substitutes`). Force-remote `nix build` uses `--store` with the machines-file ssh-ng URI and `--eval-store auto` so cargo-package, cargo-src, and toolchain store paths stay on the VPS. Default `nix build` realizes into the local store, then copies each remote output back over SSH (that is local store close, not a remote-builder miss). `--no-link` skips a local result symlink. `-L` logs still stream as text. This laptop must not substitute those NARs from cache.nixos.org either. Force-remote exports `NIX_SSHOPTS` with this account's known_hosts (host-key checks stay on) and copies that host key into the builders line so nix-daemon SSH can verify the builder. Missing builders, a missing known_hosts entry for the machines-file host, or SSH to Host surmount-1 exits 2 with no local cargo fallback. User SSH to Host surmount-1 alone is not enough. GitHub Actions must not use this recipe. |
-| **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. Agents must not run `just check-remote` / `just test-remote` / `just cargo-remote` either. The operator owns the VPS builder (pinned 2026-08-25). |
+| **`just test-remote`** / **`just cargo-remote`** | Named cargo on that same remote builder. `just test-remote -p xai-grok-pager --lib -- actions::defaults` realizes `.#workspace-cargo-named-test` (`nix build --impure`, `GROK_NIX_FORCE_REMOTE=1`, `surmount-remote`). Tests execute (`cargo test --locked` or `cargo nextest run --locked`); not compile-only `--no-run`. `just cargo-remote` takes kind `test`, `nextest`, `clippy`, `build`, or `check`, then the same filter argv. Reuses `workspaceCargoArtifacts`. Do not raise Nix max-jobs. GitHub Actions must not use these recipes. Agents must not run `cargo test` / `cargo clippy` / `cargo build` / rustc on this laptop for grok-oss. Agents must not run `just check-remote` / `just test-remote` / `just cargo-remote` either. The operator owns the VPS builder (pinned 2026-08-25). When a session is explicitly told to run one of those recipes as proof, it must start them as a background job with a long wait (timeout 0 or at least twenty minutes). A five-minute foreground wait that SIGKILLs a still-running VPS compile, then starts the same recipe again, is a failed wait policy (pinned 2026-08-28). Nested grok-oss agents inherit production bash wait policy (auto-background at the wait cap, ten-hour foreground ceiling). |
 | **`just test`** | Quality suite without re-running full flake prep |
 | **`just build` / install** | Optional release-style package (not CI) |
 
@@ -1910,12 +1913,16 @@ uses `cargo clippy --workspace --all-targets`. Then workspace
 `cargo nextest run`, then `cargo test --workspace --doc`. Workspace
 nextest covers those member crate tests. Do not add a late
 `cargo test --manifest-path`. Do not allow-lint. `--locked` stays.
-Named-test (`just test-remote` / `just cargo-remote`) is one cargo kind
+`just check-local` uses that same cargo order on this host (fmt, then
+`cargo clippy --workspace --all-targets --locked` with `-D warnings`,
+then nextest, then doctest) and does not use Nix. Named-test
+(`just test-remote` / `just cargo-remote`) is one cargo kind
 plus a filter, not this full chain. Named tests in grok-nix-helper
 `justfile_contracts`:
 `workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests`,
 `workspace_quality_source_matches_just_test`,
-`just_test_clippy_lints_all_targets`.
+`just_test_clippy_lints_all_targets`,
+`just_check_local_is_cargo_only_and_does_not_nix`.
 
 **`just update` (pinned 2026-08-27).** Refresh locks without compiling:
 the one workspace `Cargo.lock`, then `flake.lock`. Does not run

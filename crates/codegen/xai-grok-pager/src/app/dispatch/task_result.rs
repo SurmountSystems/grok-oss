@@ -555,14 +555,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             subagent_id,
             outcome,
         } => {
-            if let SubagentKillOutcome::NothingLive { status } = outcome {
-                let status = status.as_deref().unwrap_or("cancelled");
-                crate::app::acp_handler::finalize_killed_subagent(
-                    app,
-                    &session_id,
-                    &subagent_id,
-                    status,
-                );
+            match outcome {
+                SubagentKillOutcome::NothingLive { status } => {
+                    let status = status.as_deref().unwrap_or("cancelled");
+                    crate::app::acp_handler::finalize_killed_subagent(
+                        app,
+                        &session_id,
+                        &subagent_id,
+                        status,
+                    );
+                }
+                SubagentKillOutcome::StoppedLive => {
+                    crate::app::acp_handler::finalize_killed_subagent(
+                        app,
+                        &session_id,
+                        &subagent_id,
+                        "cancelled",
+                    );
+                }
+                SubagentKillOutcome::RpcFailed => {}
             }
             vec![]
         }

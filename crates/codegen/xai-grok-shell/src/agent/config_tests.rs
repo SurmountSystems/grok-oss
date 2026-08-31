@@ -1506,10 +1506,33 @@ fn default_models_include_openrouter_grok_45_separate_from_default() {
     );
 }
 
+/// Keep host Secret Service, `$GROK_HOME` file store, and Zed harness probes
+/// out of OpenRouter `resolve_credentials` tests.
+///
+/// `just check-local` inherits the operator shell and does not set
+/// `GROK_DISABLE_SHARED_HARNESS_SECRETS` (Nix `cargo-ci` does). With
+/// `OPENROUTER_API_KEY` unset, `collect_own_credentials(..., openrouter)`
+/// calls `load_openrouter_api_key_default`, which probes Zed Secret Service
+/// (`connect` / `ensure_unlocked`) with no timeout and can block for minutes.
+fn isolate_openrouter_resolve_from_host() -> (tempfile::TempDir, [EnvGuard; 4]) {
+    let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+    let guards = [
+        EnvGuard::set("GROK_HOME", home.path()),
+        EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1"),
+        EnvGuard::set(
+            crate::auth::harness_secrets::DISABLE_SHARED_HARNESS_ENV,
+            "1",
+        ),
+        EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEYS_ENV),
+    ];
+    (home, guards)
+}
+
 #[test]
 #[serial_test::serial]
 fn resolve_credentials_openrouter_uses_env_not_session() {
     use xai_chat_state::AuthType;
+    let (_home, _iso) = isolate_openrouter_resolve_from_host();
     let _env = xai_grok_test_support::EnvGuard::set(
         crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
         "sk-or-test",
@@ -1525,6 +1548,7 @@ fn resolve_credentials_openrouter_uses_env_not_session() {
 #[serial_test::serial]
 fn resolve_credentials_openrouter_does_not_use_xai_session() {
     use xai_chat_state::AuthType;
+    let (_home, _iso) = isolate_openrouter_resolve_from_host();
     let _env =
         xai_grok_test_support::EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV);
     let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
@@ -1675,13 +1699,37 @@ fn auth_scheme_defaults_to_bearer_when_not_set_in_config() {
     assert_eq!(info.auth_type, "bearer");
 }
 #[test]
+#[serial]
 fn has_own_credentials_guards_session_vs_external_key() {
     let endpoints = EndpointsConfig::default();
-    for (model_id, entry) in default_model_entries(&endpoints) {
-        assert!(
-            !entry.has_own_credentials(),
-            "{model_id}: Default model must not claim own credentials"
+    let or_id = crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID;
+    {
+        let _or = EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV);
+        for (model_id, entry) in default_model_entries(&endpoints) {
+            assert!(
+                !entry.has_own_credentials(),
+                "{model_id}: default catalog must not claim own credentials when OPENROUTER_API_KEY is unset"
+            );
+        }
+    }
+    {
+        let _or = EnvGuard::set(
+            crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
+            "sk-or-test-has-own-creds",
         );
+        for (model_id, entry) in default_model_entries(&endpoints) {
+            if model_id == or_id {
+                assert!(
+                    entry.has_own_credentials(),
+                    "{model_id}: OpenRouter default is BYOK when OPENROUTER_API_KEY is set"
+                );
+            } else {
+                assert!(
+                    !entry.has_own_credentials(),
+                    "{model_id}: first-party default must not claim own credentials"
+                );
+            }
+        }
     }
     let config_model = test_model_entry(
         "my-model",

@@ -82,9 +82,11 @@ pub(super) fn subagent_activity_label(child_view: &AgentView) -> Option<String> 
     }
 }
 
-/// Synthesize a finish for a stuck row when a kill found nothing live to stop
-/// (else `pending_kill` times out → "running"). `status` is the real terminal
-/// status for an already-finished orphan, else `"cancelled"`.
+/// Synthesize a finish for a stuck row when a kill found nothing live to
+/// stop, or when the coordinator accepted the cancel (`StoppedLive`).
+/// Nested-agent `pending_kill` that times out is cancelled in chrome, not
+/// reverted to running. `status` is the real terminal status for an
+/// already-finished orphan, else `"cancelled"`.
 pub(crate) fn finalize_killed_subagent(
     app: &mut AppView,
     session_id: &acp::SessionId,

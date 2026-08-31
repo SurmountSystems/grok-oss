@@ -655,6 +655,32 @@ mod tests {
         );
     }
 
+    /// Contract: `/rebuild` documents the sibling previous-binary rollback and
+    /// staged-only compile in complete sentences.
+    #[test]
+    fn user_guide_rebuild_documents_prev_binary_rollback_and_staged_index() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("grok-oss.prev"),
+            "04-slash-commands.md must name the sibling grok-oss.prev rollback file"
+        );
+        assert!(
+            slash.content.contains("copy") && slash.content.contains("roll back"),
+            "04-slash-commands.md must say how to roll back by copying grok-oss.prev over grok-oss"
+        );
+        assert!(
+            slash.content.contains("git index") || slash.content.contains("staged files"),
+            "04-slash-commands.md must say /rebuild compiles staged files"
+        );
+        assert!(
+            slash.content.contains("Stock `grok` is not signaled"),
+            "04-slash-commands.md must say stock grok is not SIGUSR1'd"
+        );
+    }
+
     /// Named contract: operator-facing resume / `--version` examples use
     /// `grok-oss`, never upstream `grok`.
     #[test]

@@ -239,8 +239,9 @@ impl AgentCommand {
 }
 /// Maximum in-memory stdout per background task (10 MB).
 pub const BG_TASK_MAX_STDOUT: usize = 10 * 1024 * 1024;
-/// How long to wait for a kill response before auto-clearing `pending_kill`
-/// so the user can retry. Applied to both bg tasks and subagents.
+/// How long to wait for a kill response before treating a nested-agent row
+/// as cancelled (so Subagents **X** cannot sit on `killing...` forever).
+/// Background tasks still clear `pending_kill` so the operator can retry.
 pub const PENDING_KILL_TIMEOUT_SECS: u64 = 10;
 /// Prefix baked into monitor commands by backends predating the structured
 /// `monitor_description` field (and by reparented monitors). Shared

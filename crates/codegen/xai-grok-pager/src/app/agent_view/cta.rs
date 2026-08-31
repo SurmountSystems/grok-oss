@@ -25,6 +25,7 @@ impl AgentView {
             // A card's inline editor borrows the composer to answer a question, and a guess at the next prompt to the model is not an
             // answer. In the `/feedback` box it would also paint over the detail placeholder.
             && self.question_view.is_none()
+            && self.plan_approval_view.is_none()
             && !self.session.state.is_busy();
     }
 

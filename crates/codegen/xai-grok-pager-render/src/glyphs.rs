@@ -425,8 +425,41 @@ pub fn cursor_box_hollow() -> &'static str {
 /// ~600ms keeps the blink slow and readable (not seizure-fast).
 pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
 
-/// Whether the filled (solid plate) phase is showing at `now_ms` (monotonic millis).
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CURSOR_BOX_FILLED_PHASE_PIN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Guard from [`pin_cursor_box_filled_phase`]. Drop restores the prior pin.
+#[cfg(any(test, feature = "test-support"))]
+pub struct CursorBoxFilledPhasePin {
+    prev: Option<bool>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for CursorBoxFilledPhasePin {
+    fn drop(&mut self) {
+        CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.set(self.prev));
+    }
+}
+
+/// Force the composer box caret into the filled or empty blink half for
+/// this thread. Production paint still uses wall-clock [`cursor_box_filled_phase`];
+/// tests must not sleep hoping the clock lands in the solid half.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_cursor_box_filled_phase(filled: bool) -> CursorBoxFilledPhasePin {
+    let prev = CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.replace(Some(filled)));
+    CursorBoxFilledPhasePin { prev }
+}
+
+/// Whether the filled (solid plate) phase is showing at `now_ms` (unix millis
+/// in production; tests may pin a phase via [`pin_cursor_box_filled_phase`]).
 pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = CURSOR_BOX_FILLED_PHASE_PIN.with(std::cell::Cell::get) {
+        return pinned;
+    }
     (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
 }
 
@@ -1002,6 +1035,23 @@ mod tests {
         );
         assert!(cursor_box_filled_phase(half * 2));
         assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
+    }
+
+    /// Tests drive the solid half with a pin. Wall-clock `now_ms` must not
+    /// win while the pin is held, and Drop must restore timestamp phase.
+    #[test]
+    fn pin_cursor_box_filled_phase_overrides_timestamp() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(!cursor_box_filled_phase(half));
+        {
+            let _pin = pin_cursor_box_filled_phase(true);
+            assert!(cursor_box_filled_phase(half));
+            assert_eq!(cursor_box_glyph(half), cursor_box_filled());
+        }
+        assert!(!cursor_box_filled_phase(half));
+        let _pin = pin_cursor_box_filled_phase(false);
+        assert!(!cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_hollow());
     }
 
     /// Multi-row striped rail: as tick advances one frame, each glyph moves

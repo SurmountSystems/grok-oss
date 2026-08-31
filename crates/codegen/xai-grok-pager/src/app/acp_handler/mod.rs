@@ -59,8 +59,8 @@ use permissions::{
 
 // Hub + child modules (via `use super::*`) need sibling symbols in this scope.
 use routing::{
-    SessionMatch, find_session_match, interaction_target_agent, is_matched_agent_active,
-    mcp_target_agent, resolve_notif_agent, resolve_target_view,
+    SessionMatch, find_session_match, interaction_target_agent, interaction_target_bound_agent,
+    is_matched_agent_active, mcp_target_agent, resolve_notif_agent, resolve_target_view,
 };
 
 use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
@@ -94,6 +94,7 @@ use background::{
     route_bg_task_stdout,
 };
 use follow_ups::handle_follow_ups;
+pub(crate) use interactions::flush_pending_exit_plan_mode;
 pub(crate) use interactions::handle_ask_user_question;
 use interactions::handle_exit_plan_mode;
 use mcp::{

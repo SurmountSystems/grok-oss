@@ -6,6 +6,16 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Queue Send now, rebuild identity, and honest live work are in the tree with named `just test-remote` green (2026-08-28).** Rebuild identity signals only grok-oss with SIGUSR1, does not arm peer re-exec on Ctrl-C, keeps nested agents for resume, copies the previous binary to `grok-oss.prev`, and compiles from the git index. Queue Send now paints a mouse `[Send now]` hit on each visible queue row, does not advertise Enter as send-now during a running subagent wait, and persists the pager queue in session `pending_prompts.json`. Honest live work covers the sparkler, overlay tool name, Subagents **X**, overlay **stop**, and idle plan footer (Approve / Comment / Revise / Exit; Clarify is not idle; empty Enter never Approves). The overlay test that names the tool when there is no specialist is green. Reports: `/home/hunter/.agents/reports/impl-rebuild-identity.md`, `/home/hunter/.agents/reports/impl-queue-send-now.md`, `/home/hunter/.agents/reports/impl-honest-live-work.md`, `/home/hunter/.agents/reports/impl-honest-live-work-proof.md`. This running grok-oss binary will not show these changes until you install grok-oss and reopen the session.
+
+- **Full workspace quality (`just check-remote`) is green (2026-08-28).** Wrapper printed `EXIT:0`. Store path `/nix/store/q2isvv5dpy44jphzhj1gspvadn0g5ndv-workspace-cargo-quality-1.0.3`. Receipt: `fmt: cargo fmt --all -- --check`, clippy-as-check `--workspace --all-targets`, `Summary [ 132.949s] 30874 tests run: 30874 passed, 449 skipped`, `doctests: cargo test --workspace --doc`. `flake/workspace-quality.nix` puts `pkgs.ripgrep` on that drv and tees nextest stderr into `nextest.log`. `check-remote` takes only the `/nix/store` quality path out of `nix_retry` `-L` stdout. `nix_retry` does not pass `--eval-store` to `nix store cat`. Named contract: grok-nix-helper `check_remote_prints_quality_receipt_on_cache_hit`. This running grok-oss binary will not show the queue and rebuild work until you install grok-oss and reopen the session. Report: `/home/hunter/.agents/reports/impl-queue-rebuild-chrome-closeout.md`.
+
+- **`is_grok_process` still matches a `grok` substring on kill-safety paths other than `/rebuild` SIGUSR1.** Production rebuild signaling uses `pid_is_grok_oss_product` / `is_grok_oss_cli_identity`. On Linux, `is_grok_process` still reads `/proc/<pid>/cmdline` and returns true when those bytes contain `grok`. Callers include pager-bin leader kill, running-session filters, and `is_grok_process_strict` on Linux and Windows. Tightening those paths so a stock process named `grok` is not killed is leftover in this tree.
+
+- **Image bytes are not stored in `pending_prompts.json`.** Restored queue rows keep `[Image #N]` tokens in the text. Pixel files stay under the session `assets/` and `images/` directories.
+
+- **`aws-sdk-s3` / `lru` 0.16.4 (`RUSTSEC-2026-0253`) is still deferred to fargo.** This closeout did not bump Amazon S3 1.141.0. Resume that bump in fargo. Do not fetch crates.io to skip the delayed crate index. See the cargo-audit Open bullet below.
+
 - **fargo still owns delayed-index / parent bumps (pinned 2026-08-27).** Audit-wave path copies under `third_party/` (async-openai, syntect, bm25, rhai, pdf_oxide, ttf-parser) were **deleted** so `just install` is not compiling those trees. crates.io / delayed-index crates are back (and `cargo audit` warnings for backoff, bincode, fxhash, smartstring, ttf-parser will return). `chacha20` stays a git tag pin (`chacha20-v0.10.2`). Resume in fargo: delayed-index bumps (including `aws-sdk-s3` 1.144.0 / `lru` 0.16.4), Surmount git forks that later enter that index, or drop parents. Do not add grok-oss path vendoring again. Do not fetch crates.io to skip the wait. fargo is not specified in this tree.
 
 - **Workspace `cargo audit` (2026-08-27).** **0 vulnerabilities.** `quick-xml` 0.41.0. `rsa` 0.9 / RUSTSEC-2023-0071 is gone (`jsonwebtoken` uses `aws_lc_rs`). `git2` 0.21. `yaml-rust` gone (syntect yaml-load uses yaml-rust2). `bincode` / RUSTSEC-2025-0141 is gone (syntect path patch, no dump-load; report `impl-syntect-bincode.md`). `async-std` gone (dark-light 3). `rustybuzz` gone (resvg/fontdb bump). `lru` 0.12.5 gone (`ratatui` 0.30). Helpers are workspace members. **`aws-sdk-s3` / `lru` 0.16.4 (`RUSTSEC-2026-0253`) is deferred to fargo (pinned 2026-08-27).** Operator order: do not bump Amazon S3 1.141.0 to 1.144.0 in this grok-oss wave. The delayed crate index still tops at 1.142.0 (same unsound `lru` 0.16). Do not fetch crates.io to skip that wait. Resume this bump in fargo. It is not forgotten. fargo is not specified in this tree. Yanked `aes` 0.9.0, `chacha20` 0.10.0, and `spin` 0.9.8 / 0.10.0 are gone (aes 0.9.2 and spin 0.9.9 / 0.10.1 on the delayed index; chacha20 0.10.2 path-patched from git tag `chacha20-v0.10.2`; report `impl-yanked-aes-spin.md`). `ttf-parser` / RUSTSEC-2026-0192 is gone (path-patched `third_party/ttf-parser` on skrifa; pdf_oxide 0.3.77 still the delayed-index latest). `smartstring` / RUSTSEC-2026-0249 is gone (vendored `rhai` uses `compact_str`; report `impl-rhai-smartstring.md`). `fxhash` / RUSTSEC-2025-0057 is gone (vendored `bm25` uses `rustc-hash`; report `impl-bm25-fxhash.md`). `backoff`/`instant` are gone (path-patched `third_party/async-openai` keeps `ReasoningEffort::Max` without the `backoff` crate). `paste` / RUSTSEC-2024-0436 is gone (`tikv-jemalloc-ctl` dropped; pager-bin mallctl goes through `tikv-jemalloc-sys`). Named PPTX contracts unchanged. Reports: `impl-rsa-marvin.md`, `impl-audit-warnings.md`, `impl-audit-warnings-round2.md`, `impl-workspace-members.md`, `impl-jemalloc-paste.md`.
@@ -74,9 +84,11 @@ or code — not only here. Closed campaign history:
   dark seam, theme+hooks, shell stack/interject/usage/stream/external-auth.
   Package clippy mop for shell / pager / tools / update / workflow is green
   under `-D warnings`. **Still open (not this mop):** operator dogfood after
-  install (first Open bullet); PTY grandchild-kill flake reliability
-  (`close_pty_kills_a_background_grandchild`); a later second onto/join
-  after this mop is finalized. Do not start a second onto from residual.
+  install (first Open bullet); a later second onto/join after this mop is
+  finalized. Do not start a second onto from residual. PTY close now signals
+  descendant process groups so `close_pty_kills_a_background_grandchild`
+  cannot sit on a leftover `sleep 300` (report:
+  `/home/hunter/.agents/reports/fix-close-pty-grandchild-hang.md`).
 
 - **Dogfood / next-session gate (2026-08-09; open until install + dogfood done).**
   Tree work for the plan wave (A/B/C/E chrome, plan Revise, stale plan batch,
@@ -1299,3 +1311,7 @@ need the cargo blocks below or `just check`. Full historical closed block:
 ```bash
 just check    # or just ci
 ```
+
+## Next implement prompt
+
+implement leftover that is not this quality receipt. `is_grok_process` still matches a grok substring on kill-safety paths other than `/rebuild` SIGUSR1. Image bytes are not stored in `pending_prompts.json`. `aws-sdk-s3` / `lru` 0.16.4 stays fargo. This running grok-oss binary will not show the queue and rebuild work until you install grok-oss and reopen the session.

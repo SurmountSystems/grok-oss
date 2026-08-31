@@ -5,8 +5,9 @@
 #
 # Refresh locks: `just update` (one workspace Cargo.lock, then flake.lock).
 # Bare `just` lists recipes (same idea as `just -l` / `just --list`).
-# Full local gate (same recipe chain as GHA quality): `just ci`
-#   (or `just test` for fmt/clippy/tests only).
+# Full Nix local gate (same recipe chain as GHA quality): `just ci`
+#   (or `just check`). Host cargo only: `just check-local`.
+#   `just test` is fmt/clippy/tests via cargo-ci.
 # Closest GHA repro on Linux: CI_LOW_MEM=1 CI_SYSTEM=x86_64-linux just ci
 # Under CI_LOW_MEM, cargo-ci scrubs PATH to nix-store bins only (no host
 # pw-record/parec/arecord). Interactive `just dev` keeps impure host PATH.
@@ -41,8 +42,9 @@
 # max-jobs should match that width. Force-remote exports NIX_SSHOPTS (this
 # account's known_hosts; host-key checks stay on) and copies that host key
 # onto the builders line for nix-daemon SSH. Default `just check` /
-# `just ci` stay local. GitHub Actions must not use check-remote,
-# test-remote, or cargo-remote.
+# `just ci` stay on this machine's Nix path. They do not require the
+# remote builder. `just check-local` runs cargo on this host. GitHub
+# Actions must not use check-remote, test-remote, or cargo-remote.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -181,7 +183,7 @@ require_system:
     #!/usr/bin/env bash
     set -euo pipefail
     sys="$(just current_system)"
-    # Same rule as grok-nix-helper system_safe_for_interpolation:
+    # Same interpolation rule as system_safe_for_interpolation:
     # known triples, or two [A-Za-z0-9_]+ tokens with a digit or underscore
     # (so a just recipe name like just-one is not a Nix system).
     if [[ "${sys}" =~ ^(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)$ ]]; then
@@ -542,8 +544,12 @@ nix_retry +cmd:
         --option max-jobs 0
         --cores 64
         --store "${store_uri}"
-        --eval-store auto
       )
+      # `nix store cat` rejects --eval-store. `nix build` / flake metadata
+      # still use auto so cargo-package NARs stay on the VPS.
+      if [[ "${2:-}" != "store" ]]; then
+        extra+=(--eval-store auto)
+      fi
       if [[ "${2:-}" == "build" ]]; then
         extra+=(--no-link)
       fi
@@ -628,21 +634,26 @@ nix_retry +cmd:
 # and `just test` (same chain as `just ci`, not the `just ci` entrypoint) —
 # not a release build. GHA always sets CI_LOW_MEM=1 and CI_SYSTEM=x86_64-linux.
 #
-# `just check` / `just ci` = full local gate (same recipe chain as GHA quality).
-#   Run before you push. No pre-commit hook required for this.
+# `just check` / `just ci` = full Nix local gate (same recipe chain as GHA
+#   quality). Run before you push when Nix on this machine is usable. No
+#   pre-commit hook required for this.
+# `just check-local` = host cargo only: fmt --all -- --check, then workspace
+#   clippy --all-targets --locked with -D warnings, then workspace nextest
+#   --locked, then cargo test --doc --workspace --locked. Use this when the
+#   VPS is down. It is not an alias of `just check`.
 # `just test` = fmt, clippy (-D warnings, workspace --all-targets),
 #   workspace nextest, doctests (members include cargo-mem-guard and
 #   grok-nix-helper; nextest covers those tests).
 # `just test-extra` = local-only extras CI does not run (cross-target clippy,
 #   nix_retry smoke).
 #
-# There is no `ci-quick` or `ci-host` recipe — use `check`/`ci` or `test`.
+# There is no `ci-quick` or `ci-host` recipe — use `check`/`check-local`/`ci` or `test`.
 # Optional `check-remote` sends that same full cargo gate (fmt, workspace
 # clippy --all-targets, nextest, doctests) to the remote builder
 # (surmount-remote). Named `just test-remote` / `just cargo-remote` send
 # a filter (cargo test / nextest / clippy / build / check) the same way.
 # Caller max-jobs is 0: FODs and toolchain downloads must not run on this
-# laptop. Default `just check` / `just ci` stay local.
+# laptop. Default `just check` / `just ci` stay on this machine's Nix path.
 #
 # Free GHA: CI_LOW_MEM=1 so cargo runs under cargo-mem-guard + mold (no pure
 # nix monorepo release build — that OOMs on ~16GB runners). Same flag also
@@ -652,13 +663,32 @@ nix_retry +cmd:
 # Alias: same full gate as `ci` (preferred short name before push).
 check: ci
 
-# Optional remote gate: flake metadata plus the same workspace cargo gate as
-# `just check` (fmt, workspace clippy --all-targets, nextest run,
-# doctests) as a Nix derivation.
-# rustc requires the remote builder's surmount-remote feature. Default
-# `just check` stays local.
+# Host cargo quality: fmt, then workspace clippy with -D warnings, then
+# nextest, then doctests. Does not alias just check.
+check-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> cargo fmt --all -- --check"
+    cargo fmt --all -- --check
+    echo "==> cargo clippy --workspace --all-targets --locked (-D warnings)"
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+    link_jobs="${CARGO_LINK_JOBS:-4}"
+    if [ "${link_jobs}" -gt 4 ]; then
+      link_jobs=4
+    fi
+    echo "==> cargo nextest run --workspace --locked --build-jobs ${link_jobs}"
+    cargo nextest run --workspace --locked --build-jobs "${link_jobs}"
+    echo "==> cargo test --doc --workspace --locked"
+    cargo test --doc --workspace --locked --jobs "${link_jobs}"
+    echo "just check-local passed"
+
 check-remote:
     #!/usr/bin/env bash
+    # Optional remote gate: flake metadata plus the same workspace cargo gate as
+    # just check (fmt, workspace clippy --all-targets, nextest run,
+    # doctests) as a Nix derivation.
+    # rustc requires the remote builder's surmount-remote feature.
+    # Optional remote gate. Default local check and ci recipes stay on this machine's Nix path.
     set -euo pipefail
     export GROK_NIX_FORCE_REMOTE=1
     just require_system
@@ -674,7 +704,15 @@ check-remote:
     echo "==> just check-remote: flake metadata"
     just flake-meta
     echo "==> just check-remote: workspace cargo quality as a remote Nix derivation"
-    out="$(just nix_retry nix build -L ".#workspace-cargo-quality" --print-out-paths)"
+    # nix_retry banners and `nix build -L` logs go to stdout. Capturing that
+    # whole stream as the store path makes `nix store cat` hit ARG_MAX
+    # (exit 126, "Argument list too long"). Keep -L on the terminal and
+    # take only the quality /nix/store path.
+    out="$(just nix_retry nix build -L ".#workspace-cargo-quality" --print-out-paths | tee /dev/stderr | grep -E '^/nix/store/[0-9a-z]+-workspace-cargo-quality-' | tail -n 1 || true)"
+    if [ -z "${out}" ]; then
+      echo "just check-remote: missing quality store path in nix_retry output" >&2
+      exit 2
+    fi
     echo "==> just check-remote: quality output ${out}"
     echo "==> just check-remote: quality receipt (printed even when Nix reuses a previous result)"
     just nix_retry nix store cat "${out}/quality-summary.txt"

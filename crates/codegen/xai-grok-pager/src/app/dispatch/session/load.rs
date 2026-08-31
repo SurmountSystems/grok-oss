@@ -1164,12 +1164,29 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         session_id,
     );
     let resume_canceled_turn = app.current_ui.resume_canceled_turn_on_restart_enabled();
-    if let Some(agent) = app.agents.get_mut(&agent_id) {
+    let view_plan_after_load = if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
+        agent.bind_session_id(session_id.clone());
+        // Read the slash before clearing the composer; flush then docks.
+        let requested = agent.view_plan_requested || agent.composer_holds_view_plan_slash();
+        if agent.composer_holds_view_plan_slash() {
+            agent.view_plan_requested = true;
+            agent.prompt.set_text("");
+        }
+        requested
+    } else {
+        return vec![];
+    };
+    let flushed = crate::app::acp_handler::flush_pending_exit_plan_mode(app);
+    if view_plan_after_load && let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.open_plan_from_view_plan_or_status();
+    } else if flushed {
+        tracing::debug!("SessionLoaded flushed a held restore exit_plan_mode without auto-dock");
+    }
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
         let hydrate_sid = session_id.clone();
-        agent.bind_session_id(session_id);
         agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;

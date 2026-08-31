@@ -281,6 +281,7 @@ fn test_app() -> AppView {
         pending_pager_ansi: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
+        pending_exit_plan_mode: None,
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,

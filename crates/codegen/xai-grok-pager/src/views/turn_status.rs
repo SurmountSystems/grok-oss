@@ -5,7 +5,10 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to send now` only on a parked
+//!   sendable wait where bare Enter actually force-sends. Running chrome
+//!   (including a foreground subagent wait, where the footer is
+//!   `Enter:interject`) may show `· N queued` but must not say Enter sends now.
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Pause button `[pause]` / `[resume]` (quiet white on hover; global pause)
@@ -27,7 +30,8 @@ use xai_grok_workspace::permission::mcp_pretty_name_if_qualified;
 use crate::acp::tracker::{TurnActivity, WaitingReason};
 use crate::app::agent::{AgentCommand, AgentState};
 use crate::app::agent_view::McpInitProgress;
-use crate::render::line_utils::truncate_str;
+use crate::render::SafeBuf;
+use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 
 /// Show each spinner frame for this many animation ticks.
@@ -261,6 +265,79 @@ fn parked_wait_name(activity: &Option<TurnActivity>) -> String {
         Some(TurnActivity::Waiting(reason)) => reason.label().trim_end_matches('…').to_string(),
         _ => "waiting".to_string(),
     }
+}
+
+/// First-token / retry wait that otherwise leaves the transcript empty under
+/// the last prompt (page-flip pins that prompt at the top until tokens
+/// arrive). Footer chrome alone looks like a black broken pane.
+pub(crate) fn leftover_viewport_wait_label(activity: &Option<TurnActivity>) -> Option<String> {
+    match activity {
+        Some(TurnActivity::Waiting(WaitingReason::Model)) => Some(WaitingReason::Model.label()),
+        Some(TurnActivity::Retrying { attempt, .. }) => {
+            Some(format!("Retrying the model request (attempt {attempt})…"))
+        }
+        _ => None,
+    }
+}
+
+fn row_has_glyph(buf: &Buffer, area: Rect, y: u16) -> bool {
+    (area.x..area.right()).any(|x| {
+        buf.cell((x, y)).is_some_and(|c| {
+            c.symbol()
+                .chars()
+                .any(|ch| !ch.is_whitespace() && ch != '\0')
+        })
+    })
+}
+
+fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+    (area.x..area.right())
+        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+        .collect()
+}
+
+fn last_non_blank_row(buf: &Buffer, area: Rect) -> Option<u16> {
+    (area.y..area.bottom())
+        .rev()
+        .find(|&y| row_has_glyph(buf, area, y))
+}
+
+/// Paint the live-turn wait in leftover scrollback rows so a first-token wait
+/// is not a black void under the last human line.
+///
+/// Stable across frames: if the last content row is already this label,
+/// rewrite that row instead of stacking another copy.
+pub(crate) fn paint_leftover_viewport_wait(
+    buf: &mut Buffer,
+    area: Rect,
+    label: &str,
+    style: Style,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let y = match last_non_blank_row(buf, area) {
+        None => area.y,
+        Some(last) if row_text(buf, area, last).contains(label.trim_end_matches('…')) => last,
+        Some(last) => {
+            let with_gap = last.saturating_add(2);
+            if with_gap < area.bottom() {
+                with_gap
+            } else {
+                let tight = last.saturating_add(1);
+                if tight < area.bottom() {
+                    tight
+                } else {
+                    return;
+                }
+            }
+        }
+    };
+    let line = truncate_line(
+        Line::from(Span::styled(label.to_string(), style)),
+        area.width as usize,
+    );
+    buf.set_line_safe(area.x, y, &line, area.width);
 }
 
 /// Inputs to [`render_turn_status`] — one frame's worth of turn state.
@@ -660,9 +737,10 @@ pub fn render_turn_status(
     let spinner_str = if is_pending_user_input {
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
-        let frames = crate::glyphs::braille_spinner_frames();
-        let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
-        format!("{} ", frames[frame_idx])
+        let elapsed_ms = activity_started_at
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or(tick.saturating_mul(crate::glyphs::SPARKLER_FRAME_MS));
+        format!("{} ", crate::glyphs::sparkler_frame_at_ms(elapsed_ms))
     };
     let spinner_width = spinner_str.width();
 
@@ -721,7 +799,7 @@ pub fn render_turn_status(
         let diamond_color = pending_diamond_color(&theme, theme.accent_user, tick);
         Style::default().fg(diamond_color)
     } else {
-        activity_style
+        Style::default().fg(theme.accent_running)
     };
     left_spans.push(Span::styled(spinner_str, spinner_style));
 
@@ -787,19 +865,13 @@ pub fn render_turn_status(
             }
         }
     } else {
-        // Sendable wait holding queued messages: the persistent inline hint
-        // saying why the queue is paused and how to send anyway. On the status
-        // row (not an ephemeral tip) so it stays visible for the whole wait,
-        // and dropped before the label truncates on a narrow terminal.
-        // "Enter to send now" is advertised only when Enter would actually
-        // send the top row (bash / client-expanded local rows refuse with a
-        // toast — see `AgentView::held_queue_top_sendable`).
+        // Sendable wait holding queued messages: count on the status row so
+        // it stays visible for the whole wait. Running chrome is the
+        // `Enter:interject` / `Ctrl+Enter:send now` footer (subagent waits
+        // included). Do not advertise "Enter to send now" here — that copy
+        // belongs only on the parked cue, where bare Enter force-sends.
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
-            if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to send now")
-            } else {
-                format!(" · {held_queue} queued")
-            }
+            format!(" · {held_queue} queued")
         } else {
             String::new()
         };
@@ -985,11 +1057,22 @@ fn compute_activity(
             };
             (Style::default().fg(theme.warning), label, false)
         }
-        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
-            Style::default().fg(theme.text_secondary),
-            writing.label(),
-            false,
-        ),
+        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => {
+            // Name the live tool. Overlay wait chrome must not sit on
+            // Preparing search_replace while the list has no nested job.
+            let label = writing
+                .tool_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter(|name| !xai_grok_tools::is_task_tool_id(name))
+                .map(|name| {
+                    let name = mcp_pretty_name_if_qualified(name);
+                    format!("{}…", crate::acp::tracker::clamp_activity_subject(&name))
+                })
+                .unwrap_or_else(|| writing.label());
+            (Style::default().fg(theme.text_secondary), label, false)
+        }
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
             // Explicit wait reason (model / subagent / task output / tasks /
             // sleep): name what the agent is blocked on instead of a generic
@@ -1179,7 +1262,7 @@ fn format_tokens_short(tokens: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -1434,6 +1517,73 @@ mod tests {
         );
     }
 
+    fn leftover_area_text(buf: &Buffer, area: Rect) -> String {
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Named contract: first-token wait must occupy leftover transcript rows,
+    /// not only the footer. A sent prompt with no tokens yet leaves a black
+    /// pane otherwise.
+    #[test]
+    fn leftover_viewport_wait_paints_below_the_last_prompt_row() {
+        let prompt = "Can you look into this please: [Image #1]";
+        // 40 columns clips this prompt (`[Image #1]` is past column 40).
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(0, 0, prompt, Style::default());
+        let label = WaitingReason::Model.label();
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let text = leftover_area_text(&buf, area);
+        let rows: Vec<&str> = text.lines().collect();
+        let prompt_row = rows
+            .iter()
+            .rposition(|r| r.contains("[Image #1]"))
+            .unwrap_or_else(|| panic!("prompt row must stay, got:\n{text}"));
+        assert!(
+            rows[prompt_row + 1..]
+                .iter()
+                .any(|r| r.contains("Waiting for the model")),
+            "wait must land in leftover rows below the prompt, got:\n{text}"
+        );
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let again = leftover_area_text(&buf, area);
+        let count = again.matches("Waiting for the model").count();
+        assert_eq!(
+            count, 1,
+            "a second frame must not stack another wait line, got:\n{again}"
+        );
+    }
+
+    #[test]
+    fn leftover_viewport_wait_label_is_model_or_retry_only() {
+        assert_eq!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Waiting(WaitingReason::Model)))
+                .as_deref(),
+            Some("Waiting for the model…")
+        );
+        assert!(leftover_viewport_wait_label(&Some(TurnActivity::Thinking)).is_none());
+        assert!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Waiting(WaitingReason::subagent())))
+                .is_none()
+        );
+        assert!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: 3,
+                reason: "timeout".into(),
+            }))
+            .as_deref()
+            .is_some_and(|s| s.contains("Retrying the model request"))
+        );
+    }
+
     #[test]
     fn waiting_reason_renders_specific_label() {
         use crate::acp::tracker::WaitingReason;
@@ -1510,6 +1660,81 @@ mod tests {
             Watchers::default(),
             false
         ));
+    }
+
+    /// Live-work sparkler must change glyphs from a wall clock and paint
+    /// magenta `accent_running` while a turn is running.
+    #[test]
+    fn turn_status_sparkler_advances_and_uses_accent_running() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let theme = Theme::current();
+        let early = Duration::from_millis(0);
+        let later = Duration::from_millis(crate::glyphs::SPARKLER_FRAME_MS);
+        let early_glyph = crate::glyphs::sparkler_frame_at_ms(early.as_millis() as u64);
+        let later_glyph = crate::glyphs::sparkler_frame_at_ms(later.as_millis() as u64);
+        assert_ne!(
+            early_glyph, later_glyph,
+            "sparkler clock must change glyphs after one frame dwell"
+        );
+        assert_ne!(theme.accent_running, ratatui::style::Color::Green);
+        assert_ne!(theme.accent_running, ratatui::style::Color::Cyan);
+
+        fn paint(elapsed: Duration) -> (String, Option<ratatui::style::Color>) {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
+            let _ = render_turn_status(
+                &mut buf,
+                Rect::new(0, 0, 80, 1),
+                TurnStatusArgs {
+                    state: &AgentState::TurnRunning,
+                    activity: &Some(TurnActivity::Responding),
+                    turn_elapsed: Some(elapsed),
+                    activity_started_at: Some(Instant::now() - elapsed),
+                    tick: 0,
+                    drain_blocked: false,
+                    buttons: Some(MouseButtons::default()),
+                    has_running_execute: false,
+                    total_tokens: None,
+                    mcp_init_progress: None,
+                    is_bash_turn: false,
+                    is_pending_user_input: false,
+                    goal_verifying: false,
+                    watchers: Watchers::default(),
+                    parked: false,
+                    flat_background: false,
+                    held_queue: 0,
+                    held_queue_top_sendable: false,
+                    global_paused: false,
+                },
+            );
+            let text = buffer_text(&buf, Rect::new(0, 0, 80, 1));
+            let fg = buf.cell((0, 0)).and_then(|c| match c.fg {
+                ratatui::style::Color::Reset => None,
+                color => Some(color),
+            });
+            (text, fg)
+        }
+
+        let (early_text, early_fg) = paint(early);
+        let (later_text, later_fg) = paint(later);
+        assert!(
+            early_text.contains(early_glyph),
+            "early turn-status sparkler must paint {early_glyph:?}: {early_text:?}"
+        );
+        assert!(
+            later_text.contains(later_glyph),
+            "later turn-status sparkler must paint {later_glyph:?}: {later_text:?}"
+        );
+        assert_eq!(
+            early_fg,
+            Some(theme.accent_running),
+            "running sparkler must use accent_running, got {early_fg:?}"
+        );
+        assert_eq!(
+            later_fg,
+            Some(theme.accent_running),
+            "running sparkler must stay accent_running, got {later_fg:?}"
+        );
     }
 
     /// Cancelling keeps `[stop]` clickable (the retry affordance for a lost
@@ -2182,8 +2407,38 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
-            "phase timer must sit between the wait label and the queued hint, got: {text:?}"
+            text.contains("Waiting on subagent… 5m59s · 1 queued"),
+            "phase timer must sit between the wait label and the queued count, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter to send now"),
+            "running chrome (footer Enter:interject) must not advertise Enter as send now, got: {text:?}"
+        );
+    }
+
+    /// Screenshot 16-10-13: seven queued rows while subagents run, footer
+    /// `Enter:interject` / `Ctrl+Enter:send now`. Status may count the queue
+    /// but must not say `N queued - Enter to send now`.
+    #[test]
+    fn running_subagent_wait_must_not_advertise_enter_to_send_now() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::subagent()));
+        let mut args = idle_args(Watchers {
+            subagents: 7,
+            ..Watchers::default()
+        });
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = false;
+        args.held_queue = 7;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 120);
+        assert!(
+            text.contains("7 queued"),
+            "running chrome may still count the queue, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter to send now"),
+            "must not contradict Enter:interject, got: {text:?}"
         );
     }
 

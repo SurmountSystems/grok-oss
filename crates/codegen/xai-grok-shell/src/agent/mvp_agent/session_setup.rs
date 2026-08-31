@@ -707,8 +707,17 @@ impl MvpAgent {
         }
         let session_info = begin_session(&session_id, &cwd);
         let current_session_dir = crate::session::persistence::session_dir(&session_info);
+        // Capture parked approval before reconnect flush or stale-session
+        // cleanup. The PTY harness seeds `plan_mode.json` after quit; resident
+        // Inactive memory must not persist over that bit.
+        let disk_plan_before_flush = std::fs::read(current_session_dir.join("plan_mode.json"))
+            .ok()
+            .and_then(|bytes| {
+                serde_json::from_slice::<crate::session::plan_mode::PlanModeSnapshot>(&bytes).ok()
+            });
+        let cleanup_session_dir = current_session_dir.clone();
         tokio::task::spawn_blocking(move || {
-            crate::session::persistence::cleanup_stale_sessions(Some(&current_session_dir));
+            crate::session::persistence::cleanup_stale_sessions(Some(&cleanup_session_dir));
         });
         let session_exists = self.is_resident(&session_id);
         let no_replay = policy.no_replay;
@@ -717,6 +726,17 @@ impl MvpAgent {
                 session_id = %session_id.0,
                 "Reconnect detected: flushing persistence buffer before replay"
             );
+            if let Some(handle) = self.resident_handle(&session_id) {
+                let (adopt_tx, adopt_rx) = tokio::sync::oneshot::channel();
+                let _ = handle.cmd_tx.send(SessionCommand::AdoptParkedPlanApprovalFromDisk {
+                    respond_to: adopt_tx,
+                });
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    adopt_rx,
+                )
+                .await;
+            }
             if !no_replay && let Some(handle) = self.resident_handle(&session_id) {
                 handle
                     .gateway_enabled
@@ -776,6 +796,13 @@ impl MvpAgent {
         } = persistence_info;
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
+        let restore_plan_snapshot = disk_plan_before_flush
+            .filter(|snapshot| snapshot.awaiting_plan_approval)
+            .or_else(|| {
+                persisted_plan_mode
+                    .clone()
+                    .filter(|snapshot| snapshot.awaiting_plan_approval)
+            });
         self.set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
@@ -980,9 +1007,14 @@ impl MvpAgent {
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.resident_handle(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-            if restored.awaiting_plan_approval {
-                let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
-            }
+            // Re-park even when load_light missed the bit: resume still
+            // adopts disk. Carry a pre-flush snapshot when the client seeded
+            // `plan_mode.json` after quit. Resume still does not auto-dock.
+            // Send now so SessionLoaded can flush a held reverse-request;
+            // restore uses a bound-session hold instead of dropping.
+            let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval {
+                snapshot: restore_plan_snapshot,
+            });
         }
         if self.product_analytics_enabled() {
             log_event(xai_grok_telemetry::events::SessionLoad {

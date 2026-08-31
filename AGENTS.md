@@ -94,6 +94,16 @@ less than product code and tests. Do not invent long essays or git nags.
    run them. Agents do not run cargo/rustc on this laptop either.
    `GROK_SKIP_EDIT_VERIFY` is the kill switch for the edit-tool verify,
    not the default. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-remote-wait. **A live remote compile must not be restarted at five
+   minutes (pinned 2026-08-28).** When this session is explicitly told to
+   run `just test-remote`, `just cargo-remote`, or `just check-remote`,
+   start that command as a background job with a long wait (timeout 0 or
+   at least twenty minutes). Do not treat a five-minute foreground shell
+   wait as a failed command and start the same recipe again. That SIGKILLs
+   a still-running VPS compile. Nested grok-oss agents inherit production
+   bash wait policy: auto-background at the wait cap and a ten-hour
+   foreground ceiling, so a still-running compile stays running and
+   returns a task id. Dual-pin: [`FORK.md`](FORK.md) CI table.
 3b-remote-clippy. **Remote quality clippy must use many workers (pinned
    2026-08-23).** Do not invoke `cargo clippy` on `workspace-cargo-quality`.
    That external binary lets the outer cargo start a 1-token jobserver;
@@ -152,9 +162,28 @@ less than product code and tests. Do not invent long essays or git nags.
       part of the git tree.
    3. This file or host `~/.grok/AGENTS.md` when it is process law.
    After a compaction, disk wins. If a job is only in chat, it was
-   never documented. Host dual-pin: `~/.grok/AGENTS.md` §
-   *Document every live task on disk*. Remaining-work pointer this
-   session: `~/.agents/reports/remaining-2026-08-19-grok-oss.md`.
+   never documented. The remaining-work pointer must name owed
+   outcomes, live subagent ids when they exist (or say see the session
+   board), and what is in the tree versus what this running grok-oss
+   binary still is. Chat Job / State / You / Next is not that pointer.
+   L1 must not rewrite that pointer; L2 writes it. Host dual-pin:
+   `~/.grok/AGENTS.md` § *Document every live task on disk*. Remaining-work
+   pointer this session:
+   `~/.agents/reports/remaining-2026-08-28-rebuild-inventory.md`.
+   **Do not treat guesses as facts (pinned 2026-08-28).** Do not assume
+   a cancelled Subagents row is gone from the operator's screen. Do not
+   assume a named VPS test is visible in this TUI. Do not assume host
+   `AGENTS.md` and project `AGENTS.md` say the same thing. If it was not
+   checked this turn, say it is unknown.
+   **`/rebuild` is not a nested-work gate (pinned 2026-08-28).** The
+   operator may `/rebuild` while nested agents are running. That is why
+   Grok exists: important work must not wait on chrome polish such as a
+   sparkler. `/rebuild` must resume interrupted sessions the same way a
+   network interruption does. Do not tell the operator they are blocked
+   until L2s finish. The operator stages what they intend to build.
+   Unstaged work in progress must not be the rebuild source. See
+   § *L1 must not rewrite process law* and [`FORK.md`](FORK.md)
+   `/rebuild` resume plus staged-only intent.
 3f. **L1 stays lean so we do not compact (pinned 2026-08-17; L1 500k
    2026-08-20; compact split 2026-08-21).** The main (L1) session uses
    the catalog 500k sampling window. AUTO compact on L1 uses that
@@ -325,17 +354,19 @@ less than product code and tests. Do not invent long essays or git nags.
    sycophancy. When an idea is actually good, say so in plain English and
    say why (what it solves). Do not flatter, inflate, agree by default, or
    pad empty praise. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
-   **Self-improving feedback loop (pinned 2026-08-03):** trigger phrases such as
-   "always remember", "please remember", "I hate repeating myself" (and close
-   variants) mean same-turn standing pin (project `AGENTS.md` / residual when
-   product-specific; host `~/.grok/AGENTS.md` when cross-repo). Prefer a short
-   named subsection. Chat alone does not survive compaction. Full host pin:
-   `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
-   **Write that down (pinned 2026-08-22):** when the operator explicitly
-   says "write that down", same turn put the fact in the useful place
-   (report, plan, residual, process note, user-guide) and then track the
-   work on the session board (and spawn if it is product). Chat alone is
-   not enough. Host dual-pin: `~/.grok/AGENTS.md` § *Write that down*.
+   **Self-improving feedback loop (pinned 2026-08-03; L2 writes 2026-08-28):**
+   trigger phrases such as "always remember", "please remember", "I hate
+   repeating myself" (and close variants) mean a same-turn standing pin.
+   L1 tracks the board and spawns L2. L2 writes project `AGENTS.md` /
+   residual when product-specific, and host `~/.grok/AGENTS.md` when
+   cross-repo. Prefer a short named subsection. Chat alone does not
+   survive compaction. L1 must not edit those law files itself. Full
+   host pin: `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
+   **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
+   the operator explicitly says "write that down", L1 tracks the board
+   and spawns; L2 puts the fact in the useful place (report, plan,
+   residual, process note, user-guide). Chat alone is not enough. Host
+   dual-pin: `~/.grok/AGENTS.md` § *Write that down*.
    **Citation standard (pinned 2026-08-03):** docs and non-trivial comments that
    rely on external rate limits, APIs, or vendor policy need a markdown link to
    the public page plus **accessed: YYYY-MM-DD**. Example: See
@@ -549,8 +580,8 @@ joins under project `.agents/joins/`.
 - **L2 nested** stays 200k. L2 may compact.
 - **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error.
 - **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth.
-- **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path.
-- **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2.
+- **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
+- **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
 - **No worktrees** on this tree (`allow_worktree = false`). Do not invent a worktree workflow.
 - Big already-named work runs as **parallel streams**. Explicit plan/implement is for tricky problems and new projects. After Approve, implement. Present is not Approve.
@@ -561,7 +592,7 @@ goes up. Do not go deeper than L3.
 
 | Depth | Does | Does not |
 |-------|------|----------|
-| **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs |
+| **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs, rewriting `AGENTS.md` / `FORK.md` / `RESIDUAL.md` / user-guide / remaining-work reports |
 | **L2 subagent** | Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
 | **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
 

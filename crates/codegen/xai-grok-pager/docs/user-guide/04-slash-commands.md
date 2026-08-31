@@ -544,10 +544,13 @@ The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint onl
 Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
 
 1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
-2. Runs `just install` (or a fixed cargo install when `just` is missing).
-3. Verifies package version plus git SHA.
-4. Signals other live product TUIs so they re-exec onto the new binary with the same session. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-5. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success.
+2. Copies the current installed `grok-oss` binary, when it exists, to a sibling file named `grok-oss.prev` next to it (under `${CARGO_HOME:-$HOME/.cargo}/bin/`).
+3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
+4. Verifies package version plus git SHA.
+5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
+6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. Nested agents resume the same way a network disconnect does, and the Subagents list must not go empty. Ctrl-C quits and does not re-exec peers.
+
+To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 
 CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 

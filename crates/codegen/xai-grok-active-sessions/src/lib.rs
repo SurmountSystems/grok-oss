@@ -103,6 +103,37 @@ const DATA_FILENAME: &str = "active_sessions.json";
 const LOCK_FILENAME: &str = "active_sessions.lock";
 const TMP_FILENAME: &str = "active_sessions.json.tmp";
 
+/// Product CLI basename used to classify rebuild SIGUSR1 targets.
+///
+/// Same string as the pager product CLI name. Stock `grok` is not this product.
+pub const PRODUCT_CLI_NAME: &str = "grok-oss";
+
+fn basename_is_product_cli(path: &str) -> bool {
+    let trimmed = path.trim();
+    let without_deleted = trimmed.strip_suffix(" (deleted)").unwrap_or(trimmed).trim();
+    let name = Path::new(without_deleted)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(without_deleted);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    name.eq_ignore_ascii_case(PRODUCT_CLI_NAME)
+}
+
+/// True when argv0 or the exe path is `grok-oss`, not a stock `grok` comm prefix.
+///
+/// `/rebuild` SIGUSR1 must use this classifier. A substring `grok` match is too
+/// wide: Systems Lean `grok` would be terminated by SIGUSR1.
+pub fn is_grok_oss_cli_identity(cmdline: &str, exe_path: Option<&str>) -> bool {
+    if let Some(exe) = exe_path
+        && basename_is_product_cli(exe)
+    {
+        return true;
+    }
+    let argv0 = cmdline.split('\0').next().unwrap_or(cmdline);
+    let argv0 = argv0.split_whitespace().next().unwrap_or(argv0);
+    basename_is_product_cli(argv0)
+}
+
 // -- Public API (delegates to `_in` variants with default grok home) --------
 
 /// Register a session as active (idempotent by `(pid, session_id)`).
@@ -539,6 +570,34 @@ mod tests {
 
     fn make_session(id: &str, pid: u32) -> ActiveSession {
         ActiveSession::new(acp::SessionId::new(id), pid, "/tmp/test", Utc::now())
+    }
+
+    /// Contract: stock process named `grok` is not grok-oss. Rebuild SIGUSR1
+    /// must not target it. Product CLI / exe basename is `grok-oss`.
+    #[test]
+    fn grok_oss_cli_identity_rejects_stock_grok_and_accepts_product_exe() {
+        assert!(
+            !is_grok_oss_cli_identity("grok", Some("/usr/bin/grok")),
+            "stock grok comm must not look like grok-oss"
+        );
+        assert!(!is_grok_oss_cli_identity(
+            "/usr/bin/grok\0--resume\0sess",
+            Some("/usr/bin/grok")
+        ));
+        assert!(
+            !is_grok_oss_cli_identity("xai-grok-update-abc123", None),
+            "a cargo test binary whose path contains grok is not grok-oss"
+        );
+        assert!(is_grok_oss_cli_identity(
+            "/home/me/.cargo/bin/grok-oss\0--resume\0sess",
+            Some("/home/me/.cargo/bin/grok-oss")
+        ));
+        assert!(is_grok_oss_cli_identity(
+            "grok-oss",
+            Some("/home/me/.cargo/bin/grok-oss (deleted)")
+        ));
+        assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
+        assert_ne!(PRODUCT_CLI_NAME, "grok");
     }
 
     #[test]

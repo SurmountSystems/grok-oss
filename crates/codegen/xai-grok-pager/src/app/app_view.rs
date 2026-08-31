@@ -1183,6 +1183,10 @@ pub struct AppView {
     pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
+    /// Restore `x.ai/exit_plan_mode` that arrived before this pager had a
+    /// local view for that session. Flushed on SessionLoaded / SessionCreated
+    /// so `--continue` can park the waiter after bind.
+    pub(crate) pending_exit_plan_mode: Option<xai_acp_lib::AcpArgs<acp::ExtRequest>>,
     /// Structured startup warnings collected from the terminal diagnostics
     /// engine at launch. Empty when the environment is healthy.
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
@@ -1650,6 +1654,7 @@ impl AppView {
             pending_gate_verification: None,
             gate_verify_gen: 0,
             reconnect_pending: false,
+            pending_exit_plan_mode: None,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
@@ -5502,6 +5507,7 @@ impl AppView {
             needs_redraw |= agent.tasks.tick();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
+                needs_redraw |= child_view.tasks.tick();
                 needs_redraw |= child_view.tick_toast();
                 needs_redraw |= child_view.tick_ephemeral_tip();
                 needs_redraw |= child_view.tick_mode_banner();
@@ -5516,6 +5522,16 @@ impl AppView {
             let spinner_frame_tick =
                 agent.scrollback.animation_tick() % crate::views::turn_status::SPINNER_DIVISOR == 0;
             needs_redraw |= !agent.session.state.is_idle() && spinner_frame_tick;
+            needs_redraw |= agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running() && info.workflow_run_id.is_none())
+                && spinner_frame_tick;
+            needs_redraw |= agent
+                .subagent_views
+                .values()
+                .any(|child| child.has_live_work_animation())
+                && spinner_frame_tick;
             needs_redraw |= agent
                 .mcp_init_progress
                 .as_ref()
@@ -5823,6 +5839,10 @@ impl AppView {
                     || agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
                     || agent.tasks.needs_tick()
+                    || agent
+                        .subagent_sessions
+                        .values()
+                        .any(|info| info.is_running() && info.workflow_run_id.is_none())
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || !agent.session.state.is_idle()
                     || agent.wake_turn_active()
@@ -5875,13 +5895,14 @@ impl AppView {
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
-                        child.toast.is_some()
+                        child.has_live_work_animation()
+                            || child.toast.is_some()
                             || child.ephemeral_tip_needs_tick()
                             || child.mode_switch_banner.is_some()
                             || child.has_drag_autoscroll()
                             || child.selection_created_at.is_some()
                             || (agent.active_subagent.as_deref() == Some(sid.as_str())
-                                && child.scrollback.needs_animation())
+                                && (child.scrollback.needs_animation() || child.tasks.needs_tick()))
                             || child.any_cancel_pending()
                             || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()

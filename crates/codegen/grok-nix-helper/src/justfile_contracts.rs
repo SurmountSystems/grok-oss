@@ -57,14 +57,18 @@ fn recipe_body(justfile: &str, name: &str) -> String {
     let mut taking = false;
     for line in justfile.lines() {
         if taking {
-            if looks_like_recipe_header(line) {
+            let t = line.trim_end();
+            // Unindented non-empty lines are the next recipe, a [attribute],
+            // or a comment that documents the next recipe. Blank lines stay
+            // in the body (just shebang recipes use them between functions).
+            if !t.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
                 break;
             }
             out.push_str(line);
             out.push('\n');
             continue;
         }
-        if recipe_starts(line, name) {
+        if recipe_starts(line, name) && looks_like_recipe_header(line) {
             taking = true;
             out.push_str(line);
             out.push('\n');
@@ -280,10 +284,24 @@ fn check_remote_prints_quality_receipt_on_cache_hit() {
         remote.contains("nix store cat"),
         "check-remote must nix store cat the receipt (not rely on -L during a cache hit):\n{remote}"
     );
+    assert!(
+        remote.contains("tee /dev/stderr")
+            && remote.contains("grep -E")
+            && remote.contains("/nix/store/"),
+        "check-remote must pick the quality store path out of nix_retry -L stdout; the full log is too long for argv:\n{remote}"
+    );
     let quality = read(&root, "flake/workspace-quality.nix");
     assert!(
         quality.contains("quality-summary.txt") && quality.contains("Summary ["),
         "workspace-cargo-quality must write a nextest Summary receipt into $out"
+    );
+    assert!(
+        quality.contains("pkgs.ripgrep"),
+        "workspace-cargo-quality must put ripgrep on PATH so rg can find the nextest Summary line"
+    );
+    assert!(
+        quality.contains("2>&1") && quality.contains("tee"),
+        "workspace-cargo-quality must tee nextest stderr into nextest.log; Summary is not on stdout"
     );
 }
 
@@ -413,6 +431,87 @@ fn just_ci_stays_local() {
     assert!(
         !ci.contains("require_remote_builder"),
         "just ci must stay local (no require_remote_builder):\n{ci}"
+    );
+}
+
+#[test]
+fn just_check_local_is_cargo_only_and_does_not_nix() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    let local = recipe_body(&just, "check-local");
+    let header = local.lines().next().unwrap_or("");
+    assert!(
+        header.trim() == "check-local:",
+        "just check-local must be its own cargo recipe, not an alias of just check:\n{local}"
+    );
+    assert!(
+        local.contains("cargo fmt --all -- --check"),
+        "just check-local must run cargo fmt --all -- --check:\n{local}"
+    );
+    assert!(
+        local.contains("cargo clippy --workspace --all-targets --locked -- -D warnings"),
+        "just check-local clippy must pass -- -D warnings so unused-assignments is a hard error:\n{local}"
+    );
+    assert!(
+        local.contains("cargo nextest run --workspace --locked"),
+        "just check-local must run cargo nextest run --workspace --locked:\n{local}"
+    );
+    assert!(
+        local.contains("cargo test --doc --workspace --locked"),
+        "just check-local must run cargo test --doc --workspace --locked:\n{local}"
+    );
+    let fmt_at = local
+        .find("cargo fmt --all -- --check")
+        .expect("fmt command");
+    let clippy_at = local
+        .find("cargo clippy --workspace --all-targets --locked")
+        .expect("clippy command");
+    let nextest_at = local
+        .find("cargo nextest run --workspace --locked")
+        .expect("nextest command");
+    let doc_at = local
+        .find("cargo test --doc --workspace --locked")
+        .expect("doctest command");
+    assert!(
+        fmt_at < clippy_at && clippy_at < nextest_at && nextest_at < doc_at,
+        "just check-local must run fmt, then clippy, then nextest, then doctest:\n{local}"
+    );
+    assert!(
+        local.contains("CARGO_LINK_JOBS")
+            && local.contains("-gt 4")
+            && local.contains("--build-jobs"),
+        "just check-local must cap nextest compile/link jobs at 4:\n{local}"
+    );
+    let forbidden = [
+        "flake-meta",
+        "nix_retry",
+        "nix build",
+        "check-remote",
+        "test-remote",
+        "cargo-remote",
+        "require_remote_builder",
+        "mem-guard",
+        "GROK_NIX_FORCE_REMOTE",
+        "cargo-ci",
+    ];
+    for needle in forbidden {
+        assert!(
+            !local.contains(needle),
+            "just check-local must not contain {needle}:\n{local}"
+        );
+    }
+    let lower = local.to_ascii_lowercase();
+    assert!(
+        !lower.contains("nix"),
+        "just check-local must not mention nix:\n{local}"
+    );
+    let check = recipe_body(&just, "check");
+    let check_header = check.lines().next().unwrap_or("");
+    assert!(
+        check_header.trim() == "check: ci",
+        "just check must keep working as the same Nix gate as just ci:\n{check}"
     );
 }
 
@@ -641,7 +740,7 @@ fn workspace_quality_deps_cargo_check_stays_locked() {
     );
     for line in quality.lines() {
         let t = line.trim();
-        if t.starts_with('#') {
+        if t.starts_with('#') || t.starts_with("echo ") || t.starts_with("printf ") {
             continue;
         }
         let is_cargo = t.contains("cargo check")
@@ -993,6 +1092,15 @@ fn named_remote_cargo_source_contracts() {
     );
 }
 
+/// Product helper source only. Unit tests may name a forbidden SSH option in a
+/// negative assert; that is not the preflight setting it.
+fn rust_production_src(src: &str) -> &str {
+    match src.find("#[cfg(test)]") {
+        Some(i) => &src[..i],
+        None => src,
+    }
+}
+
 fn recipe_must_not_nix_build_helper(name: &str, body: &str) {
     for line in body.lines() {
         let t = line.trim();
@@ -1061,18 +1169,23 @@ fn require_remote_builder_is_justfile_preflight_without_helper() {
         &root,
         "crates/codegen/grok-nix-helper/src/require_remote_builder.rs",
     );
+    let helper_prod = rust_production_src(&helper);
     assert!(
-        helper.contains("GROK_NIX_REMOTE_SYSTEM_FEATURES")
-            || helper.contains("remote_system_features"),
+        helper_prod.contains("GROK_NIX_REMOTE_SYSTEM_FEATURES")
+            || helper_prod.contains("remote_system_features"),
         "require-remote-builder must accept an injected daemon feature list"
     );
     assert!(
-        helper.contains("surmount-remote"),
+        helper_prod.contains("surmount-remote"),
         "require-remote-builder must require surmount-remote"
     );
     assert!(
-        !helper.contains("StrictHostKeyChecking=no"),
-        "require-remote-builder must not set StrictHostKeyChecking=no"
+        helper_prod.contains("StrictHostKeyChecking=yes"),
+        "require-remote-builder must keep host-key checks on:\n{helper_prod}"
+    );
+    assert!(
+        !helper_prod.contains("StrictHostKeyChecking=no"),
+        "require-remote-builder must not set StrictHostKeyChecking=no:\n{helper_prod}"
     );
 }
 

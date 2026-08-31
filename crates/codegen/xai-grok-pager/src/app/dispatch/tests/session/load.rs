@@ -1038,6 +1038,43 @@ fn entry_title_loading_when_no_session_id() {
     let title = entry_title(&app.agents[&AgentId(0)]);
     assert_eq!(title, "loading...");
 }
+/// Composer still holds `/view-plan` at bind (Enter not processed). SessionLoaded
+/// must capture that slash before clearing the composer, then dock.
+#[test]
+fn session_loaded_docks_when_composer_holds_view_plan_slash() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.prompt.set_text("/view-plan");
+        agent.latest_inline_plan_content = Some("# Composer slash at bind\n".into());
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.line_viewer.is_some(),
+        "SessionLoaded must dock when the composer still holds /view-plan"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "",
+        "SessionLoaded must clear the /view-plan slash, not keep it as a draft"
+    );
+}
+
 /// Regression: SessionLoaded must clear stale running entries from replay.
 /// Without the finish_turn call, Execute blocks that were InProgress when the
 /// session was last active stay orphaned as "running" forever.

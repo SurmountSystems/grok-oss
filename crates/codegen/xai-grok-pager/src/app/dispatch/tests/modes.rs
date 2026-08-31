@@ -2,6 +2,29 @@
 
 use super::*;
 
+/// `/view-plan` on welcome must stick the request so `--continue` can dock
+/// Approve after SessionLoaded. Idle resume still does not auto-dock.
+#[test]
+fn show_plan_on_welcome_sticks_view_plan_request() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.active_view = ActiveView::Welcome;
+
+    let effects = dispatch(Action::ShowPlan, &mut app);
+    assert!(
+        effects.is_empty(),
+        "welcome /view-plan is local, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].view_plan_requested,
+        "/view-plan on welcome must stick until the restored waiter binds Approve"
+    );
+    assert!(
+        app.agents[&id].line_viewer.is_none(),
+        "welcome /view-plan must not auto-dock"
+    );
+}
+
 /// `ShowPlanNudge` is a no-op when its per-tip gate is off: no tip shown,
 /// no count burned, even on a drawable agent.
 #[test]

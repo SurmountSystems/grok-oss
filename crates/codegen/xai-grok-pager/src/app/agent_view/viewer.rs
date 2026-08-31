@@ -367,10 +367,19 @@ impl AgentView {
     /// Cancel line viewer: revert all changes.
     pub(crate) fn cancel_line_viewer(&mut self) {
         self.line_viewer = None;
-        self.prompt.textarea.cancel_undo_group();
+        self.view_plan_requested = false;
+        if self.plan_approval_view.is_some() {
+            // Keep Revise / Comment box text. `cancel_undo_group` reverts the
+            // open group and drops Undo, which is why revision notes vanished.
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.prompt.textarea.end_undo_group();
+        } else {
+            self.prompt.textarea.cancel_undo_group();
+        }
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.focus = PlanApprovalFocus::Preview;
         }
+        self.restore_plan_feedback_draft_if_composer_lost();
         // If a casual plan comment was in progress when the modal
         // closed (via [✗], click-outside, or any other path that
         // doesn't route through `cancel_casual_plan_commenting`),

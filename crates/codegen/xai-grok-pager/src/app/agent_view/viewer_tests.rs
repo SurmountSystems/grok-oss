@@ -452,6 +452,10 @@ fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
         PlanApprovalFocus::Preview,
         "empty Enter on Preview must not enter Commenting"
     );
+    assert!(
+        !agent.plan_decision_resolved,
+        "empty Enter must never Approve a parked plan"
+    );
 }
 
 /// A lost mouse-up after a track press must not make the next plan-line

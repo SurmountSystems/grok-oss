@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
-    is_l2_list_row, live_l3_count, live_subagent_list,
+    is_l2_list_row, live_l3_count, live_nested_specialist_list, live_subagent_list,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -410,15 +410,12 @@ impl TaskEntry {
         const ACTIVITY_DESC_MAX_WIDTH: usize = 40;
         let activity = info
             .is_running()
-            .then_some(info.activity_label.as_deref())
-            .flatten()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let shown_desc = match activity {
-            Some(_) => {
-                crate::render::line_utils::truncate_str(&description, ACTIVITY_DESC_MAX_WIDTH)
-            }
-            None => description.clone(),
+            .then(|| info.wait_progress_label())
+            .flatten();
+        let shown_desc = if activity.is_some() {
+            crate::render::line_utils::truncate_str(&description, ACTIVITY_DESC_MAX_WIDTH)
+        } else {
+            description.clone()
         };
 
         // Skip the trailing-space separator when the cleaned description is
@@ -949,7 +946,13 @@ impl TasksPane {
             .values()
             .map(|info| info.child_session_id.as_ref())
             .collect();
-        for info in live_subagent_list(subagents.values()) {
+        let live = live_subagent_list(subagents.values());
+        let live = if live.is_empty() {
+            live_nested_specialist_list(subagents.values())
+        } else {
+            live
+        };
+        for info in live {
             let n = live_l3_count(subagents.values(), info.child_session_id.as_ref());
             self.items
                 .push(TaskEntry::from_subagent_with_l3_count(info, n));
@@ -1221,7 +1224,7 @@ impl TasksPane {
 
     pub fn tick(&mut self) -> bool {
         self.tick += 1;
-        self.entries.iter().any(|e| e.is_running())
+        self.needs_tick()
     }
 
     pub fn tick_count(&self) -> u64 {
@@ -1229,7 +1232,7 @@ impl TasksPane {
     }
 
     pub fn needs_tick(&self) -> bool {
-        self.entries.iter().any(|e| e.is_running())
+        self.items.iter().any(|e| e.is_running()) || self.entries.iter().any(|e| e.is_running())
     }
 
     // -- Input handling ------------------------------------------------------
@@ -1753,13 +1756,11 @@ impl TasksPane {
                 Style::default().fg(theme.accent_error),
             )
         } else if info.is_running() {
-            let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = info.display_elapsed();
             (
-                frames[frame_idx],
+                crate::glyphs::sparkler_frame_at_ms(elapsed.as_millis() as u64),
                 Style::default().fg(theme.accent_running),
-                format!("{elapsed} "),
+                format!("{} ", format_duration(elapsed)),
                 Style::default().fg(theme.gray),
             )
         } else if info.status.as_deref() == Some("completed") {
@@ -2935,6 +2936,51 @@ mod tests {
         assert!(pane.items[0].is_running());
     }
 
+    /// Nested overlay copies L3 specialists into the child map. That map has
+    /// no L2 row, so the L1 filter would paint an empty list. Live L3s must
+    /// still appear so the pane does not say there are no running tasks.
+    #[test]
+    fn sync_lists_live_nested_specialists_when_l2_rows_are_absent() {
+        let mut pane = TasksPane::new();
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("sa-l3");
+        l3.child_session_id = Arc::from("l3-impl");
+        l3.description = Arc::from("Keep live remote compile");
+        l3.parent_session_id = Some(Arc::from("l2-coord"));
+        l3.depth = Some(2);
+        l3.finished = false;
+        let mut subagents = HashMap::new();
+        subagents.insert("l3-impl".into(), l3);
+
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+
+        let labels: Vec<String> = pane
+            .items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Keep live remote compile")),
+            "nested overlay Subagents list must name the live specialist, got {labels:?}"
+        );
+        assert!(
+            pane.needs_tick(),
+            "a live nested specialist must keep the pane animation clock"
+        );
+    }
+
     #[test]
     fn sync_inserts_group_headers_with_counts() {
         let mut pane = TasksPane::new();
@@ -3243,6 +3289,27 @@ mod tests {
                 .iter()
                 .all(|s| !s.content.contains("cargo build")),
             "no activity suffix on finished rows: {styled:?}"
+        );
+    }
+
+    #[test]
+    fn subagent_activity_suffix_skips_stale_preparing_and_uses_last_tool() {
+        let mut info = make_info();
+        info.activity_label = Some("Preparing search_replace…".into());
+        info.tools_used = vec![Arc::from("read_file")];
+        let entry = TaskEntry::from_subagent(&info);
+        let styled = match &entry {
+            TaskEntry::Agent { styled, .. } => styled,
+            _ => panic!("expected Agent variant"),
+        };
+        let joined: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            joined.contains("read_file"),
+            "list row must show the last live tool, got {joined:?}"
+        );
+        assert!(
+            !joined.to_ascii_lowercase().contains("preparing"),
+            "stale Preparing search_replace must not suffix the list row, got {joined:?}"
         );
     }
 

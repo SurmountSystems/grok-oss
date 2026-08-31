@@ -738,6 +738,7 @@ impl AgentView {
                     == Some(crate::tips::clear_detector::UNDO_TIP_KEY);
             match self.prompt.handle_key(key) {
                 PromptEvent::Edited => {
+                    self.snapshot_or_clear_plan_feedback_draft();
                     self.persist_unsent_composer_draft();
                     if undo_tip_accepted {
                         xai_grok_telemetry::session_ctx::log_event(

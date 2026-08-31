@@ -63,7 +63,7 @@ impl AgentView {
         )
     }
     /// Whether the current line viewer is showing a plan preview.
-    pub(super) fn is_plan_viewer(&self) -> bool {
+    pub(crate) fn is_plan_viewer(&self) -> bool {
         self.line_viewer.as_ref().is_some_and(|v| {
             v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
         })
@@ -167,11 +167,24 @@ impl AgentView {
 
     /// Apply `plan_decision_resolved` from this session's `plan_mode.json`.
     /// New process after Approve/Quit must not re-present Plan ready.
+    /// A parked awaiting flag is still a live decision: do not treat the
+    /// session as decided, and do not drop a restore waiter that already
+    /// bound.
     pub(crate) fn apply_persisted_plan_decision_on_load(&mut self) {
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.response_tx.is_some())
+        {
+            return;
+        }
         let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
             return;
         };
         let cwd = self.session.cwd.to_string_lossy();
+        if xai_grok_shell::session::plan_mode::load_awaiting_plan_approval(&cwd, &sid) {
+            return;
+        }
         if xai_grok_shell::session::plan_mode::load_plan_decision_resolved(&cwd, &sid) {
             self.plan_decision_resolved = true;
         }
@@ -328,6 +341,8 @@ impl AgentView {
     /// waiting. With no live park, falls through to the saved preview (and
     /// may park a local idle decision when chrome should arm).
     pub(crate) fn open_plan_from_view_plan_or_status(&mut self) {
+        self.view_plan_requested = true;
+        self.snapshot_or_clear_plan_feedback_draft();
         if self
             .plan_approval_view
             .as_ref()
@@ -341,6 +356,42 @@ impl AgentView {
             return;
         }
         self.show_plan_preview();
+        self.restore_plan_feedback_draft_if_composer_lost();
+        self.clear_view_plan_request_if_waiter_bound();
+    }
+
+    /// Composer holds a complete `/view-plan` (or alias) slash, Enter not yet
+    /// applied. Restore treats that as a view-plan request, not a draft.
+    pub(crate) fn composer_holds_view_plan_slash(&self) -> bool {
+        matches!(
+            self.prompt.text().trim(),
+            "/view-plan" | "/show-plan" | "/plan-view"
+        )
+    }
+
+    pub(crate) fn clear_view_plan_request_if_waiter_bound(&mut self) {
+        if self.is_plan_viewer()
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.response_tx.is_some())
+        {
+            self.view_plan_requested = false;
+        }
+    }
+
+    /// Bind Approve on an already-open or just-opened restore pane.
+    pub(crate) fn bind_restore_plan_preview_approve(&mut self) {
+        if let Some(ref mut pav) = self.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Preview;
+        }
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.feedback_active = true;
+        }
+        self.clear_view_plan_request_if_waiter_bound();
     }
 
     /// Open the plan preview when content exists, or when plan approval is
@@ -468,6 +519,41 @@ impl AgentView {
         }
     }
 
+    /// Remember Revise / Comment box text. Slash commands are not a draft.
+    /// Empty composer after a real edit drops the snapshot (Backspace-all,
+    /// first Ctrl+C). `/view-plan` consume does not go through this path.
+    pub(crate) fn snapshot_or_clear_plan_feedback_draft(&mut self) {
+        let Some(ref mut pav) = self.plan_approval_view else {
+            return;
+        };
+        let text = self.prompt.text();
+        if text.trim().starts_with('/') {
+            return;
+        }
+        if text.trim().is_empty() {
+            pav.feedback_draft = None;
+            return;
+        }
+        pav.feedback_draft = Some(text.to_string());
+    }
+
+    /// Put the Revise / Comment snapshot back when `/view-plan` or pane
+    /// close wiped the composer (or left only the slash).
+    pub(crate) fn restore_plan_feedback_draft_if_composer_lost(&mut self) {
+        let Some(draft) = self
+            .plan_approval_view
+            .as_ref()
+            .and_then(|pav| pav.feedback_draft.clone())
+            .filter(|d| !d.trim().is_empty())
+        else {
+            return;
+        };
+        if self.prompt.text().trim().is_empty() || self.composer_holds_view_plan_slash() {
+            self.prompt.set_text(&draft);
+            self.prompt.set_cursor(draft.len());
+        }
+    }
+
     /// After a turn ends, leftover `plan.md` is view-only. Do not invent a
     /// local idle park that paints Plan ready while the composer is
     /// Enter:send. `/view-plan` still parks via `show_plan_preview`. Live
@@ -510,16 +596,40 @@ impl AgentView {
         // not review notes. Strip them before deciding implement text.
         let notes = self.prompt.text_without_image_chips();
         let notes = notes.trim();
-        let images = self.prompt.drain_images();
-        let consumed_composer = !notes.is_empty() || !images.is_empty();
+        // Isolated present leaves the composer as the agent prompt. Consume
+        // it as review notes only when that text is the keep-draft snapshot
+        // or Comment / Revise / Clarify is armed. Text typed after the pane
+        // closed is not review notes. Image chips with no leftover text are
+        // still the Approve payload: drain them onto the implement turn.
+        let feedback_armed = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            matches!(
+                pav.focus,
+                PlanApprovalFocus::Prompt | PlanApprovalFocus::Commenting
+            )
+        });
+        let has_images = !self.prompt.images.is_empty();
+        let keep_draft_snapshot = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.stashed_prompt.text.trim() == notes
+                && pav.stashed_prompt.images.len() == self.prompt.images.len()
+                && (!notes.is_empty() || has_images)
+        });
+        let images_only_idle = notes.is_empty() && has_images;
+        let consumed_composer = (feedback_armed || keep_draft_snapshot || images_only_idle)
+            && (!notes.is_empty() || has_images);
+        let images = if consumed_composer {
+            self.prompt.drain_images()
+        } else {
+            Vec::new()
+        };
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
         self.record_explicit_plan_choice(
             crate::views::file_search::line_viewer::RecordedPlanChoice::Approve,
         );
-        let review_comments = if !pav.comments.is_empty() || !notes.is_empty() {
-            let formatted = pav.format_feedback((!notes.is_empty()).then_some(notes));
+        let review_notes = consumed_composer.then_some(notes).filter(|n| !n.is_empty());
+        let review_comments = if !pav.comments.is_empty() || review_notes.is_some() {
+            let formatted = pav.format_feedback(review_notes);
             if formatted.trim().is_empty() {
                 None
             } else {
@@ -587,6 +697,7 @@ impl AgentView {
         // re-present leftover plan.md.
         self.plan_decision_resolved = true;
         self.persist_plan_decision_resolved_flag(true);
+        self.view_plan_requested = false;
         self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.restore_stashed_prompt_unless_composer_has_text(pav.stashed_prompt);
@@ -740,19 +851,21 @@ impl AgentView {
     }
 
     pub(crate) fn reopen_plan_approval(&mut self) {
-        let keep_draft = !self.prompt.text().trim().is_empty();
+        self.snapshot_or_clear_plan_feedback_draft();
+        let keep_draft =
+            !self.prompt.text().trim().is_empty() && !self.composer_holds_view_plan_slash();
         let live_cursor = self.prompt.cursor();
         if let Some(ref mut pav) = self.plan_approval_view {
-            pav.focus = if keep_draft {
-                PlanApprovalFocus::Prompt
-            } else {
-                PlanApprovalFocus::Preview
-            };
+            // Isolated present: composer stays the agent prompt. Do not
+            // steal a mid-compose draft into Prompt focus; Approve would
+            // then treat it as review notes.
+            pav.focus = PlanApprovalFocus::Preview;
         }
         if keep_draft {
             self.prompt.set_cursor(live_cursor);
         }
         self.show_plan_preview_if_available();
+        self.restore_plan_feedback_draft_if_composer_lost();
         if self.line_viewer.is_none() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
@@ -760,6 +873,7 @@ impl AgentView {
         } else if let Some(ref mut viewer) = self.line_viewer {
             viewer.plan_mut().feedback_active = true;
         }
+        self.clear_view_plan_request_if_waiter_bound();
     }
     /// Discard an in-progress line-comment draft: restore the Human box
     /// that Commenting stashed. Used when focus leaves the prompt without
@@ -943,6 +1057,7 @@ impl AgentView {
                 if let Some(req) = self.prompt.pending_viewer_request.take() {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }
+                self.snapshot_or_clear_plan_feedback_draft();
                 self.persist_unsent_composer_draft();
                 InputOutcome::Changed
             }
@@ -2330,6 +2445,113 @@ mod plan_pane_letter_a_contract_tests {
             "Shift+Enter must not wipe the comment box, got {:?}",
             comment_agent.prompt.text()
         );
+    }
+
+    /// Typed Revise-box text must survive `/view-plan` while parked, pane
+    /// close, a second `/view-plan`, and an open undo group (close used
+    /// to revert the group and leave no Undo).
+    #[test]
+    fn revise_box_text_survives_view_plan_close_and_undo_group() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nKeep revise notes");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        type_chars(&mut agent, "please add auth middleware");
+        assert_eq!(agent.prompt.text(), "please add auth middleware");
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.as_deref()),
+            Some("please add auth middleware")
+        );
+
+        agent.open_plan_from_view_plan_or_status();
+        assert_eq!(
+            agent.prompt.text(),
+            "please add auth middleware",
+            "/view-plan while parked must keep the Revise box text, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().unwrap().focus,
+            PlanApprovalFocus::Preview,
+            "isolated present still uses Preview"
+        );
+
+        agent.prompt.textarea.begin_undo_group();
+        type_chars(&mut agent, " and tests");
+        assert_eq!(agent.prompt.text(), "please add auth middleware and tests");
+        agent.cancel_line_viewer();
+        assert_eq!(
+            agent.prompt.text(),
+            "please add auth middleware and tests",
+            "closing the pane must not revert the Revise box, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.textarea.can_undo() || !agent.prompt.text().is_empty(),
+            "Revise text must not vanish with no Undo"
+        );
+
+        agent.open_plan_from_view_plan_or_status();
+        assert_eq!(
+            agent.prompt.text(),
+            "please add auth middleware and tests",
+            "close then /view-plan must keep the Revise box text, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent.unsent_composer_draft_to_persist(),
+            "please add auth middleware and tests"
+        );
+
+        agent.prompt.set_text("/view-plan");
+        assert_eq!(
+            agent.unsent_composer_draft_to_persist(),
+            "please add auth middleware and tests",
+            "persist must not store the /view-plan slash over revision notes"
+        );
+        agent.restore_plan_feedback_draft_if_composer_lost();
+        assert_eq!(
+            agent.prompt.text(),
+            "please add auth middleware and tests",
+            "/view-plan in the composer is the slash, not a lost draft"
+        );
+    }
+
+    /// Comment-box text must survive the same `/view-plan` and close path.
+    #[test]
+    fn comment_box_text_survives_view_plan_and_close() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nKeep comment notes");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Commenting;
+            pav.commenting_range = Some(0..1);
+        }
+        type_chars(&mut agent, "nit: name the helper");
+        assert_eq!(agent.prompt.text(), "nit: name the helper");
+
+        agent.open_plan_from_view_plan_or_status();
+        assert_eq!(
+            agent.prompt.text(),
+            "nit: name the helper",
+            "/view-plan while parked must keep the Comment box text, got {:?}",
+            agent.prompt.text()
+        );
+        agent.cancel_line_viewer();
+        assert_eq!(
+            agent.prompt.text(),
+            "nit: name the helper",
+            "closing the pane must keep the Comment box text, got {:?}",
+            agent.prompt.text()
+        );
+        agent.open_plan_from_view_plan_or_status();
+        assert_eq!(agent.prompt.text(), "nit: name the helper");
     }
 
     /// Footer Revise (and `s` if kept) arms the revise box and waits.

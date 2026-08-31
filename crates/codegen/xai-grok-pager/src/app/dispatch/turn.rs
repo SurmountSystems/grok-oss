@@ -51,39 +51,93 @@ pub(super) fn apply_cancel_subagents_preference_global(app: &mut AppView, stop: 
     }
 }
 
+/// Nested jobs overlay [stop] must kill.
+///
+/// Parented specialists always. The overlay row itself only when the parent
+/// is Idle: session/cancel on the overlay view can sit on Cancelling without
+/// ending that background nested job. A TurnRunning parent cancels the overlay
+/// child with CancelTurn; KillSubagent for that same row uses the parent session.
+fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(child_sid) = agent.active_subagent.as_ref() else {
+        return vec![];
+    };
+    if !agent.subagent_views.contains_key(child_sid.as_str()) {
+        return vec![];
+    }
+    let mut ids = Vec::new();
+    let mut push = |info: &crate::app::subagent::SubagentInfo| {
+        if info.is_running() && info.workflow_run_id.is_none() {
+            let id = info.subagent_id.to_string();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    };
+    if agent.session.state.is_idle()
+        && let Some(info) = agent.subagent_sessions.get(child_sid.as_str())
+    {
+        push(info);
+    }
+    for info in agent.subagent_sessions.values() {
+        if info.parent_session_id.as_deref() == Some(child_sid.as_str()) {
+            push(info);
+        }
+    }
+    ids
+}
+
 pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
     // Overlay [stop] is the child's turn. Parent may be Idle (background Task) and the ask panel
-    // would render under the overlay, unreachable.
-    if let Some(agent) = active_subagent_view_mut(app) {
-        // No wire target: leave local state alone (do not flip to Cancelling).
-        let Some(session_id) = agent.session.session_id.clone() else {
-            return vec![];
-        };
-        let retrying = agent.any_cancel_pending();
-        crate::unified_log::info(
+    // would render under the overlay, unreachable. Also kill parented specialists, and the
+    // overlay nested job when the parent is Idle, so [stop] cannot sit on Cancelling.
+    let overlay_open = app.agents.get(&id).is_some_and(|agent| {
+        agent
+            .active_subagent
+            .as_ref()
+            .is_some_and(|sid| agent.subagent_views.contains_key(sid.as_str()))
+    });
+    let overlay_kill_ids = overlay_live_kill_ids(app, id);
+    if overlay_open {
+        let mut effects = Vec::new();
+        if let Some(agent) = active_subagent_view_mut(app)
+            && let Some(session_id) = agent.session.session_id.clone()
+        {
+            let retrying = agent.any_cancel_pending();
+            crate::unified_log::info(
+                if retrying {
+                    "cancel.retry"
+                } else {
+                    "cancel.overlay"
+                },
+                Some(&session_id.0),
+                Some(serde_json::json!({
+                    "current_prompt_id": agent.session.current_prompt_id,
+                })),
+            );
             if retrying {
-                "cancel.retry"
+                agent.clear_send_now_expectation();
+                effects.push(emit_cancel_turn(
+                    agent, session_id, /* cancel_subagents */ true,
+                    /* rewind_if_no_output */ false,
+                ));
             } else {
-                "cancel.overlay"
-            },
-            Some(&session_id.0),
-            Some(serde_json::json!({
-                "current_prompt_id": agent.session.current_prompt_id,
-            })),
-        );
-        if retrying {
-            agent.clear_send_now_expectation();
-            return vec![emit_cancel_turn(
-                agent, session_id, /* cancel_subagents */ true,
-                /* rewind_if_no_output */ false,
-            )];
+                effects.extend(cancel_agent_turn(
+                    agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
+                ));
+            }
         }
-        return cancel_agent_turn(
-            agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
-        );
+        for subagent_id in overlay_kill_ids {
+            effects.extend(dispatch_kill_subagent(app, subagent_id));
+        }
+        if !effects.is_empty() {
+            return effects;
+        }
     }
     // Focused running subagent with no child view (no overlay to cancel through): kill is
     // the same lever as the row's kill button.

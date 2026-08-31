@@ -1761,7 +1761,10 @@ mod tests {
         );
 
         assert!(manager.cancel(&run_id));
-        let _ = outcome_rx.await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), outcome_rx)
+            .await
+            .expect("cancel must complete the run outcome")
+            .expect("run outcome channel must stay open through cancel");
         assert!(first.cancel_token.is_cancelled());
         assert!(subagent_rx.try_recv().is_err());
     }

@@ -155,10 +155,13 @@ let
       CARGO_BUILD_JOBS = "32";
       CARGO_PROFILE = "dev";
       # Same cargo steps as `just test`. nextest is not in commonArgs.
+      # ripgrep is required: the receipt greps nextest.log with `rg -a -F
+      # 'Summary ['`. Without it, a green nextest run still exits 2.
       nativeBuildInputs = nativeBuildInputs ++ [
         pkgs.cargo-nextest
         pkgs.git
         pkgs.python3
+        pkgs.ripgrep
       ];
       # One workspace Cargo.lock (cargo-mem-guard and grok-nix-helper
       # are members). Do not vendor leftover crate-local locks.
@@ -189,10 +192,16 @@ let
         unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
         nextest_log="$NIX_BUILD_TOP/nextest.log"
         set -o pipefail
-        CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" | tee "$nextest_log"
+        if ! command -v rg >/dev/null 2>&1; then
+          echo "workspace-cargo-quality: rg not on PATH" >&2
+          exit 2
+        fi
+        # nextest writes the final Summary line on stderr. stdout-only tee
+        # leaves nextest.log without that line and the receipt exits 2.
+        CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" 2>&1 | tee "$nextest_log"
         unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
         workspace_run_make_jobserver cargo test --workspace --doc --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_LINK_JOBS"
-        summary="$(rg -n 'Summary \[' "$nextest_log" | tail -n 1 || true)"
+        summary="$(rg -a -F -n 'Summary [' "$nextest_log" | tail -n 1 || true)"
         if [ -z "$summary" ]; then
           echo "workspace-cargo-quality: nextest Summary line missing" >&2
           exit 2

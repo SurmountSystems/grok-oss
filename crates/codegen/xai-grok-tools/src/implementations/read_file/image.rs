@@ -392,14 +392,38 @@ mod tests {
         );
     }
 
-    /// Regression: a 25 Mpx camera-class photo (cf. a real 5184×3888 iPhone
-    /// shot rejected under the old 16 Mpx cap) must compress, not error —
-    /// the API accepts up to ~178.9 Mpx and we downscale before the wire.
+    /// A camera-class JPEG just over the conversation pixel-area cap must
+    /// compress to JPEG under that cap, not error. The API decode ceiling
+    /// is ~178.9 Mpx; this path downscales before the wire. A 5000×5000
+    /// noise PNG (25 Mpx) spent a minute in PNG encode + Lanczos; only
+    /// exceeding [`MAX_IMAGE_PIXELS`] is required.
     #[test]
     fn compress_camera_sized_photo_succeeds() {
-        let png = make_noisy_png(5000, 5000);
-        let (out, mime) = compress_image_for_conversation(png, "image/png".into())
-            .expect("25 Mpx photo must compress");
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{DynamicImage, ImageBuffer, Rgb};
+
+        let width = 1025u32;
+        let height = 1024u32;
+        assert!(
+            u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS,
+            "fixture must exceed the conversation pixel cap before compress"
+        );
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, y| {
+            let seed = (x as u64).wrapping_mul(6364136223846793005)
+                ^ (y as u64).wrapping_mul(1442695040888963407);
+            Rgb([
+                (seed & 0xFF) as u8,
+                ((seed >> 8) & 0xFF) as u8,
+                ((seed >> 16) & 0xFF) as u8,
+            ])
+        });
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 85)
+            .encode_image(&DynamicImage::ImageRgb8(img))
+            .unwrap();
+
+        let (out, mime) = compress_image_for_conversation(jpeg, "image/jpeg".into())
+            .expect("camera-sized photo must compress");
         assert_eq!(mime, "image/jpeg");
         let (w, h, _) = crate::util::image_validate::validate_image_bytes(&out).unwrap();
         assert!(u64::from(w) * u64::from(h) <= MAX_IMAGE_PIXELS);

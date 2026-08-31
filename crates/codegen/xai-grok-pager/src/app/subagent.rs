@@ -139,6 +139,8 @@ fn meaningful_wait_progress(label: Option<&str>) -> Option<String> {
     if lower.contains("waiting on task output")
         || lower.contains("waiting for the model")
         || lower == "waiting"
+        || lower.starts_with("preparing ")
+        || lower == "preparing"
     {
         return None;
     }
@@ -557,6 +559,27 @@ where
         .filter(|info| is_l2_list_row(info, &child_ids))
         .collect();
     live.sort_by_key(|info| info.started_at);
+    dedupe_live_by_description(live)
+}
+
+/// Running nested specialists for an overlay that only holds L3 rows.
+///
+/// The L1 list uses [`live_subagent_list`] (L2 rows only). A nested overlay
+/// copies parented specialists into the child map; that map has no L2 row,
+/// so the L1 filter would leave the Subagents list empty while work is live.
+pub(crate) fn live_nested_specialist_list<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let mut live: Vec<_> = infos
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .collect();
+    live.sort_by_key(|info| info.started_at);
+    dedupe_live_by_description(live)
+}
+
+fn dedupe_live_by_description<'a>(live: Vec<&'a SubagentInfo>) -> Vec<&'a SubagentInfo> {
     let mut seen = std::collections::HashSet::<&str>::new();
     let mut out = Vec::new();
     for info in live {
@@ -1379,6 +1402,18 @@ mod tests {
         );
     }
     #[test]
+    fn wait_progress_label_skips_stale_preparing_and_uses_last_tool() {
+        let mut info = make_info();
+        info.activity_label = Some("Preparing search_replace…".into());
+        info.tools_used = vec![Arc::from("read_file")];
+        assert_eq!(
+            info.wait_progress_label().as_deref(),
+            Some("read_file"),
+            "stale Preparing search_replace must not mask the last live tool"
+        );
+    }
+
+    #[test]
     fn format_activity_label_unlimited_retry_has_no_u32_max_fraction() {
         use crate::acp::tracker::TurnActivity;
         let label = format_activity_label(&TurnActivity::Retrying {
@@ -1510,6 +1545,15 @@ mod tests {
             format_live_l3_count(2).as_deref(),
             Some("2 specialists"),
             "L2 row count text is a specialist count, not a dump of L3 names"
+        );
+        let overlay_ids: Vec<&str> = live_nested_specialist_list([&l3_a, &l3_b, &l3_done, &l3_c])
+            .iter()
+            .map(|r| r.child_session_id.as_ref())
+            .collect();
+        assert_eq!(
+            overlay_ids,
+            ["l3-grep", "l3-edit", "l3-live"],
+            "nested overlay list must show live L3 specialists, got {overlay_ids:?}"
         );
     }
 

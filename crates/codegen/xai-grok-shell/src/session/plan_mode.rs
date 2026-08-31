@@ -475,17 +475,21 @@ pub fn plan_mode_json_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
     )
 }
 
+fn load_plan_mode_snapshot(cwd: &str, session_id: &str) -> Option<PlanModeSnapshot> {
+    let path = plan_mode_json_path(cwd, session_id)?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// Load persisted Approve/Quit sticky for a rebuilt pager process.
 pub fn load_plan_decision_resolved(cwd: &str, session_id: &str) -> bool {
-    let Some(path) = plan_mode_json_path(cwd, session_id) else {
-        return false;
-    };
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    serde_json::from_slice::<PlanModeSnapshot>(&bytes)
-        .ok()
-        .is_some_and(|s| s.plan_decision_resolved)
+    load_plan_mode_snapshot(cwd, session_id).is_some_and(|s| s.plan_decision_resolved)
+}
+
+/// Parked `exit_plan_mode` from disk. Wins over a leftover resolved bit so
+/// `--continue` can re-issue the waiter when the operator has not decided.
+pub fn load_awaiting_plan_approval(cwd: &str, session_id: &str) -> bool {
+    load_plan_mode_snapshot(cwd, session_id).is_some_and(|s| s.awaiting_plan_approval)
 }
 
 /// Merge `plan_decision_resolved` into `plan_mode.json` without clobbering

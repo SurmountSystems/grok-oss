@@ -501,7 +501,11 @@ pub(super) async fn run_session(
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
                         }
-                        SessionCommand::RestorePlanApproval => {
+                        SessionCommand::AdoptParkedPlanApprovalFromDisk { respond_to } => {
+                            session.adopt_parked_plan_approval_from_disk();
+                            let _ = respond_to.send(());
+                        }
+                        SessionCommand::RestorePlanApproval { snapshot } => {
                             // Resume re-park: spawn the approval
                             // round-trip so the command loop is not blocked on
                             // the (open-ended) user decision.
@@ -513,6 +517,9 @@ pub(super) async fn run_session(
                             // cannot outlive the actor. `resume_plan_approval`
                             // also self-guards against a concurrent/duplicate
                             // re-park via the `pending_interactions` registry.
+                            if let Some(snapshot) = snapshot {
+                                session.adopt_parked_plan_snapshot(snapshot);
+                            }
                             let s = session.clone();
                             let completion_tx = completion_tx.clone();
                             tokio::task::spawn_local(async move {
