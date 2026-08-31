@@ -1,0 +1,5 @@
+# cargo-mem-guard is a cargo wrapper, not grok-oss session chrome.
+# Clippy uses the nearest clippy.toml with no merge. Repo-root clippy.toml
+# forbids Command::spawn so TUI children enroll in ProcessScope. This crate
+# setsid()s its cargo child and waits on it. Keep this file nearest.
+disallowed-methods = []

@@ -1,0 +1,31 @@
+name: TOML
+file_extensions: [toml]
+scope: source.toml
+contexts:
+  main:
+    - match: '#'
+      push: comment
+    - match: '^\[+[^\]]+\]+'
+      scope: entity.name.section.toml
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '\b(true|false)\b'
+      scope: constant.language.toml
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.toml
+  comment:
+    - meta_scope: comment.line.number-sign.toml
+    - match: '$'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.toml
+    - match: '\\.'
+      scope: constant.character.escape.toml
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.toml
+    - match: "'"
+      pop: true

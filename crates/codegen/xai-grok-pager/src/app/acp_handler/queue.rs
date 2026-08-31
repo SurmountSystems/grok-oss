@@ -489,6 +489,9 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
     let Some(agent) = app.agents.get_mut(&id) else {
         return false;
     };
+    if matches!(matched, SessionMatch::Child(_)) {
+        return crate::app::subagent::finish_nested_child_session_turn(agent, session_id);
+    }
 
     // Finalize on the agent, then map the outcome to the return bool in the one shared place both terminal rails use
     // The outcome is returned directly; arming reports a change unconditionally so a background tab still wakes the reconcile tick

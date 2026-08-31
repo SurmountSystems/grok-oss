@@ -1663,13 +1663,37 @@ fn auth_scheme_defaults_to_bearer_when_not_set_in_config() {
     assert_eq!(info.auth_type, "bearer");
 }
 #[test]
+#[serial]
 fn has_own_credentials_guards_session_vs_external_key() {
     let endpoints = EndpointsConfig::default();
-    for (model_id, entry) in default_model_entries(&endpoints) {
-        assert!(
-            !entry.has_own_credentials(),
-            "{model_id}: Default model must not claim own credentials"
+    let or_id = crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID;
+    {
+        let _or = EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV);
+        for (model_id, entry) in default_model_entries(&endpoints) {
+            assert!(
+                !entry.has_own_credentials(),
+                "{model_id}: default catalog must not claim own credentials when OPENROUTER_API_KEY is unset"
+            );
+        }
+    }
+    {
+        let _or = EnvGuard::set(
+            crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
+            "sk-or-test-has-own-creds",
         );
+        for (model_id, entry) in default_model_entries(&endpoints) {
+            if model_id == or_id {
+                assert!(
+                    entry.has_own_credentials(),
+                    "{model_id}: OpenRouter default is BYOK when OPENROUTER_API_KEY is set"
+                );
+            } else {
+                assert!(
+                    !entry.has_own_credentials(),
+                    "{model_id}: first-party default must not claim own credentials"
+                );
+            }
+        }
     }
     let config_model = test_model_entry(
         "my-model",

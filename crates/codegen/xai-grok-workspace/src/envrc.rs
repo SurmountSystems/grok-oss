@@ -260,8 +260,14 @@ fn try_direnv_export(
             }
         }
         Err(e) => {
-            tracing::warn!(?dir, ?e, "Failed to parse direnv JSON output");
-            DirenvExport::SideEffectsRan
+            // Real `direnv export json` is a JSON object. A PATH stub that
+            // prints usage/text must not skip the bash evaluator.
+            if stdout.trim_start().starts_with('{') {
+                tracing::warn!(?dir, ?e, "Failed to parse direnv JSON output");
+                DirenvExport::SideEffectsRan
+            } else {
+                DirenvExport::Unavailable
+            }
         }
     }
 }
@@ -285,8 +291,16 @@ set -e
 cd "{dir}"
 {stubs}
 . "{envrc}"
-# Output all environment variables, null-separated, then prove completeness
-env -0
+# NUL-separated KEY=VALUE. GNU `env -0` when present; bash dump otherwise.
+# `set +e` so a dump-loop EOF does not abort before the sentinel.
+set +e
+if command -v env >/dev/null 2>&1; then
+  env -0
+else
+  while IFS= read -r name; do
+    printf '%s=%s\0' "$name" "${{!name}}"
+  done < <(compgen -e)
+fi
 printf '%s' '{sentinel}'
 "#,
         dir = dir.display(),
@@ -296,8 +310,9 @@ printf '%s' '{sentinel}'
 
     let mut baseline: HashMap<String, String> = std::env::vars().collect();
 
-    // Run the script and capture output
-    let mut bash_cmd = Command::new("/bin/bash");
+    // PATH `bash`: Nix quality / NixOS often have no `/bin/bash`, or a
+    // non-bash stub at that path.
+    let mut bash_cmd = Command::new("bash");
     bash_cmd.arg("-c").arg(&script).current_dir(dir);
     let output = match run_with_deadline(bash_cmd, deadline, "bash", sandbox) {
         // `truncated` is ignored here: the sentinel below is strictly stronger evidence of completeness

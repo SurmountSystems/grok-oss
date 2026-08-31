@@ -1093,8 +1093,15 @@ pub(crate) async fn run(
         remote_permission_mode,
         xai_grok_shell::util::config::default_interactive_permission_mode(),
     );
+    let launch_context_only = xai_grok_shell::util::config::effective_context_only_for_launch(
+        args.yolo,
+        args.permission_mode_flag.as_deref(),
+        remote_permission_mode,
+    );
     if launch_auto {
         app.current_ui.permission_mode = Some("auto".into());
+    } else if launch_context_only {
+        app.current_ui.permission_mode = Some("context-only".into());
     }
     let launch_effective_config = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.app_init.launch_config");
@@ -1551,6 +1558,8 @@ pub(crate) async fn run(
         "auto"
     } else if launch_yolo.yolo {
         "always-approve"
+    } else if launch_context_only {
+        "context-only"
     } else if let Some(cli) = args.permission_mode_flag.as_deref() {
         xai_grok_shell::util::config::clamped_display_permission_mode(
             xai_grok_shell::util::config::parse_permission_mode_canonical(cli),
@@ -2640,9 +2649,7 @@ pub(crate) async fn run(
                             None,
                             Some(serde_json::json!({ "attempt": attempt })),
                         );
-                        app.show_toast(&format!(
-                            "Disconnected. Reconnecting... (attempt {attempt})"
-                        ));
+                        app.handle_session_disconnect_toast(attempt);
                         presenter.request(false);
                     }
                     ConnectionStatus::Connected { generation }
@@ -3911,6 +3918,11 @@ pub(crate) fn session_flags_for_effects(
             app.default_yolo,
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
+        context_only_mode: !app.default_yolo
+            && matches!(
+                app.current_ui.permission_mode.as_deref(),
+                Some("context-only")
+            ),
         chat_mode: {
             #[cfg(feature = "local-workspace")]
             {

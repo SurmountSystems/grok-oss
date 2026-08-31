@@ -605,7 +605,22 @@ impl AgentView {
                                 }
                             })
                     }
-                    Event::Mouse(mouse) => self.handle_line_viewer_mouse(mouse),
+                    Event::Mouse(mouse) => {
+                        let in_prompt = self
+                            .pane_areas
+                            .prompt
+                            .contains((mouse.column, mouse.row).into());
+                        if self.plan_approval_view.is_some()
+                            && self.route_plan_prompt_mouse_drag(mouse, in_prompt)
+                        {
+                            self.prompt.handle_mouse(mouse);
+                            return InputOutcome::Changed;
+                        }
+                        if self.route_plan_scrollback_mouse(mouse) {
+                            return self.handle_mouse(mouse);
+                        }
+                        self.handle_line_viewer_mouse(mouse)
+                    }
                     _ => InputOutcome::Changed,
                 };
             }
@@ -636,6 +651,8 @@ impl AgentView {
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
                         self.prompt.handle_mouse(mouse);
                         InputOutcome::Changed
+                    } else if self.route_plan_scrollback_mouse(mouse) {
+                        self.handle_mouse(mouse)
                     } else {
                         self.handle_line_viewer_mouse(mouse)
                     }
@@ -1034,7 +1051,7 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('t', CONTROL).matches(key)
+            && registry.matches_id(ActionId::ToggleTodos, key)
         {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
@@ -1238,6 +1255,12 @@ impl AgentView {
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
                 }
+                if self.plan_approval_view.is_some()
+                    && self.prompt.text().trim().is_empty()
+                    && self.prompt.images.is_empty()
+                {
+                    return self.abandon_plan();
+                }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()
                     && self.prompt.text().is_empty()
@@ -1415,6 +1438,8 @@ mod background_and_tasks_shortcut_tests {
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1597,6 +1622,60 @@ mod background_and_tasks_shortcut_tests {
         ));
         assert!(!agent.tasks.overlay.visible);
         assert!(!agent.tasks.overlay.focused);
+    }
+
+    #[test]
+    fn ctrl_t_from_focused_prompt_toggles_thinking_not_todos_or_draft() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("Also,");
+        let draft_len = agent.prompt.text().len();
+        agent.prompt.set_cursor(draft_len);
+        agent.set_active_pane(AgentPane::Prompt, true);
+        assert!(!agent.todo.overlay.visible, "todo overlay starts hidden");
+        let first = agent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(first, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T from the focused composer must expand or collapse thinking, got {first:?}"
+        );
+        assert!(
+            !agent.todo.overlay.visible,
+            "Ctrl+T must not open the todo overlay"
+        );
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "Also,");
+        assert_eq!(agent.prompt.cursor(), draft_len);
+    }
+
+    #[test]
+    fn ctrl_t_in_nested_overlay_toggles_thinking_not_parent_todos() {
+        let registry = ActionRegistry::defaults();
+        let mut parent = make_agent();
+        let mut child = make_agent();
+        child.set_active_pane(AgentPane::Prompt, true);
+        child.prompt.set_text("Also,");
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(child));
+        parent.active_subagent = Some("l2-coord".into());
+        let outcome = parent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T in a nested overlay must expand or collapse that overlay's thinking, got {outcome:?}"
+        );
+        let child = parent
+            .subagent_views
+            .get("l2-coord")
+            .expect("nested overlay");
+        assert!(
+            !child.todo.overlay.visible,
+            "Ctrl+T must not open the nested todo board"
+        );
+        assert!(
+            !parent.todo.overlay.visible,
+            "Ctrl+T in nested overlay must not toggle the parent todo board"
+        );
+        assert_eq!(child.prompt.text(), "Also,");
     }
 }
 #[cfg(test)]

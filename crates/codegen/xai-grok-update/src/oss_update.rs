@@ -4,6 +4,12 @@
 //! There is no formal Surmount release channel. Version identity is
 //! **upstream package version + short commit**. Users rebuild or reinstall
 //! from git / Nix / AUR when behind `main`.
+//!
+//! The git SHA here is a **git object id** (SHA-1 hex on today's GitHub
+//! repos). It is not SHA-1 hashing of a downloaded binary, and it is not a
+//! Nix FOD pin. Download / FOD verify is SHA-256 or minisign. Helper
+//! logs name env vars (`GITHUB_TOKEN`) only; they must not print token
+//! values.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -31,6 +37,9 @@ pub fn how_to_update_message() -> String {
 }
 
 /// User-facing build id: `0.1.220-alpha.4 (cfe4602)`.
+///
+/// `git_sha` is a git object id (short SHA-1 hex on today's repos), not a
+/// download checksum and not a Nix FOD hash.
 pub fn format_build_id(upstream_version: &str, git_sha: &str) -> String {
     format!("{upstream_version} ({git_sha})")
 }
@@ -129,6 +138,8 @@ pub async fn check_against_main(upstream_version: &str, git_sha: &str) -> OssUpd
 }
 
 fn github_token() -> Option<String> {
+    // Value is for `Authorization` only. Never log it. Name the env var
+    // (`GITHUB_TOKEN` / `GH_TOKEN`) in user-facing hints, not the secret.
     std::env::var("GITHUB_TOKEN")
         .or_else(|_| std::env::var("GH_TOKEN"))
         .ok()
@@ -185,7 +196,7 @@ async fn fetch_compare(base_sha: &str) -> Result<(String, GhCompare)> {
         };
         anyhow::bail!(
             "could not read github.com/{OSS_GITHUB_REPO} main ({main_status}){hint}: {}",
-            body.chars().take(160).collect::<String>()
+            github_error_excerpt(&body, 160)
         );
     }
     let main: GhCommitRef = main_resp.json().await.context("parse main tip")?;
@@ -224,7 +235,7 @@ async fn fetch_compare(base_sha: &str) -> Result<(String, GhCompare)> {
         }
         anyhow::bail!(
             "compare failed ({cmp_status}): {}",
-            body.chars().take(200).collect::<String>()
+            github_error_excerpt(&body, 200)
         );
     }
     let compare: GhCompare = cmp_resp.json().await.context("parse compare")?;
@@ -252,6 +263,51 @@ fn github_rate_limit_wait(headers: &reqwest::header::HeaderMap) -> Option<std::t
 
 fn shorten_sha(sha: &str) -> String {
     sha.chars().take(12).collect()
+}
+
+/// Truncate a GitHub error body for logs. Redact token-shaped fragments so
+/// helper stdout never prints `GITHUB_TOKEN` / `GH_TOKEN` values.
+fn github_error_excerpt(body: &str, max_chars: usize) -> String {
+    redact_secret_fragments(body)
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn redact_secret_fragments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for piece in input.split_inclusive(char::is_whitespace) {
+        let trimmed_end = piece.trim_end_matches(char::is_whitespace);
+        let ws = &piece[trimmed_end.len()..];
+        out.push_str(&redact_one_token(trimmed_end));
+        out.push_str(ws);
+    }
+    out
+}
+
+fn redact_one_token(s: &str) -> String {
+    let stripped = s.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | ';' | ':'));
+    let lower = stripped.to_ascii_lowercase();
+    if lower.starts_with("ghp_")
+        || lower.starts_with("gho_")
+        || lower.starts_with("ghu_")
+        || lower.starts_with("ghs_")
+        || lower.starts_with("github_pat_")
+    {
+        return "[redacted]".to_string();
+    }
+    if let Some((k, _v)) = stripped.split_once('=') {
+        let k_up = k.to_ascii_uppercase();
+        if k_up.contains("TOKEN")
+            || k_up.contains("SECRET")
+            || k_up.contains("PASSWORD")
+            || k_up.contains("API_KEY")
+            || k_up.contains("DEPLOYMENT_KEY")
+        {
+            return format!("{k}=[redacted]");
+        }
+    }
+    s.to_string()
 }
 
 /// Print [`OssUpdateStatus`] for humans or JSON.
@@ -357,6 +413,29 @@ mod tests {
         assert!(msg.contains("just install") || msg.contains("git pull"));
         assert!(msg.contains(OSS_GITHUB_REPO));
         assert!(!msg.contains("x.ai/cli/install"));
+    }
+
+    #[test]
+    fn github_error_excerpt_redacts_token_shaped_fragments_not_git_object_ids() {
+        let body = concat!(
+            "Bad credentials ghp_TESTONLY_not_a_real_token ",
+            "GITHUB_TOKEN=also-not-a-real-value ",
+            "commit abcdef0123456789"
+        );
+        let out = github_error_excerpt(body, 200);
+        assert!(
+            !out.contains("ghp_TESTONLY_not_a_real_token"),
+            "token-shaped fragment must not appear: {out}"
+        );
+        assert!(
+            !out.contains("also-not-a-real-value"),
+            "GITHUB_TOKEN value must not appear: {out}"
+        );
+        assert!(
+            out.contains("abcdef0123456789"),
+            "git object ids stay visible: {out}"
+        );
+        assert!(out.contains("[redacted]"), "{out}");
     }
 
     #[test]

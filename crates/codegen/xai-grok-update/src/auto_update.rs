@@ -1,3 +1,12 @@
+//! SpaceXAI auto-updater (optional Grok OSS escape hatch).
+//!
+//! The internal (CDN) download and the GitHub Releases installer pin
+//! SHA-256 of the published `${artifact}.sha256` file (fail-closed on miss
+//! or mismatch). Internal still smoke-tests `--version` after the pin.
+//! Not SHA-1. POSIX `install.sh` and PowerShell `install.ps1` use the same
+//! digest rules. Git SHAs in version identity strings are git object ids.
+//! Do not add SHA-1 as a download FOD hash.
+
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -138,7 +147,7 @@ enum InstallPhaseError {
 
 /// Smoke failures stay unwrapped: already typed, and the base-retry abort in [`install_internal_from_bases`] must still downcast them.
 fn wrap_download_err(e: anyhow::Error) -> anyhow::Error {
-    if e.is::<SmokeTestFailure>() {
+    if e.is::<SmokeTestFailure>() || e.is::<ChecksumVerifyFailure>() {
         e
     } else {
         InstallPhaseError::Download(e).into()
@@ -153,6 +162,9 @@ pub fn classify_install_error(err: &anyhow::Error) -> CliUpdateErrorKind {
             SmokeTestFailure::Spawn(_) => CliUpdateErrorKind::SmokeSpawn,
             SmokeTestFailure::NonZero { .. } => CliUpdateErrorKind::SmokeNonzero,
         };
+    }
+    if err.is::<ChecksumVerifyFailure>() {
+        return CliUpdateErrorKind::Download;
     }
     match err.downcast_ref::<InstallPhaseError>() {
         Some(InstallPhaseError::Download(_)) => CliUpdateErrorKind::Download,
@@ -1429,7 +1441,7 @@ async fn download_cli_artifact_from_gcs(
     object_name: &str,
     dest: &std::path::Path,
     with_progress: bool,
-) -> Result<()> {
+) -> Result<String> {
     let base = gcs_base_url.trim_end_matches('/');
     let names = cli_object_candidates(object_name, cfg!(windows));
 
@@ -1623,8 +1635,9 @@ pub async fn install_internal_from_base(
         .map_err(|e| InstallPhaseError::Activate(e).into())
 }
 
-/// A downloaded and smoke-tested binary in `~/.grok/downloads/`, not yet
-/// activated as the managed `grok`/`agent`.
+/// A downloaded binary in `~/.grok/downloads/` whose SHA-256 matched the
+/// published checksum file and that passed `--version`, not yet activated
+/// as the managed `grok`/`agent`.
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
@@ -2322,7 +2335,8 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
 /// Download and install grok from GitHub Releases (xai-org-shared/grok-build). Uses `gh release download` to fetch the
 /// binary matching the current platform. This works anywhere the `gh` CLI is authenticated, without needing npm or
 /// internal network access.
-async fn install_gh_release(target: Option<&str>) -> Result<()> {
+#[doc(hidden)]
+pub async fn install_gh_release(target: Option<&str>) -> Result<()> {
     let (os, arch) = detect_platform()?;
     let platform = format!("{}-{}", os, arch);
 
@@ -2346,14 +2360,16 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         version, platform
     );
 
-    gh_release_download(&tag, &binary_name, &binary_path).await?;
-
-    // chmod +x
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
+    // Download onto a pending sibling so a failed pin cannot replace
+    // previous-good at `binary_path`.
+    let pending = tmp_download_path(&binary_path);
+    gh_release_download(&tag, &binary_name, &pending).await?;
+    let checksum_pattern = artifact_checksum_url(&binary_name);
+    if let Err(fail) = verify_gh_release_sha256(&pending, &tag, &checksum_pattern).await {
+        let _ = tokio::fs::remove_file(&pending).await;
+        return Err(fail.into());
     }
+    publish_downloaded_artifact(&pending, &binary_path).await?;
 
     // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
     swap_managed_bin_links(&binary_path, &bin_dir).await?;
@@ -2403,6 +2419,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
 /// Creates a temporary .npmrc file with the NPM token if present.
 /// Returns the path to the created file, or None if no token was set.
+/// Writes the token to a 0600 file so it is not in argv. Do not log the
+/// token value; log only that a temp userconfig path was used.
 fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<std::path::PathBuf>> {
     if let Ok(token) = std::env::var("NPM_TOKEN") {
         let token = token.trim();

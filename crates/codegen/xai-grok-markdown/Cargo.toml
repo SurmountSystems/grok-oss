@@ -12,7 +12,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 [dependencies]
 anstyle = { workspace = true }
 anstyle-lossy = { workspace = true }
-anstyle-syntect = { workspace = true }
 html-escape = { workspace = true }
 linkify = { workspace = true }
 pulldown-cmark = { workspace = true }

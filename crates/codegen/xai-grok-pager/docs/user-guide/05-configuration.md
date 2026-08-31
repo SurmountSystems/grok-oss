@@ -77,7 +77,8 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
-always_expand_thinking = false         # keep thinking fully expanded; when true, hides Ctrl+E hint
+always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
+                                       # true keeps the body open and hides the Ctrl+T hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -781,7 +782,7 @@ highlight_overlays_border = false     # highlight extends over selection box bor
 dim_accent = 0.5                      # dimming factor for collapsed accents (0.0-1.0)
 ```
 
-`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+E` clears pins on thinking blocks.
+`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+T` clears pins on thinking blocks.
 
 ### Block configuration
 

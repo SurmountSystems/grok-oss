@@ -162,6 +162,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),

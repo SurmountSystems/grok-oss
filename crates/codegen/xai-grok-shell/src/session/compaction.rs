@@ -686,6 +686,7 @@ impl SessionActor {
         detail: &str,
         estimated_tokens: u64,
         context_window: u64,
+        upstream_error: Option<&str>,
     ) {
         let new_state = reason.suppress_state();
         if self
@@ -755,6 +756,8 @@ impl SessionActor {
             || m.contains("out of credits")
             || m.contains("usage balance exhausted")
             || m.contains("usage limit reached")
+            || m.contains("status 402")
+            || m.contains("payment required")
         {
             SuppressReason::CreditBlock
         } else if is_context_length_error(&m) {
@@ -1295,6 +1298,7 @@ impl SessionActor {
                                 &message,
                                 estimated_input_tokens,
                                 context_window,
+                                Some(message.as_str()),
                             )
                             .await;
                         }
@@ -1311,6 +1315,7 @@ impl SessionActor {
                                 &message,
                                 estimated_input_tokens,
                                 context_window,
+                                Some(message.as_str()),
                             )
                             .await;
                         }
@@ -2178,19 +2183,48 @@ impl SessionActor {
         let Some(ref metadata) = err.model_metadata else {
             return false;
         };
-        let Some(context_window) = metadata.context_window else {
-            return false;
-        };
-        if context_window == 0 {
-            return false;
+        estimated_total >= gate
+    }
+
+    /// Terminal when used is still over the sampling window after compact
+    /// was skipped, suppressed, or did not save enough. Do not sample.
+    pub(crate) async fn refuse_over_window_sample(&self) -> Result<(), acp::Error> {
+        if self.is_l3_session() {
+            return Ok(());
         }
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        estimated_total > context_window
+        if self.tool_context.task_output_token_budget.is_some() {
+            return Ok(());
+        }
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return Ok(());
+        };
+        let cw = cfg.context_window.get();
+        let used = self.chat_state_handle.get_estimated_total_tokens().await;
+        if cw == 0 || used < cw {
+            return Ok(());
+        }
+        let message = format!(
+            "Context is over this session's sampling window ({used}/{cw} tokens). \
+             Not retrying the same oversized model request. Compact once or start a new session."
+        );
+        self.log_terminal_failure("context_length", None, &message);
+        self.send_xai_notification(crate::extensions::notification::SessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Failed {
+                error_type: "context_length".to_string(),
+                message: message.clone(),
+            },
+        ))
+        .await;
+        Err(acp::Error::internal_error().data(message))
     }
     /// Pre-sampling compaction check.
     /// Uses `get_estimated_total_tokens()` (exact prior count plus a byte-estimate of items since last response) so tool results are accounted for.
     /// Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return None;
+        }
         if self
             .memory
             .is_flushing
@@ -2278,6 +2312,10 @@ impl SessionActor {
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
+        // L3 never AUTO compact.
+        if self.is_l3_session() {
+            return Ok(());
+        }
         self.refresh_token_if_expired().await;
         let Some(prev) = self.compaction.previous_model.take() else {
             return Ok(());

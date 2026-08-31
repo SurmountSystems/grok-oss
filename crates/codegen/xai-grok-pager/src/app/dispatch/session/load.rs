@@ -18,9 +18,10 @@ use crate::app::app_view::ActiveView;
 use crate::app::app_view::AppView;
 use crate::app::cancel_latency::TurnEnd;
 use crate::app::dispatch::ctx::{
-    SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
+    SwitchCause, find_agent_id_by_session_id, get_active_agent, get_active_agent_mut,
+    switch_to_agent, with_active_agent,
 };
-use crate::app::dispatch::modes::inherit_auto_mode;
+use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
@@ -31,6 +32,7 @@ use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use crate::views::session_picker_surface::SessionPickerHost;
 use agent_client_protocol as acp;
+use std::path::{Path, PathBuf};
 /// Create a placeholder agent and load an existing session by ID.
 /// `session_cwd` overrides the CWD in the `LoadSessionRequest`.
 /// This is needed when resuming a session that was created in a different CWD (e.g., a worktree).
@@ -54,7 +56,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session(
             });
         return vec![];
     }
-    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind)
+    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true)
 }
 /// Clear `session_id` from any existing agent that already owns the given session, then return a freshly constructed [`acp::SessionId`].
 /// Without this, `find_session_match` finds the stale agent first (IndexMap insertion order) and routes ACP notifications to it, not the new agent.
@@ -137,6 +139,7 @@ fn dispatch_load_session_ungated(
     session_id: String,
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
+    restore_fork_parent: bool,
 ) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
     let bypass_chat_refusal = app.welcome_history_load_as_build;
@@ -197,6 +200,7 @@ fn dispatch_load_session_ungated(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,
@@ -290,6 +294,7 @@ fn dispatch_load_session_ungated(
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
+    wire_forked_from_from_disk(app, agent_id);
     switch_to_agent(app, agent_id, SwitchCause::Load);
     effects.push(Effect::LoadSession {
         agent_id,
@@ -1127,6 +1132,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
+            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,
@@ -1243,7 +1249,6 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let hydrate_sid = session_id.clone();
-        agent.bind_session_id(session_id);
         agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
@@ -1452,6 +1457,12 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
     tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
+            return vec![];
+        }
+        if crate::app::effects::is_session_rpc_timeout_error(&error) {
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Couldn't load session: {error}"
+            )));
             return vec![];
         }
         agent.pending_extensions_fetch = false;

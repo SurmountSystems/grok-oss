@@ -1,0 +1,27 @@
+name: CSS
+file_extensions: [css]
+scope: source.css
+contexts:
+  main:
+    - match: '/\*'
+      push: comment
+    - match: '[A-Za-z_-][\w-]*(?=\s*:)'
+      scope: support.type.property-name.css
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '#[0-9A-Fa-f]{3,8}'
+      scope: constant.other.color.css
+  comment:
+    - meta_scope: comment.block.css
+    - match: '\*/'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.css
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.css
+    - match: "'"
+      pop: true

@@ -2,6 +2,7 @@
 //! `#[path = "messages_tests.rs"] mod tests;` in messages.rs wires them in.
 
 use super::*;
+use futures_util::StreamExt;
 use futures_util::stream;
 
 fn nth<T>(xs: &[T], i: usize) -> &T {

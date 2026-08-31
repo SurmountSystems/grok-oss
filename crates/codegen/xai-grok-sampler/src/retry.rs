@@ -144,7 +144,8 @@ pub fn classify_error(
 
     if err.is_retryable() {
         let next_attempt = retry_count.saturating_add(1);
-        if !is_unlimited_retries(max_retries) && next_attempt >= max_retries {
+        let cap = transport_retry_cap(max_retries);
+        if next_attempt >= cap {
             return RetryDecision::Fatal(clone_error(err));
         }
         if next_attempt == 1 {
@@ -424,11 +425,13 @@ mod tests {
     }
 
     #[test]
-    fn unlimited_retries_never_fatals_on_5xx() {
+    fn unlimited_default_does_not_retry_5xx_forever() {
         let err = api_err(StatusCode::BAD_GATEWAY, "proxy blip");
         match classify_error(&err, 100, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::Retry { .. } | RetryDecision::RetryWithClientRebuild { .. } => {}
-            other => panic!("expected Retry under unlimited budget, got {other:?}"),
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+            }
+            other => panic!("unlimited default must still cap under-window 5xx, got {other:?}"),
         }
     }
 
@@ -873,6 +876,46 @@ mod tests {
         }
     }
 
+    /// HTTP 502 with a 29m26s Retry-After must not sit that long. Clamp to
+    /// ~30s like other gateway outages. 502 is not billing empty and is not
+    /// a 429 hop.
+    #[test]
+    fn classify_502_long_retry_after_clamps_and_does_not_hop() {
+        let err = api_err_with_retry_after(StatusCode::BAD_GATEWAY, 1766);
+        assert!(err.is_retryable());
+        assert!(!err.is_rate_limited());
+        assert!(!err.is_credit_exhausted());
+        match classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { backoff } => {
+                assert!(
+                    backoff >= Duration::from_secs(24) && backoff <= Duration::from_secs(36),
+                    "502 Retry-After 1766s (29m26s) must clamp to ~30s, got {backoff:?}"
+                );
+            }
+            other => panic!("first 502 must rebuild the client, got {other:?}"),
+        }
+        match classify_error(
+            &err,
+            DEFAULT_TRANSPORT_MAX_RETRIES.saturating_sub(1),
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+        ) {
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+            }
+            other => panic!(
+                "unlimited budget must still stop 502 after a small transport cap, got {other:?}"
+            ),
+        }
+        if let RetryDecision::RetryWithBackoff {
+            is_rate_limited: true,
+            ..
+        } = classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD)
+        {
+            panic!("502 must not take the 429 hop/wait path");
+        }
+    }
+
     #[test]
     fn classify_clamps_and_jitters_retry_after_on_generic_path_but_not_on_429() {
         // Cloudflare answers 52x with Retry-After: 60-120. Honoring that
@@ -1313,5 +1356,140 @@ mod tests {
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    #[test]
+    fn over_window_blocks_retry_when_used_meets_sampling_window() {
+        assert!(over_window_blocks_retry(Some(411_000), 200_000));
+        assert!(over_window_blocks_retry(Some(200_000), 200_000));
+        assert!(!over_window_blocks_retry(Some(199_999), 200_000));
+        assert!(!over_window_blocks_retry(None, 200_000));
+        assert!(!over_window_blocks_retry(Some(500_000), 0));
+    }
+
+    /// Named leftover from the over-window Fatal slice: under-window 5xx and
+    /// first-token / headers timeout must not retry forever. Small honest
+    /// budget, then Fatal with the same named error.
+    #[test]
+    fn under_window_timeout_retries_are_capped_then_fatal() {
+        let err = SamplingError::EventStreamError(
+            "timed out waiting for the first token after 2m0s".into(),
+        );
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(384_000),
+            500_000,
+        ) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("first under-window first-token timeout still retries, got {other:?}"),
+        }
+        match classify_error_with_window(
+            &err,
+            DEFAULT_TRANSPORT_MAX_RETRIES.saturating_sub(1),
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(384_000),
+            500_000,
+        ) {
+            RetryDecision::Fatal(SamplingError::EventStreamError(msg)) => {
+                assert!(
+                    msg.contains("first token"),
+                    "exhausted timeout must keep the named cause, got {msg}"
+                );
+            }
+            other => panic!(
+                "under-window first-token timeout must stop after a small budget, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn under_window_5xx_retries_are_capped_then_fatal() {
+        let err = api_err(StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(100_000),
+            200_000,
+        ) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("first under-window 5xx still retries, got {other:?}"),
+        }
+        match classify_error_with_window(
+            &err,
+            DEFAULT_TRANSPORT_MAX_RETRIES.saturating_sub(1),
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(100_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("under-window 5xx must stop after a small budget, got {other:?}"),
+        }
+    }
+
+    /// Named contract: over-window model failure does not keep incrementing
+    /// retry attempts. Same oversized payload cannot recover via 5xx retry.
+    #[test]
+    fn over_window_model_failure_does_not_keep_incrementing_retries() {
+        let err = api_err(StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => {
+                panic!("over-window 5xx must be Fatal (compact or honest fail), not {other:?}")
+            }
+        }
+        match classify_error_with_window(
+            &err,
+            1,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => panic!("a later over-window attempt must stay Fatal, got {other:?}"),
+        }
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(100_000),
+            200_000,
+        ) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("under-window 5xx still retries, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn over_window_timeout_is_fatal_not_retry_chrome() {
+        let err = SamplingError::EventStreamError("timed out waiting for response headers".into());
+        match classify_error_with_window(
+            &err,
+            0,
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+            Some(411_000),
+            200_000,
+        ) {
+            RetryDecision::Fatal(_) => {}
+            other => panic!("over-window timeout must not Retrying, got {other:?}"),
+        }
     }
 }

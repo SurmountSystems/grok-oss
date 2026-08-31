@@ -28,7 +28,7 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         StreamableHttpClientTransport, Transport,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
     },
 };
 
@@ -2281,7 +2281,7 @@ async fn discover_and_prepare_auth(
         crate::credentials::McpCredentialStoreAdapter::new(server_name.to_string(), parsed_url);
     let observed = adapter.observed();
 
-    let mut manager = match rmcp::transport::auth::AuthorizationManager::new(server_url).await {
+    let mut manager = match crate::mcp_http_client::authorization_manager(server_url).await {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(server = server_name, %e, "Failed to create OAuth manager");

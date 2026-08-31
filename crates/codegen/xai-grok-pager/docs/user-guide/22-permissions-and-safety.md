@@ -2,7 +2,7 @@
 
 Control what Grok can access and do: permission modes, allow/ask/deny rules, hooks, and the optional OS-level sandbox.
 
-- **Modes** set how often Grok asks for approval (always-approve, auto, ask, and related).
+- **Modes** set how often Grok asks for approval (always-approve, auto, ask, context-only, and related).
 - **Rules** set which tools are allowed, asked about, or blocked within that baseline.
 
 ---
@@ -38,18 +38,20 @@ ACP clients can set `"_meta": { "yoloMode": true }` on `session/new`. See [Agent
 | `auto` | Work the safety check allows; other calls are blocked or escalated | Interactive sessions that want fewer prompts |
 | `dontAsk` | Only pre-approved tools and built-in read-only handling | Strict CI allowlists |
 | `bypassPermissions` (**always-approve**) | Tool calls in general (`deny` rules, hooks, and some shell `ask` rules still apply) | Trusted automation and agent servers |
+| `context-only` | Nothing: the model is sent no tool list, and any tool call is refused | Redteaming and harness diagnosis (can the model follow process instructions without tools?) |
 
-**Always-approve** is the product name; config and Claude-compatible settings may use `bypassPermissions` for the same mode. Always-approve and auto are mutually exclusive (always-approve takes precedence when both are requested).
+**Always-approve** is the product name; config and Claude-compatible settings may use `bypassPermissions` for the same mode. Always-approve and auto are mutually exclusive (always-approve takes precedence when both are requested). An explicit `--permission-mode` flag wins over `--yolo` / `--always-approve`, including `--permission-mode context-only`. Without an explicit `--permission-mode`, always-approve and auto still win over a remote or config context-only value. Context-only is not the default.
 
 ### How to set the mode
 
-**Interactive TUI:** `Shift+Tab` / `Ctrl+O`, `/always-approve` or `/auto`, or `/settings` ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)).
+**Interactive TUI:** `Shift+Tab` / `Ctrl+O`, `/always-approve`, `/auto`, `/context-only`, or `/settings` ([shortcuts](03-keyboard-shortcuts.md), [commands](04-slash-commands.md)). `Shift+Tab` does not cycle into context-only.
 
 **CLI:**
 
 ```bash
 grok-oss --always-approve -p "Run the test suite"
 grok-oss --permission-mode auto
+grok-oss --permission-mode context-only
 grok-oss agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
@@ -57,7 +59,7 @@ grok-oss agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 
 ```toml
 [ui]
-permission_mode = "always-approve"   # or "auto", "ask", …
+permission_mode = "always-approve"   # or "auto", "ask", "context-only", …
 ```
 
 Claude-compatible `defaultMode` in `.claude/settings.json` is also supported (see [Claude-compatible settings](#3-claude-code-compatibility-claudesettingsjson)). CLI overrides config for that process.

@@ -300,6 +300,7 @@ impl Default for UiConfig {
             dashboard_preview: None,
             page_flip_on_send: None,
             scrub_ascii_punct: None,
+            ulid_session_ids: None,
             confirm_before_rewind: None,
             auto_dark_theme: None,
             auto_light_theme: None,
@@ -528,6 +529,22 @@ mod tests {
         let missing: UiConfig =
             serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
         assert!(missing.scrub_ascii_punct_enabled());
+    }
+
+    #[test]
+    fn ulid_session_ids_defaults_on() {
+        assert!(UiConfig::default().ulid_session_ids_enabled());
+        let off = UiConfig {
+            ulid_session_ids: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.ulid_session_ids_enabled());
+        let on: UiConfig = serde_json::from_value(serde_json::json!({ "ulid_session_ids": true }))
+            .expect("deserializes ulid_session_ids true");
+        assert!(on.ulid_session_ids_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.ulid_session_ids_enabled());
     }
 
     #[test]

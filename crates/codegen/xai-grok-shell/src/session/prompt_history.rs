@@ -181,6 +181,7 @@ pub(crate) async fn truncate_if_needed_async(cwd: String) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use xai_grok_test_support::EnvGuard;
 
     fn test_cwd() -> (TempDir, String) {
         let tmp = TempDir::new().unwrap();
@@ -189,12 +190,13 @@ mod tests {
             .join("test_project")
             .to_string_lossy()
             .to_string();
-        (tmp, cwd)
+        (home, env, cwd)
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_append_and_load() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         let entry1 = PromptEntry {
             timestamp: Utc::now(),
@@ -219,8 +221,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_deduplication() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         // Add consecutive identical prompts
         for _ in 0..3 {
@@ -240,8 +243,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_empty_file() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
         let prompts = load_prompts(&cwd).unwrap();
         assert!(prompts.is_empty());
     }
@@ -256,8 +260,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_load_bash_prompts_filters_correctly() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         let bash_entry = PromptEntry {
             timestamp: Utc::now(),
@@ -292,8 +297,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_backward_compat_missing_is_bash() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
         let path = prompt_history_path(&cwd);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
@@ -313,8 +319,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_load_bash_prompts_deduplicates() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         for _ in 0..3 {
             let entry = PromptEntry {
@@ -332,15 +339,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_load_bash_prompts_empty_file() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
         let bash = load_bash_prompts(&cwd).unwrap();
         assert!(bash.is_empty());
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn test_load_prompts_for_session_filters_by_session_id() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         let mk = |session_id: &str, prompt: &str| PromptEntry {
             timestamp: Utc::now(),
@@ -368,8 +377,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(GROK_HOME)]
     async fn test_append_prompt_async_round_trips_for_session() {
-        let (_tmp, cwd) = test_cwd();
+        let (_home, _env, cwd) = test_cwd();
 
         let entry = PromptEntry {
             timestamp: Utc::now(),

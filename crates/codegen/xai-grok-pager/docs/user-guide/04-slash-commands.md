@@ -29,6 +29,20 @@ Not `/config-agents` (alias `/agents`), which manages agent *definitions* and pe
 
 Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* sampling window AUTO uses. With **Economic mode** on (default), that sampling window is soft-capped at 200k tokens even when the model catalog is larger (for example 500k). The footer context chip then names both windows (`used / 200K sampling · 500K catalog`) so catalog 500k is not implied as the AUTO gate.
 
+### `/queue`
+
+With no args, list the composer prompt queue as a transcript block.
+
+With a slash, hold that command on the **same** prompt queue so it does not run this turn. Supported holds: `/compaction` (and `/compact`), `/plan`, `/reports`, `/finish`. First-arg `queue` or `later` on those commands does the same hold.
+
+```
+/queue
+/queue /compaction
+/queue /plan
+/queue /reports
+/queue /finish
+```
+
 ### `/economic-mode`
 
 Cap (or uncap) effective context at 200k tokens for cheaper Grok 4.5 pricing. Default **on** for new sessions (`[ui] economic_mode` in `/settings`). Soft-caps the sampling window AUTO compact uses. When that sampling window is smaller than the catalog window, the footer context chip names both.
@@ -60,6 +74,81 @@ Generate a short "where was I" summary of the session so far. Alias: `/summarize
 ### `/session-info`
 
 Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`. Click a value or drag to select and copy; `c` copies the session ID and `y` copies the whole block.
+
+### `/finish`
+
+Write a structured post-mortem for this session. Work continues. A wrap often reveals more features worth adding. Leftover and next features stay first-class. Optional focus text is passed through to the agent. The product is not finished forever.
+
+This is **not** `/dream` (memory consolidation), **not** `/recap` (a short chat recap), and **not** `/reports` (a checkpoint while work continues). `/finish` asks the agent to document what shipped, leftover, and useful next features. The artifact is a markdown file under `~/.agents/reports/` named `finish-YYYY-MM-DD.md` (or `finish-YYYY-MM-DD-<short-session>.md` if that dated name already exists). Complete American English. No secrets.
+
+The host skill lives at `~/.agents/skills/finish/SKILL.md`. The pager builtin `/finish` keeps that slash name; a same-named skill cannot steal the bare command.
+
+Immediate `/finish` injects that skill now. To hold it on the existing composer prompt queue, use first-arg `queue` or `later`, or `/queue /finish`.
+
+```
+/finish
+/finish pager slashes and the ULID map
+/finish queue
+/queue /finish
+```
+
+### `/reports`
+
+Write a checkpoint while work continues: what landed so far, leftover, and useful next features. This is not a wrap that says the project is done.
+
+This is **not** `/finish` (session post-mortem), **not** `/dream` (memory consolidation), and **not** `/recap` (a short chat recap). The artifact is a markdown file under `~/.agents/reports/` named `reports-YYYY-MM-DD.md` (or `reports-YYYY-MM-DD-<short-session>.md` if that dated name already exists). Complete American English. No secrets.
+
+The host skill lives at `~/.agents/skills/reports/SKILL.md`. The pager builtin `/reports` keeps that slash name; a same-named skill cannot steal the bare command.
+
+Immediate `/reports` injects that skill now. To hold it on the existing composer prompt queue, use first-arg `queue` or `later`, or `/queue /reports`.
+
+```
+/reports
+/reports pager slashes
+/reports queue
+/queue /reports
+```
+
+### `/polish`
+
+Run a polish pass: make the product work well. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/polish/`) into `~/.grok/bundled/skills/polish/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/polish/`.
+
+This is **not** `/finish` (session post-mortem) and **not** `/reports` (a checkpoint while work continues). Type `/polish` to load the skill. Optional focus text is passed through.
+
+```
+/polish
+/polish compact occupancy
+```
+
+### `/subagent`
+
+Spawn one L2 coordinator for this job. The L1 main thread does not do the job. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/subagent/`) into `~/.grok/bundled/skills/subagent/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/subagent/`.
+
+Type `/subagent this ...` or `/subagent ...`. The rest of the line is the job passed to that L2 as a self-contained prompt.
+
+This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff). It is not the Hierarchical fast path on L1.
+
+```
+/subagent this diagnose the compact occupancy
+/subagent implement the remaining-work pointer
+```
+
+### `/what`
+
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **What we are doing**, **What is true right now**, **What you need to do** (or `nothing`), **What I will do next**. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
+
+This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
+
+`/what` is a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`; not host overlay as the grok-oss source, not a pager-only prompt, not a project `.agents/skills/what` pack). The pager builtin `/what` keeps that slash name; a same-named skill cannot steal the bare command. Immediate `/what` injects that skill now. When you ask to revise a skill in grok-oss, edit `crates/codegen/xai-grok-bundle/skills/`. The live cache is not the source.
+
+```
+/what
+/what the last status
+```
+
+### `/metadata`
+
+Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. Fields that are not known are omitted rather than invented. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
 
 ### `/fork`
 
@@ -147,7 +236,7 @@ Set the context window for the current model. The command is listed only when th
 
 ### `/always-approve` and `/auto`
 
-Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
+These are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
 
 | Command | When off | When already on |
 |---|---|---|
@@ -190,15 +279,19 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/plan`
 
-Enter plan mode.
+Enter plan mode. Immediate `/plan` (optionally with a description) still enters plan mode when you want it now.
+
+To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue. Present is not Approve. Empty Enter never Approves.
 
 ```
 /plan [description]
+/plan queue
+/queue /plan
 ```
 
 ### `/view-plan`
 
-Open a preview of the current saved plan. Aliases: `/show-plan`, `/plan-view`.
+Open the current saved plan in the right pane. The pane uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. If grok-oss.db has an explicit recorded choice for this session, a dot marks that option. Clicking Approve is a real Approve only while a live waiter is parked; after Approve or Exit it does not re-arm Plan ready. Aliases: `/show-plan`, `/plan-view`.
 
 ---
 
@@ -424,10 +517,13 @@ The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint onl
 Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
 
 1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
-2. Runs `just install` (or a fixed cargo install when `just` is missing).
-3. Verifies package version plus git SHA.
-4. Signals other live product TUIs so they re-exec onto the new binary with the same session. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-5. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success.
+2. Copies the current installed `grok-oss` binary, when it exists, to a sibling file named `grok-oss.prev` next to it (under `${CARGO_HOME:-$HOME/.cargo}/bin/`).
+3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
+4. Verifies package version plus git SHA.
+5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
+6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. Nested agents resume the same way a network disconnect does, and the Subagents list must not go empty. Ctrl-C quits and does not re-exec peers.
+
+To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 
 CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 

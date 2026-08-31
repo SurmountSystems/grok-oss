@@ -187,6 +187,11 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub auto_mode: bool,
 
+    /// Diagnostic context-only. When true and not yolo/auto, the leader
+    /// injects `contextOnly: true` into session/new and session/load `_meta`.
+    #[serde(default)]
+    pub context_only: bool,
+
     /// Default model ID to use for new sessions.
     /// When set, the leader injects `modelId` into session/new requests that don't already specify one.
     #[serde(default)]

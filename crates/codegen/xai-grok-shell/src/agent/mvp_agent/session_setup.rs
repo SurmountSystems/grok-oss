@@ -458,6 +458,12 @@ impl MvpAgent {
             self.default_auto_mode,
             session_yolo_mode,
         );
+        let session_context_only = resolve_session_context_only(
+            arguments.meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
+        );
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s).map_err(|e| {
@@ -700,6 +706,7 @@ impl MvpAgent {
                     initial_reasoning_effort: spawn_effort,
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
                     prompt_display_cwd: None,
                     is_headless,
                     is_chat_kind: false,
@@ -753,6 +760,8 @@ impl MvpAgent {
                 && crate::util::config::auto_permission_mode_enabled_from_disk()
             {
                 xai_grok_telemetry::enums::PermissionMode::Auto
+            } else if session_context_only {
+                xai_grok_telemetry::enums::PermissionMode::ContextOnly
             } else {
                 xai_grok_telemetry::enums::PermissionMode::Ask
             };
@@ -964,6 +973,8 @@ impl MvpAgent {
             meta: request_meta,
             ..
         } = arguments;
+        // Fail-open grok-oss UUID ↔ ULID map. Resume/load wire id stays UUID.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         let policy = AttachPolicy::resolve(op, request_meta.as_ref(), self.restore_code);
         let SessionWorkspace {
             cwd,
@@ -992,6 +1003,17 @@ impl MvpAgent {
                 session_id = %session_id.0,
                 "Reconnect detected: flushing persistence buffer before replay"
             );
+            if let Some(handle) = self.resident_handle(&session_id) {
+                let (adopt_tx, adopt_rx) = tokio::sync::oneshot::channel();
+                let _ = handle.cmd_tx.send(SessionCommand::AdoptParkedPlanApprovalFromDisk {
+                    respond_to: adopt_tx,
+                });
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    adopt_rx,
+                )
+                .await;
+            }
             if !no_replay && let Some(handle) = self.resident_handle(&session_id) {
                 handle
                     .gateway_enabled
@@ -1113,6 +1135,12 @@ impl MvpAgent {
             request_meta.as_ref(),
             self.default_auto_mode,
             session_yolo_mode,
+        );
+        let session_context_only = resolve_session_context_only(
+            request_meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
         );
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(request_meta.as_ref())?;
@@ -1364,6 +1392,7 @@ impl MvpAgent {
             client_code_nav_enabled,
             session_yolo_mode,
             session_auto_mode,
+            session_context_only,
         );
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
@@ -1407,6 +1436,8 @@ impl MvpAgent {
                     && crate::util::config::auto_permission_mode_enabled_from_disk()
                 {
                     xai_grok_telemetry::enums::PermissionMode::Auto
+                } else if session_context_only {
+                    xai_grok_telemetry::enums::PermissionMode::ContextOnly
                 } else {
                     xai_grok_telemetry::enums::PermissionMode::Ask
                 },
@@ -1677,6 +1708,7 @@ impl MvpAgent {
         client_code_nav_enabled: bool,
         session_yolo_mode: bool,
         session_auto_mode: bool,
+        session_context_only: bool,
     ) {
         let session_id = session_id.clone();
         self.with_resident_mut(&session_id, |handle| {
@@ -1703,6 +1735,15 @@ impl MvpAgent {
                 let _ = handle
                     .cmd_tx
                     .send(SessionCommand::SetAutoMode { enabled: true });
+            }
+            if session_context_only && !session_yolo_mode && !session_auto_mode {
+                tracing::debug!(
+                    session_id = %session_id.0,
+                    "Setting context-only on reconnect from load_session request metadata"
+                );
+                let _ = handle
+                    .cmd_tx
+                    .send(SessionCommand::SetContextOnlyMode { enabled: true });
             }
         });
     }

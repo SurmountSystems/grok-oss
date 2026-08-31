@@ -12,9 +12,9 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,8 +47,10 @@ impl Config {
             .max(1)
             .min(jobs_start);
         let max_restarts = env_u32("CARGO_MEM_MAX_RESTARTS", DEFAULT_MAX_RESTARTS);
-        let poll =
-            Duration::from_millis(u64::from(env_u32("CARGO_MEM_POLL_MS", DEFAULT_POLL_MS as u32)));
+        let poll = Duration::from_millis(u64::from(env_u32(
+            "CARGO_MEM_POLL_MS",
+            DEFAULT_POLL_MS as u32,
+        )));
         let use_mold = env_truthy("CARGO_MEM_USE_MOLD") || env_truthy("USE_MOLD");
         let cargo = env::var_os("CARGO")
             .map(PathBuf::from)
@@ -340,10 +342,7 @@ fn apply_mold_rustflags(config: &mut Config) {
         mold_ok,
         encoded.as_deref(),
         plain.as_deref(),
-        &[
-            target_priors[0].as_deref(),
-            target_priors[1].as_deref(),
-        ],
+        &[target_priors[0].as_deref(), target_priors[1].as_deref()],
     );
 
     if plan.remove_encoded {
@@ -382,10 +381,10 @@ fn decode_encoded_rustflags(encoded: &str) -> String {
 /// True if this token (or -C + next) is a fuse-ld link-arg form we strip.
 fn is_fuse_ld_pair(flag: &str, next: Option<&str>) -> Option<usize> {
     if flag == "-C" {
-        if let Some(n) = next {
-            if n.starts_with("link-arg=-fuse-ld=") || n == "link-arg=-fuse-ld" {
-                return Some(2);
-            }
+        if let Some(n) = next
+            && (n.starts_with("link-arg=-fuse-ld=") || n == "link-arg=-fuse-ld")
+        {
+            return Some(2);
         }
         return None;
     }
@@ -453,19 +452,16 @@ fn strip_job_flags(rest: &[String]) -> Vec<String> {
     let mut cleaned = Vec::new();
     while j < rest.len() {
         let a = &rest[j];
-        if a == "-j"
-            || a == "--jobs"
-            || a == "--build-jobs"
-            || a == "--test-threads"
-        {
+        if a == "-j" || a == "--jobs" || a == "--build-jobs" || a == "--test-threads" {
             j += 2;
             continue;
         }
-        if let Some(restn) = a.strip_prefix("-j") {
-            if !restn.is_empty() && restn.chars().all(|c| c.is_ascii_digit()) {
-                j += 1;
-                continue;
-            }
+        if let Some(restn) = a.strip_prefix("-j")
+            && !restn.is_empty()
+            && restn.chars().all(|c| c.is_ascii_digit())
+        {
+            j += 1;
+            continue;
         }
         if a.starts_with("--jobs=")
             || a.starts_with("--build-jobs=")
@@ -554,10 +550,7 @@ fn resolve_command(cmd: &[String], cargo: &Path) -> (PathBuf, Vec<String>) {
     if cmd.first().map(|s| s.as_str()) == Some("cargo") {
         (cargo.to_path_buf(), cmd[1..].to_vec())
     } else {
-        (
-            PathBuf::from(&cmd[0]),
-            cmd.get(1..).unwrap_or(&[]).to_vec(),
-        )
+        (PathBuf::from(&cmd[0]), cmd.get(1..).unwrap_or(&[]).to_vec())
     }
 }
 
@@ -567,12 +560,7 @@ enum RunOutcome {
     PressureRestart,
 }
 
-fn run_once(
-    config: &Config,
-    program: &Path,
-    args: &[String],
-    jobs: u32,
-) -> io::Result<RunOutcome> {
+fn run_once(config: &Config, program: &Path, args: &[String], jobs: u32) -> io::Result<RunOutcome> {
     let mut command = Command::new(program);
     command.args(args);
     command.stdout(Stdio::inherit());
@@ -612,17 +600,17 @@ fn run_once(
     let poll = config.poll;
     let monitor = thread::spawn(move || {
         while !stop_flag.load(Ordering::Relaxed) {
-            if let Ok(mem) = read_meminfo() {
-                if mem.available_ratio() < high_water {
-                    eprint_log(format!(
-                        "memory pressure: available {:.1}% of {} MiB (threshold {:.0}% free)",
-                        mem.available_ratio() * 100.0,
-                        mem.total_kb / 1024,
-                        high_water * 100.0
-                    ));
-                    let _ = tx.send(());
-                    return;
-                }
+            if let Ok(mem) = read_meminfo()
+                && mem.available_ratio() < high_water
+            {
+                eprint_log(format!(
+                    "memory pressure: available {:.1}% of {} MiB (threshold {:.0}% free)",
+                    mem.available_ratio() * 100.0,
+                    mem.total_kb / 1024,
+                    high_water * 100.0
+                ));
+                let _ = tx.send(());
+                return;
             }
             thread::sleep(poll);
         }
@@ -825,11 +813,11 @@ mod tests {
             "--check".into(),
         ];
         let out = with_jobs_args(&cmd, 2);
-        assert_eq!(
-            out,
-            vec!["cargo", "fmt", "--all", "--", "--check"]
+        assert_eq!(out, vec!["cargo", "fmt", "--all", "--", "--check"]);
+        assert!(
+            !out.iter()
+                .any(|a| a == "-j" || a.starts_with("-j") || a.starts_with("--jobs"))
         );
-        assert!(!out.iter().any(|a| a == "-j" || a.starts_with("-j") || a.starts_with("--jobs")));
     }
 
     #[test]
@@ -920,18 +908,12 @@ mod tests {
     #[test]
     fn force_mold_table_driven() {
         let cases = [
-            (
-                "",
-                "-C link-arg=-fuse-ld=mold",
-            ),
+            ("", "-C link-arg=-fuse-ld=mold"),
             (
                 "-C link-arg=-fuse-ld=wild -C force-unwind-tables=yes",
                 "-C force-unwind-tables=yes -C link-arg=-fuse-ld=mold",
             ),
-            (
-                "-Clink-arg=-fuse-ld=lld",
-                "-C link-arg=-fuse-ld=mold",
-            ),
+            ("-Clink-arg=-fuse-ld=lld", "-C link-arg=-fuse-ld=mold"),
             (
                 "link-arg=-fuse-ld=wild -C force-unwind-tables=yes",
                 "-C force-unwind-tables=yes -C link-arg=-fuse-ld=mold",
@@ -992,10 +974,7 @@ mod tests {
         // setting CARGO_TARGET_* leaves wild on the link line next to mold;
         // always set RUSTFLAGS when mold is on to replace build.rustflags.
         let plan = plan_mold_rustflags(true, None, None, &[None, None]);
-        assert_eq!(
-            plan.rustflags.as_deref(),
-            Some("-C link-arg=-fuse-ld=mold")
-        );
+        assert_eq!(plan.rustflags.as_deref(), Some("-C link-arg=-fuse-ld=mold"));
         assert!(!plan.remove_encoded);
         assert_eq!(plan.target_flags.len(), 2);
         assert_eq!(
@@ -1058,17 +1037,9 @@ mod tests {
 
     #[test]
     fn plan_mold_ok_uses_prior_target_env_over_defaults() {
-        let plan = plan_mold_rustflags(
-            true,
-            None,
-            None,
-            &[Some("-C opt-level=1"), None],
-        );
+        let plan = plan_mold_rustflags(true, None, None, &[Some("-C opt-level=1"), None]);
         // mold_ok always sets global RUSTFLAGS (host build.rustflags override).
-        assert_eq!(
-            plan.rustflags.as_deref(),
-            Some("-C link-arg=-fuse-ld=mold")
-        );
+        assert_eq!(plan.rustflags.as_deref(), Some("-C link-arg=-fuse-ld=mold"));
         // Prior wins over workspace default for x86_64.
         assert_eq!(
             plan.target_flags[0].1,

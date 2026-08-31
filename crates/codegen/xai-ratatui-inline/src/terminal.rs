@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ratatui::{
     CompletedFrame, Frame, TerminalOptions, Viewport,
     backend::{Backend, ClearType},
-    buffer::{Buffer, Cell},
+    buffer::{Buffer, Cell, CellDiffOption},
     layout::{Position, Rect, Size},
     style::{Color, Modifier},
 };
@@ -408,7 +408,7 @@ where
     /// so links are cleared automatically when they disappear — no out-of-band repaint.
     pub fn flush_with_links(&mut self) -> io::Result<bool>
     where
-        B: Write,
+        B: Backend<Error = io::Error> + Write,
     {
         let cur = self.current;
 
@@ -477,7 +477,7 @@ where
     }
 
     /// Queries the backend for size and resizes if it doesn't match the previous size.
-    pub fn autoresize(&mut self) -> io::Result<()> {
+    pub fn autoresize(&mut self) -> Result<(), B::Error> {
         // fixed viewports do not get autoresized
         if matches!(self.viewport, Viewport::Fullscreen | Viewport::Inline(_)) {
             let area = Rect::from((Position::ORIGIN, self.size()?));
@@ -497,7 +497,7 @@ where
     {
         self.try_draw(|frame| {
             render_callback(frame);
-            io::Result::Ok(())
+            Ok::<(), B::Error>(())
         })
     }
 
@@ -507,7 +507,7 @@ where
     pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
     where
         F: FnOnce(&mut Frame) -> Result<(), E>,
-        E: Into<io::Error>,
+        E: Into<B::Error>,
     {
         // Autoresize - otherwise we get glitches if shrinking or potential desync between widgets
         // and the terminal (if growing), which may OOB.
@@ -551,14 +551,14 @@ where
     }
 
     /// Hides the cursor.
-    pub fn hide_cursor(&mut self) -> io::Result<()> {
+    pub fn hide_cursor(&mut self) -> Result<(), B::Error> {
         self.backend.hide_cursor()?;
         self.hidden_cursor = true;
         Ok(())
     }
 
     /// Shows the cursor.
-    pub fn show_cursor(&mut self) -> io::Result<()> {
+    pub fn show_cursor(&mut self) -> Result<(), B::Error> {
         self.backend.show_cursor()?;
         self.hidden_cursor = false;
         Ok(())
@@ -566,26 +566,26 @@ where
 
     /// This is the position of the cursor after the last draw call and is returned as a tuple of `(x, y)` coordinates.
     #[deprecated = "the method get_cursor_position indicates more clearly what about the cursor to get"]
-    pub fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
+    pub fn get_cursor(&mut self) -> Result<(u16, u16), B::Error> {
         let Position { x, y } = self.get_cursor_position()?;
         Ok((x, y))
     }
 
     /// Sets the cursor position.
     #[deprecated = "the method set_cursor_position indicates more clearly what about the cursor to set"]
-    pub fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
+    pub fn set_cursor(&mut self, x: u16, y: u16) -> Result<(), B::Error> {
         self.set_cursor_position(Position { x, y })
     }
 
     /// Gets the current cursor position.
     ///
     /// This is the position of the cursor after the last draw call.
-    pub fn get_cursor_position(&mut self) -> io::Result<Position> {
+    pub fn get_cursor_position(&mut self) -> Result<Position, B::Error> {
         self.backend.get_cursor_position()
     }
 
     /// Sets the cursor position.
-    pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+    pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), B::Error> {
         let position = position.into();
         self.backend.set_cursor_position(position)?;
         self.last_known_cursor_pos = position;
@@ -593,7 +593,7 @@ where
     }
 
     /// Clear the terminal and force a full redraw on the next draw call.
-    pub fn clear(&mut self) -> io::Result<()> {
+    pub fn clear(&mut self) -> Result<(), B::Error> {
         match self.viewport {
             Viewport::Fullscreen => self.backend.clear_region(ClearType::All)?,
             Viewport::Inline(_) => {
@@ -644,7 +644,7 @@ where
     }
 
     /// Queries the real size of the backend.
-    pub fn size(&self) -> io::Result<Size> {
+    pub fn size(&self) -> Result<Size, B::Error> {
         self.backend.size()
     }
 
@@ -748,7 +748,7 @@ where
         &mut self,
         height: u16,
         draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+    ) -> Result<(), B::Error> {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
@@ -928,7 +928,7 @@ where
         &mut self,
         mut height: u16,
         draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+    ) -> Result<(), B::Error> {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
@@ -1005,7 +1005,7 @@ where
         y_offset: u16,
         lines_to_draw: u16,
         cells: &'a [Cell],
-    ) -> io::Result<&'a [Cell]> {
+    ) -> Result<&'a [Cell], B::Error> {
         let width: usize = self.last_known_area.width.into();
         let (to_draw, remainder) = cells.split_at(width * lines_to_draw as usize);
         if lines_to_draw > 0 {
@@ -1029,7 +1029,7 @@ where
         y_offset: u16,
         lines_to_draw: u16,
         cells: &'a [Cell],
-    ) -> io::Result<&'a [Cell]> {
+    ) -> Result<&'a [Cell], B::Error> {
         let width: usize = self.last_known_area.width.into();
         let (to_draw, remainder) = cells.split_at(width * lines_to_draw as usize);
         if lines_to_draw > 0 {
@@ -1047,7 +1047,7 @@ where
 
     /// Scroll the whole screen up by the given number of lines.
     #[cfg(not(feature = "scrolling-regions"))]
-    fn scroll_up(&mut self, lines_to_scroll: u16) -> io::Result<()> {
+    fn scroll_up(&mut self, lines_to_scroll: u16) -> Result<(), B::Error> {
         if lines_to_scroll > 0 {
             self.set_cursor_position(Position::new(
                 0,
@@ -1074,7 +1074,10 @@ fn diff_large<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> 
     let mut to_skip: usize = 0;
 
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
-        if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || invalidated > 0)
+            && to_skip == 0
+        {
             // Safe coordinate conversion: divide in usize, then narrow to u16.
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
@@ -1115,7 +1118,9 @@ fn diff_large_with_links<'a>(
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
         let link_changed =
             resolve_link(next_ids, next_table, i) != resolve_link(prev_ids, prev_table, i);
-        if !current.skip && (current != previous || link_changed || invalidated > 0) && to_skip == 0
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || link_changed || invalidated > 0)
+            && to_skip == 0
         {
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
@@ -1208,7 +1213,7 @@ fn compute_inline_size<B: Backend>(
     height: u16,
     size: Size,
     offset_in_previous_viewport: u16,
-) -> io::Result<(Rect, Position)> {
+) -> Result<(Rect, Position), B::Error> {
     let pos = backend.get_cursor_position()?;
     let mut row = pos.y;
 

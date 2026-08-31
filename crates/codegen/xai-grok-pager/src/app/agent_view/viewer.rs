@@ -25,8 +25,18 @@ pub(crate) enum IdleEnterQuote {
 }
 
 /// Bare typing while plan.md is open: letters and delete keys go to the
-/// composer. Ctrl/Alt/Super chords stay with the viewer (fullscreen, quit).
+/// composer. Ctrl+Backspace / Alt+Backspace / Ctrl+Delete are word-edit
+/// on that composer. Other Ctrl/Alt/Super chords stay with the viewer
+/// (fullscreen, quit, worktree).
 fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+    let word_edit = matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SUPER);
+    if word_edit {
+        return true;
+    }
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
@@ -120,10 +130,7 @@ impl AgentView {
         }
 
         if in_plan_approval && crate::input::key::RowWalk::from_key(key).is_some() {
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Prompt;
-            }
-            return InputOutcome::Changed;
+            return self.handle_plan_feedback_key(key);
         }
 
         // In plan approval, `Esc` doesn't close the viewer (use `q` / `Ctrl+\`)
@@ -140,6 +147,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
+            self.cancel_line_viewer();
             return InputOutcome::Changed;
         }
 
@@ -213,9 +221,13 @@ impl AgentView {
 
         if key!(Enter).matches(key) {
             if in_plan_approval {
-                // Commenting is explicit `c` only. Empty Enter on Preview
-                // must not steal the parked surface.
-                return InputOutcome::Changed;
+                let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
+                if focus == Some(PlanApprovalFocus::Prompt) {
+                    return self.handle_plan_feedback_key(key);
+                }
+                // Preview: empty Enter never Approves. A draft submits as
+                // a normal prompt so present cannot steal the composer.
+                return self.send_composer_as_normal_prompt();
             }
             if self.is_plan_viewer() {
                 return self.enter_casual_plan_commenting();
@@ -370,7 +382,15 @@ impl AgentView {
     /// Cancel line viewer: revert all changes.
     pub(crate) fn cancel_line_viewer(&mut self) {
         self.line_viewer = None;
-        self.prompt.textarea.cancel_undo_group();
+        self.view_plan_requested = false;
+        if self.plan_approval_view.is_some() {
+            // Keep Revise / Comment box text. `cancel_undo_group` reverts the
+            // open group and drops Undo, which is why revision notes vanished.
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.prompt.textarea.end_undo_group();
+        } else {
+            self.prompt.textarea.cancel_undo_group();
+        }
         if let Some(ref mut pav) = self.plan_approval_view {
             pav.focus = PlanApprovalFocus::Preview;
         }
@@ -424,6 +444,9 @@ impl AgentView {
         let Some(ref mut viewer) = self.line_viewer else {
             return InputOutcome::Changed;
         };
+        // `discard_in_progress_comment` needs `&mut self`. Defer it until
+        // after this `viewer` borrow ends (E0499).
+        let mut restore_stashed_on_leave_commenting = false;
 
         // `popup_area` is the list-rendered area, excluding the divider and footer rows in plan modes
         // Mouse events dispatch into `ListPaneState` against it
@@ -485,9 +508,7 @@ impl AgentView {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A click on the close button cancels
                 if close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    if self.plan_approval_view.is_none() {
-                        self.cancel_line_viewer();
-                    }
+                    self.cancel_line_viewer();
                     return InputOutcome::Changed;
                 }
                 // A click on the fullscreen button toggles fullscreen
@@ -890,6 +911,9 @@ impl AgentView {
         }
         if should_enter_commenting {
             return self.enter_casual_plan_commenting();
+        }
+        if restore_stashed_on_leave_commenting {
+            self.discard_in_progress_comment();
         }
         InputOutcome::Changed
     }

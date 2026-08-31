@@ -256,7 +256,11 @@ impl ScrollbackState {
             last_width: 0,
             layout_cache: None,
             structural_scroll_anchor: None,
-            thinking_display_mode: DisplayMode::Collapsed,
+            thinking_display_mode: if crate::appearance::cache::load_always_expand_thinking() {
+                DisplayMode::Expanded
+            } else {
+                DisplayMode::Collapsed
+            },
             tick: 0,
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
@@ -887,7 +891,7 @@ impl ScrollbackState {
         }
     }
 
-    /// Maximum number of folded-commit IDs retained for `Ctrl+E` / `/expand`.
+    /// Maximum number of folded-commit IDs retained for `Ctrl+T` / `/expand`.
     const EXPAND_RING_CAP: usize = 256;
 
     /// Record that the entry `id` was committed to native scrollback in a folded display mode (collapsed reasoning / truncated tool output).
@@ -1167,7 +1171,9 @@ impl ScrollbackState {
                     );
                 }
             } else if matches!(entry.block, RenderBlock::Thinking(_)) {
-                if entry.display_mode != DisplayMode::Expanded {
+                if crate::appearance::cache::load_always_expand_thinking() {
+                    entry.display_mode = DisplayMode::Expanded;
+                } else if entry.display_mode != DisplayMode::Expanded {
                     entry.display_mode = thinking_mode;
                 }
             } else if let Some(mode) = entry.block.finished_display_mode() {
@@ -3250,7 +3256,8 @@ mod tests {
         state.push_chunk_to_thinking(id, "deep thoughts");
         assert_eq!(
             state.get_by_id(id).unwrap().display_mode,
-            DisplayMode::Truncated
+            DisplayMode::Collapsed,
+            "[ui] always_expand_thinking off paints running thinking as a header"
         );
 
         state.finish_running(id);
@@ -3302,6 +3309,86 @@ mod tests {
             state.get_by_id(id).unwrap().display_mode,
             DisplayMode::Expanded
         );
+    }
+
+    #[test]
+    fn always_expand_thinking_finish_overrides_sticky_collapsed() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(RenderBlock::thinking_streaming());
+            state.set_last_running(true);
+            state.push_chunk_to_thinking(id, "deep thoughts");
+            state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Truncated;
+
+            state.finish_running(id);
+
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep finished thinking expanded even when session sticky is collapsed"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn always_expand_thinking_flip_rematerializes_stacked_thinking() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(false);
+            let mut state = ScrollbackState::new();
+            let first = state.push_block(RenderBlock::thinking("first thought"));
+            let second = state.push_block(RenderBlock::thinking("second thought"));
+            state.get_by_id_mut(first).unwrap().display_mode = DisplayMode::Collapsed;
+            state.get_by_id_mut(second).unwrap().display_mode = DisplayMode::Truncated;
+
+            crate::appearance::cache::set_always_expand_thinking(true);
+            state.apply_always_expand_thinking_flip(true);
+            assert_eq!(
+                state.get_by_id(first).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "turning always-expand on must expand stacked thinking"
+            );
+            assert_eq!(
+                state.get_by_id(second).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "turning always-expand on must expand every stacked thinking block"
+            );
+
+            crate::appearance::cache::set_always_expand_thinking(false);
+            state.apply_always_expand_thinking_flip(false);
+            assert_eq!(
+                state.get_by_id(first).unwrap().display_mode,
+                DisplayMode::Collapsed,
+                "turning always-expand off must collapse stacked thinking to Thought-for headers"
+            );
+            assert_eq!(
+                state.get_by_id(second).unwrap().display_mode,
+                DisplayMode::Collapsed,
+                "turning always-expand off must collapse every stacked thinking block"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn always_expand_thinking_blocks_ctrl_t_collapse() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(RenderBlock::thinking("open thought"));
+            state.apply_always_expand_thinking_flip(true);
+            state.expand_all_thinking();
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "Ctrl+T must not collapse thinking while always-expand is on"
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     fn long_wrap_text() -> String {

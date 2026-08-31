@@ -1,0 +1,27 @@
+name: Rust
+file_extensions: [rs]
+scope: source.rust
+contexts:
+  main:
+    - match: '\b(fn|let|mut|pub|use|mod|struct|enum|impl|const|static|if|else|match|for|while|loop|return|async|await|unsafe|trait|type|where|self|Self|crate|super|ref|move|dyn|as|in|break|continue|yield)\b'
+      scope: keyword.control.rust
+    - match: '//.*'
+      scope: comment.line.double-slash.rust
+    - match: '/\*'
+      push: block_comment
+    - match: '"'
+      push: string
+    - match: '''(?:\\.|[^''])'''
+      scope: string.quoted.single.rust
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.rust
+  block_comment:
+    - meta_scope: comment.block.rust
+    - match: '\*/'
+      pop: true
+  string:
+    - meta_scope: string.quoted.double.rust
+    - match: '\\.'
+      scope: constant.character.escape.rust
+    - match: '"'
+      pop: true

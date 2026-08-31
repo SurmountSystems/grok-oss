@@ -22,6 +22,8 @@ pub struct PtyConfig {
     pub cwd: Option<PathBuf>,
     /// Additional environment variables.
     pub env: HashMap<String, String>,
+    /// Inherited parent keys to drop before spawn (nextest shard vars, and similar).
+    pub env_remove: Vec<String>,
 }
 
 /// Handle to a running PTY session.
@@ -119,6 +121,9 @@ impl PtyHandle {
                 continue;
             }
             cmd.env(key, value);
+        }
+        for key in &config.env_remove {
+            cmd.env_remove(key);
         }
         // Set TERM for proper terminal detection.
         cmd.env("TERM", "xterm-256color");

@@ -26,6 +26,7 @@ windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+xai-tty-utils = { workspace = true }
 
 [lints]
 workspace = true

@@ -2455,6 +2455,25 @@ impl acp::Agent for MvpAgent {
                     "Setting auto permission mode for matching sessions"
                 );
             }
+            if want_context_only || matches!(
+                permission_mode,
+                "always-approve" | "ask" | "default" | "auto"
+            ) {
+                let enabled = want_context_only && yolo_signal != Some(true) && !enable_auto;
+                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
+                    sender_id.is_none()
+                        || h.origin_client.as_ref().map(|c| c.product.as_str())
+                            == sender_id
+                };
+                self.session_registry.for_each_resident_mut(|_, h| {
+                    if !matches_sender(h) {
+                        return;
+                    }
+                    let _ = h.cmd_tx.send(crate::session::SessionCommand::SetContextOnlyMode {
+                        enabled,
+                    });
+                });
+            }
         }
         if args.method.as_ref() == "x.ai/permissions/reset" {
             let mut updated = 0;

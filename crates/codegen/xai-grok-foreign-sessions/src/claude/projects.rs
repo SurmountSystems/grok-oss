@@ -19,7 +19,11 @@ pub(super) fn scoped_project_dirs(config_dir: &Path, cwd: &Path) -> Vec<PathBuf>
             }
         }
         if let Ok(worktrees) = repository.worktrees() {
-            for name in worktrees.iter().flatten().take(MAX_PROJECT_DIRS) {
+            // git2 0.21 StringArray::iter is Result<Option<&str>, Error>; skip missing names.
+            for name in worktrees.iter().take(MAX_PROJECT_DIRS) {
+                let Ok(Some(name)) = name else {
+                    continue;
+                };
                 if let Ok(worktree) = repository.find_worktree(name) {
                     let path = worktree.path();
                     paths.push(dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));

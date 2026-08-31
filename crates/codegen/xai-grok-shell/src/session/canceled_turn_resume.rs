@@ -8,15 +8,18 @@
 //! - on explicit user cancel (Esc / stop),
 //! - on graceful process quit (SIGTERM / first signal → Quit / `/exit`),
 //! - on `/rebuild` mid-turn cancel before re-exec,
+//! - on fearless global pause when it cancels a running primary turn (the
+//!   in-process pause gate stays in RAM; this file is the interrupted prompt),
 //! - on session load **history recovery** when no marker exists but the
 //!   loaded session still looks mid-work (unfinished subagents / running
 //!   scrollback) and a last user prompt is available.
 //!
 //! Cleared on clean successful turn finish (and rate-limit terminals). Kept
 //! on **error** terminals so reopen continues failed work. Not written for
-//! network blips alone, fearless global pause, soft stop, or **SIGKILL**
-//! (`kill -9` — no userspace handler can run; eager write is the only defense
-//! against total hard death).
+//! network blips alone, global pause when nothing is mid-turn, soft stop, or
+//! **SIGKILL** (`kill -9` — no userspace handler can run; eager write is the
+//! only defense against total hard death). The pause chip does not persist
+//! the RAM gate itself.
 //!
 //! Resume on session open is gated by `[ui] resume_canceled_turn_on_restart`
 //! (default **on**). Order on load: (A) apply marker if present **and** the
@@ -353,6 +356,13 @@ pub fn interrupted_resume_failed_toast(reason: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use xai_grok_test_support::EnvGuard;
+
+    fn isolate_grok_home() -> (TempDir, EnvGuard) {
+        let home = TempDir::new().unwrap();
+        let env = EnvGuard::set("GROK_HOME", home.path());
+        (home, env)
+    }
 
     #[test]
     fn build_rejects_empty_prompt() {
@@ -370,7 +380,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn round_trip_write_load_clear() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         // Point sessions root at temp by using an absolute cwd under temp.
         let cwd = dir.path().join("proj");
@@ -422,7 +434,9 @@ mod tests {
     /// Named contract: armed process-shutdown payload writes the same marker
     /// without AppView (signal hard-exit / first SIGTERM before Quit).
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn armed_process_shutdown_writes_cancel_resume_marker() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -448,7 +462,9 @@ mod tests {
     /// Named contract: turn-start arm+persist leaves a marker without waiting
     /// for SIGTERM / Action::Quit (killall race dogfood).
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn arm_and_persist_writes_cancel_resume_marker_eagerly() {
+        let (_home, _env) = isolate_grok_home();
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();

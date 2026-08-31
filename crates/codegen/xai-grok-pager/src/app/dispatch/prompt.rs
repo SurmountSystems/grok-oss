@@ -738,6 +738,18 @@ pub(super) fn dispatch_send_prompt_submission(
     let Some(agent) = app.agents.get_mut(&id) else {
         return prelude;
     };
+    match interject::overlay_operator_clarify(agent) {
+        interject::OverlayOperatorClarify::L3Unbothered => {
+            agent.show_toast(
+                "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
+            );
+            return vec![];
+        }
+        interject::OverlayOperatorClarify::L2(_) => {
+            return interject::dispatch_interject(app, text, Vec::new());
+        }
+        interject::OverlayOperatorClarify::None => {}
+    }
     if let Some(toast) = implement_rewrite.toast {
         agent.show_toast(&toast);
     }
@@ -855,6 +867,7 @@ pub(super) fn dispatch_send_prompt_submission(
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
+                    context_only_mode: agent.session.is_context_only(),
                     current_model_name: agent.session.models.current_model_name(),
                     available_models: agent
                         .session
@@ -1080,6 +1093,33 @@ pub(super) fn dispatch_send_prompt_submission(
             CommandResult::QueueCommand(cmd_text) => {
                 agent.session.enqueue_command(cmd_text);
             }
+            CommandResult::QueueLater {
+                text: held,
+                as_command,
+                wire_blocks,
+                display_as_skill,
+            } => {
+                if as_command {
+                    agent.session.enqueue_command(held);
+                } else {
+                    let qid = agent.session.next_queue_id;
+                    agent.session.next_queue_id += 1;
+                    agent.start_pending_live_prompt_task(&held);
+                    agent
+                        .session
+                        .pending_prompts
+                        .push_back(crate::app::agent::QueuedPrompt {
+                            wire_blocks,
+                            display_as_skill,
+                            ..crate::app::agent::QueuedPrompt::plain(
+                                qid,
+                                held,
+                                crate::app::agent::QueueEntryKind::Prompt,
+                            )
+                        });
+                }
+                skip_drain = true;
+            }
             CommandResult::InjectSkill {
                 display_text,
                 prompt_blocks,
@@ -1090,6 +1130,7 @@ pub(super) fn dispatch_send_prompt_submission(
                 // Leading skill invocation: display_as_skill owns styling (no ranges)
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
+                agent.start_pending_live_prompt_task(&display_text);
                 agent
                     .session
                     .pending_prompts
@@ -1123,11 +1164,19 @@ pub(super) fn dispatch_send_prompt_submission(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Mid-turn Enter: slash PassThrough that is not a named hold
+                // (`/goal ...`, unknown shell builtins) merges into this turn.
+                // `/queue /finish` is QueueLater above, not this arm.
+                if consume_input && agent.session.state.is_turn_running() {
+                    let images = agent.prompt.drain_images();
+                    return enqueue_if_interject_dropped(app, id, pass_text, images);
+                }
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
                     .slash_controller
                     .recognized_token_ranges(&pass_text, &agent.session.models);
+                agent.start_pending_live_prompt_task(&pass_text);
                 agent
                     .session
                     .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
@@ -1275,6 +1324,7 @@ pub(super) fn dispatch_send_prompt_submission(
             return effects;
         }
 
+        agent.start_pending_live_prompt_task(&text);
         agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
@@ -1311,6 +1361,29 @@ pub(super) fn dispatch_send_prompt_submission(
         if let Some(agent) = app.agents.get_mut(&id) {
             agent.maybe_toast_plan_feedback_queue();
         }
+    }
+
+    if skip_drain {
+        if let Some(agent) = app.agents.get_mut(&id)
+            && consume_input
+        {
+            let trimmed_key = text.trim().to_string();
+            if !trimmed_key.is_empty() {
+                agent
+                    .session
+                    .prompt_history
+                    .retain(|p| p.trim() != trimmed_key);
+                agent.session.prompt_history.insert(0, text.clone());
+                if agent.session.prompt_history.len() > 200 {
+                    agent.session.prompt_history.truncate(200);
+                }
+            }
+        }
+        app.show_toast("Queued on the prompt queue. It will not run this turn.");
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.persist_pending_prompts();
+        }
+        return vec![];
     }
 
     let drain = {

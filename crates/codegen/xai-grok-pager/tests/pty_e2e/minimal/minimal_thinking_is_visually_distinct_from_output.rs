@@ -189,14 +189,14 @@ async fn minimal_thinking_is_visually_distinct_from_output() {
 }
 
 /// The collapsed header advertises the only way back into the body, and
-/// `Ctrl+E` must honour the advertisement by re-printing it in full (K10).
+/// `Ctrl+T` must honour the advertisement by re-printing it in full (K10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens() {
+async fn minimal_collapse_thinking_toggle_folds_and_ctrl_t_reopens() {
     let Turn { mut harness, .. } = run_reasoning_turn(true).await;
 
     harness
-        .wait_for_full_text("ctrl+e to expand", Duration::from_secs(10))
+        .wait_for_full_text("ctrl+t to expand", Duration::from_secs(10))
         .unwrap_or_else(|e| {
             panic!(
                 "collapsed reasoning must advertise the expand key: {e}\nfull:\n{}",
@@ -213,16 +213,16 @@ async fn minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens() {
         harness.full_text()
     );
 
-    harness.inject_keys(b"\x05").expect("ctrl+e");
+    harness.inject_keys(b"\x14").expect("ctrl+t");
     harness
         .wait_for_full_text(REASONING_SENTINEL, Duration::from_secs(10))
         .unwrap_or_else(|e| {
             panic!(
-                "ctrl+e must re-print the folded reasoning: {e}\nfull:\n{}",
+                "ctrl+t must re-print the folded reasoning: {e}\nfull:\n{}",
                 harness.full_text()
             )
         });
-    eprintln!("─── after ctrl+e ───\n{}\n───", harness.screen_contents());
+    eprintln!("─── after ctrl+t ───\n{}\n───", harness.screen_contents());
 
     assert!(
         !harness.contains_text("panicked"),

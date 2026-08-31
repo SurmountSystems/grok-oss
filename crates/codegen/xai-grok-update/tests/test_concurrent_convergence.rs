@@ -121,7 +121,7 @@ exit 0
 fn gh_download_count(g: &FakeBinGuard) -> usize {
     g.args_log()
         .iter()
-        .filter(|l| l.contains("release download"))
+        .filter(|l| l.contains("release download") && !l.contains(".sha256"))
         .count()
 }
 
@@ -131,7 +131,7 @@ fn setup_gh_release(running_version: &str) -> FakeBinGuard {
     set_test_version(running_version);
     // SAFETY: serial_test ensures no race; reset_home clears this between tests.
     unsafe { std::env::set_var("GROK_INSTALLER", "gh-release") };
-    FakeBinGuard::install("gh", fake_gh_serving_releases)
+    FakeBinGuard::install_gh_serving_releases()
 }
 
 // Convergence: ensure_latest_on_disk downloads once, then every subsequent pass (the leader's hourly re-entry) converges

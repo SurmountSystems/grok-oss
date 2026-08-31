@@ -325,3 +325,68 @@ exit "$exit_code"
 "#
     )
 }
+
+/// Fake `gh` that lists releases and downloads a binary plus the published
+/// `${artifact}.sha256` GitHub release asset. Not SHA-1.
+///
+/// Files under the fake's dir:
+/// - `gh-stable-only-stdout` / `gh-with-pre-stdout` — `release list`
+/// - `gh-artifact` — non-checksum download bytes (default: [`small_good_artifact`])
+/// - `gh-sha256` — checksum file body (default: GNU line for that default artifact)
+/// - `gh-sha256-missing` — if present, checksum downloads exit 1
+pub fn fake_gh_serving_releases(dir: &Path) -> String {
+    let dq = single_quote_for_sh(dir);
+    // SHA-256 of [`small_good_artifact`]. Must stay in lockstep with
+    // `artifact_sha256` tests. Not SHA-1.
+    let default_sha = small_good_artifact_sha256();
+    format!(
+        r#"#!/bin/sh
+echo "$@" >> {dq}/gh-args.log
+case "$*" in
+  *"release list"*)
+    if echo "$@" | grep -q '\-\-exclude-pre-releases'; then
+      if [ -f {dq}/gh-stable-only-stdout ]; then cat {dq}/gh-stable-only-stdout; fi
+    else
+      if [ -f {dq}/gh-with-pre-stdout ]; then cat {dq}/gh-with-pre-stdout; fi
+    fi
+    ;;
+  *"release download"*)
+    out=""
+    pattern=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--output" ]; then out="$a"; fi
+      if [ "$prev" = "--pattern" ]; then pattern="$a"; fi
+      prev="$a"
+    done
+    case "$pattern" in
+      *.sha256)
+        if [ -f {dq}/gh-sha256-missing ]; then
+          echo "no matching assets" >&2
+          exit 1
+        fi
+        if [ -n "$out" ]; then
+          if [ -f {dq}/gh-sha256 ]; then
+            cat {dq}/gh-sha256 > "$out"
+          else
+            printf '%s  grok\n' '{default_sha}' > "$out"
+          fi
+        fi
+        ;;
+      *)
+        if [ -n "$out" ]; then
+          if [ -f {dq}/gh-artifact ]; then
+            cat {dq}/gh-artifact > "$out"
+          else
+            printf '#!/bin/sh\nexit 0\n' > "$out"
+          fi
+          chmod +x "$out"
+        fi
+        ;;
+    esac
+    ;;
+esac
+exit 0
+"#
+    )
+}

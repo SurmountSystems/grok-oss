@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::{Value, json};
 
-use xai_grok_mcp::mcp_http_client::{McpHttpClient, WarnBudget};
+use xai_grok_mcp::mcp_http_client::{McpHttpClient, WarnBudget, reqwest_client};
 use xai_grok_mcp::rmcp::ServiceExt;
 use xai_grok_mcp::rmcp::transport::StreamableHttpClientTransport;
 use xai_grok_mcp::rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -75,7 +75,7 @@ async fn spawn_fake_server() -> (String, Arc<AtomicUsize>) {
 async fn throttled_client_does_not_affect_healthy_server() {
     let (url, gets) = spawn_fake_server().await;
     let throttled = McpHttpClient::new(
-        reqwest::Client::default(),
+        reqwest_client().expect("MCP HTTP client must construct"),
         "fake-server",
         WarnBudget::default(),
     );

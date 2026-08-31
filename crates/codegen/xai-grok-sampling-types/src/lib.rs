@@ -6,6 +6,7 @@
 
 #![deny(clippy::indexing_slicing)]
 
+pub mod billing_credits_card;
 pub mod conversation;
 pub mod doom_loop;
 pub mod error;
@@ -15,6 +16,14 @@ pub mod serde_helpers;
 pub mod tool_overrides;
 pub mod types;
 
+pub use self::billing_credits_card::{
+    BILLING_CREDITS_CARD_NAMED_FIELD, BillingCreditsCard,
+    billing_credits_card_from_supergrok_prepaid_balance,
+    billing_credits_cents_from_core_invoice_prepaid_remaining,
+    billing_credits_usd_from_core_invoice_prepaid_remaining,
+    billing_credits_usd_from_included_period_percent, billing_credits_usd_from_named_json_field,
+    current_billing_credits_usd, prefer_live_documented_usd_over_stored,
+};
 pub use self::conversation::*;
 pub use self::doom_loop::{
     DEFAULT_EXACT_REPETITION_MIN_TOKENS, DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER,

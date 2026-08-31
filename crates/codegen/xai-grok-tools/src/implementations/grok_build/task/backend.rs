@@ -556,6 +556,56 @@ impl SubagentBackend for ChannelBackend {
         })
     }
 
+    async fn spawn_registered(&self, mut request: SubagentRequest) -> Result<(), ToolError> {
+        if let Some(parent_session_id) = self.parent_session_id.as_deref() {
+            request.parent_session_id = parent_session_id.to_owned();
+        }
+        let (result_tx, result_rx) = oneshot::channel();
+        let (admitted_tx, admitted_rx) = oneshot::channel();
+        let bg_id = request.id.clone();
+        let bg_type = request.subagent_type.clone();
+        self.tx
+            .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                request: Box::new(request),
+                result_tx,
+                admitted_tx: Some(admitted_tx),
+            }))
+            .map_err(|_| {
+                ToolError::custom(
+                    "channel_closed",
+                    "Subagent coordinator channel closed — cannot spawn subagent",
+                )
+            })?;
+        tokio::spawn(async move {
+            match result_rx.await {
+                Ok(result) if !result.success => {
+                    tracing::error!(
+                        subagent_id = %bg_id,
+                        subagent_type = %bg_type,
+                        error = ?result.error,
+                        "background spawn rejected by coordinator",
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        subagent_id = %bg_id,
+                        subagent_type = %bg_type,
+                        "background spawn result channel dropped",
+                    );
+                }
+                Ok(_) => {}
+            }
+        });
+        match admitted_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(ToolError::invalid_arguments(message)),
+            Err(_) => Err(ToolError::custom(
+                "channel_closed",
+                "Subagent coordinator dropped spawn admission — cannot spawn subagent",
+            )),
+        }
+    }
+
     async fn query(
         &self,
         id: &str,

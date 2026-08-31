@@ -523,6 +523,9 @@ impl AcpUpdateTracker {
     /// Current activity within the turn, derived from in-flight state. When [`Self::session_cwd`] is set, execute
     /// activity titles omit a leading `cd <cwd> &&` / `;` that only restates the session working directory.
     pub fn activity(&self) -> Option<TurnActivity> {
+        if let Some(waiting) = self.activity_known_blocking_wait() {
+            return Some(waiting);
+        }
         if self.retry_activity.is_some() {
             return self.retry_activity.clone();
         }
@@ -641,9 +644,29 @@ impl AcpUpdateTracker {
         });
     }
     pub fn note_context_used(&mut self, used: u64) {
-        if let Some(pending) = self.pending_compaction.as_mut() {
-            pending.last_used = Some(used);
+        let Some(pending) = self.pending_compaction.as_mut() else {
+            return;
+        };
+        // Pre-compact ACP `totalTokens` can flush after AutoCompactCompleted.
+        // Do not confirm a count above the compact remainder.
+        if used > pending.estimate_after {
+            return;
         }
+        pending.last_used = Some(pending.last_used.map_or(used, |prev| prev.min(used)));
+    }
+
+    /// Highest occupancy the chip may take while a compact remainder is pending.
+    ///
+    /// Stale thought-chunk `totalTokens` from before compact must not raise
+    /// the bar back to the pre-compact estimate.
+    pub fn compact_occupancy_ceiling(&self) -> Option<u64> {
+        let pending = self.pending_compaction.as_ref()?;
+        Some(
+            pending
+                .last_used
+                .unwrap_or(pending.estimate_after)
+                .min(pending.estimate_after),
+        )
     }
     /// Set a retry-related activity override.
     /// Called by the ACP handler when `ExtNotification` `RetryState::Retrying` arrives.
@@ -718,7 +741,9 @@ impl AcpUpdateTracker {
     pub fn note_tool_call_arguments_delta(&mut self, name: Option<&str>, tool_index: u32) -> bool {
         let now = std::time::Instant::now();
         let retry_cleared = self.retry_activity.take().is_some();
+        let already_capped = self.has_capped_tool_call_write();
         let expired = self.has_stale_tool_call_write();
+        let new_stream = !already_capped && (self.writing_tool_call.is_none() || expired);
         if self.writing_tool_names.len() < MAX_WRITING_TOOL_NAMES
             || self.writing_tool_names.contains_key(&tool_index)
         {
@@ -741,10 +766,16 @@ impl AcpUpdateTracker {
         let changed =
             expired || self.writing_tool_call.as_ref().map(|(writing, _)| writing) != Some(&next);
         self.writing_tool_call = Some((next, now));
+        if new_stream {
+            self.writing_stream_started_at = Some(now);
+        }
         retry_cleared || changed
     }
     /// The in-flight write while its deltas are fresh; a stream silent past [`WRITING_DELTA_STALE_AFTER`] is treated as no longer writing.
     fn fresh_writing_tool_call(&self) -> Option<&WritingToolCall> {
+        if self.has_capped_tool_call_write() {
+            return None;
+        }
         self.writing_tool_call
             .as_ref()
             .filter(|(_, at)| at.elapsed() < WRITING_DELTA_STALE_AFTER)
@@ -755,6 +786,12 @@ impl AcpUpdateTracker {
         self.writing_tool_call
             .as_ref()
             .is_some_and(|(_, at)| at.elapsed() >= WRITING_DELTA_STALE_AFTER)
+    }
+    /// A write-argument stream that has run past [`WRITING_STREAM_MAX`] from
+    /// its first delta, even if later deltas are still arriving.
+    pub(crate) fn has_capped_tool_call_write(&self) -> bool {
+        self.writing_stream_started_at
+            .is_some_and(|at| at.elapsed() >= WRITING_STREAM_MAX)
     }
     /// Backdate the write's delta stamp (staleness tests).
     #[cfg(test)]
@@ -997,8 +1034,7 @@ impl AcpUpdateTracker {
         }
         let is_agent_output = is_agent_output_update(&update);
         if is_agent_output && !matches!(&update, acp::SessionUpdate::ToolCallUpdate(_)) {
-            self.writing_tool_call = None;
-            self.writing_tool_names.clear();
+            self.clear_writing_tool_call();
         }
         let changed = match update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {

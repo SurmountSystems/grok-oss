@@ -1633,6 +1633,7 @@ impl AppView {
             pending_gate_verification: None,
             gate_verify_gen: 0,
             reconnect_pending: false,
+            pending_exit_plan_mode: None,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
@@ -2298,6 +2299,41 @@ impl AppView {
     }
 }
 impl AppView {
+    /// Stamp Esc as the cancel gesture when the double-press arm fires.
+    /// Overlay cancel targets the nested child; otherwise the parent.
+    fn stamp_esc_cancel_trigger_hint(&mut self) {
+        let ActiveView::Agent(id) = self.active_view else {
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        if let Some(child_sid) = agent.active_subagent.clone()
+            && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        {
+            child.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+            return;
+        }
+        agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+    }
+
+    /// Nested L2/L3 overlay Esc closes the view. It is not cancel confirm.
+    fn nested_overlay_esc_would_dismiss(&self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        let Some(agent) = self.agents.get(&id) else {
+            return false;
+        };
+        let Some(child_sid) = agent.active_subagent.as_ref() else {
+            return false;
+        };
+        agent
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|child| child.nested_overlay_esc_dismisses())
+    }
+
     /// Handle a terminal event. Routes through the input layer stack:
     /// Pending action check (double-press confirmation)
     /// Quit always goes through double-press confirmation, even when escalated from agent-level (e.g., Ctrl-C while cancelling).
@@ -2345,10 +2381,20 @@ impl AppView {
                 })
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
-                let action = self.pending_action.take().unwrap().action;
-                return InputOutcome::Action(action);
+                if matches!(pending.action, Action::CancelTurn)
+                    && self.nested_overlay_esc_would_dismiss()
+                {
+                    self.pending_action = None;
+                } else {
+                    let action = self.pending_action.take().unwrap().action;
+                    if matches!(action, Action::CancelTurn) {
+                        self.stamp_esc_cancel_trigger_hint();
+                    }
+                    return InputOutcome::Action(action);
+                }
+            } else {
+                self.pending_action = None;
             }
-            self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
         if let Event::Mouse(mouse) = ev
@@ -4250,15 +4296,18 @@ impl AppView {
     /// The full-TUI Ctrl+T toggles the todo overlay pane, which minimal never renders.
     /// Committed terminal text can't be mutated, so expansion is an honest re-print.
     fn minimal_key_intercept(&mut self, key: &crossterm::event::KeyEvent) -> Option<InputOutcome> {
-        if key!('t', CONTROL).matches(key) {
+        if key!('t', CONTROL).matches(key) || key!('e', CONTROL).matches(key) {
+            self.minimal_expand_last();
+        } else if self
+            .registry
+            .matches_id(crate::actions::ActionId::ToggleTodos, key)
+        {
             self.minimal_state.show_todos = !self.minimal_state.show_todos;
         } else if self
             .registry
             .matches_id(crate::actions::ActionId::ToggleQueue, key)
         {
             return Some(InputOutcome::Action(crate::app::actions::Action::ShowQueue));
-        } else if key!('e', CONTROL).matches(key) {
-            self.minimal_expand_last();
         } else if key!('o', CONTROL).matches(key) {
             if crate::minimal_api::minimal_ctrl_o_opens_transcript(self) {
                 return Some(InputOutcome::Action(
@@ -5346,6 +5395,7 @@ impl AppView {
             needs_redraw |= agent.resize_preview_needs_tick();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
+                needs_redraw |= child_view.tasks.tick();
                 needs_redraw |= child_view.tick_toast();
                 needs_redraw |= child_view.tick_ephemeral_tip();
                 needs_redraw |= child_view.tick_mode_banner();
@@ -5738,13 +5788,14 @@ impl AppView {
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
-                        child.toast.is_some()
+                        child.has_live_work_animation()
+                            || child.toast.is_some()
                             || child.ephemeral_tip_needs_tick()
                             || child.mode_switch_banner.is_some()
                             || child.has_drag_autoscroll()
                             || child.selection_created_at.is_some()
                             || (agent.active_subagent.as_deref() == Some(sid.as_str())
-                                && child.scrollback.needs_animation())
+                                && (child.scrollback.needs_animation() || child.tasks.needs_tick()))
                             || child.any_cancel_pending()
                             || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()

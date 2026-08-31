@@ -168,6 +168,56 @@ fn is_busy_code(code: rusqlite::ErrorCode) -> bool {
     matches!(code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
 }
 
+/// Errors from the one-time journal conversion (and the CREATE that follows)
+/// that another opener can ride out by closing and retrying.
+///
+/// `PRAGMA journal_mode=WAL` needs an exclusive lock and does not always
+/// invoke the busy handler. SQLITE_BUSY also does not roll back the implicit
+/// transaction that pragma started, so a later attempt on the same connection
+/// fails with SQLITE_ERROR ("cannot change into wal mode from within a
+/// transaction") instead of BUSY. Concurrent `-wal`/`-shm` create uses
+/// CANTOPEN / IOERR / PROTOCOL as well.
+fn is_retryable_sqlite(e: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode;
+    match e {
+        rusqlite::Error::SqliteFailure(f, msg) => {
+            matches!(
+                f.code,
+                ErrorCode::DatabaseBusy
+                    | ErrorCode::DatabaseLocked
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::FileLockingProtocolFailed
+                    | ErrorCode::SchemaChanged
+            ) || msg.as_deref().is_some_and(|m| {
+                let m = m.to_ascii_lowercase();
+                m.contains("wal mode from within a transaction")
+                    || m.contains("database is locked")
+                    || m.contains("database is busy")
+            })
+        }
+        _ => false,
+    }
+}
+
+fn is_retryable_open_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(is_retryable_sqlite)
+    })
+}
+
+/// Spread concurrent WAL converters so they do not all re-take SHARED on the
+/// same 20ms tick.
+fn journal_retry_pause() -> Duration {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    Duration::from_millis(20 + hasher.finish() % 32)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqliteFailureKind {
     Busy,
@@ -212,10 +262,47 @@ impl WorktreeDb {
     fn open_at_with_journal_mode(path: &Path, journal_mode: JournalMode) -> Result<Self> {
         // Per-host sibling on network mounts (see JournalMode::effective_db_path).
         let path = journal_mode.effective_db_path(path);
-        let conn = Connection::open(&path)
+        // WAL conversion ignores busy_timeout and needs an exclusive lock.
+        // Same-connection retry cannot drop peer SHARED locks, so a failed
+        // attempt closes the handle and another opener retries until the
+        // shared budget. One deadline: do not stack a second 10s wait.
+        let deadline = Instant::now() + BUSY_RETRY_BUDGET;
+        loop {
+            match Self::open_at_with_journal_mode_once(&path, journal_mode, deadline) {
+                Ok(db) => return Ok(db),
+                Err(e) if is_retryable_open_error(&e) => {
+                    let pause = journal_retry_pause();
+                    if Instant::now() + pause >= deadline {
+                        return Err(e);
+                    }
+                    std::thread::sleep(pause);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn open_at_with_journal_mode_once(
+        path: &Path,
+        journal_mode: JournalMode,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let conn = Connection::open(path)
             .with_context(|| format!("failed to open worktree DB: {}", path.display()))?;
+        // Fail-fast WAL conversion still returns immediately; paths that do
+        // honor the handler wait at most 1s so the outer loop can close.
+        conn.busy_timeout(remaining.clamp(Duration::from_millis(20), Duration::from_millis(1000)))
+            .context("failed to set busy_timeout")?;
         let db = Self { conn };
-        db.set_journal_mode(journal_mode)?;
+        if let Err(e) = db.set_journal_mode(journal_mode) {
+            db.clear_failed_journal_attempt();
+            return Err(e);
+        }
+        // Matches xai-sqlite-journal's post-conversion default (and INIT_SQL).
+        db.conn
+            .busy_timeout(Duration::from_millis(5000))
+            .context("failed to set busy_timeout")?;
         db.init_schema()?;
         Ok(db)
     }

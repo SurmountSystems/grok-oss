@@ -137,6 +137,51 @@ mod auto_compact_threshold_tests {
         assert_eq!(t.absolute_tokens(500_000), 450_000);
         assert_eq!(t.as_percent_of(500_000), 90);
     }
+
+    /// L1 uses the catalog window. Nested L2/L3 never exceed 200k even when
+    /// the catalog is 500k.
+    #[test]
+    fn session_sampling_window_is_catalog_on_l1_and_200k_when_nested() {
+        assert_eq!(session_sampling_window(500_000, false), 500_000);
+        assert_eq!(session_sampling_window(500_000, true), 200_000);
+        assert_eq!(session_sampling_window(128_000, true), 128_000);
+        assert_eq!(
+            session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, false),
+            GROK_45_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            session_sampling_window(GROK_45_CONTEXT_WINDOW_TOKENS, true),
+            NESTED_SESSION_CONTEXT_CAP
+        );
+    }
+
+    #[test]
+    fn attention_target_is_forty_percent_of_the_running_session_window() {
+        assert_eq!(SESSION_ATTENTION_TARGET_PERCENT, 40);
+        assert_eq!(session_attention_target_tokens(500_000), 200_000);
+        assert_eq!(session_attention_target_tokens(200_000), 80_000);
+    }
+
+    /// AUTO compact on L1 is 95% of 500k (475k), not the old 200k nested cap.
+    #[test]
+    fn main_session_auto_compact_knee_is_not_the_old_200k_l1_cap() {
+        let window = session_sampling_window(500_000, false);
+        assert_eq!(window, 500_000);
+        assert_eq!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(window),
+            475_000
+        );
+        assert!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(window) > 200_000,
+            "L1 auto-compact must not fire at the old 200k nested cap"
+        );
+        let nested = session_sampling_window(500_000, true);
+        assert_eq!(nested, 200_000);
+        assert_eq!(
+            AutoCompactThreshold::Percent(95).absolute_tokens(nested),
+            190_000
+        );
+    }
 }
 
 /// Minimum character count for a cleaned summary seed.

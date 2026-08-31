@@ -43,6 +43,7 @@ xai-grok-version = { workspace = true }
 async-openai = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
+# crates.io bm25 2.3 (delayed index).
 bm25 = "2.3"
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -109,7 +110,7 @@ futures-util = { workspace = true }
 urlencoding = { workspace = true }
 gethostname = { workspace = true }
 gcloud-storage = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 notify = { workspace = true }

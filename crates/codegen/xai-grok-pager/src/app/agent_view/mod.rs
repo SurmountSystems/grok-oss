@@ -350,6 +350,53 @@ impl HitArea {
         self.hovered = false;
     }
 }
+
+/// 1-based index and size of the live fork family that contains `current`
+/// (the living parent plus its forks, in pager insertion order).
+///
+/// Used to paint the upper-left forked-conversation switcher. A family of
+/// one is still returned so a lone fork can show `[Dashboard]` without
+/// cycle chips.
+pub(crate) fn fork_family_position(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Option<(usize, usize)> {
+    let family = fork_family_ids(agents, current);
+    let idx = family.iter().position(|id| *id == current)?;
+    Some((idx + 1, family.len()))
+}
+
+fn fork_family_root(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> crate::app::agent::AgentId {
+    let mut id = current;
+    for _ in 0..agents.len().saturating_add(1) {
+        let Some(parent) = agents.get(&id).and_then(|a| a.session.forked_from) else {
+            break;
+        };
+        if parent == id || !agents.contains_key(&parent) {
+            break;
+        }
+        id = parent;
+    }
+    id
+}
+
+fn fork_family_ids(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Vec<crate::app::agent::AgentId> {
+    if !agents.contains_key(&current) {
+        return Vec::new();
+    }
+    let root = fork_family_root(agents, current);
+    agents
+        .keys()
+        .copied()
+        .filter(|id| fork_family_root(agents, *id) == root)
+        .collect()
+}
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
 /// These modes are **mutually exclusive**: only one can be active at a time.
@@ -940,6 +987,10 @@ pub struct AgentView {
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
     pub turn_started_at: Option<Instant>,
+    /// Live prompt-as-task rows keyed by client prompt_id (ULID in grok_oss.db).
+    pub(crate) live_prompt_tasks: HashMap<String, xai_grok_shell::grok_oss::LivePromptTask>,
+    /// Composer submit minted a prompt_task before drain assigned prompt_id.
+    pub(crate) pending_live_prompt_tasks: VecDeque<xai_grok_shell::grok_oss::LivePromptTask>,
     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
     pub first_activity_logged_for: Option<Instant>,
     /// Accumulated duration the turn timer was paused (while the user was
@@ -1328,6 +1379,12 @@ pub struct AgentView {
     /// Whether that overlay's cycle order holds more than one agent, i.e.
     /// whether the header shows its `‹ i/n ›` switcher. Updated every frame by `draw` beside [`Self::in_dashboard_overlay`], and read from the same place: the shortcuts bar builds the pane's hints once for both the bar and the cheatsheet, neither of which can see `draw`'s arguments.
     pub(crate) overlay_can_cycle: bool,
+    /// 1-based index and family size for live parent/fork siblings in this
+    /// pager. Set by `AppView` before draw. `Some((_, n))` with `n > 1` means
+    /// the upper-left status header must paint the forked-conversation
+    /// switcher. A lone fork (parent gone, no siblings) still paints
+    /// `[Dashboard]` from [`crate::app::agent::AgentSession::forked_from`].
+    pub(crate) fork_family_position: Option<(usize, usize)>,
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Renders as the top-bar MCP chip (`views::agent_status::mcp_status_line`).
@@ -2434,6 +2491,7 @@ pub(crate) mod test_fixtures {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2500,6 +2558,7 @@ pub(crate) mod test_fixtures {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -3336,6 +3395,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

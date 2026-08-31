@@ -46,6 +46,11 @@ pub fn list_running_sessions() -> io::Result<Vec<RunningSessionRow>> {
 }
 
 /// Flock-safe live grok-oss rows under `root`.
+///
+/// Filter is [`xai_grok_shell::util::is_grok_process`] (Linux `/proc` cmdline
+/// contains `grok`). That is not
+/// [`xai_grok_active_sessions::is_grok_oss_cli_identity`]: `/rebuild` SIGUSR1
+/// uses the grok-oss CLI/exe classifier so a stock `grok` comm is not signaled.
 pub fn list_running_sessions_in(root: &Path) -> io::Result<Vec<RunningSessionRow>> {
     let live = xai_grok_active_sessions::list_live_in(root)?;
     let mut rows: Vec<RunningSessionRow> = live

@@ -89,6 +89,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 fn test_app() -> AppView {
+    if std::env::var_os("GROK_HOME").is_none() {
+        let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+        }
+    }
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
         pending_startup: None,
@@ -312,6 +319,7 @@ fn test_app() -> AppView {
         pending_pager_ansi: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
+        pending_exit_plan_mode: None,
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,
@@ -374,6 +382,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
+        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -604,6 +613,13 @@ pub(super) fn end_turn() -> Action {
 /// Plant a Build session under the process `grok_home()` (OnceLock-cached; do not rely on setting `GROK_HOME` mid-process).
 /// Caller must remove `sess_dir`.
 fn plant_local_build_session(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    if std::env::var_os("GROK_HOME").is_none() {
+        let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+        }
+    }
     let home = xai_grok_shell::util::grok_home::grok_home();
     let encoded = xai_grok_shell::util::grok_home::encode_cwd_dirname(&cwd.to_string_lossy());
     let sess_dir = home.join("sessions").join(encoded).join(session_id);
@@ -651,6 +667,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -815,6 +832,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

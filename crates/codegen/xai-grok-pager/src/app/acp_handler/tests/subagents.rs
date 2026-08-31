@@ -2332,6 +2332,23 @@
             "impl: residual slice",
             "todo contents must survive compact"
         );
+        let counts = agent.todo.counts();
+        assert_eq!(
+            counts.in_progress, 1,
+            "compact must keep in-progress rows on the painted board"
+        );
+        assert_eq!(
+            counts.pending, 1,
+            "compact must keep pending rows on the painted board"
+        );
+        assert!(
+            counts.total() > 0,
+            "compact must not empty the painted board so the status badge can still render"
+        );
+        assert!(
+            !agent.todo.overlay.visible,
+            "compact must not auto-open the todo pane"
+        );
         assert_eq!(
             agent.context_state.as_ref().map(|c| c.used),
             Some(25_000),

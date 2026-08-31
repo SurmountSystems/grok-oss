@@ -1,0 +1,41 @@
+name: TypeScript
+file_extensions: [ts, tsx, mts, cts]
+scope: source.ts
+contexts:
+  main:
+    - match: '\b(function|const|let|var|if|else|for|while|return|class|import|export|from|async|await|new|this|try|catch|finally|throw|switch|case|break|continue|typeof|instanceof|in|of|yield|default|interface|type|enum|implements|extends|public|private|protected|readonly)\b'
+      scope: keyword.control.ts
+    - match: '//.*'
+      scope: comment.line.double-slash.ts
+    - match: '/\*'
+      push: block_comment
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '`'
+      push: template
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.ts
+  block_comment:
+    - meta_scope: comment.block.ts
+    - match: '\*/'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.ts
+    - match: '\\.'
+      scope: constant.character.escape.ts
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.ts
+    - match: '\\.'
+      scope: constant.character.escape.ts
+    - match: "'"
+      pop: true
+  template:
+    - meta_scope: string.quoted.other.template.ts
+    - match: '\\.'
+      scope: constant.character.escape.ts
+    - match: '`'
+      pop: true

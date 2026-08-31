@@ -74,6 +74,13 @@ fn app_draw_drains_deferred_release_after_flush() {
     );
 }
 pub(crate) fn test_app() -> AppView {
+    if std::env::var_os("GROK_HOME").is_none() {
+        let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&home);
+        unsafe {
+            std::env::set_var("GROK_HOME", &home);
+        }
+    }
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AppView {
         pending_startup: None,
@@ -287,6 +294,7 @@ pub(crate) fn test_app() -> AppView {
         pending_pager_ansi: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
+        pending_exit_plan_mode: None,
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,
@@ -347,6 +355,7 @@ pub(crate) fn test_app_with_agent() -> AppView {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -554,6 +563,7 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
+        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -2512,20 +2522,38 @@ fn minimal_ctrl_backslash_is_inert_while_full_modes_open_dashboard() {
     }
 }
 #[test]
-fn minimal_ctrl_t_toggles_todo_panel() {
+fn minimal_ctrl_shift_t_toggles_todo_panel() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = ScreenMode::Minimal;
+    assert!(!app.minimal_state.show_todos);
+    let out = app.handle_input(&key_event(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(matches!(out, InputOutcome::Changed));
+    assert!(
+        app.minimal_state.show_todos,
+        "Ctrl+Shift+T pins the panel visible"
+    );
+    let _ = app.handle_input(&key_event(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(
+        !app.minimal_state.show_todos,
+        "Ctrl+Shift+T again unpins the panel"
+    );
+}
+#[test]
+fn minimal_ctrl_t_expands_folded_and_does_not_pin_todos() {
     let mut app = test_app_with_agent();
     app.screen_mode = ScreenMode::Minimal;
     assert!(!app.minimal_state.show_todos);
     let out = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(matches!(out, InputOutcome::Changed));
     assert!(
-        app.minimal_state.show_todos,
-        "Ctrl+T pins the panel visible"
-    );
-    let _ = app.handle_input(&key_event(KeyCode::Char('t'), KeyModifiers::CONTROL));
-    assert!(
         !app.minimal_state.show_todos,
-        "Ctrl+T again unpins the panel"
+        "Ctrl+T is thinking/fold expand in minimal, not the todo pin"
     );
 }
 #[test]
@@ -3904,8 +3932,16 @@ fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
         "Esc during a wake turn must swallow, got {outcome:?}"
     );
     assert!(
-        app.pending_action.is_none(),
-        "must not arm idle clear/rewind"
+        matches!(
+            app.pending_action.as_ref().map(|p| &p.action),
+            Some(Action::CancelTurn)
+        ),
+        "must arm cancel, not idle clear/rewind"
+    );
+    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "second Esc during a wake turn must cancel, got {outcome:?}"
     );
     assert!(
         app.agents
@@ -3992,6 +4028,8 @@ fn esc_cancel_grace_holds_rewind_arm_then_expires() {
         .push_block(crate::scrollback::block::RenderBlock::user_prompt(
             "earlier",
         ));
+    let first = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(first, InputOutcome::Changed));
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Changed));
     assert!(
@@ -6550,6 +6588,19 @@ fn overlay_esc_running_turn_non_vim_hints_not_backout() {
     agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
     agent.session.state = AgentState::TurnRunning;
     agent.vim_mode = false;
+    let first = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(first, InputOutcome::Changed),
+        "running-turn dashboard overlay first Esc must arm confirm, got {first:?}",
+    );
+    assert!(
+        !matches!(first, InputOutcome::Action(Action::DashboardOverlayExit)),
+        "Esc must not detach mid-turn",
+    );
+    assert!(matches!(
+        app.pending_action.as_ref().map(|p| &p.action),
+        Some(Action::CancelTurn)
+    ));
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),

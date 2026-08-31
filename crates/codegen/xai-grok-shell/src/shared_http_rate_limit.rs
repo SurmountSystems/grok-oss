@@ -154,9 +154,8 @@ mod tests {
             unsafe { std::env::remove_var(DISABLE_ENV) };
         }
         let out = f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) }
         }
         out
     }
@@ -340,11 +339,14 @@ mod tests {
 
     #[tokio::test]
     async fn wait_before_http_respects_shared_cooldown() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os(DISABLE_ENV);
-        if prev.is_some() {
-            unsafe { std::env::remove_var(DISABLE_ENV) };
-        }
+        let prev = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(DISABLE_ENV);
+            if prev.is_some() {
+                unsafe { std::env::remove_var(DISABLE_ENV) };
+            }
+            prev
+        };
 
         let dir = TempDir::new().unwrap();
         let store = SharedRateLimitStore::open(dir.path()).unwrap();
@@ -364,9 +366,9 @@ mod tests {
         wait_before_http(&key).await;
         assert_eq!(store.remaining(&key), Duration::ZERO);
 
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => unsafe { std::env::remove_var(DISABLE_ENV) },
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) }
         }
     }
 }

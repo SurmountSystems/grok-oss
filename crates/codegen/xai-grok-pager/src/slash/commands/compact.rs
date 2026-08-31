@@ -22,6 +22,10 @@ impl SlashCommand for CompactCommand {
         (!args.trim().is_empty()).then_some(NO_ARGS)
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["compaction"]
+    }
+
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             CommandResult::QueueCommand("/compact".to_string())

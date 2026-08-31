@@ -142,6 +142,7 @@ json_get() {
 
 # Read a token from ~/.grok/auth.json for the given scope key.
 # Format: {"scope_url": {"key": "token"}, ...}
+# Log auth *source names* only. Do not echo token, API key, or secret env values.
 read_grok_token() {
     local auth_file="$HOME/.grok/auth.json"
     local scope="$1"
@@ -257,6 +258,7 @@ fi
 
 binary_tmp="${binary_path}.tmp.$$"
 rm -f "$binary_tmp" 2>/dev/null || true
+checksum_url="${artifact_base}.sha256"
 
 echo "  Downloading grok ${version}..." >&2
 if [ "$os" = "windows" ]; then
@@ -270,6 +272,7 @@ if [ "$os" = "windows" ]; then
             fi
             exit 1
         fi
+        exit 1
     fi
 elif ! fetch_binary "$artifact_base" "$binary_tmp"; then
     rm -f "$binary_tmp"
@@ -278,6 +281,11 @@ elif ! fetch_binary "$artifact_base" "$binary_tmp"; then
     else
         echo "Error: binary download failed from ${artifact_base}" >&2
     fi
+    exit 1
+fi
+
+if ! verify_downloaded_sha256 "$binary_tmp" "$checksum_url"; then
+    rm -f "$binary_tmp"
     exit 1
 fi
 
@@ -300,6 +308,8 @@ if [ "$os" = "windows" ]; then
     echo "  Binary installed to $BIN_DIR/grok.exe and $BIN_DIR/agent.exe." >&2
 else
     chmod +x "$binary_tmp"
+    # SHA-256 of the bytes already matched the published checksum file.
+    # `--version` is a second run-check, not the pin. Not SHA-1.
     if ! "$binary_tmp" --version </dev/null >/dev/null 2>&1; then
         echo "Error: downloaded grok failed to run; keeping the existing install." >&2
         rm -f "$binary_tmp"

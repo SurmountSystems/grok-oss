@@ -373,11 +373,14 @@ impl SessionActor {
     }
 
     pub(crate) fn hosted_tools_for_turn(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
-        if self.backend_search_active() {
-            self.effective_hosted_tools()
-        } else {
-            Vec::new()
-        }
+        advertise_hosted_tools_for_turn(
+            if self.backend_search_active() {
+                self.effective_hosted_tools()
+            } else {
+                Vec::new()
+            },
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// The applied overrides to echo, or `None` when backend search is off.
@@ -437,7 +440,11 @@ impl SessionActor {
         };
 
         let plan_active = self.plan_mode.lock().is_active();
-        filter_cursor_tools_by_plan_mode(defs, plan_active)
+        advertise_tools_for_turn(
+            defs,
+            plan_active,
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Messages-backed models never see `use_tool`'s file forms: the Anthropic Messages API rejects the schema's
@@ -819,6 +826,7 @@ impl SessionActor {
                 &mut sampling.session_identity_key,
             );
         }
+        crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
         sampling
     }
 
@@ -1292,7 +1300,12 @@ impl SessionActor {
                 .model_metadata
                 .as_ref()
                 .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+                .filter(|cw| *cw > 0);
+            let Some(cw) = session_cw.or(error_cw) else {
+                let message = "Context overflow recovery has no sampling window".to_string();
+                self.log_terminal_failure("context_length", error.status_code, &message);
+                return Err(acp::Error::internal_error().data(message));
+            };
             {
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
@@ -1683,6 +1696,12 @@ impl SessionActor {
             }
             _ => (error_type, detailed_message),
         };
+        let detailed_message =
+            if xai_grok_sampling_types::is_console_team_prepaid_message(&detailed_message) {
+                xai_grok_sampling_types::credit_exhausted_user_message(&detailed_message)
+            } else {
+                detailed_message
+            };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -2527,15 +2546,17 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-business-included"),
-            "per-turn reconstruct must hop to Business included SuperGrok period limits"
+            Some("tok-personal-full-extras"),
+            "per-turn reconstruct must stay on the personal SuperGrok paying JWT; Team JWT omitted"
+        );
+        assert!(
+            !failover.iter().any(|k| k == "tok-business-included"),
+            "Team JWT omitted while a personal SuperGrok login exists: {failover:?}"
         );
         assert_eq!(
-            failover,
-            vec!["tok-personal-full-extras".to_string()],
-            "personal usagePct 100 without SuperGrok Heavy keeps included remaining; console omitted: {failover:?}"
+            session_identity.as_deref(),
+            Some("tok-personal-full-extras")
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
         clear_included_billing_cache();
     }
 
@@ -2610,15 +2631,14 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-team-included"),
-            "missing Heavy / false 100% must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+            Some("tok-personal-false-100"),
+            "missing Heavy / false 100% keeps personal SuperGrok paying JWT; primary={api_key:?} failover={failover:?}"
         );
-        assert_eq!(
-            failover,
-            vec!["tok-personal-false-100".to_string()],
-            "personal included remaining is next; console omitted: {failover:?}"
+        assert!(
+            !failover.iter().any(|k| k == "tok-team-included"),
+            "Team JWT omitted while personal SuperGrok can pay: {failover:?}"
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        assert_eq!(session_identity.as_deref(), Some("tok-personal-false-100"));
         clear_included_billing_cache();
     }
 
@@ -2694,19 +2714,18 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-team-included"),
-            "100% + SuperGrok dollar credits on both + missing Heavy must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+            Some("tok-personal-dollars"),
+            "100% + SuperGrok dollar credits on both + missing Heavy keeps personal SuperGrok paying JWT; primary={api_key:?} failover={failover:?}"
         );
-        assert_eq!(
-            failover,
-            vec!["tok-personal-dollars".to_string()],
-            "personal included remaining is next; SuperGrok dollar credits and console are not primary: {failover:?}"
+        assert!(
+            !failover.iter().any(|k| k == "tok-team-included"),
+            "Team JWT omitted while personal SuperGrok can pay: {failover:?}"
         );
         assert!(
             !failover.iter().any(|k| k == "console-must-not-win"),
             "must not hop to console while any stored SuperGrok identity has included remaining"
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        assert_eq!(session_identity.as_deref(), Some("tok-personal-dollars"));
         clear_included_billing_cache();
     }
 }

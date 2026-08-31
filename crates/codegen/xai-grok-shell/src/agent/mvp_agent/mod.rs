@@ -266,6 +266,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub initial_reasoning_effort: Option<ReasoningEffort>,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
+    pub session_context_only: bool,
     pub prompt_display_cwd: Option<String>,
     /// Persisted visibility of this Build session for roster snapshots/deltas.
     pub is_headless: bool,
@@ -410,6 +411,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         initial_reasoning_effort: None,
         session_yolo_mode,
         session_auto_mode: false,
+        session_context_only: false,
         prompt_display_cwd: None,
         is_headless: false,
         is_chat_kind: true,

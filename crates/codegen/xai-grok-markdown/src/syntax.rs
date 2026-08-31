@@ -8,7 +8,7 @@ use syntect::{
     dumps::from_uncompressed_data,
     easy::HighlightLines,
     highlighting::{Theme as SyntectTheme, ThemeSet},
-    parsing::{SyntaxReference, SyntaxSet},
+    parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder},
 };
 
 /// Syntax highlighting configuration.
@@ -17,7 +17,7 @@ use syntect::{
 pub struct Syntect {
     /// The color theme for syntax highlighting.
     pub theme: SyntectTheme,
-    /// The syntax definitions (supports 250+ languages via two-face).
+    /// The syntax definitions (bundled `.sublime-syntax` files, yaml-load).
     pub syntax_set: SyntaxSet,
 }
 
@@ -132,6 +132,54 @@ fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
     Some((start, end, path))
 }
 
+/// If pulldown left container indent on continuation lines of a fenced
+/// block (first line already stripped, later lines still prefixed), drop
+/// that common prefix. Inner relative indent stays.
+fn strip_leaked_fence_indent(text: &str) -> String {
+    let mut iter = text.split_inclusive('\n');
+    let Some(first) = iter.next() else {
+        return text.to_string();
+    };
+    let first_body = first.trim_end_matches(['\n', '\r']);
+    if first_body.starts_with(' ') || first_body.starts_with('\t') {
+        return text.to_string();
+    }
+    let rest: Vec<&str> = iter.collect();
+    if rest.is_empty() {
+        return text.to_string();
+    }
+    let min_ws = rest
+        .iter()
+        .map(|line| {
+            let body = line.trim_end_matches(['\n', '\r']);
+            if body.is_empty() {
+                usize::MAX
+            } else {
+                body.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+            }
+        })
+        .min()
+        .unwrap_or(0);
+    if min_ws == 0 || min_ws == usize::MAX {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(first);
+    for line in rest {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let stripped: String = body.chars().skip(min_ws).collect();
+        out.push_str(&stripped);
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Syntax highlight code, returning raw styled segments per line.
 /// `fence_info` is the fenced code block *info* string (language tag or citation); see [`Syntect::highlight_lines_for_fence_info`].
 /// This function lives here (not in `parse`) so both the parser and the streaming highlighter caches depend one-way on `syntax`.
@@ -143,9 +191,13 @@ pub(crate) fn syntax_highlight_raw(
     use syntect::util::LinesWithEndings;
 
     let syn = syntect?;
-    let mut hl = syn.highlight_lines_for_fence_info(fence_info)?;
+    let mut hl = match syn.highlight_lines_for_fence_info(fence_info) {
+        Some(hl) => hl,
+        None => HighlightLines::new(syn.syntax_set.find_syntax_plain_text(), &syn.theme),
+    };
+    let text = strip_leaked_fence_indent(text);
     let mut lines = Vec::new();
-    for line in LinesWithEndings::from(text) {
+    for line in LinesWithEndings::from(&text) {
         let highlighted = hl.highlight_line(line, &syn.syntax_set).ok()?;
         lines.push(
             highlighted

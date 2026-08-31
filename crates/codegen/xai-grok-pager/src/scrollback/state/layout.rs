@@ -741,6 +741,11 @@ impl ScrollbackState {
         }
         let max_iters = self.entries.len().saturating_add(2);
         for _ in 0..max_iters {
+            // Capture before measure: the first visible entry can itself shrink
+            // when its estimate becomes exact. Clamp-only then pulls the
+            // viewport back to the new bottom (an in-chat image the user just
+            // scrolled off). Case 2 already re-pins this way.
+            let top_anchor = self.viewport_top_anchor_point();
             let Some((start, end)) = self.measurement_window() else {
                 return;
             };

@@ -13,8 +13,25 @@ use xai_grok_tools::types::SessionMode;
 /// If no plan has been written yet, show a toast.
 /// Delegates to `AgentView::show_plan_preview()`, which reads the session's `plan.md` from its session artifacts directory.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
+    // `/view-plan` after `--continue` can race SessionLoaded. Flush a restore
+    // that arrived before bind so the slash can dock Approve. Idle resume
+    // still does not auto-dock; this path is an explicit open.
+    let _ = crate::app::acp_handler::flush_pending_exit_plan_mode(app);
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        ActiveView::AgentDashboard => match app.dashboard.as_ref().and_then(|d| d.attached_agent) {
+            Some(id) => id,
+            None => {
+                stick_view_plan_request(app);
+                return vec![];
+            }
+        },
+        ActiveView::Welcome => {
+            // `--continue` can still be on welcome while a placeholder
+            // agent exists. Dropping the slash here leaves Approve unbound.
+            stick_view_plan_request(app);
+            return vec![];
+        }
     };
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -258,6 +275,8 @@ pub(super) fn sync_active_auto_flag(app: &mut AppView) {
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.session.auto_mode = effective_auto(agent.session.is_yolo(), is_auto);
+        agent.session.context_only_mode =
+            !agent.session.is_yolo() && !agent.session.auto_mode && is_context_only;
     }
     // Keep `/auto` feature-gate visibility in lockstep across slash surfaces.
     app.sync_permission_mode_slash_gate();
@@ -360,6 +379,7 @@ fn capture_prev_permission_canonical(app: &AppView, prev_yolo: bool) -> &'static
         match app.current_ui.permission_mode.as_deref() {
             Some("default") => "default",
             Some("auto") => "auto",
+            Some("context-only") => "context-only",
             _ => "ask",
         }
     }
@@ -786,7 +806,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 app.default_yolo = false;
                 app.current_ui.permission_mode = Some("ask".into());
                 agent.show_mode_switch_banner("Normal");
-                tracing::info!("Mode cycle (pre-session): Always-Approve → Normal");
+                tracing::info!("Mode cycle (pre-session): context-only → Normal");
                 Some("ask")
             }
             // Plan + Always-Approve to Always-Approve (keep yolo)

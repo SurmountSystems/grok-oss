@@ -6,6 +6,10 @@
 //! team default credits (dashboard allotment).
 //!
 //! **Named contracts:**
+//! - grok-oss limits / TUI `/limits` is a client printout, not grok.com Usage.
+//!   Combined remaining is not Usage. Fail-open: do not mark SuperGrok used
+//!   up from this printout. Named commands: stay-supergrok, use-console,
+//!   meter included|dollar-credits|console|combined, refresh.
 //! - Do not present SuperGrok included % as proven included-limit burn.
 //! - Optional flat-poll note only names meters that were **observed** flat
 //!   (never claim Build product % or SuperGrok dollar credits stayed flat when those
@@ -17,8 +21,38 @@
 //!   class can still move under SuperGrok session).
 //! - When console team prepaid dollars are shown, name the ≤Ns process-cache
 //!   lag and that `grok limits` / TUI `/limits` force a fresh Management fetch.
+//! - Billing Credits remaining is GetAmountToPay `prepaidCredits` minus
+//!   `prepaidCreditsUsed`. Label Management `prepaid/balance` `total.val` as
+//!   team prepaid remaining and SuperGrok `prepaidBalance.val` as SuperGrok
+//!   dollar credits. Those fields are not the card.
 
 use super::credit_bar::SamplingIdentityKind;
+
+/// Agent-usable `grok-oss limits` / TUI `/limits` fail-open banner.
+///
+/// Always first on the human body and in JSON `notes`. Combined remaining is
+/// chrome across distinct SuperGrok identities, not grok.com Usage. Do not
+/// invent remaining. Do not call any pool used up from this printout.
+pub const NOTE_LIMITS_PRINTOUT_NOT_USAGE: &str = "Note: grok-oss limits is a client printout, \
+not xAI billing truth. Combined remaining is not grok.com Usage for that workspace. \
+Do not invent remaining. Do not call any pool used up from this printout. Operator \
+Usage (grok.com for that workspace) and the console.x.ai Billing page they can see win. \
+Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 must not mark \
+SuperGrok used up or hop to console. Named commands: stay-supergrok, use-console, \
+meter included|dollar-credits|console|combined, refresh. console.isLive is sampler \
+identity, not proof that credits are not being used.";
+
+/// `console.isLive` is sampler identity. It is not billing empty.
+pub const CONSOLE_IS_LIVE_MEANING: &str =
+    "sampler identity, not proof that credits are not being used";
+
+/// Same named words on TUI `/limits` and CLI `grok-oss limits`.
+pub const LIMITS_NAMED_COMMANDS: &[&str] = &[
+    "stay-supergrok",
+    "use-console",
+    "meter included|dollar-credits|console|combined",
+    "refresh",
+];
 
 /// SuperGrok included % is a billing poll reading, not proof of burn.
 ///
@@ -56,12 +90,13 @@ team settlement as SuperGrok dollar credits.";
 /// Shown when SuperGrok session is live and the product also has team prepaid
 /// remaining and/or team postpaid OAuth class dominating. Closes the gap where
 /// chrome says included SuperGrok period limits are active while dogfood burn still settles
-/// on team Billing Credits (prepaid remaining) and/or team OAuth / Grok Build
+/// on console team prepaid remaining and/or team OAuth / Grok Build
 /// class without included SuperGrok period used % moving and without console key live.
+/// Does **not** claim Management prepaid remaining is console.x.ai Billing Credits.
 pub const NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT: &str = "Note: Active included SuperGrok \
 period limits (activeDriver) is the client spend-order driver and intent chrome, not proof of \
 which wallet settles the bill. SuperGrok session traffic can still settle on team postpaid OAuth \
-/ Grok Build class and can change console team prepaid remaining (team Billing Credits) without \
+/ Grok Build class and can change console team prepaid remaining without \
 included SuperGrok period used % moving and without the console API key being live. Product \
 tracks team prepaid remaining and team OAuth class when a management key is set; it does not \
 invent included SuperGrok period debit.";
@@ -95,6 +130,43 @@ keep last successful cents until a later successful fetch. Running grok limits o
 /limits forces a fresh Management fetch."
     )
 }
+
+/// Shown on `/limits` when GetAmountToPay remaining was not parsed.
+///
+/// Management `GET …/prepaid/balance` `total.val` is team prepaid remaining.
+/// SuperGrok session `prepaidBalance.val` is SuperGrok dollar credits. See
+/// [Billing Management REST](https://docs.x.ai/developers/rest-api-reference/management/billing)
+/// (accessed: 2026-08-22). xAI page copy may say "including free credits
+/// granted to your account"; that is their sentence, not a grok-oss meter name.
+pub const NOTE_BILLING_CREDITS_CARD_NOT_FETCHED: &str = "Note: grok-oss did not parse the \
+console.x.ai Billing Credits card remaining this run. Management prepaid/balance total.val is team prepaid remaining. \
+SuperGrok session billing prepaidBalance.val is SuperGrok dollar credits. The Billing Credits \
+card remaining is GetAmountToPay prepaidCredits minus prepaidCreditsUsed when those fields are fetched. The console.x.ai Billing page may say \
+\"including free credits granted to your account\"; that is their copy, not a grok-oss meter name.";
+
+/// Shown when GetAmountToPay remaining was parsed.
+pub const NOTE_BILLING_CREDITS_CARD_FETCHED: &str = "Note: the console.x.ai Billing Credits card \
+remaining is Management GET postpaid/invoice/preview coreInvoice.prepaidCredits.val minus \
+coreInvoice.prepaidCreditsUsed.val. That remaining is not Management prepaid/balance total.val \
+(console team prepaid remaining) and not SuperGrok session prepaidBalance.val (SuperGrok dollar \
+credits). grok-oss does not hop sampling from this card. Fail-open printout still must not hop. \
+Real SuperGrok HTTP 402 still hops.";
+
+/// Shown when a Management preview call was attempted and failed.
+pub const NOTE_BILLING_CREDITS_CARD_FETCH_FAILED: &str = "Note: grok-oss could not fetch the \
+console.x.ai Billing Credits card (Management GET postpaid/invoice/preview failed). That card \
+stays unknown this run. Management prepaid/balance total.val is still team prepaid remaining. \
+SuperGrok session prepaidBalance.val is still SuperGrok dollar credits.";
+
+/// Management prepaid remaining is `prepaid/balance` `total.val`.
+///
+/// Shown when console team prepaid dollars are shown. Does not classify the
+/// Billing Credits card as that ledger.
+pub const NOTE_PREPAID_LEDGER_IS_NOT_BILLING_CREDITS_PAGE: &str = "Note: console team prepaid \
+remaining is Management prepaid/balance total.val. That ledger is not the console.x.ai \
+Billing Credits card. The Billing Credits remaining is GetAmountToPay prepaidCredits minus \
+prepaidCreditsUsed when those fields are fetched. The Billing page \
+may say it includes free credits granted; that is their copy.";
 
 /// Team default credits are a separate dashboard allotment meter.
 ///
@@ -239,10 +311,36 @@ pub struct LimitsHonestyInput {
     /// True when the product will block sampler turns under unproven free
     /// SuperGrok period debit (operator has not opted into allow-spend).
     pub turns_blocked_free_period_debit_unproven: bool,
+    /// Billing Credits card status (GetAmountToPay remaining).
+    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+}
+
+/// True when `text` carries the fail-open printout-vs-Usage contract.
+pub fn copy_names_limits_tool_fail_open(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("client printout")
+        && lower.contains("not xai billing truth")
+        && lower.contains("combined remaining is not")
+        && lower.contains("grok.com")
+        && lower.contains("usage")
+        && lower.contains("do not invent remaining")
+        && lower.contains("do not call any pool used up")
+        && lower.contains("fail-open")
+        && lower.contains("stay-supergrok")
+        && lower.contains("use-console")
+        && lower.contains("refresh")
+        && lower.contains("sampler identity")
+        && !lower.contains("free supergrok")
+        && !lower.contains("extras")
+        && !text.contains('\u{2014}')
+        && !text.contains('—')
+        && !text.contains('\u{2026}')
 }
 
 /// Build honesty notes for limits modal / human `grok limits` (ordered).
 ///
+/// - Always: grok-oss limits is a client printout, not grok.com Usage
+///   (fail-open; named stay-supergrok / use-console / refresh).
 /// - Always: license page ≠ SuperGrok / team Management (no invented license
 ///   message/conversation counts).
 /// - Prepaid lag note when console team prepaid dollars are shown (any live
@@ -259,10 +357,25 @@ pub struct LimitsHonestyInput {
 ///   lag note still allowed when dollars are shown; license note still present).
 pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     let mut notes = Vec::new();
+    // Always first: printout vs Usage, fail-open, named commands. Agents
+    // reading grok-oss limits must see this before percents.
+    notes.push(NOTE_LIMITS_PRINTOUT_NOT_USAGE.to_string());
     // Always: license seat page is not a product meter (plain dogfood honesty).
     notes.push(NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string());
+    notes.push(match input.billing_credits_card {
+        xai_grok_sampling_types::BillingCreditsCard::Fetched => {
+            NOTE_BILLING_CREDITS_CARD_FETCHED.to_string()
+        }
+        xai_grok_sampling_types::BillingCreditsCard::Error => {
+            NOTE_BILLING_CREDITS_CARD_FETCH_FAILED.to_string()
+        }
+        xai_grok_sampling_types::BillingCreditsCard::NotFetched => {
+            NOTE_BILLING_CREDITS_CARD_NOT_FETCHED.to_string()
+        }
+    });
     if input.has_console_team_prepaid_reading {
         notes.push(note_console_team_prepaid_may_lag());
+        notes.push(NOTE_PREPAID_LEDGER_IS_NOT_BILLING_CREDITS_PAGE.to_string());
     }
     if input.has_team_default_credits_reading {
         notes.push(NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT.to_string());
@@ -322,6 +435,66 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: false,
+            billing_credits_card: Default::default(),
+        }
+    }
+
+    /// Named contract: the limits checking tool (CLI `grok-oss limits` and
+    /// TUI `/limits`) must always name printout vs Usage, fail-open, and the
+    /// named commands. Combined remaining is not grok.com Usage. Do not
+    /// invent remaining. Do not call any pool used up from chrome.
+    #[test]
+    fn limits_tool_always_names_printout_not_usage_fail_open_and_named_commands() {
+        let note = NOTE_LIMITS_PRINTOUT_NOT_USAGE;
+        assert!(
+            copy_names_limits_tool_fail_open(note),
+            "fail-open banner must name printout vs Usage: {note}"
+        );
+        assert!(
+            note.contains("stay-supergrok")
+                && note.contains("use-console")
+                && note.contains("refresh")
+                && note.contains("meter included|dollar-credits|console|combined"),
+            "must name stay-supergrok / use-console / meter / refresh: {note}"
+        );
+        assert_eq!(
+            CONSOLE_IS_LIVE_MEANING,
+            "sampler identity, not proof that credits are not being used"
+        );
+        assert_eq!(
+            LIMITS_NAMED_COMMANDS,
+            &[
+                "stay-supergrok",
+                "use-console",
+                "meter included|dollar-credits|console|combined",
+                "refresh",
+            ]
+        );
+
+        for (label, input) in [
+            ("supergrok live", input_base()),
+            (
+                "console live",
+                LimitsHonestyInput {
+                    live: SamplingIdentityKind::ConsoleKey,
+                    has_included_reading: true,
+                    ..Default::default()
+                },
+            ),
+            ("empty default", LimitsHonestyInput::default()),
+        ] {
+            let notes = honesty_notes_for_limits(input);
+            assert_eq!(
+                notes.first().map(String::as_str),
+                Some(NOTE_LIMITS_PRINTOUT_NOT_USAGE),
+                "{label}: fail-open printout note must be first so an agent sees it before percents: {notes:?}"
+            );
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.as_str() == NOTE_LIMITS_PRINTOUT_NOT_USAGE),
+                "{label} must emit the limits-tool fail-open note: {notes:?}"
+            );
         }
     }
 
@@ -555,8 +728,12 @@ mod tests {
             "must name Active / activeDriver: {note}"
         );
         assert!(
-            lower.contains("team prepaid") && lower.contains("billing credits"),
-            "must name team prepaid remaining / Billing Credits: {note}"
+            lower.contains("team prepaid"),
+            "must name team prepaid remaining: {note}"
+        );
+        assert!(
+            !lower.contains("prepaid remaining (team billing credits)"),
+            "must not equate prepaid remaining with Billing Credits: {note}"
         );
         assert!(
             lower.contains("oauth") || lower.contains("grok build"),
@@ -628,6 +805,149 @@ mod tests {
                 .iter()
                 .any(|n| n.as_str() == NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT),
             "no team meters → no intent-not-settlement note: {bare:?}"
+        );
+    }
+
+    /// Operator correction 2026-08-22: do not classify the console Billing
+    /// Credits card without a named JSON field for that card. Default honesty
+    /// is did-not-parse this run. Do not claim live $47.03 / stored $89.94 is
+    /// team prepaid or is not SuperGrok dollar credits.
+    #[test]
+    fn billing_credits_card_is_not_classified_without_named_json_field() {
+        use xai_grok_sampling_types::{BillingCreditsCard, current_billing_credits_usd};
+
+        assert_eq!(
+            current_billing_credits_usd(Some(89.94), Some(47.03), None),
+            None
+        );
+        assert_eq!(BillingCreditsCard::NotFetched.as_wire(), "not_fetched");
+
+        let notes = honesty_notes_for_limits(LimitsHonestyInput::default());
+        let joined = notes.join("\n");
+        let lower = joined.to_ascii_lowercase();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_BILLING_CREDITS_CARD_NOT_FETCHED),
+            "must say grok-oss did not parse the Billing Credits card this run: {notes:?}"
+        );
+        assert!(
+            lower.contains("did not parse") && lower.contains("billing credits card"),
+            "must name the missing remaining parse: {joined}"
+        );
+        assert!(
+            joined.contains("total.val") && lower.contains("prepaid/balance"),
+            "must label Management prepaid remaining as total.val: {joined}"
+        );
+        assert!(
+            joined.contains("prepaidBalance.val") && lower.contains("supergrok dollar credits"),
+            "must label SuperGrok dollar credits as prepaidBalance.val: {joined}"
+        );
+        assert!(
+            lower.contains("prepaidcredits") && lower.contains("prepaidcreditsused"),
+            "must name GetAmountToPay remaining fields: {joined}"
+        );
+        assert!(
+            !joined.contains("47.03") && !joined.contains("89.94"),
+            "must not classify the live/stored Credits dollars: {joined}"
+        );
+        assert!(
+            !lower.contains("billing credits card is console team prepaid")
+                && !lower.contains("credits card is not supergrok dollar credits"),
+            "must not classify the card without a named JSON field: {joined}"
+        );
+        assert!(
+            !joined.contains('\u{2014}') && !joined.contains('—') && !joined.contains('\u{2026}'),
+            "no em dash / unicode ellipsis: {joined}"
+        );
+        assert!(
+            !lower.contains("extras"),
+            "must not teach extras as a nickname: {joined}"
+        );
+    }
+
+    /// Named remaining on GetAmountToPay is the Billing Credits card. Honesty
+    /// must name prepaidCredits minus prepaidCreditsUsed and must not hop.
+    #[test]
+    fn billing_credits_card_fetched_note_names_remaining_and_does_not_hop() {
+        use xai_grok_sampling_types::BillingCreditsCard;
+
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            billing_credits_card: BillingCreditsCard::Fetched,
+            ..Default::default()
+        });
+        let joined = notes.join("\n");
+        let lower = joined.to_ascii_lowercase();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_BILLING_CREDITS_CARD_FETCHED),
+            "must emit fetched remaining note: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_BILLING_CREDITS_CARD_NOT_FETCHED),
+            "fetched must not keep not_fetched copy: {notes:?}"
+        );
+        assert!(
+            joined.contains("prepaidCredits") && joined.contains("prepaidCreditsUsed"),
+            "must name GetAmountToPay remaining fields: {joined}"
+        );
+        assert!(
+            joined.contains("total.val") && joined.contains("prepaidBalance.val"),
+            "must keep team prepaid and SuperGrok dollar credits distinct: {joined}"
+        );
+        assert!(
+            lower.contains("does not hop sampling from this card"),
+            "must not hop from the Billing Credits card: {joined}"
+        );
+        assert!(
+            !joined.contains('\u{2014}') && !joined.contains('—') && !joined.contains('\u{2026}'),
+            "no em dash / unicode ellipsis: {joined}"
+        );
+        assert!(
+            !lower.contains("extras"),
+            "must not teach extras as a nickname: {joined}"
+        );
+    }
+
+    /// Named contract (2026-08-19, restated 2026-08-22): label Management
+    /// `teamPrepaidUsd` as `prepaid/balance` `total.val`. Do not classify the
+    /// Billing Credits card from this ledger. The card remaining is
+    /// GetAmountToPay prepaidCredits minus prepaidCreditsUsed.
+    #[test]
+    fn prepaid_dollars_note_does_not_present_ledger_as_billing_credits_page() {
+        let notes = honesty_notes_for_limits(LimitsHonestyInput {
+            live: SamplingIdentityKind::SuperGrokSession,
+            has_console_team_prepaid_reading: true,
+            has_included_reading: false,
+            ..Default::default()
+        });
+        let joined = notes.join("\n").to_ascii_lowercase();
+        assert!(
+            joined.contains("management")
+                && joined.contains("prepaid")
+                && joined.contains("total.val"),
+            "must name Management prepaid remaining as total.val: {notes:?}"
+        );
+        assert!(
+            joined.contains("billing credits"),
+            "must name Billing Credits as the other page: {notes:?}"
+        );
+        assert!(
+            joined.contains("free credits granted"),
+            "must name free credits granted on the Billing page: {notes:?}"
+        );
+        assert!(
+            joined.contains("not the console.x.ai billing credits card")
+                || joined.contains("not the console.x.ai") && joined.contains("billing credits"),
+            "must keep team prepaid remaining distinct from the Billing Credits card: {notes:?}"
+        );
+        let active = NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT.to_ascii_lowercase();
+        assert!(
+            !active.contains("prepaid remaining (team billing credits)"),
+            "must not equate prepaid remaining with Billing Credits: {active}"
         );
     }
 
@@ -730,6 +1050,7 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: true,
+            billing_credits_card: Default::default(),
         });
         assert!(
             !notes
@@ -823,6 +1144,7 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: false,
+            billing_credits_card: Default::default(),
         });
         let expected_flat = flat_poll_unproven_debit_note(false, false);
         assert!(
@@ -850,6 +1172,7 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: true,
+            billing_credits_card: Default::default(),
         });
         assert!(
             notes
@@ -882,6 +1205,7 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: false,
+            billing_credits_card: Default::default(),
         });
         assert!(
             !notes
@@ -909,6 +1233,7 @@ mod tests {
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: false,
+            billing_credits_card: Default::default(),
         });
         assert!(
             !notes
@@ -1041,7 +1366,8 @@ mod tests {
         );
     }
 
-    /// SuperGrok live + flat (all meters) + C6: honesty notes ordered (license first).
+    /// SuperGrok live + flat (all meters) + C6: honesty notes ordered
+    /// (fail-open printout first, then license).
     #[test]
     fn branch_2b_stack_base_flat_and_c6_when_evidence() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
@@ -1054,7 +1380,9 @@ mod tests {
         assert_eq!(
             notes,
             vec![
+                NOTE_LIMITS_PRINTOUT_NOT_USAGE.to_string(),
                 NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string(),
+                NOTE_BILLING_CREDITS_CARD_NOT_FETCHED.to_string(),
                 NOTE_INCLUDED_PCT_IS_BILLING_POLL.to_string(),
                 NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT.to_string(),
                 flat_poll_unproven_debit_note(true, true),

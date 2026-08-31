@@ -295,6 +295,52 @@ fn slash_plan_desc_forwards_skill_token_ranges() {
     }
 }
 
+/// Named queue path: `/queue /plan` and `/plan queue` must not enter plan
+/// mode this turn. Immediate `/plan` still does.
+#[test]
+fn queue_plan_does_not_invoke_immediately() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_queue_cmd = dispatch(Action::SendPrompt("/queue /plan".into()), &mut app);
+    assert!(
+        via_queue_cmd.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "queued /plan must not enter plan mode this turn, got {via_queue_cmd:?}"
+    );
+    assert!(
+        app.agents[&id].plan_mode_pending.is_none(),
+        "queued /plan must not set plan_mode_pending"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert_eq!(held.kind, crate::app::agent::QueueEntryKind::Command);
+    assert!(
+        held.text.starts_with("/plan"),
+        "held row should be /plan, got {}",
+        held.text
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/plan queue".into()), &mut app);
+    assert!(
+        via_token.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "/plan queue must not enter plan mode this turn, got {via_token:?}"
+    );
+    assert!(app.agents[&id].plan_mode_pending.is_none());
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
 #[test]
 fn slash_plan_with_args_already_in_plan_is_noop() {
     let mut app = test_app_with_agent();

@@ -63,6 +63,10 @@ pub struct PlanModeSnapshot {
     /// Survives process restart so the pager can restore approval chrome without treating every Active session that has a plan.md as pending.
     #[serde(default)]
     pub awaiting_plan_approval: bool,
+    /// Approve / Quit already decided this plan. Survives rebuild so leftover
+    /// plan.md does not re-present Plan ready.
+    #[serde(default)]
+    pub plan_decision_resolved: bool,
 }
 impl PlanModeTracker {
     /// Create a new tracker. `session_dir` is the session's storage
@@ -74,6 +78,7 @@ impl PlanModeTracker {
             reminder_count: 0,
             pending_exit_reminder: false,
             awaiting_plan_approval: false,
+            plan_decision_resolved: false,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
         }
@@ -98,6 +103,7 @@ impl PlanModeTracker {
             reminder_count: snapshot.reminder_count,
             pending_exit_reminder: snapshot.pending_exit_reminder,
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
+            plan_decision_resolved: snapshot.plan_decision_resolved,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
         }
@@ -105,6 +111,9 @@ impl PlanModeTracker {
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
     pub(crate) fn set_awaiting_plan_approval(&mut self, awaiting: bool) {
         self.awaiting_plan_approval = awaiting;
+        if awaiting {
+            self.plan_decision_resolved = false;
+        }
     }
     /// Whether approval is outstanding (also true after resume from snapshot).
     pub(crate) fn is_awaiting_plan_approval(&self) -> bool {
@@ -115,6 +124,7 @@ impl PlanModeTracker {
             state: self.state,
             was_previously_active: self.was_previously_active,
             awaiting_plan_approval: self.awaiting_plan_approval,
+            plan_decision_resolved: self.plan_decision_resolved,
             reminder_count: self.reminder_count,
             pending_exit_reminder: self.pending_exit_reminder,
         }
@@ -228,6 +238,7 @@ impl PlanModeTracker {
         self.state = PlanModeState::Inactive;
         self.reminder_count = 0;
         self.awaiting_plan_approval = false;
+        self.plan_decision_resolved = true;
         self.pending_activation = None;
         true
     }
@@ -235,6 +246,7 @@ impl PlanModeTracker {
     /// `turn_in_flight`: whether a model turn is currently running.
     pub(crate) fn user_exit(&mut self, turn_in_flight: bool) {
         self.awaiting_plan_approval = false;
+        self.plan_decision_resolved = true;
         if let Some(pending) = self.pending_activation.take()
             && self.state == PlanModeState::Active
         {
@@ -346,6 +358,84 @@ You have exited plan mode. You can now make edits, run tools, and take actions."
 /// `plan_file` is the absolute path from [`PlanModeTracker::plan_file_path`].
 pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
     target_path == plan_file
+}
+
+/// Session `plan_mode.json` path under `$GROK_HOME/sessions/<cwd>/<id>/`.
+pub fn plan_mode_json_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
+    let sid = session_id.trim();
+    if sid.is_empty() || sid.contains('/') || sid.contains('\\') || sid.contains("..") {
+        return None;
+    }
+    Some(
+        crate::util::grok_home::sessions_cwd_dir(cwd)
+            .join(sid)
+            .join("plan_mode.json"),
+    )
+}
+
+fn load_plan_mode_snapshot(cwd: &str, session_id: &str) -> Option<PlanModeSnapshot> {
+    let path = plan_mode_json_path(cwd, session_id)?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Load persisted Approve/Quit sticky for a rebuilt pager process.
+pub fn load_plan_decision_resolved(cwd: &str, session_id: &str) -> bool {
+    load_plan_mode_snapshot(cwd, session_id).is_some_and(|s| s.plan_decision_resolved)
+}
+
+/// Parked `exit_plan_mode` from disk. Wins over a leftover resolved bit so
+/// `--continue` can re-issue the waiter when the operator has not decided.
+pub fn load_awaiting_plan_approval(cwd: &str, session_id: &str) -> bool {
+    load_plan_mode_snapshot(cwd, session_id).is_some_and(|s| s.awaiting_plan_approval)
+}
+
+/// Merge `plan_decision_resolved` into `plan_mode.json` without clobbering
+/// other snapshot fields the shell owns.
+pub fn persist_plan_decision_resolved(cwd: &str, session_id: &str, resolved: bool) {
+    let Some(path) = plan_mode_json_path(cwd, session_id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "plan_decision_resolved".into(),
+            serde_json::Value::Bool(resolved),
+        );
+        if resolved {
+            obj.insert(
+                "awaiting_plan_approval".into(),
+                serde_json::Value::Bool(false),
+            );
+        }
+        if !obj.contains_key("state") {
+            obj.insert("state".into(), serde_json::Value::String("Active".into()));
+        }
+        if !obj.contains_key("was_previously_active") {
+            obj.insert(
+                "was_previously_active".into(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if !obj.contains_key("reminder_count") {
+            obj.insert("reminder_count".into(), serde_json::json!(0));
+        }
+        if !obj.contains_key("pending_exit_reminder") {
+            obj.insert(
+                "pending_exit_reminder".into(),
+                serde_json::Value::Bool(false),
+            );
+        }
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
+        let _ = std::fs::write(path, bytes);
+    }
 }
 /// Whether the path's final component ends with a markdown suffix (case-insensitive).
 /// Suffixes align with client / workspace `MARKDOWN_SUFFIXES`: `.md`, `.markdown`, `.mdown`, `.mkd`, `.mkdn`, `.mdx`.
@@ -1101,6 +1191,7 @@ mod tests {
         }"#;
         let snapshot: PlanModeSnapshot = serde_json::from_str(legacy).unwrap();
         assert!(!snapshot.awaiting_plan_approval);
+        assert!(!snapshot.plan_decision_resolved);
         let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/test-session"), snapshot);
         assert!(!restored.is_awaiting_plan_approval());
     }

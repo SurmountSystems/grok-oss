@@ -20,6 +20,7 @@ mod import_claude;
 mod inline_feedback;
 mod interject;
 mod jump;
+mod metadata;
 mod modes;
 pub(crate) mod notes;
 mod permissions;

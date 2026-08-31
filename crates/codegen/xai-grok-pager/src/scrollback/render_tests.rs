@@ -1289,8 +1289,8 @@ fn message_block_content_width_subtracts_timestamp_reservation() {
     let block = &at(&result.selection_model.visible_blocks, 0);
     assert_eq!(
         block.content_width,
-        pane_content_width.saturating_sub(10),
-        "AgentMessage should reserve 10 cols for the timestamp"
+        pane_content_width.saturating_sub(reserved),
+        "AgentMessage should reserve timestamp plus copy trailing inset"
     );
 
     // The lines registered in the resolved model came from the cached output computed at `block.content_width`

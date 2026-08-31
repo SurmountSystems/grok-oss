@@ -445,10 +445,10 @@ impl PredecessorTarget {
         } else {
             libc::SIGTERM
         };
-        let ret = match &self.pidfd {
+        if let Some(fd) = &self.pidfd {
             // SAFETY: the pidfd is owned and open; the siginfo pointer is
             // documented-null (kernel builds a default), flags are zero.
-            Some(fd) => unsafe {
+            let ret = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
                     fd.as_raw_fd(),
@@ -456,10 +456,22 @@ impl PredecessorTarget {
                     std::ptr::null::<libc::siginfo_t>(),
                     0u32,
                 )
-            },
-            // SAFETY: kill() takes no pointers.
-            None => unsafe { libc::kill(self.pid as libc::pid_t, signal) }.into(),
-        };
+            };
+            if ret == 0 {
+                return Ok(());
+            }
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ESRCH) => return Ok(()),
+                // Unsupported / filtered: same-pid kill() is the predecessor
+                // we just pinned; a recycle race would require the process to
+                // die *and* the pid to reuse in this fallback window.
+                Some(libc::ENOSYS | libc::EPERM | libc::ENOTSUP) => {}
+                _ => return Err(e),
+            }
+        }
+        // SAFETY: kill() takes no pointers.
+        let ret = unsafe { libc::kill(self.pid as libc::pid_t, signal) };
         if ret == 0 {
             return Ok(());
         }
@@ -956,7 +968,7 @@ mod tests {
         let mut cmd = Command::new("bash");
         cmd.arg("-c")
             .arg(format!(
-                "trap '' TERM; touch {}; while true; do sleep 1; done",
+                "trap '' TERM; touch {}; while true; do :; done",
                 trap_ready.display()
             ))
             .stdin(Stdio::null())
@@ -970,6 +982,7 @@ mod tests {
             assert!(Instant::now() < trap_deadline, "child never set its trap");
             thread::sleep(Duration::from_millis(10));
         }
+        wait_until_process_name_matches(child.id(), "bash");
 
         // Stand in for the stuck predecessor's flock: released only after the graceful grace has expired, inside the post-kill window
         let holder = PidFile::acquire(&path).unwrap().unwrap();
@@ -984,6 +997,11 @@ mod tests {
                 .unwrap();
         release.join().expect("release thread");
 
+        if !wait_for_exit(&mut child, Duration::from_secs(2)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("SIGKILL escalation must end the predecessor (not hang the suite)");
+        }
         let status = child.wait().expect("child wait");
         assert_eq!(
             status.signal(),

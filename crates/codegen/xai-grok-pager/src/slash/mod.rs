@@ -15,6 +15,7 @@ pub mod matcher;
 pub(crate) mod mid_text_hoist;
 pub mod mode_support;
 pub mod mru;
+pub mod queue_schedule;
 pub mod registry;
 
 use std::{
@@ -2625,14 +2626,18 @@ mod tests {
         ctrl.set_auto_mode_available(true);
         assert!(visible(&ctrl, "always-approve"));
         assert!(visible(&ctrl, "auto"));
+        assert!(visible(&ctrl, "context-only"));
         assert!(dispatchable(&ctrl, "always-approve"));
         assert!(dispatchable(&ctrl, "auto"));
+        assert!(dispatchable(&ctrl, "context-only"));
 
         ctrl.set_auto_mode_available(false);
         assert!(visible(&ctrl, "always-approve"));
         assert!(!visible(&ctrl, "auto"));
+        assert!(visible(&ctrl, "context-only"));
         assert!(dispatchable(&ctrl, "always-approve"));
         assert!(!dispatchable(&ctrl, "auto"));
+        assert!(dispatchable(&ctrl, "context-only"));
     }
 
     /// With the gate open, both permission-mode toggles appear in completion for full-list, prefix, and exact-name queries.
@@ -2650,6 +2655,9 @@ mod tests {
             ("/", "/auto"),
             ("/au", "/auto"),
             ("/auto", "/auto"),
+            ("/", "/context-only"),
+            ("/con", "/context-only"),
+            ("/context-only", "/context-only"),
         ] {
             ctrl.refresh(&state, query, query.len(), &models);
             let snapshot = state.snapshot();
@@ -2667,6 +2675,7 @@ mod tests {
         ctrl.set_auto_mode_available(true);
         assert!(is_command_complete("/always-approve", ctrl.registry()));
         assert!(is_command_complete("/auto", ctrl.registry()));
+        assert!(is_command_complete("/context-only", ctrl.registry()));
     }
 
     #[test]

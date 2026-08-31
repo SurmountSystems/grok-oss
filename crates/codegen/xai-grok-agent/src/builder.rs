@@ -268,6 +268,32 @@ fn merge_tool_params(
         }
     }
 }
+
+/// Restricted toolsets without Agent cannot observe or cancel background
+/// work. Force every bash background mode off so finalize does not keep
+/// `auto_background_on_timeout` true while `enabled_background` is false.
+fn disable_all_background_bash_modes(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+) {
+    let mut disabled = serde_json::Map::new();
+    disabled.insert("enabled_background".into(), serde_json::Value::Bool(false));
+    disabled.insert(
+        "auto_background_on_timeout".into(),
+        serde_json::Value::Bool(false),
+    );
+    disabled.insert(
+        "allow_background_operator".into(),
+        serde_json::Value::Bool(false),
+    );
+    merge_tool_params(
+        tool_config,
+        &[
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuildConcise:run_terminal_cmd",
+        ],
+        &disabled,
+    );
+}
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
@@ -1375,15 +1401,14 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     resume_from_param: "${{ params.task.resume_from }}",
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
+    write_paths_param: "${{ params.task.write_paths }}",
 };
 /// Child sessions get a concise description that discourages recursive delegation.
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Whenever work is to be done and tools are to be called, agents are \
-three layers deep. Always. Including implement loops. \
-You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
-Do not compact-and-continue a product restore on L2. \
+Spawn L3 only if the problem is actually hard. Easy work can stay on L2. \
+Including implement loops. L2 may compact. L3 must not compact-and-continue. \
 Give each L3 a distinct description. One reviewer unless the operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\

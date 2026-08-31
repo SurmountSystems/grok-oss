@@ -497,7 +497,7 @@ mod tests {
             "a collapsed commit must still expand in /transcript: {out:?}"
         );
         assert!(
-            !out.contains("ctrl+e to expand"),
+            !out.contains("ctrl+t to expand"),
             "no expand hint in the fully-expanded transcript: {out:?}"
         );
     }

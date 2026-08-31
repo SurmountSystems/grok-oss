@@ -786,8 +786,8 @@ mod tests {
     #[test]
     #[serial]
     fn env_key_probe_unusable_suppresses_advertise_without_byok() {
+        let _isolated = isolate_process_auth_env();
         let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-dead-key");
-        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
         let cfg = Config::default();
         let models = resolve_model_list(&cfg, None);
         assert!(

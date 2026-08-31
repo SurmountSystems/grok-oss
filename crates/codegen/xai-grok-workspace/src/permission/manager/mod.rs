@@ -1605,6 +1605,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Auto;
@@ -1623,6 +1624,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Auto;
@@ -1642,6 +1644,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Auto;
@@ -1715,6 +1718,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let transport = fake_hub(serde_json::json!({ "outcome": "approve" }));
                 let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
@@ -1752,6 +1756,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
                 let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
@@ -1879,6 +1884,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = test_manager_with_hub(
                     &cwd,
@@ -1899,6 +1905,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = test_manager_with_hub(
                     &cwd,
@@ -1916,6 +1923,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let transport = fake_hub(serde_json::json!({
                     "outcome": "always_approve",
@@ -1958,6 +1966,7 @@ mod tests {
             .run_until(async {
                 for (name, forged_server) in [("a__b__c", "a"), ("foo___bar", "foo")] {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let transport = fake_hub(serde_json::json!({
                         "outcome": "always_approve",
@@ -2013,6 +2022,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Ask,
@@ -2055,6 +2065,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let rule = |action, tool, pattern: &str| PermissionRule {
                     action,
@@ -2174,6 +2185,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Deny,
@@ -2250,6 +2262,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let deny = |tool, pattern: &str| PermissionRule {
                     action: RuleAction::Deny,
@@ -2328,6 +2341,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 assert!(
                     !test_manager(&cwd, true, Some(PIN)).0.is_yolo_mode(),
@@ -2348,6 +2362,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (tx, _rx) = mpsc::unbounded_channel();
                 let globs = vec!["**/*.pem".to_string(), "**/cli-denied.txt".to_string()];
@@ -2385,6 +2400,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
 
                 let (pinned, _e1) = test_manager(&cwd, false, Some(PIN));
@@ -2409,6 +2425,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let benign = "my-custom-build --release";
                 let state = PermissionState {
@@ -3002,6 +3019,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = manager_with_recording_client_remember(
                     &cwd,
@@ -3057,6 +3075,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let (mgr, _e) =
@@ -3108,6 +3127,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Deny,
@@ -3160,6 +3180,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = manager_with_recording_client_remember(
                     &cwd,
@@ -3236,6 +3257,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = manager_with_recording_client_remember(
                     &cwd,
@@ -3288,6 +3310,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _e) = manager_with_recording_client_remember(
                     &cwd,
@@ -3340,6 +3363,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Ask,
@@ -3385,6 +3409,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Ask,
@@ -3422,6 +3447,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Ask,
@@ -3566,6 +3592,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -3715,6 +3742,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -3759,6 +3787,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -3808,6 +3837,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -3858,6 +3888,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let (mgr, mut events) = manager_with_recording_client(
@@ -3916,6 +3947,7 @@ mod tests {
 
             async fn run_case(select_allow: bool) {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, mut events) = manager_with_recording_client_remember(
                     &cwd,
@@ -3994,6 +4026,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -4136,6 +4169,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -4168,6 +4202,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -4218,6 +4253,7 @@ mod tests {
                     let url = format!("https://{host}/status");
 
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -4318,6 +4354,7 @@ mod tests {
             local
                 .run_until(async {
                     let tmp = tempfile::tempdir().unwrap();
+                    pin_grok_home_to(tmp.path());
                     let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                     let client = RecordingClient::default();
                     let prompts = client.prompts.clone();
@@ -4352,6 +4389,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4381,6 +4419,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut config = crate::permission::types::PermissionConfig::new(vec![]);
                 config.prompt_policy = PromptPolicy::Deny;
@@ -4467,6 +4506,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4532,6 +4572,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config =
                     crate::permission::types::PermissionConfig::new(vec![PermissionRule {
@@ -4644,6 +4685,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let rule = parse_permission_rule("Bash(git:*)", RuleAction::Allow).unwrap();
                 let config = PermissionConfig::new(vec![rule]);
@@ -4793,6 +4835,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let (mgr, mut events) =
@@ -4818,6 +4861,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4857,6 +4901,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4901,6 +4946,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4944,6 +4990,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -4971,6 +5018,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -5183,6 +5231,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -5215,6 +5264,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -5306,6 +5356,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let started = Arc::new(AtomicBool::new(false));
                 let (mgr, mut events) = test_manager(&cwd, false, None);
@@ -5358,6 +5409,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                 let client = HangingFirstPromptClient {
@@ -5432,6 +5484,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, mut events) = test_manager(&cwd, true, None);
                 let d = decide(&mgr, AccessKind::Bash("echo hi".into()), tool_call()).await;
@@ -5456,6 +5509,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let (mgr, mut events) =
@@ -5524,6 +5578,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let seen = Arc::new(AtomicUsize::new(0));
                 let gate = Arc::new(tokio::sync::Notify::new());
@@ -5629,6 +5684,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 if let Some(grant) = grant {
                     let state = PermissionState {
@@ -5709,6 +5765,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let state = PermissionState {
                     allowed_bash_commands: HashSet::from(["cat".to_string()]),
@@ -5841,6 +5898,7 @@ mod tests {
 
     fn evil_repo() -> (tempfile::TempDir, AbsPathBuf) {
         let tmp = tempfile::tempdir().unwrap();
+        pin_grok_home_to(tmp.path());
         git2::Repository::init(tmp.path()).unwrap();
         std::fs::write(
             tmp.path().join(".git/config"),
@@ -5853,6 +5911,7 @@ mod tests {
 
     fn clean_repo() -> (tempfile::TempDir, AbsPathBuf) {
         let tmp = tempfile::tempdir().unwrap();
+        pin_grok_home_to(tmp.path());
         git2::Repository::init(tmp.path()).unwrap();
         std::fs::write(
             tmp.path().join(".git/config"),
@@ -6391,6 +6450,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let dummy_update = acp::ToolCallUpdate::new(
                     acp::ToolCallId::new(Arc::from("tc-auto")),
@@ -6454,6 +6514,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _ev) = test_manager(&cwd, false, None);
                 mgr.set_auto_mode(true);
@@ -6491,6 +6552,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, mut events) = test_manager(&cwd, false, None);
                 mgr.set_auto_mode(true);
@@ -6543,6 +6605,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _ev) = test_manager(&cwd, false, None);
                 mgr.set_auto_mode(true);
@@ -6580,6 +6643,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, _ev) = test_manager(&cwd, false, None);
                 mgr.set_auto_mode(true);
@@ -6620,6 +6684,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let (mgr, mut events) =
@@ -6666,6 +6731,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let (mgr, mut events) = test_manager(&cwd, false, None);
                 mgr.set_auto_mode(true);
@@ -6713,6 +6779,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -6973,6 +7040,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                 let client = HangingFirstPromptClient {
@@ -7068,6 +7136,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let client = RecordingClient::default();
                 let prompts = client.prompts.clone();
@@ -7138,6 +7207,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let config = PermissionConfig::new(vec![PermissionRule {
                     action: RuleAction::Allow,
@@ -7174,6 +7244,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut seeded = PermissionState::default();
                 seeded
@@ -7223,6 +7294,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut seeded = PermissionState::default();
                 seeded.allowed_mcp_servers.insert("test_server".to_string());
@@ -7266,6 +7338,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut seeded = PermissionState::default();
                 seeded
@@ -7308,6 +7381,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 const SCRIPT: &str = "my-tool build && my-tool test";
                 let mut seeded = PermissionState::default();
@@ -7349,6 +7423,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 const CMD: &str = "git push origin main";
                 let mut seeded = PermissionState::default();
@@ -7389,6 +7464,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
 
                 let narrow = PermissionConfig::new(vec![PermissionRule {
@@ -7445,6 +7521,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut seeded = PermissionState::default();
                 seeded
@@ -7487,6 +7564,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let seeded = PermissionState {
                     allow_bash_execute: true,
@@ -7528,6 +7606,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let state = PermissionState {
                     allow_bash_execute: true,
@@ -7676,6 +7755,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let mut seeded = PermissionState {
                     allow_bash_execute: true,
@@ -7725,6 +7805,7 @@ mod tests {
         local
             .run_until(async {
                 let tmp = tempfile::tempdir().unwrap();
+                pin_grok_home_to(tmp.path());
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let seeded = PermissionState {
                     allow_bash_execute: true,

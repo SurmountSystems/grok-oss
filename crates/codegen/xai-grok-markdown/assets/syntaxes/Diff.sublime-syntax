@@ -1,0 +1,13 @@
+name: Diff
+file_extensions: [diff, patch]
+scope: source.diff
+contexts:
+  main:
+    - match: '^diff --git.*'
+      scope: meta.diff.header.git
+    - match: '^@@.*'
+      scope: meta.diff.range.unified
+    - match: '^\+.*'
+      scope: markup.inserted.diff
+    - match: '^-.*'
+      scope: markup.deleted.diff

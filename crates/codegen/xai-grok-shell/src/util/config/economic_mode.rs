@@ -1,10 +1,10 @@
-//! Economic mode: soft-cap effective context to stay under pricing tiers.
+//! Economic mode and session sampling windows.
 //!
 //! Grok 4.5 doubles input / output / cache-read prices once a request exceeds
 //! [`GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS`] (200K; catalog context remains
-//! 500K). When economic mode is on, the session treats the model as a 200K-window
-//! model for compaction, the context bar, and related budgets so turns stay on
-//! the cheap tier.
+//! 500K). Nested L2/L3 sessions use that 200k count as their sampling window.
+//! The main (L1) session uses the catalog window so AUTO compact does not fire
+//! at the old 200k L1 knee. Economic mode still gates implement-effort policy.
 //!
 //! **Implement-loop effort** (skill 1–5 thoroughness, not model reasoning
 //! effort, and not how many Review rows to launch) is a separate Token
@@ -22,9 +22,29 @@ use toml::Value as TomlValue;
 /// Pricing-tier soft cap (tokens). Same value as
 /// [`xai_grok_compaction::GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS`] and the
 /// settings modal's `200k` auto-compact preset — one source of truth for the
-/// cliff.
+/// cliff. Nested L2/L3 sampling uses this count; L1 uses the catalog window.
 pub const ECONOMIC_CONTEXT_CAP: u64 =
     xai_grok_compaction::GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS;
+
+/// Nested L2/L3 sessions never exceed this sampling window.
+pub const NESTED_SESSION_CONTEXT_CAP: u64 = xai_grok_compaction::NESTED_SESSION_CONTEXT_CAP;
+
+/// Keep-near attention target as a percent of this session's sampling window.
+pub const SESSION_ATTENTION_TARGET_PERCENT: u8 =
+    xai_grok_compaction::SESSION_ATTENTION_TARGET_PERCENT;
+
+/// Sampling/compaction window for the session that is running.
+///
+/// L1 (parent TUI) uses the catalog window (500k on Grok 4.5). Nested L2/L3
+/// never exceed [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
+    xai_grok_compaction::session_sampling_window(catalog, is_nested)
+}
+
+/// 40% of `sampling_window` (attention target for the running session).
+pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
+    xai_grok_compaction::session_attention_target_tokens(sampling_window)
+}
 
 /// Client default when `[ui].economic_mode` is unset.
 pub const ECONOMIC_MODE_DEFAULT: bool = true;
@@ -124,5 +144,52 @@ mod tests {
             cliff.absolute_tokens(xai_grok_compaction::GROK_45_CONTEXT_WINDOW_TOKENS),
             ECONOMIC_CONTEXT_CAP
         );
+    }
+
+    /// L1 uses the catalog window. Nested L2/L3 never exceed 200k even when
+    /// the catalog is 500k. Economic mode must not recap L1 to the nested budget.
+    #[test]
+    fn session_sampling_window_is_catalog_on_l1_and_200k_when_nested() {
+        assert_eq!(session_sampling_window(500_000, false), 500_000);
+        assert_eq!(session_sampling_window(500_000, true), 200_000);
+        assert_eq!(session_sampling_window(128_000, true), 128_000);
+        assert_eq!(
+            session_sampling_window(500_000, false),
+            xai_grok_compaction::GROK_45_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            session_sampling_window(500_000, true),
+            NESTED_SESSION_CONTEXT_CAP
+        );
+    }
+
+    #[test]
+    fn attention_target_is_forty_percent_of_the_running_session_window() {
+        assert_eq!(SESSION_ATTENTION_TARGET_PERCENT, 40);
+        assert_eq!(session_attention_target_tokens(500_000), 200_000);
+        assert_eq!(session_attention_target_tokens(200_000), 80_000);
+    }
+
+    /// AUTO compact on L1 is 95% of 500k (475k), not the old 200k nested cap.
+    #[test]
+    fn main_session_auto_compact_knee_is_not_the_old_200k_l1_cap() {
+        let window = session_sampling_window(500_000, false);
+        assert_eq!(window, 500_000);
+        assert!(!xai_token_estimation::exceeds_threshold(
+            200_000, window, 95
+        ));
+        assert!(!xai_token_estimation::exceeds_threshold(
+            190_000, window, 95
+        ));
+        assert!(!xai_token_estimation::exceeds_threshold(
+            474_999, window, 95
+        ));
+        assert!(xai_token_estimation::exceeds_threshold(475_000, window, 95));
+        let nested = session_sampling_window(500_000, true);
+        assert_eq!(nested, 200_000);
+        assert!(!xai_token_estimation::exceeds_threshold(
+            189_999, nested, 95
+        ));
+        assert!(xai_token_estimation::exceeds_threshold(190_000, nested, 95));
     }
 }

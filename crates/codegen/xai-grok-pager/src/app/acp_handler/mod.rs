@@ -215,11 +215,12 @@ fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         );
                         false
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
-                        let items: Vec<_> = plan
+                        let mut items: Vec<_> = plan
                             .entries
                             .into_iter()
                             .map(todo_item_from_plan_entry)
                             .collect();
+                        agent.stamp_todos_with_live_prompt_task(&mut items);
                         agent.todo.update_todos(items);
                         agent.mark_reload_todo_update();
                         advance_reconnect_cursor(agent, &mut meta);

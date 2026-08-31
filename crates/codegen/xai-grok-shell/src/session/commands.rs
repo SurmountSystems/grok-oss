@@ -616,6 +616,10 @@ pub enum SessionCommand {
     SetAutoMode {
         enabled: bool,
     },
+    /// Advertise no tools and refuse tool calls (diagnostic / redteam mode).
+    SetContextOnlyMode {
+        enabled: bool,
+    },
     ResetPermissionState,
     Rewind {
         request: RewindRequest,

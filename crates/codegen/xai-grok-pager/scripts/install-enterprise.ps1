@@ -347,11 +347,19 @@ if ($AuthSource) {
 
 $binaryPath = Join-Path $DownloadDir "grok-$platform.exe"
 $artifactBase = "$BaseUrl/grok-$resolvedVersion-$platform"
+$binaryTmp = "$binaryPath.tmp.$PID"
+if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force }
 
 $downloaded = $false
+$checksumUrl = "$artifactBase.sha256"
 foreach ($url in @("$artifactBase.exe", $artifactBase)) {
     try {
-        Download-File $url $binaryPath
+        Download-File $url $binaryTmp
+        if ($url.EndsWith('.exe')) {
+            $checksumUrl = "$artifactBase.exe.sha256"
+        } else {
+            $checksumUrl = "$artifactBase.sha256"
+        }
         $downloaded = $true
         break
     } catch {
@@ -360,10 +368,19 @@ foreach ($url in @("$artifactBase.exe", $artifactBase)) {
 }
 
 if (-not $downloaded) {
-    if (Test-Path $binaryPath) { Remove-Item $binaryPath -Force }
+    if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force }
     Write-Error "Binary download failed from $artifactBase.exe and $artifactBase"
     exit 1
 }
+
+try {
+    Verify-DownloadedSha256 $binaryTmp $checksumUrl
+} catch {
+    if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force -ErrorAction SilentlyContinue }
+    throw
+}
+
+Move-Item -LiteralPath $binaryTmp -Destination $binaryPath -Force
 
 # --- Install binary (locked-file safe) ---
 

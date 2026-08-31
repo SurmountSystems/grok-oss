@@ -940,6 +940,7 @@ mod tests {
         assert_eq!(TIMELINE_DEFAULT, ui.show_timeline_enabled());
         assert_eq!(PAGE_FLIP_ON_SEND_DEFAULT, ui.page_flip_on_send_enabled());
         assert_eq!(SCRUB_ASCII_PUNCT_DEFAULT, ui.scrub_ascii_punct_enabled());
+        assert_eq!(ULID_SESSION_IDS_DEFAULT, ui.ulid_session_ids_enabled());
         assert_eq!(
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts
@@ -1102,6 +1103,23 @@ mod tests {
             assert!(
                 !load_scrub_ascii_punct(),
                 "prime must seed scrub_ascii_punct from UiConfig so disk false applies at launch"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn prime_applies_ulid_session_ids_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                ulid_session_ids: Some(false),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                !load_ulid_session_ids(),
+                "prime must seed ulid_session_ids from UiConfig so disk false applies at launch"
             );
         })
         .join()

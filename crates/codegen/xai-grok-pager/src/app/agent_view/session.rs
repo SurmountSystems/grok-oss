@@ -277,6 +277,8 @@ impl AgentView {
             turn_start_ms: None,
             turn_start_ms_prompt: None,
             turn_started_at: None,
+            live_prompt_tasks: HashMap::new(),
+            pending_live_prompt_tasks: VecDeque::new(),
             first_activity_logged_for: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_paused_wall: std::time::Duration::ZERO,
@@ -436,6 +438,7 @@ impl AgentView {
             workspace_dashboard_enabled: false,
             overlay_stop_label: None,
             overlay_can_cycle: false,
+            fork_family_position: None,
             mcp_init_progress: None,
             session_starting_since: None,
             session_new_phase: None,
@@ -767,6 +770,7 @@ impl AgentView {
         ));
         self.scrollback.begin_batch();
         self.begin_replay_window();
+        self.pause_live_prompt_reconnect();
     }
     /// Record that an `isReplay` update applied while a reload window is open. No-op otherwise.
     pub(crate) fn mark_reload_replay_seen(&mut self) {
@@ -946,6 +950,22 @@ impl AgentView {
     pub(crate) fn any_cancel_pending(&self) -> bool {
         self.session.state.is_cancelling() || self.wake_turn_cancelling()
     }
+    /// Drop a still-cancellable cancel so a keep-working interject can
+    /// steer the live turn. Compact command cancel is left alone.
+    pub(crate) fn abort_cancellable_cancel(&mut self) {
+        if matches!(
+            self.session.state,
+            crate::app::agent::AgentState::TurnCancelling
+        ) {
+            self.session.state = crate::app::agent::AgentState::TurnRunning;
+        }
+        if let Some(wake) = self.running_wake_turn.as_mut() {
+            wake.cancel_sent = false;
+        }
+        self.pending_cancel_resend = None;
+        self.cancel_trigger_hint = None;
+        self.pending_turn_end_reconcile = None;
+    }
     /// Mark the wake cancel sent. No-op without a wake turn.
     pub(crate) fn mark_wake_cancel_sent(&mut self) {
         if let Some(wake) = self.running_wake_turn.as_mut() {
@@ -1000,13 +1020,13 @@ impl AgentView {
     /// (A full-arena purge there would madvise away warm pages on the most common reconnect outcome, once per open tab.)
     #[must_use = "purge retained memory iff a heavy transient dropped"]
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
+        self.resume_live_prompt_after_reconnect();
         if let Some(pid) = self.loading_placeholder_id.take() {
             self.scrollback.remove_entry(pid);
         }
-        let dropped_heavy;
-        if success && reload.saw_replay {
+        let dropped_heavy = if success && reload.saw_replay {
             self.scrollback.end_batch();
-            dropped_heavy = true;
+            true
         } else if success {
             let stash = reload.stash;
             let mut tail = std::mem::replace(&mut self.scrollback, stash.scrollback);
@@ -1075,15 +1095,15 @@ impl AgentView {
             if !reload.saw_todo_update {
                 self.todo = stash.todo;
             }
-            dropped_heavy = false;
+            false
         } else {
             self.restore_replay_rebuilt_state(reload.stash);
             self.last_seen_event_id = reload.last_seen_event_id;
             self.last_seen_event_seq = reload.last_seen_event_seq;
             self.last_applied_event_seq = reload.last_applied_event_seq;
             self.last_applied_xai_event_seq = reload.last_applied_xai_event_seq;
-            dropped_heavy = true;
-        }
+            true
+        };
         self.session.loading_replay = false;
         if success {
             self.arm_late_replay_grace();
@@ -1138,7 +1158,42 @@ impl AgentView {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use crate::app::agent::AgentState;
         if let Some(activity) = self.session.turn_activity() {
-            return Some(activity);
+            // Retrying is only a tracker override. A live foreground child
+            // is a healthy wait; do not paint Retrying as if the turn failed
+            // and is restarting.
+            if matches!(activity, TurnActivity::Retrying { .. })
+                && self.has_running_foreground_subagent()
+            {
+                return Some(TurnActivity::Waiting(WaitingReason::subagent()));
+            }
+            // A stale Preparing / write-argument snapshot must not mask a
+            // live nested specialist. Overlay title and turn-status would
+            // otherwise sit on Preparing search_replace for minutes.
+            if matches!(activity, TurnActivity::WritingToolCall(_))
+                && self.running_live_specialists().next().is_some()
+            {
+                // Model wait enrichment names background specialists. A
+                // Subagent wait only names foreground rows, so it would
+                // keep the generic label while an L3 is still running.
+                return Some(TurnActivity::Waiting(WaitingReason::Model));
+            }
+            // A pending get_command_or_subagent_output wait is not a healthy
+            // wait once every *known* waited-on nested agent / bg task has
+            // completed. Overlay title otherwise stays `Waiting on task
+            // output` with a climbing timer after the child already exited.
+            // Named ids that are not in the maps yet still count as live:
+            // a blocking wait tool outranks generic Model wait.
+            if let TurnActivity::Waiting(WaitingReason::TaskOutput {
+                ref task_ids,
+                waits: true,
+                ..
+            }) = activity
+                && !self.waited_work_still_running(task_ids)
+            {
+                // Fall through: do not keep task-output wait chrome.
+            } else {
+                return Some(activity);
+            }
         }
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
@@ -1170,7 +1225,9 @@ impl AgentView {
             TurnActivity::Waiting(WaitingReason::TaskOutput {
                 task_ids, waits, ..
             }) => {
-                let subject = self.subject_for_wait_tasks(&task_ids);
+                let subject = self
+                    .subject_for_wait_tasks(&task_ids)
+                    .or_else(|| self.live_specialist_wait_subject());
                 TurnActivity::Waiting(WaitingReason::TaskOutput {
                     task_ids,
                     subject,
@@ -1178,9 +1235,20 @@ impl AgentView {
                 })
             }
             TurnActivity::Waiting(WaitingReason::Subagent { .. }) => {
+                // Foreground wait: description only. Empty/whitespace stays
+                // the generic "Waiting on subagent…" label. Id fallback is
+                // for unnamed TaskOutput / Model waits (live_specialist).
                 TurnActivity::Waiting(WaitingReason::Subagent {
                     display: Some(self.subagent_wait_subject()),
                 })
+            }
+            TurnActivity::Waiting(WaitingReason::Model) => {
+                match self.live_specialist_wait_subject() {
+                    Some(display) => TurnActivity::Waiting(WaitingReason::Subagent {
+                        display: Some(display),
+                    }),
+                    None => TurnActivity::Waiting(WaitingReason::Model),
+                }
             }
             other => other,
         }
@@ -1245,22 +1313,12 @@ impl AgentView {
             }
         }
         if let Some(info) = self.subagent_sessions.get(task_id) {
-            let desc = info.description.trim();
-            if !desc.is_empty() {
-                return Some(first_nonempty_line(desc).to_string());
-            }
+            return specialist_lookup_subject(info);
         }
         self.subagent_sessions
             .values()
             .find(|info| info.subagent_id.as_ref() == task_id)
-            .and_then(|info| {
-                let desc = info.description.trim();
-                if desc.is_empty() {
-                    None
-                } else {
-                    Some(first_nonempty_line(desc).to_string())
-                }
-            })
+            .and_then(specialist_lookup_subject)
     }
     /// Whether a foreground subagent (`task`/`spawn_subagent`, not `run_in_background`) is currently running.
     /// The parent turn is blocked on it, so the spinner should read as a subagent wait.
@@ -2174,6 +2232,326 @@ mod resolve_turn_activity_tests {
                 subject: None,
                 waits: true,
             }
+        );
+    }
+    /// Nested L2 wait on a live background L3 must name that specialist even
+    /// when wait ids miss. Bare "Waiting on task output" is FAIL.
+    #[test]
+    fn nested_l2_task_output_wait_names_live_background_specialist() {
+        use crate::acp::meta::NotificationMeta;
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("prove cert DNS-01");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        specialist.subagent_id = Arc::from("sa-l3-cert");
+        view.subagent_sessions.insert("l3-cert".into(), specialist);
+        let meta = NotificationMeta::default();
+        view.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({
+                    "timeout_ms": 30_000,
+                })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut view.scrollback,
+        );
+        let activity = view.resolve_turn_activity().expect("activity");
+        let TurnActivity::Waiting(reason) = activity else {
+            panic!("expected waiting: {activity:?}");
+        };
+        let label = reason.label();
+        assert!(
+            label.contains("prove cert DNS-01"),
+            "nested L2 wait must name the live specialist, got {label}"
+        );
+        assert!(
+            label.contains("read_file"),
+            "wait chrome must include last known tool when the registry has it, got {label}"
+        );
+        assert!(
+            !label.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL when a specialist is live, got {label}"
+        );
+    }
+
+    /// Nested progress stamps `tools_used` / `tool_call_count` and often leaves
+    /// `activity_label` empty (or stuck on the generic wait). Wait chrome must
+    /// still name the last tool.
+    #[test]
+    fn nested_l2_task_output_wait_names_last_tool_from_progress() {
+        let mut view = running_view();
+        let mut specialist = running_child("Land check-remote");
+        specialist.is_background = true;
+        specialist.activity_label = Some("Waiting on task output…".into());
+        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.tool_call_count = Some(4);
+        view.subagent_sessions.insert("l3-gate".into(), specialist);
+        pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 30_000 }));
+        let activity = view.resolve_turn_activity().expect("activity");
+        let TurnActivity::Waiting(reason) = activity else {
+            panic!("expected waiting: {activity:?}");
+        };
+        let label = reason.label();
+        assert!(
+            label.contains("Land check-remote"),
+            "wait must name the specialist, got {label}"
+        );
+        assert!(
+            label.contains("read_file"),
+            "wait must use last tools_used when activity_label is the generic wait, got {label}"
+        );
+        assert!(
+            !label.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL when a specialist is live, got {label}"
+        );
+    }
+
+    /// Nested L2 model-wait (no pending task-output tool) with a live
+    /// background specialist must name that specialist. Bare
+    /// `Waiting for the model` is FAIL while the specialist is running.
+    #[test]
+    fn nested_l2_model_wait_names_live_background_specialist() {
+        let mut view = running_view();
+        let mut specialist = running_child("CheckersLater");
+        specialist.is_background = true;
+        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.tool_call_count = Some(6);
+        view.subagent_sessions.insert("l3-impl".into(), specialist);
+        let activity = view.resolve_turn_activity().expect("activity");
+        let label = crate::app::subagent::format_activity_label(&activity);
+        assert!(
+            label.contains("CheckersLater"),
+            "nested L2 model-wait must name the live specialist, got {label}"
+        );
+        assert!(
+            label.contains("read_file") || label.contains("6 tools"),
+            "wait chrome must include last tool or tool count, got {label}"
+        );
+        assert!(
+            !label.to_ascii_lowercase().contains("waiting for the model"),
+            "bare Waiting for the model is FAIL when a specialist is live, got {label}"
+        );
+    }
+
+    /// A frozen Preparing search_replace snapshot must yield to a live
+    /// nested specialist. Overlay title and footer stay on that snapshot
+    /// for minutes when the tracker still thinks arguments are streaming.
+    #[test]
+    fn nested_l2_preparing_tool_yields_to_live_background_specialist() {
+        let mut view = running_view();
+        view.session
+            .tracker
+            .note_tool_call_arguments_delta(Some("search_replace"), 0);
+        let mut specialist = running_child("remote compile");
+        specialist.is_background = true;
+        specialist.child_session_id = std::sync::Arc::from("l3-impl");
+        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        view.subagent_sessions.insert("l3-impl".into(), specialist);
+        let activity = view.resolve_turn_activity().expect("activity");
+        let label = crate::app::subagent::format_activity_label(&activity);
+        assert!(
+            label.contains("remote compile"),
+            "preparing chrome must name the live nested job, got {label}"
+        );
+        assert!(
+            !label.to_ascii_lowercase().contains("preparing"),
+            "stale Preparing search_replace must not outrank a live nested job, got {label}"
+        );
+    }
+
+    fn mark_specialist_completed(info: &mut crate::app::subagent::SubagentInfo) {
+        use std::sync::Arc;
+        info.finished = true;
+        info.status = Some(Arc::from("completed"));
+        info.duration_ms = Some(1_500);
+        info.activity_label = None;
+    }
+
+    fn pending_task_output_wait(view: &mut AgentView, raw_input: serde_json::Value) {
+        use crate::acp::meta::NotificationMeta;
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        let meta = NotificationMeta::default();
+        view.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(raw_input))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut view.scrollback,
+        );
+    }
+
+    /// After the waited-on nested agent has completed, parent wait chrome must
+    /// not stay `Waiting on task output` even if the wait tool call is still
+    /// Pending. Occupied turn + finished children is not a healthy wait.
+    #[test]
+    fn task_output_wait_clears_after_waited_nested_agent_completes() {
+        use crate::views::turn_status::is_sendable_wait;
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("prove cert DNS-01");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        specialist.subagent_id = Arc::from("sa-l3-cert");
+        view.subagent_sessions.insert("l3-cert".into(), specialist);
+        pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
+        mark_specialist_completed(view.subagent_sessions.get_mut("l3-cert").unwrap());
+
+        let activity = view.resolve_turn_activity();
+        let label = activity
+            .as_ref()
+            .map(|a| a.as_label().to_string())
+            .unwrap_or_default();
+        let text = activity
+            .as_ref()
+            .map(crate::app::subagent::format_activity_label)
+            .unwrap_or_default();
+        assert!(
+            !matches!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput { .. }))
+            ),
+            "wait chrome must end after the waited-on nested agent completed, got {activity:?}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "parent overlay must not stay Waiting on task output after the child completed, got {text}"
+        );
+        assert_ne!(
+            label, "waiting_task_output",
+            "unenriched wait identity must not stay task-output after the child completed"
+        );
+        assert!(
+            !is_sendable_wait(&view.resolve_turn_activity_unenriched()),
+            "completed nested wait must not keep the parked send-a-message-to-interrupt footer"
+        );
+        assert!(
+            crate::app::subagent::live_subagent_list(view.subagent_sessions.values())
+                .iter()
+                .all(|info| info.child_session_id.as_ref() != "l3-cert"),
+            "live list must not show the completed nested agent as running"
+        );
+        let info = view.subagent_sessions.get("l3-cert").unwrap();
+        assert_eq!(
+            info.display_elapsed(),
+            std::time::Duration::from_millis(1_500),
+            "completed nested-agent timer must stop at SubagentFinished duration"
+        );
+        assert_ne!(
+            info.activity_label.as_deref(),
+            Some("Responding"),
+            "list must not keep painting Responding after the nested agent completed"
+        );
+        assert_ne!(
+            info.activity_label.as_deref(),
+            Some("Thinking"),
+            "list must not keep painting Thinking after the nested agent completed"
+        );
+    }
+
+    /// Same contract when the wait names the child. Finished children must not
+    /// keep a task-output wait alive just because the tool call is still Pending.
+    #[test]
+    fn named_task_output_wait_clears_after_waited_nested_agent_completes() {
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("remote Lake");
+        specialist.is_background = true;
+        specialist.subagent_id = Arc::from("sa-l3-lake");
+        view.subagent_sessions.insert("l3-lake".into(), specialist);
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["l3-lake", "sa-l3-lake"],
+                "timeout_ms": 600_000,
+            }),
+        );
+        mark_specialist_completed(view.subagent_sessions.get_mut("l3-lake").unwrap());
+
+        let activity = view.resolve_turn_activity();
+        assert!(
+            !matches!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput { .. }))
+            ),
+            "named wait chrome must end after that nested agent completed, got {activity:?}"
+        );
+    }
+
+    /// A live wait tool that names an id not yet in bg_tasks / subagent maps
+    /// still advertises TaskOutput. Unknown is not completed.
+    #[test]
+    fn named_task_output_wait_outranks_model_when_id_is_unknown() {
+        let mut view = running_view();
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["bg-not-registered"],
+                "timeout_ms": 30_000,
+            }),
+        );
+        let activity = view.resolve_turn_activity();
+        assert!(
+            matches!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+                    waits: true,
+                    ..
+                }))
+            ),
+            "blocking wait tool must outrank Waiting(Model), got {activity:?}"
+        );
+    }
+
+    /// `SubagentFinished` must drop the tracker wait, not only skip it in
+    /// display enrichment. Otherwise ACP complete still leaves the parent turn
+    /// painted as a blocking wait until kill.
+    #[test]
+    fn subagent_finished_drops_pending_task_output_wait_without_kill() {
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("remote Lake");
+        specialist.is_background = true;
+        specialist.subagent_id = Arc::from("sa-l3-lake");
+        view.subagent_sessions.insert("l3-lake".into(), specialist);
+        pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
+        assert!(
+            matches!(
+                view.session.turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+                    waits: true,
+                    ..
+                }))
+            ),
+            "precondition: wait tool is a blocking tracker wait"
+        );
+        mark_specialist_completed(view.subagent_sessions.get_mut("l3-lake").unwrap());
+        view.drop_satisfied_task_output_waits();
+        assert!(
+            !matches!(
+                view.session.turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput { .. }))
+            ),
+            "SubagentFinished must drop the pending wait tool chrome, got {:?}",
+            view.session.turn_activity()
         );
     }
 }

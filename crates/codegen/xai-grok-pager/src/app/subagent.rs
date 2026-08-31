@@ -344,6 +344,48 @@ impl SubagentInfo {
             self.elapsed()
         }
     }
+
+    /// Last operator-visible tool or progress for wait chrome.
+    ///
+    /// Prefers a real `activity_label`, then the last `tools_used` name, then
+    /// a tool-call count. Generic `Waiting on task output` labels are not
+    /// progress: nested progress often leaves that leftover while `tools_used`
+    /// still names the last tool.
+    pub(crate) fn wait_progress_label(&self) -> Option<String> {
+        if let Some(label) = meaningful_wait_progress(self.activity_label.as_deref()) {
+            return Some(label);
+        }
+        if let Some(tool) = self
+            .tools_used
+            .last()
+            .map(|s| s.as_ref())
+            .and_then(|s| meaningful_wait_progress(Some(s)))
+        {
+            return Some(tool);
+        }
+        match self.tool_call_count.or(self.tool_calls) {
+            Some(1) => Some("1 tool".to_string()),
+            Some(n) if n > 1 => Some(format!("{n} tools")),
+            _ => None,
+        }
+    }
+}
+
+fn meaningful_wait_progress(label: Option<&str>) -> Option<String> {
+    let label = label?.trim_end_matches('…').trim_end_matches("...").trim();
+    if label.is_empty() {
+        return None;
+    }
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("waiting on task output")
+        || lower.contains("waiting for the model")
+        || lower == "waiting"
+        || lower.starts_with("preparing ")
+        || lower == "preparing"
+    {
+        return None;
+    }
+    Some(label.to_string())
 }
 
 /// Pager-side slice of the shell's on-disk `SubagentMeta`.

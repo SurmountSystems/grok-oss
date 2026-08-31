@@ -54,6 +54,44 @@ pub(super) fn apply_cancel_subagents_preference_global(app: &mut AppView, stop: 
     }
 }
 
+/// Nested jobs overlay [stop] must kill.
+///
+/// Parented specialists always. The overlay row itself only when the parent
+/// is Idle: session/cancel on the overlay view can sit on Cancelling without
+/// ending that background nested job. A TurnRunning parent cancels the overlay
+/// child with CancelTurn; KillSubagent for that same row uses the parent session.
+fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(child_sid) = agent.active_subagent.as_ref() else {
+        return vec![];
+    };
+    if !agent.subagent_views.contains_key(child_sid.as_str()) {
+        return vec![];
+    }
+    let mut ids = Vec::new();
+    let mut push = |info: &crate::app::subagent::SubagentInfo| {
+        if info.is_running() && info.workflow_run_id.is_none() {
+            let id = info.subagent_id.to_string();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    };
+    if agent.session.state.is_idle()
+        && let Some(info) = agent.subagent_sessions.get(child_sid.as_str())
+    {
+        push(info);
+    }
+    for info in agent.subagent_sessions.values() {
+        if info.parent_session_id.as_deref() == Some(child_sid.as_str()) {
+            push(info);
+        }
+    }
+    ids
+}
+
 pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -67,7 +105,11 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         let retrying = agent.any_cancel_pending();
         crate::unified_log::info(
             if retrying {
-                "cancel.retry"
+                agent.clear_send_now_expectation();
+                effects.push(emit_cancel_turn(
+                    agent, session_id, /* cancel_subagents */ true,
+                    /* rewind_if_no_output */ false,
+                ));
             } else {
                 "cancel.overlay"
             },

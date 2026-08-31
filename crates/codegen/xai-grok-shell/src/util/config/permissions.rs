@@ -8,6 +8,7 @@ pub fn parse_permission_mode_canonical(mode_str: &str) -> PermissionMode {
     match mode_str {
         "always-approve" => PermissionMode::AlwaysApprove,
         "auto" => PermissionMode::Auto,
+        "context-only" => PermissionMode::ContextOnly,
         "ask" => PermissionMode::Ask,
         "default" => PermissionMode::Ask,
         _ => PermissionMode::Ask,
@@ -21,6 +22,7 @@ pub(crate) fn permission_mode_canonical_str(mode: PermissionMode) -> &'static st
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",
+        PermissionMode::ContextOnly => "context-only",
         PermissionMode::Ask => "ask",
     }
 }
@@ -399,6 +401,24 @@ mod tests {
             PermissionMode::Ask,
             "wire format is case-sensitive; 'Always-Approve' is unknown",
         );
+        assert_eq!(
+            parse_permission_mode_canonical("context-only"),
+            PermissionMode::ContextOnly,
+            "operator-facing context-only must round-trip as its own mode, not Ask"
+        );
+        assert_eq!(
+            permission_mode_canonical_str(PermissionMode::ContextOnly),
+            "context-only",
+        );
+        assert_eq!(
+            parse_permission_mode_canonical("always-approve"),
+            PermissionMode::AlwaysApprove,
+        );
+        assert_eq!(
+            parse_permission_mode_canonical("auto"),
+            PermissionMode::Auto
+        );
+        assert_eq!(parse_permission_mode_canonical("ask"), PermissionMode::Ask);
     }
 
     /// `resolve_permission_mode` is the pure logic `load_permission_mode` delegates to.
@@ -415,6 +435,11 @@ mod tests {
                 "[ui]\npermission_mode = \"auto\"\n",
                 PermissionMode::Auto,
                 "auto",
+            ),
+            (
+                "[ui]\npermission_mode = \"context-only\"\n",
+                PermissionMode::ContextOnly,
+                "context-only",
             ),
             (
                 "[ui]\npermission_mode = \"default\"\n",
@@ -613,6 +638,11 @@ mod tests {
         );
         assert_eq!(clamped_display_permission_mode(PermissionMode::Auto), "ask");
         assert_eq!(clamped_display_permission_mode(PermissionMode::Ask), "ask");
+        assert_eq!(
+            clamped_display_permission_mode(PermissionMode::ContextOnly),
+            "context-only",
+            "context-only is diagnostic, not a clamped-off always-approve/auto"
+        );
 
         let default_ui: TomlValue =
             toml::from_str("[ui]\npermission_mode = \"default\"\n").unwrap();
@@ -623,6 +653,10 @@ mod tests {
         );
         assert_eq!(resolved_display_permission_mode(None, Some("auto")), "ask");
         assert_eq!(resolved_display_permission_mode(None, None), "ask");
+        assert_eq!(
+            resolved_display_permission_mode(None, Some("context-only")),
+            "context-only"
+        );
     }
 
     #[test]

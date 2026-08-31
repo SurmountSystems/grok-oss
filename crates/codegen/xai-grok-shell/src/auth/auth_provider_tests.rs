@@ -376,7 +376,7 @@ async fn provider_concurrent_mints_single_flight() {
 #[tokio::test]
 async fn provider_expiry_source_precedence() {
     // jsonwebtoken needs a process-level CryptoProvider before encode/decode.
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 
     fn short_jwt() -> String {
         // exp within the skew window: stale immediately if consumed.

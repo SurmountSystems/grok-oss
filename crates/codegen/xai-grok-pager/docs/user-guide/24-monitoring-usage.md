@@ -11,9 +11,11 @@ For included SuperGrok period limits, SuperGrok dollar credits, and console
 team prepaid, type **`/limits`** in the TUI or click the compact meter on the
 status row. See [Authentication](02-authentication.md) and
 [Slash Commands → `/limits`](04-slash-commands.md#limits). `/spend` is the
-local Token Economy book. Spend included SuperGrok period limits on stored
-Business / Team SuperGrok logins first, then personal included, then SuperGrok
-dollar credits that never expire, then console team prepaid / console API
+local Token Economy book. Spend included SuperGrok period limits on a stored
+personal SuperGrok login first. A Team / Business SuperGrok JWT is not the
+paying source while that personal login exists (that JWT settles as team
+postpaid OAuth / Grok Build and can debit the Billing Credits card). Then
+SuperGrok dollar credits that never expire, then console team prepaid / console API
 credits. Remaining included SuperGrok period limits across distinct stored
 plans are added together. After included SuperGrok period limits are full,
 sampling hops to SuperGrok dollar credits, then to the console API as failover.

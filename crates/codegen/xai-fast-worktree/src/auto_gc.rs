@@ -339,6 +339,7 @@ fn build_auto_gc_options_with_dry_run(
         dry_run,
         keep_worktrees_containing,
         max_age_by_kind,
+        now_secs: None,
     }
 }
 

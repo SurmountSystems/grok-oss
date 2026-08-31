@@ -72,7 +72,7 @@ Git may never see a merge-base with `xai-org/main`. **That is fine.** We use
 
 ## Put Surmount history on their tip (`put-history-on-xai`)
 
-**This is the script for “our history on theirs”.** Import (below) is the
+**This is the helper for “our history on theirs”** (`grok-nix-helper put-history-on-xai`). Import (below) is the
 *opposite* direction (their tree into Surmount).
 
 After each export, rebuild a branch **parented at their tip** that carries
@@ -83,25 +83,25 @@ stable xAI parent chain.
 ```
 xai-org/main @ export tip
         │
-        └── onto-xai/<short>   ← put-history-on-xai.sh (cherry-pick product)
+        └── onto-xai/<short>   ← grok-nix-helper put-history-on-xai (cherry-pick product)
                 │
-                └── join-main-into-onto.sh  (merge -s ours origin/main)
+                └── grok-nix-helper join-main-into-onto  (merge -s ours origin/main)
                           │
                           └── PR base=main ← head=onto-xai/*
 ```
 
 | Goal | Command |
 |------|---------|
-| Stack Surmount product on current xAI tip | `SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
-| Resume after conflict resolution | `CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
-| Rebuild stack from scratch (backs up first) | `FORCE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh` |
-| Join Surmount `main` for a landable PR | `./scripts/join-main-into-onto.sh` then signed merge commit |
+| Stack Surmount product on current xAI tip | `SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai` |
+| Resume after conflict resolution | `CONTINUE=1 SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai` |
+| Rebuild stack from scratch (backs up first) | `FORCE=1 SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai` |
+| Join Surmount `main` for a landable PR | `grok-nix-helper join-main-into-onto` then signed merge commit |
 | Log | [`docs/upstream-onto-log.md`](upstream-onto-log.md) |
 
 **There is no `MODE=overlay` / commit-tree mode** in the current script. Older
 notes that mentioned those modes are obsolete — do not invent them.
 
-`scripts/replay-onto-upstream.sh` is a thin alias of put-history.
+`grok-nix-helper replay-onto-upstream` is a thin alias of put-history.
 
 **How it works:** cherry-pick each non-merge Surmount commit after the seed
 (`docs/upstream-import-log.md` seed / `b189869…`) onto `xai-org/main`. Conflicts
@@ -137,21 +137,21 @@ Proved path: PR [#12](https://github.com/SurmountSystems/grok-oss/pull/12)
 ```bash
 git fetch origin main
 git fetch xai-org main --force
-./scripts/detect-upstream-export.sh   # record XAI_TIP / XAI_TREE
+grok-nix-helper detect-upstream-export   # record XAI_TIP / XAI_TREE
 
 # Anytime mid-stack / after compaction: live probe (prefer over guessing from docs)
-./scripts/recon-status.sh             # or: just recon-status
+grok-nix-helper recon-status             # or: just recon-status
 # → branch, CHERRY_PICK/MERGE, UU count, onto-ish, recommended next human action
 
 # clean worktree preferred
-SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai
 # on conflict: resolve carefully (see rules below), then:
 git add -u
 git cherry-pick --continue            # SIGNED on real TTY — agent never commits
-CONTINUE=1 SURMOUNT_REF=origin/main ./scripts/put-history-on-xai.sh
+CONTINUE=1 SURMOUNT_REF=origin/main grok-nix-helper put-history-on-xai
 
 # when stack complete:
-./scripts/join-main-into-onto.sh
+grok-nix-helper join-main-into-onto
 git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
@@ -168,20 +168,18 @@ git push -u origin HEAD
 # append docs/upstream-onto-log.md
 ```
 
-### Scripts missing mid-stack
+### Helper missing mid-stack
 
-Early cherry-picks start from bare xAI tip — **`scripts/put-history-on-xai.sh`
-does not exist until a later product commit lands**. Fish may run
-“find-the-command” and fail. Use a temp copy with fixed `ROOT` until the pick
-that adds `scripts/` lands:
+Early cherry-picks start from a bare xAI tip. **`grok-nix-helper` may not
+exist until a later product commit lands**. Realize it from origin/main
+(or a prior onto backup) and set `GROK_NIX_HELPER`, or run
+`just grok_nix_helper_bin` after `nix build .#grok-nix-helper`.
 
 ```bash
-REPO="$(pwd)"   # path to your grok-build / grok-oss clone
-git show origin/main:scripts/put-history-on-xai.sh \
-  | sed "s|ROOT=\"\$(cd \"\$(dirname \"\${BASH_SOURCE\[0\]}\")/..\" && pwd)\"|ROOT=\"$REPO\"|" \
-  > /tmp/put-history-on-xai.sh
-chmod +x /tmp/put-history-on-xai.sh
-CONTINUE=1 SURMOUNT_REF=origin/main bash /tmp/put-history-on-xai.sh
+nix build origin/main#grok-nix-helper --out-link /tmp/grok-nix-helper-result
+CONTINUE=1 SURMOUNT_REF=origin/main \
+  GROK_NIX_HELPER=/tmp/grok-nix-helper-result/bin/grok-nix-helper \
+  grok-nix-helper put-history-on-xai
 ```
 
 ### Conflict resolution rules (fork)
@@ -296,10 +294,7 @@ git push --force-with-lease origin onto-xai/b13fa526f511
 
 ```bash
 # after #7, #12, #13 all cherry-picked cleanly:
-test -x scripts/join-main-into-onto.sh \
-  || git show origin/main:scripts/join-main-into-onto.sh > scripts/join-main-into-onto.sh
-chmod +x scripts/join-main-into-onto.sh
-./scripts/join-main-into-onto.sh
+grok-nix-helper join-main-into-onto
 git commit -S -m "Merge Surmount main into onto-xai (keep tip tree)" \
   -m "Join Surmount archive history so main is an ancestor of this tip." \
   -m "Strategy ours: retain onto tree (xAI tip + product). Enables normal PR onto → main."
@@ -324,11 +319,13 @@ Never ship `aws-config` 1.9 / `kstring` 2.0.3 while toolchain is 1.92.0.
 
 | Tool | Role |
 |------|------|
-| [`scripts/put-history-on-xai.sh`](../scripts/put-history-on-xai.sh) | **Our history on their tip** → `onto-xai/<short>` (re-run replaces branch) |
-| [`scripts/import-upstream-export.sh`](../scripts/import-upstream-export.sh) | **Their tree into Surmount** → `import/*` content-import review branch |
-| [`scripts/detect-upstream-export.sh`](../scripts/detect-upstream-export.sh) | Fetch xAI tip; compare to last imported tree; exit codes for CI |
-| [`scripts/sync-upstream.sh`](../scripts/sync-upstream.sh) | Detect → print both directions (or `PUT_ON_XAI=1` / `IMPORT_NOW=1`) |
-| [`scripts/replay-onto-upstream.sh`](../scripts/replay-onto-upstream.sh) | Alias of `put-history-on-xai.sh` |
+| `grok-nix-helper put-history-on-xai` | **Our history on their tip** → `onto-xai/<short>` (re-run replaces branch) |
+| `grok-nix-helper import-upstream-export` | **Their tree into Surmount** → `import/*` content-import review branch |
+| `grok-nix-helper detect-upstream-export` | Fetch xAI tip; compare to last imported tree; exit codes for CI |
+| `grok-nix-helper sync-upstream` | Detect → print both directions (or `PUT_ON_XAI=1` / `IMPORT_NOW=1`) |
+| `grok-nix-helper replay-onto-upstream` | Alias of `put-history-on-xai` |
+| `grok-nix-helper join-main-into-onto` | Join Surmount `main` with `merge -s ours`; default stages for `git commit -S` |
+| `grok-nix-helper recon-status` | Read-only onto / cherry-pick / merge probe |
 | [`.github/workflows/upstream-export.yml`](../.github/workflows/upstream-export.yml) | Scheduled detection; opens issue when a new export appears |
 | Agent skill `upstream-export-import` | Checklist for both directions |
 
@@ -339,7 +336,7 @@ Never ship `aws-config` 1.9 / `kstring` 2.0.3 while toolchain is 1.92.0.
 | Dirty worktree | **Abort** unless `ALLOW_DIRTY=1` |
 | Default base | **`origin/main`**, never the currently checked-out feature tip |
 | Feature commits | **Not** included unless you set `BASE_REF=feat/your-branch` |
-| After import | Returns to your previous branch (pass `--stay` to remain on `import/…`) |
+| After import | Stays on `import/*` until a signed commit exists. After `DO_COMMIT=1` succeeds, returns to the previous branch unless `--stay` |
 | Tree apply | `git read-tree -u --reset <xai-tree>` — **not** `git add -A` (that bug once imported only a `result` symlink) |
 
 **Recommended order when you have unmerged features:** finish the feature (merge
@@ -354,13 +351,12 @@ with a clean tree.
 - [ ] `git diff --stat <old-tree> <new-tree>` reviewed (not empty “noise only”)
 - [ ] Permission / workspace / shell / pager high-churn areas skimmed for behavior changes
 - [ ] Fork-only files still present: branding, OpenRouter, `grok-rate-limit`, AUR, FORK.md, justfile, flake
-- [ ] **Process pins still present** (import only restores `FORK_PATHS`; expanded list includes AGENTS/RESIDUAL/join/hermetic/`doc/dev`/assert script — run the assert, do not eyeball alone):
-  - [ ] `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins` (fails if pins missing)
+- [ ] **Process pins still present** (import only restores `FORK_PATHS`; expanded list includes AGENTS/RESIDUAL/join/hermetic/`doc/dev`/assert helper — run the assert, do not eyeball alone):
+  - [ ] `grok-nix-helper assert-process-pins` or `just upstream-assert-process-pins` (fails if pins missing)
   - [ ] `AGENTS.md`, `RESIDUAL.md`, `FORK.md`
-  - [ ] `scripts/join-main-into-onto.sh`, `scripts/with-ci-hermetic-path.sh`, `scripts/assert-process-pins.sh`, `scripts/recon-status.sh`
-  - [ ] `scripts/put-history-on-xai.sh` + other import/sync scripts already in `FORK_PATHS`
+  - [ ] `crates/codegen/grok-nix-helper` (put-history, import, join, recon-status, hermetic PATH / process-pin assert)
   - [ ] `docs/upstream-history.md` (+ import/onto logs)
-  - [ ] Review `FORK_PATHS` in `scripts/import-upstream-export.sh` only if the assert failed or a new process path is needed
+  - [ ] Review `FORK_PATHS` in `grok-nix-helper` (`fork_paths.rs`) only if the assert failed or a new process path is needed
 - [ ] **Product regression filters** (assert is path-only; seams inside `xai-grok-*` need cargo). After process-pin assert, walk the **seven product classes** in [`FORK.md`](../FORK.md) § *Land checklist* and [`doc/dev/upstream-regression-filters.md`](../doc/dev/upstream-regression-filters.md) § *Required land inventory*: CLI identity first token `grok-oss`; `/settings` plus unread-config readers plus DOGE picker; grok-oss ledger `/spend` ingest; DOGE/chrome paint; dual-auth hop after included SuperGrok period limits are full; last-session on start; product skills are not a Python runtime. Walk extra neighbors the catalog already lists (bubble click, plan present is not Approve, SHA-aware `/rebuild`, nucleo, `from_config` cold catalog, pause / Clear finished, always-three-layer product prompt, user-guide hop / spend-order). Do not invent a second numbered board. Then `rg` the catalog identifiers; a named filter with no matching `fn` is a failed land. **Helper-green is a failed land** (`contains("grok")` version tests, schema-without-`/spend`, serde-only `hide_header`, rank-without-hop, catalog-exists-without-paint, bundle-still-has-junk-`.py`). A chrome-only inventory is a failed land. Paint-only bubble copy is a failed land. Skills Python reintroduced is a failed land. `just check` / `just ci` cannot fail a deleted test. Optional reminder after assert: `just upstream-land-filters`.
 - [ ] **Paint / dogfood.** Operator check after the named paint `fn`s exist, not the only check: Human/agent rails, titled composer white frame with yellow title only, plan five CTAs (Approve / Notes / Clarify / Revise / Quit), included SuperGrok period limits compact meter (click opens `/limits`), SIGUSR1 fleet still alive after a **failed** install. Do not accept "compile mop re-applied seams" without the seven-class cargo list.
 - [ ] **User-guide conflict resolve** — shared path `crates/codegen/xai-grok-pager/docs/user-guide/` is **not** in `FORK_PATHS`. On onto, re-check `/limits`, DOGE default theme, window titles / `title.enabled` vs `hide_header`, and Grok OSS / `grok-oss` branding sections against xAI base; do not drop fork copy for a clean merge alone. A guide with zero `/limits` hits is a failed land.
@@ -382,7 +378,7 @@ project skill roots, and user-guide; operator skill packs live under
 | Paths listed in import `FORK_PATHS` (includes AGENTS, RESIDUAL, join/hermetic/assert, `doc/dev`) | Shared user-guide (xAI base on import; conflict on onto) |
 | Product commits cherry-picked on onto | Onto tip missing a pin before join (`-s ours` cannot backfill) |
 
-Assert anytime: `./scripts/assert-process-pins.sh` or `just upstream-assert-process-pins`.
+Assert anytime: `grok-nix-helper assert-process-pins` or `just upstream-assert-process-pins`.
 That proves files exist, including the catalog file and its seven product
 class titles. It does not prove crate `fn` names. After assert, walk FORK
 § *Land checklist* and `doc/dev/upstream-regression-filters.md` (name-check

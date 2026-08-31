@@ -1076,13 +1076,18 @@ mod tests {
             order_credentials_for_preferred_auto(&candidates, &["console-must-wait".into()]);
         assert_eq!(
             order.primary.as_deref(),
+            Some("tok-personal"),
+            "next-turn rank must stay on the personal SuperGrok paying JWT: {order:?}"
+        );
+        assert_ne!(
+            order.primary.as_deref(),
             Some("tok-team"),
-            "next-turn rank must hop to Business included remaining: {order:?}"
+            "must not hop to Team JWT (Billing Credits settlement) while a personal SuperGrok login exists"
         );
         assert_ne!(
             order.primary.as_deref(),
             Some("console-must-wait"),
-            "must not make console primary while Business included remains"
+            "must not make console primary while personal SuperGrok included remaining stands"
         );
     }
 
@@ -1258,6 +1263,41 @@ mod tests {
                 .and_then(|b| b.get("val"))
                 .and_then(|v| v.as_u64()),
             Some(100)
+        );
+    }
+
+    /// SuperGrok `GetGrokCreditsConfig.prepaidBalance.val` is SuperGrok dollar
+    /// credits. It is not the console Billing Credits card. Public docs do
+    /// not bind that card to this field.
+    #[test]
+    fn prepaid_balance_maps_to_supergrok_dollar_credits_never_billing_credits_card() {
+        use xai_grok_sampling_types::{
+            BillingCreditsCard, billing_credits_card_from_supergrok_prepaid_balance,
+            billing_credits_usd_from_named_json_field, current_billing_credits_usd,
+        };
+
+        let config = BillingConfig {
+            prepaid_balance: Some(Cent { val: 4703 }),
+            ..empty_config()
+        };
+        let row = limits_identity_from_credits_config("principal-1", &config, "ok");
+        assert_eq!(
+            row.extras_cents,
+            Some(4703),
+            "prepaidBalance.val is SuperGrok dollar credits"
+        );
+        assert_eq!(
+            billing_credits_card_from_supergrok_prepaid_balance(row.extras_cents.unwrap()),
+            BillingCreditsCard::NotFetched
+        );
+        assert_eq!(
+            billing_credits_usd_from_named_json_field("prepaidBalance.val", 47.03),
+            None
+        );
+        assert_eq!(
+            current_billing_credits_usd(Some(89.94), Some(47.03), None),
+            None,
+            "operator-visible Billing Credits $47.03 is not this SuperGrok field"
         );
     }
 

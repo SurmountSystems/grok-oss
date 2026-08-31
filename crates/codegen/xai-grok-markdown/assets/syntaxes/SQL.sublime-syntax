@@ -1,0 +1,17 @@
+name: SQL
+file_extensions: [sql]
+scope: source.sql
+contexts:
+  main:
+    - match: '\b(SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|INDEX|DROP|ALTER|JOIN|LEFT|RIGHT|INNER|ON|AND|OR|NOT|NULL|AS|GROUP|BY|ORDER|LIMIT|OFFSET|UNION|DISTINCT)\b'
+      scope: keyword.control.sql
+    - match: '--.*'
+      scope: comment.line.double-dash.sql
+    - match: "'"
+      push: string
+  string:
+    - meta_scope: string.quoted.single.sql
+    - match: "''"
+      scope: constant.character.escape.sql
+    - match: "'"
+      pop: true

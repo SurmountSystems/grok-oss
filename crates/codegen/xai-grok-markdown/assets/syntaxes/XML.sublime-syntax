@@ -1,0 +1,25 @@
+name: XML
+file_extensions: [xml]
+scope: text.xml
+contexts:
+  main:
+    - match: '<!--'
+      push: comment
+    - match: '</?[A-Za-z][\w:.-]*'
+      scope: entity.name.tag.xml
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+  comment:
+    - meta_scope: comment.block.xml
+    - match: '-->'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.xml
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.xml
+    - match: "'"
+      pop: true

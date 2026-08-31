@@ -123,6 +123,19 @@ pub struct TaskToolInput {
     #[schemars(skip)]
     #[serde(default)]
     pub task_id: Option<String>,
+
+    /// Files this subagent is assigned to write. Spawn fails if another live
+    /// subagent already claimed one of these paths. The claim lasts until the
+    /// child finishes. Omit this to skip spawn-time claims; edit tools still
+    /// refuse two agents writing the same file at the same time.
+    #[schemars(
+        description = "Files this subagent is assigned to write. Spawn fails if another live \
+            subagent already claimed one of these paths. The claim lasts until the child \
+            finishes. Omit this when paths are unknown; edit tools still refuse overlapping \
+            writes on the same file."
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_paths: Vec<String>,
 }
 
 /// Default `subagent_type` for [`TaskToolInput`] when the caller omits it.
@@ -1487,6 +1500,8 @@ pub struct TaskToolNaming<'a> {
     /// Name of the `isolation` parameter, used in the isolation/worktree
     /// paragraph.
     pub isolation_param: &'a str,
+    /// Name of the `write_paths` parameter.
+    pub write_paths_param: &'a str,
 }
 
 /// Build the `task` tool description.
@@ -1499,6 +1514,7 @@ pub fn build_task_description(naming: &TaskToolNaming) -> String {
         resume_from_param,
         background_retrieval_tool,
         isolation_param,
+        write_paths_param,
     } = *naming;
 
     format!(
@@ -1834,6 +1850,7 @@ mod tests {
             resume_from_param: "resume_from",
             background_retrieval_tool: "get_task_output",
             isolation_param: "isolation",
+            write_paths_param: "write_paths",
         }
     }
 
@@ -1877,6 +1894,7 @@ mod tests {
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         };
         assert_eq!(input.subagent_type, "explore");
         let value = serde_json::to_value(&input).unwrap();
@@ -2138,6 +2156,8 @@ mod tests {
         });
         assert!(desc.contains("Isolation mode:"));
         assert!(desc.contains("Use isolation to control the child's execution environment."));
+        assert!(desc.contains("Assigned write paths:"));
+        assert!(desc.contains("Use write_paths to claim files this subagent will write."));
     }
 
     #[test]

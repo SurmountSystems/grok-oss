@@ -41,6 +41,8 @@ pub enum PermissionMode {
     AlwaysApprove,
     /// LLM transcript classifier reviews non-fast-path tool calls.
     Auto,
+    /// Advertise no tools; refuse any tool call that still arrives.
+    ContextOnly,
 }
 
 impl PermissionMode {

@@ -1316,8 +1316,20 @@ pub(super) async fn run_session(
                             tracing::info!("Session received SetAutoMode: {}", enabled);
                             session.permissions.set_auto_mode(enabled);
                             if enabled {
+                                session.context_only.store(false, std::sync::atomic::Ordering::Relaxed);
                                 session.wire_permission_auto_llm_classifier().await;
                             } else {
+                                session.permissions.set_llm_side_query_wired(false);
+                            }
+                        }
+                        SessionCommand::SetContextOnlyMode { enabled } => {
+                            tracing::info!("Session received SetContextOnlyMode: {}", enabled);
+                            session
+                                .context_only
+                                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+                            if enabled {
+                                session.permissions.set_yolo_mode(false);
+                                session.permissions.set_auto_mode(false);
                                 session.permissions.set_llm_side_query_wired(false);
                             }
                         }
@@ -1411,7 +1423,7 @@ pub(super) async fn run_session(
                                                 false,
                                             )
                                         }
-                                        Err(()) => {
+                                        Err(_) => {
                                             crate::extensions::notification::PromptUsage::for_error_path(
                                                 None, true,
                                             )

@@ -545,6 +545,9 @@ impl BlockContent for ThinkingBlock {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else if is_running {
+            // Match `next_fold_mode`: skip Collapsed while streaming so
+            // explicit collapse from Expanded lands on Truncated (the
+            // running min-fold), not a header-only Collapsed.
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -555,7 +558,7 @@ impl BlockContent for ThinkingBlock {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else {
-            DisplayMode::Truncated
+            DisplayMode::Collapsed
         }
     }
 

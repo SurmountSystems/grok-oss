@@ -129,8 +129,15 @@ pub(super) fn find_session_match(
             child_match = Some(*id);
         }
     }
-    if let Some(id) = child_match {
-        return Some(SessionMatch::Child(id));
+    child_match.map(SessionMatch::Child)
+}
+
+pub(super) fn find_session_match(
+    app: &AppView,
+    session_id: &acp::SessionId,
+) -> Option<SessionMatch> {
+    if let Some(matched) = find_bound_session_match(app, session_id) {
+        return Some(matched);
     }
     // Pass 3: race-window fallback for notifications that arrive before the root session_id has been assigned
     // Only the active agent is eligible, only while its `session_id` is still `None`, and never after its load failed
@@ -164,6 +171,16 @@ pub(super) fn is_matched_agent_active(app: &AppView, matched_agent: AgentId) -> 
 pub(super) fn interaction_target_agent(app: &AppView, session_id: &str) -> Option<AgentId> {
     let sid = acp::SessionId::new(session_id.to_owned());
     match find_session_match(app, &sid) {
+        Some(SessionMatch::Root(id) | SessionMatch::Child(id)) => Some(id),
+        None => None,
+    }
+}
+
+/// Same as [`interaction_target_agent`] but only a bound session id.
+/// Restore must not treat an unbound active agent as the local view.
+pub(super) fn interaction_target_bound_agent(app: &AppView, session_id: &str) -> Option<AgentId> {
+    let sid = acp::SessionId::new(session_id.to_owned());
+    match find_bound_session_match(app, &sid) {
         Some(SessionMatch::Root(id) | SessionMatch::Child(id)) => Some(id),
         None => None,
     }

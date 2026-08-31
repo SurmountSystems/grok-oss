@@ -238,7 +238,7 @@ pub(crate) async fn resolve_git_repo_info(cwd: &str) -> (Option<String>, Option<
         let remote_url = repo
             .find_remote("origin")
             .ok()
-            .and_then(|r| r.url().map(strip_url_credentials));
+            .and_then(|r| r.url().ok().map(strip_url_credentials));
         Some((repo_root, remote_url))
     })
     .await
@@ -1627,6 +1627,7 @@ pub(crate) mod tests {
             .find_remote("origin")
             .unwrap()
             .url()
+            .ok()
             .map(strip_url_credentials)
             .expect("origin remote must have a url");
         let mut meta = bare_prompt_metadata();
@@ -1662,6 +1663,7 @@ pub(crate) mod tests {
             .find_remote("origin")
             .unwrap()
             .url()
+            .ok()
             .map(strip_url_credentials)
             .expect("origin remote must have a url");
         let (repo_root, remote_url) = resolve_git_repo_info(tmp.path().to_str().unwrap()).await;

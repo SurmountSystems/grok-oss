@@ -1242,6 +1242,7 @@ impl Default for Config {
             session_summary_model_override: None,
             default_yolo_mode: false,
             default_auto_mode: false,
+            default_context_only_mode: false,
             agent_profile_path: None,
             client_version: Some(xai_grok_version::VERSION.to_string()),
             mode: AgentMode::default(),

@@ -25,6 +25,7 @@ pub mod expand;
 pub mod export;
 pub mod feedback;
 pub mod find;
+pub mod finish;
 pub mod fork;
 pub mod gboom;
 pub mod help;
@@ -55,6 +56,7 @@ pub mod recap;
 pub mod release_notes;
 pub mod remember;
 pub mod rename;
+pub mod reports;
 pub mod resume;
 pub mod rewind;
 pub mod running;
@@ -633,6 +635,22 @@ mod tests {
         assert!(
             reg.get("queue").is_some(),
             "/queue should be registered in builtins"
+        );
+    }
+    #[test]
+    fn reports_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("reports").is_some(),
+            "/reports should be registered in builtins"
+        );
+    }
+    #[test]
+    fn what_registered_in_builtin_commands() {
+        let reg = CommandRegistry::new(builtin_commands());
+        assert!(
+            reg.get("what").is_some(),
+            "/what should be registered in builtins"
         );
     }
     #[test]

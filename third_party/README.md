@@ -1,7 +1,8 @@
-# Third-party vendored crates
+# Third-party crates that belong in grok-oss
 
-This directory holds **upstream source** vendored into the repository. It is
-**not** first-party application code.
+This directory holds first-party-adjacent graph and mermaid ports
+(dagre, graphlib, mermaid-to-svg, ordered_hashmap). It is not a dump of
+crates.io copies for cargo-audit.
 
 ## Why vendor
 

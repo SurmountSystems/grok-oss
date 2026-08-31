@@ -395,6 +395,7 @@ impl Default for PagerLocalSnapshot {
             multiline_mode: false,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             current_model_name: None,
             available_models: Vec::new(),
             coding_data_sharing_opt_out: true,
@@ -797,6 +798,9 @@ pub fn current_value_for(
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
         )),
+        "ulid_session_ids" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_ulid_session_ids(),
+        )),
         "plan_approval_park" => Some(SettingValue::Enum(
             if crate::appearance::cache::load_plan_approval_force_modal() {
                 "modal"
@@ -941,8 +945,12 @@ pub fn current_value_for(
         // When yolo is on the value is "always-approve"; otherwise honor ui ("auto", "default", or "ask")
         "permission_mode" => Some(SettingValue::Enum(if pager.yolo_mode {
             "always-approve"
-        } else if matches!(ui.permission_mode.as_deref(), Some("auto")) {
+        } else if pager.auto_mode || matches!(ui.permission_mode.as_deref(), Some("auto")) {
             "auto"
+        } else if pager.context_only_mode
+            || matches!(ui.permission_mode.as_deref(), Some("context-only"))
+        {
+            "context-only"
         } else if matches!(ui.permission_mode.as_deref(), Some("default")) {
             "default"
         } else {

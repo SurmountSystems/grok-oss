@@ -188,6 +188,34 @@ mod tests {
         }
     }
 
+    /// Contract: stock process named `grok` is not grok-oss. Rebuild SIGUSR1
+    /// must not target it. Product CLI / exe basename is `grok-oss`.
+    #[test]
+    fn grok_oss_cli_identity_rejects_stock_grok_and_accepts_product_exe() {
+        assert!(
+            !is_grok_oss_cli_identity("grok", Some("/usr/bin/grok")),
+            "stock grok comm must not look like grok-oss"
+        );
+        assert!(!is_grok_oss_cli_identity(
+            "/usr/bin/grok\0--resume\0sess",
+            Some("/usr/bin/grok")
+        ));
+        assert!(
+            !is_grok_oss_cli_identity("xai-grok-update-abc123", None),
+            "a cargo test binary whose path contains grok is not grok-oss"
+        );
+        assert!(is_grok_oss_cli_identity(
+            "/home/me/.cargo/bin/grok-oss\0--resume\0sess",
+            Some("/home/me/.cargo/bin/grok-oss")
+        ));
+        assert!(is_grok_oss_cli_identity(
+            "grok-oss",
+            Some("/home/me/.cargo/bin/grok-oss (deleted)")
+        ));
+        assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
+        assert_ne!(PRODUCT_CLI_NAME, "grok");
+    }
+
     #[test]
     fn register_is_idempotent() {
         let dir = TempDir::new().unwrap();

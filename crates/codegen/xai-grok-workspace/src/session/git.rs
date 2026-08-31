@@ -488,9 +488,13 @@ pub fn resolve_normalized_remote_urls(cwd: &Path) -> Vec<String> {
     };
     let mut urls = Vec::new();
     if let Ok(names) = repo.remotes() {
-        for name in names.iter().flatten() {
+        // git2 0.21 StringArray::iter is Result<Option<&str>, Error>; skip missing names.
+        for name in names.iter() {
+            let Ok(Some(name)) = name else {
+                continue;
+            };
             if let Ok(remote) = repo.find_remote(name)
-                && let Some(raw) = remote.url()
+                && let Ok(raw) = remote.url()
                 && let Some(n) = normalize_repo_url(raw)
             {
                 urls.push(n);
@@ -529,9 +533,13 @@ pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMe
     };
     let mut remotes = BTreeSet::new();
     if let Ok(remote_names) = repo.remotes() {
-        for name in remote_names.iter().flatten() {
+        // git2 0.21 StringArray::iter is Result<Option<&str>, Error>; skip missing names.
+        for name in remote_names.iter() {
+            let Ok(Some(name)) = name else {
+                continue;
+            };
             if let Ok(remote) = repo.find_remote(name)
-                && let Some(url) = remote.url()
+                && let Ok(url) = remote.url()
             {
                 remotes.insert(strip_url_credentials(url));
             }
@@ -758,7 +766,7 @@ async fn get_remote_url(cwd: &Path) -> Option<String> {
 fn compute_ahead_behind(repo: &Repository) -> Option<(usize, usize)> {
     let head = repo.head().ok()?;
     let local_oid = head.target()?;
-    let branch_name = head.shorthand()?;
+    let branch_name = head.shorthand().ok()?;
     let local_branch = repo
         .find_branch(branch_name, git2::BranchType::Local)
         .ok()?;
@@ -1043,12 +1051,16 @@ pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
         let current_branch = repo
             .head()
             .ok()
-            .and_then(|h| h.shorthand().map(String::from));
+            .and_then(|h| h.shorthand().ok().map(String::from));
         let mut remotes_set = BTreeSet::new();
         if let Ok(remote_names) = repo.remotes() {
-            for name in remote_names.iter().flatten() {
+            // git2 0.21 StringArray::iter is Result<Option<&str>, Error>; skip missing names.
+            for name in remote_names.iter() {
+                let Ok(Some(name)) = name else {
+                    continue;
+                };
                 if let Ok(remote) = repo.find_remote(name)
-                    && let Some(url) = remote.url()
+                    && let Ok(url) = remote.url()
                 {
                     remotes_set.insert(url.to_string());
                 }
@@ -1083,12 +1095,15 @@ fn detect_remote_default_branch(repo: &Repository) -> Option<String> {
     let reference = repo.find_reference("refs/remotes/origin/HEAD").ok()?;
     let prefix = "refs/remotes/origin/";
     if let Ok(resolved) = reference.resolve()
-        && let Some(branch) = resolved.name().and_then(|n| n.strip_prefix(prefix))
+        && let Ok(name) = resolved.name()
+        && let Some(branch) = name.strip_prefix(prefix)
     {
         return Some(branch.to_string());
     }
     reference
         .symbolic_target()
+        .ok()
+        .flatten()
         .and_then(|t| t.strip_prefix(prefix))
         .map(|b| b.to_string())
 }
@@ -1103,14 +1118,16 @@ pub async fn list_branches(git_root: &Path) -> Result<GitBranchListData> {
         let current_branch = repo
             .head()
             .ok()
-            .and_then(|h| h.shorthand().map(String::from));
+            .and_then(|h| h.shorthand().ok().map(String::from));
         let mut branches = Vec::new();
         for result in repo.branches(None)? {
             let (branch, branch_type) = result?;
             let Some(name) = branch.name()?.map(String::from) else {
                 continue;
             };
-            if branch.get().symbolic_target().is_some() && branch_type == git2::BranchType::Remote {
+            if branch.get().symbolic_target().ok().is_some()
+                && branch_type == git2::BranchType::Remote
+            {
                 continue;
             }
             let is_remote = branch_type == git2::BranchType::Remote;

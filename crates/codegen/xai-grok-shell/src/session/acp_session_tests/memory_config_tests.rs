@@ -162,6 +162,7 @@ pub(super) async fn create_test_actor_with_memory(
             persistence_tx,
         ),
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),

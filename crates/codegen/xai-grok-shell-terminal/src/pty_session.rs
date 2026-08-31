@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -467,6 +468,10 @@ async fn run_pty_output_loop(
     let (exit_code, signal, target_client_id, was_busy) = tokio::task::spawn_blocking({
         let pty = pty.clone();
         move || {
+            let deadline = std::time::Instant::now()
+                + REAP_GRACE
+                + xai_tty_utils::HANGUP_GRACE
+                + std::time::Duration::from_secs(2);
             loop {
                 {
                     let mut session = pty.blocking_lock();
@@ -479,6 +484,9 @@ async fn run_pty_output_loop(
                             target_client_id,
                             was_busy,
                         );
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return (None, None, target_client_id, was_busy);
                     }
                 }
                 std::thread::sleep(EXIT_POLL_INTERVAL);
@@ -645,6 +653,10 @@ pub async fn close_pty(pty_id: &str) -> Result<(), String> {
 
 /// Dropping the master would not hang the shell up: the reader and writer hold their own dups of it, and SIGHUP needs the last one closed.
 fn reap(entry: &Arc<Mutex<PtySession>>) {
+    // Snapshot job groups while the shell is still the parent. After it exits
+    // they reparent to init and a walk from the shell pid finds nothing.
+    #[cfg(unix)]
+    let extra_groups = descendant_groups_besides_shell(&entry.blocking_lock().shell);
     let hung_up = {
         let mut session = entry.blocking_lock();
         session.master.take();
@@ -652,9 +664,17 @@ fn reap(entry: &Arc<Mutex<PtySession>>) {
         session.input_tx.take();
         session.shell.hangup()
     };
+    // Job-control children live in their own groups. Hangup of the shell group
+    // does not reach them, and a surviving grandchild keeps the slave open.
+    #[cfg(unix)]
+    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGHUP);
     if hung_up && wait_for_exit(entry, xai_tty_utils::HANGUP_GRACE) {
+        #[cfg(unix)]
+        signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
         return;
     }
+    #[cfg(unix)]
+    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
     entry.blocking_lock().shell.kill();
     wait_for_exit(entry, REAP_GRACE);
 }
@@ -688,12 +708,16 @@ pub async fn close_all() {
 /// Windows has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
 fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell {
-        return (s.to_string(), vec![]);
+        return (existing_unix_shell(s), vec![]);
     }
 
     #[cfg(unix)]
     {
-        let path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let path = std::env::var("SHELL")
+            .ok()
+            .filter(|p| Path::new(p).is_file())
+            .or_else(|| unix_shell_on_path("bash"))
+            .unwrap_or_else(|| "/bin/bash".to_string());
         (path, vec!["-l".to_string()])
     }
 
@@ -960,7 +984,7 @@ mod tests {
                 let (gateway, _) = recording_gateway();
                 let pty_id = create_test_pty(gateway).await;
 
-                write_pty_input(&pty_id, b"sleep 300 & echo pid=$!\n")
+                write_pty_input(&pty_id, BACKGROUND_SLEEP_CMD)
                     .await
                     .expect("write command");
                 let grandchild = wait_for_reported_pid(&pty_id).await;
@@ -1003,7 +1027,7 @@ mod tests {
                 let (gateway, _) = recording_gateway();
                 let pty_id = create_test_pty(gateway).await;
 
-                write_pty_input(&pty_id, b"sleep 300 & echo pid=$!\n")
+                write_pty_input(&pty_id, BACKGROUND_SLEEP_CMD)
                     .await
                     .expect("write command");
                 let grandchild = wait_for_reported_pid(&pty_id).await;
@@ -1051,11 +1075,26 @@ mod tests {
                 pixel_height: 0,
             })
             .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("sleep 300");
+        // Same spawn as [`create_pty`]: resolved PATH bash + login args +
+        // TERM. A raw `sleep` store path ENOENTs under portable_pty here;
+        // `create_test_pty` already proves this CommandBuilder shape works.
+        let (shell_path, shell_args) = resolve_pty_shell(Some("/bin/bash"));
+        let mut cmd = CommandBuilder::new(&shell_path);
+        for arg in &shell_args {
+            cmd.arg(arg);
+        }
+        if let Ok(dir) = std::env::current_dir() {
+            cmd.cwd(dir);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("LC_ALL", "en_US.UTF-8");
         #[allow(clippy::disallowed_methods)]
-        let child = pair.slave.spawn_command(cmd).expect("spawn shell");
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .unwrap_or_else(|e| panic!("spawn {shell_path}: {e}"));
         let pid = child.process_id().expect("shell pid") as i32;
 
         drop(UnregisteredShell::new(child));
@@ -1070,9 +1109,32 @@ mod tests {
         }
     }
 
+    /// Job-control on, `command sleep` so Nix wrappers/functions cannot hide a
+    /// coreutils `sleep` that dies when its process group is signaled.
+    #[cfg(unix)]
+    const BACKGROUND_SLEEP_CMD: &[u8] = b"set -m; command sleep 300 & echo pid=$!\n";
+
+    #[cfg(unix)]
+    fn parse_reported_pids(text: &str) -> Vec<i32> {
+        text.split("pid=")
+            .skip(1)
+            .filter_map(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    async fn pty_output_text(pty_id: &str) -> String {
+        let entry = require_pty(pty_id).await.expect("pty");
+        let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     #[cfg(unix)]
     async fn wait_for_reported_pid(pty_id: &str) -> i32 {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let entry = require_pty(pty_id).await.expect("pty");
             let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
@@ -1086,12 +1148,30 @@ mod tests {
             {
                 return pid;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "shell never reported a background pid: {text}"
-            );
+            if tokio::time::Instant::now() >= deadline {
+                let _ = close_pty(pty_id).await;
+                panic!("shell never reported a background pid within 5s: {text}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_reported_pid_skips_echoed_dollar_bang() {
+        assert_eq!(
+            parse_reported_pids("sleep 300 & echo pid=$!\r\npid=4321\r\n"),
+            vec![4321]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_stat_ppid_pgid_reads_ppid_and_pgrp() {
+        assert_eq!(
+            parse_stat_ppid_pgid("4321 (sleep) S 100 200 200 0"),
+            Some((100, 200))
+        );
     }
 
     #[tokio::test]

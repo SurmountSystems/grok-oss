@@ -908,6 +908,13 @@ pub(crate) fn apply_turn_start_shim(
         agent.session.tracker.clear_user_echo_skip();
     }
     agent.session.current_prompt_id = Some(prompt_id.clone());
+    if !adopted_from_other_client {
+        if let Some(text) = text.as_deref() {
+            agent.bind_or_start_live_prompt_task(&prompt_id, text);
+        } else {
+            agent.bind_pending_live_prompt_task(&prompt_id);
+        }
+    }
     agent.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but keep the seen ring
     // A buffer-replayed `x.ai/follow_ups` for an older response then stays rejected (no stale revival)

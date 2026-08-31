@@ -317,6 +317,36 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     }
 }
 
+/// Drops spawn-time path claims if spawn fails before the child is live.
+/// Call [`LiveWriteClaim::keep`] after the coordinator admits the child.
+struct LiveWriteClaim {
+    holder: Option<String>,
+}
+
+impl LiveWriteClaim {
+    fn none() -> Self {
+        Self { holder: None }
+    }
+
+    fn armed(holder: String) -> Self {
+        Self {
+            holder: Some(holder),
+        }
+    }
+
+    fn keep(&mut self) {
+        self.holder = None;
+    }
+}
+
+impl Drop for LiveWriteClaim {
+    fn drop(&mut self) {
+        if let Some(holder) = self.holder.take() {
+            crate::implementations::editor_infra::per_path_write_lock::release_holder(&holder);
+        }
+    }
+}
+
 impl xai_tool_runtime::Tool for TaskTool {
     type Args = TaskToolInput;
     type Output = ToolOutput;
@@ -607,6 +637,22 @@ impl xai_tool_runtime::Tool for TaskTool {
             })
             .flatten();
 
+        let write_paths: Vec<&str> = input
+            .write_paths
+            .iter()
+            .map(|path| path.trim())
+            .filter(|path| !path.is_empty())
+            .collect();
+        let mut write_claim = LiveWriteClaim::none();
+        if !write_paths.is_empty() {
+            crate::implementations::editor_infra::per_path_write_lock::try_reserve_writes(
+                write_paths,
+                &id,
+            )
+            .map_err(|held| held.into_tool_error("task"))?;
+            write_claim = LiveWriteClaim::armed(id.clone());
+        }
+
         let request = SubagentRequest {
             id: id.clone(),
             prompt: input.prompt.clone(),
@@ -633,6 +679,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 harness_agent_type: None,
                 completion_output_cap: None,
                 spawn_depth: None,
+                immediate_parent_session_id: None,
                 output_token_budget: None,
                 output_schema: None,
                 loop_task_id: None,
@@ -729,6 +776,7 @@ impl xai_tool_runtime::Tool for TaskTool {
         // still-running child — return a task_id to poll, like the background
         // branch above (the result arrives via auto-wake or a later poll).
         if result.backgrounded {
+            write_claim.keep();
             let (task_output_tool, task_ids_param, timeout_ms_param) =
                 resolve_background_notice_names(&resources).await;
             let naming = xai_tool_types::BackgroundNoticeNaming {
@@ -853,11 +901,12 @@ fn reject_subagent_type(
 mod tests {
     use super::*;
     use crate::implementations::grok_build::task::backend::{
-        ChannelBackend, SubagentBackendResource,
+        ChannelBackend, SubagentBackend, SubagentBackendResource,
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
     use xai_tool_types::SubagentCapabilityMode;
 
@@ -918,6 +967,96 @@ mod tests {
         }
     }
 
+    fn drain_spawn_ok(
+        mut rx: mpsc::UnboundedReceiver<SubagentEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
+                let _ = boxed.respond_with(|boxed| SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(""),
+                    subagent_id: boxed.id.clone(),
+                    child_session_id: boxed.id.clone(),
+                    ..Default::default()
+                });
+            }
+        })
+    }
+
+    /// Backend whose `spawn` stays pending until the test opens the admit
+    /// gate. `query` is `None` until that happens. Models the coordinator
+    /// not having the child yet: returning a spawn id in that window is
+    /// the wait miss the operator saw.
+    struct HoldAdmitBackend {
+        admit: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        admitted: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl SubagentBackend for HoldAdmitBackend {
+        async fn spawn(
+            &self,
+            request: SubagentRequest,
+        ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
+            let admit = self
+                .admit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(admit) = admit {
+                let _ = admit.await;
+            }
+            self.admitted.store(true, Ordering::SeqCst);
+            Ok(SubagentResult {
+                success: true,
+                subagent_id: request.id.clone(),
+                child_session_id: request.id,
+                ..Default::default()
+            })
+        }
+
+        async fn query(
+            &self,
+            id: &str,
+            _block: bool,
+            _timeout_ms: Option<u64>,
+        ) -> Option<SubagentSnapshot> {
+            if !self.admitted.load(Ordering::SeqCst) {
+                return None;
+            }
+            Some(SubagentSnapshot {
+                subagent_id: id.to_owned(),
+                description: "held".to_owned(),
+                subagent_type: "explore".to_owned(),
+                status: SubagentSnapshotStatus::Initializing,
+                started_at_epoch_ms: 0,
+                duration_ms: 0,
+                persona: None,
+            })
+        }
+
+        async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
+            SubagentCancelOutcome::NotFound
+        }
+
+        async fn validate_type(
+            &self,
+            _subagent_type: &str,
+            _parent_session_id: &str,
+        ) -> SubagentValidateTypeOutcome {
+            SubagentValidateTypeOutcome::Ok
+        }
+
+        async fn describe_subagent_type(
+            &self,
+            _subagent_type: &str,
+            _harness_agent_type: Option<&str>,
+            _parent_session_id: &str,
+        ) -> SubagentDescribeOutcome {
+            SubagentDescribeOutcome::Unavailable
+        }
+    }
+
     #[tokio::test]
     async fn depth_limit_exceeded() {
         let (backend, _rx) = make_backend();
@@ -944,6 +1083,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1007,6 +1147,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1044,6 +1185,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1077,6 +1219,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1137,6 +1280,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await
@@ -1195,6 +1339,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1240,6 +1385,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -1350,6 +1496,7 @@ mod tests {
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         }
     }
 
@@ -1922,17 +2069,114 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
     }
 
+    /// `spawn_subagent` must not return an id until wait can see it.
+    /// Fire-and-forget that returns the UUID before the coordinator
+    /// admits the child is the nested L2 miss: wait is `not_found`,
+    /// retrying spawn mints another vanishing id.
     #[tokio::test]
-    async fn background_spawn_emits_error_log_on_coordinator_rejection() {
-        use super::types::test_capture;
+    async fn background_spawn_does_not_return_until_wait_can_see_the_id() {
+        let (admit_tx, admit_rx) = tokio::sync::oneshot::channel();
+        let backend = Arc::new(HoldAdmitBackend {
+            admit: std::sync::Mutex::new(Some(admit_rx)),
+            admitted: AtomicBool::new(false),
+        });
+        let resources = resources_for_task(SubagentBackendResource(backend.clone()));
+        let mut input = task_input("explore", true);
+        input.task_id = Some("l3".into());
 
-        let captured = test_capture::capture();
+        let run = tokio::spawn(async move {
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(
+            !run.is_finished(),
+            "background spawn must not return an id before wait can see the child"
+        );
+        assert!(
+            backend.query("l3", false, None).await.is_none(),
+            "wait must stay not_found until the coordinator admits the spawn"
+        );
+
+        let _ = admit_tx.send(());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("spawn must return after the coordinator admits the id")
+            .expect("tool task must not panic")
+            .expect("admitted background spawn is a success notice, not a tool error");
+        let text = match result {
+            ToolOutput::Text(text) => text.text,
+            other => panic!("expected text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("l3"),
+            "notice must carry the spawn id wait will use, got {text}"
+        );
+        assert!(
+            backend.query("l3", false, None).await.is_some(),
+            "the id spawn just returned must be visible to wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_when_write_paths_overlap_a_live_claim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("shared.rs");
+        std::fs::write(&path, "fn x() {}\n").unwrap();
+        let first_id = format!("claim-a-{}", path.display());
+        let second_id = format!("claim-b-{}", path.display());
+
+        let (admit_tx, admit_rx) = tokio::sync::oneshot::channel();
+        let backend_a = Arc::new(HoldAdmitBackend {
+            admit: std::sync::Mutex::new(Some(admit_rx)),
+            admitted: AtomicBool::new(false),
+        });
+        let mut input_a = task_input("explore", true);
+        input_a.task_id = Some(first_id.clone());
+        input_a.write_paths = vec![path.to_string_lossy().into_owned()];
+        let resources_a = resources_for_task(SubagentBackendResource(backend_a));
+        let first_id_for_run = first_id.clone();
+        let run_a = tokio::spawn(async move {
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources_a.into_shared()), input_a)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(
+            !run_a.is_finished(),
+            "first spawn must still be waiting on admit after claiming write_paths"
+        );
+
+        let (backend_b, _rx) = make_backend();
+        let mut input_b = task_input("explore", true);
+        input_b.task_id = Some(second_id);
+        input_b.write_paths = vec![path.to_string_lossy().into_owned()];
+        let err = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources_for_task(backend_b).into_shared()),
+            input_b,
+        )
+        .await
+        .expect_err("second spawn must fail when write_paths overlap");
+        let detail = err.to_string();
+        assert!(
+            detail.contains(&first_id_for_run),
+            "error must name the live holder: {detail}"
+        );
+        assert!(
+            detail.contains("shared.rs"),
+            "error must name the file: {detail}"
+        );
+
+        let _ = admit_tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_a).await;
+        crate::implementations::editor_infra::per_path_write_lock::release_holder(&first_id);
+    }
+
+    #[tokio::test]
+    async fn background_spawn_returns_coordinator_rejection() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
 
-        // done_tx signals after the spawn has been replied to so the
-        // test can wait for Fix A's match arm to execute.
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let drain = tokio::spawn(async move {
             if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
                 let _ = boxed.respond_with(|boxed| SubagentResult {
@@ -1942,7 +2186,6 @@ mod tests {
                     ..Default::default()
                 });
             }
-            let _ = done_tx.send(());
         });
 
         let result = xai_tool_runtime::Tool::run(
@@ -1980,10 +2223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_spawn_survives_transport_error_after_validation() {
-        // Smoke test of the fire-and-forget contract when the spawn
-        // channel is closed; companion test covers the Ok(success:false)
-        // arm with tracing assertions.
+    async fn background_spawn_returns_transport_error_after_validation() {
         let (backend, rx) = make_backend();
         drop(rx);
         let resources = resources_for_task(backend);
@@ -2129,6 +2369,7 @@ mod tests {
             let _ = capture_tx.send(parent_session_id.to_string());
             SubagentValidateTypeOutcome::Ok
         });
+        let drain = drain_spawn_ok(rx);
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));
@@ -2259,6 +2500,7 @@ mod tests {
             model: Some("test-model".into()),
             workspace: None,
             task_id: Some("task-123".into()),
+            write_paths: Vec::new(),
         };
         assert_eq!(input.subagent_type, "explore");
         let json = serde_json::to_string(&input).unwrap();
@@ -2546,6 +2788,7 @@ mod tests {
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         })
         .unwrap();
         assert!(
@@ -2597,6 +2840,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await
@@ -2635,6 +2879,7 @@ mod tests {
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(
@@ -2683,6 +2928,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await
@@ -2751,6 +2997,7 @@ mod tests {
                     model: None,
                     workspace: None,
                     task_id: None,
+                    write_paths: Vec::new(),
                 },
             )
             .await
@@ -2799,6 +3046,7 @@ mod tests {
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(!json.contains("cwd"), "None cwd should be skipped: {json}");
@@ -2829,6 +3077,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -2885,6 +3134,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -2937,6 +3187,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -2989,6 +3240,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -3044,6 +3296,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -3080,6 +3333,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -3137,6 +3391,7 @@ mod tests {
                     model: None,
                     workspace: None,
                     task_id: None,
+                    write_paths: Vec::new(),
                 },
             )
             .await
@@ -3192,6 +3447,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await
@@ -3251,6 +3507,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await
@@ -3305,6 +3562,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await;
@@ -3355,6 +3613,7 @@ mod tests {
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             },
         )
         .await

@@ -511,6 +511,7 @@ pub(crate) fn execute(
             }
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
             let acp_session_id = acp::SessionId::new(session_id);
+            let ptx = progress_tx.clone();
             tasks
                 .spawn(async move {
                     let mcp_servers = discover_mcp_servers(cwd.clone()).await;
@@ -523,6 +524,14 @@ pub(crate) fn execute(
                                 .meta(meta),
                             &tx,
                             "Session loading",
+                            |msg| {
+                                let _ = ptx.send(RestoreProgressMsg {
+                                    agent_id,
+                                    message: msg,
+                                    toast: false,
+                                    fraction: None,
+                                });
+                            },
                         )
                         .await;
                     let load_elapsed_ms = load_started.elapsed().as_millis() as u64;

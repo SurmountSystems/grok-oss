@@ -1187,6 +1187,23 @@ mod tests {
         );
     }
 
+    /// Operator screenshot contract: AUTO compact wall of 133s paints
+    /// `(2m13s)` on the completed line, not raw seconds. This is the
+    /// formatter, not a claim that compact itself got faster.
+    #[test]
+    fn compaction_completed_133000ms_paints_2m13s() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(509_400),
+            tokens_after: 422_100,
+            elapsed_ms: Some(133_000),
+            saved_too_little: false,
+        };
+        assert_eq!(
+            event.message(),
+            "Context compacted: 509.4k → 422.1k tokens (2m13s)"
+        );
+    }
+
     #[test]
     fn compaction_completed_tiny_savings_says_will_not_run_again() {
         let event = SessionEvent::CompactionCompleted {
@@ -1269,7 +1286,7 @@ mod tests {
     #[test]
     fn compaction_failed_curated_error_is_appended() {
         let event = SessionEvent::CompactionFailed {
-            error: "out of credits or over your spending limit. Add credits and retry.".into(),
+            error: "this conversation is too large to compact.".into(),
         };
         assert_eq!(
             event.message(),

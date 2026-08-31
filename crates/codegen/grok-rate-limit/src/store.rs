@@ -375,32 +375,34 @@ pub fn fingerprint_secret(secret: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// Serialize tests that read/write `GROK_DISABLE_SHARED_RATE_LIMIT` or assume
+/// shared limits are enabled. Cargo runs tests multi-threaded by default.
+/// Tokio mutex so the async sleep test can hold exclusivity across `.await`
+/// without a `std::sync::MutexGuard` crossing an await (clippy).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Hold the env lock for the duration of a store test (limits must stay enabled).
+#[cfg(test)]
+pub(crate) fn with_shared_limits_enabled<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = ENV_LOCK.blocking_lock();
+    // Another test may have left the kill-switch set; clear while we hold the lock.
+    let prev = std::env::var_os(DISABLE_ENV);
+    if prev.is_some() {
+        // SAFETY: exclusive via ENV_LOCK; restored before unlock.
+        unsafe { std::env::remove_var(DISABLE_ENV) };
+    }
+    let out = f();
+    if let Some(v) = prev {
+        unsafe { std::env::set_var(DISABLE_ENV, v) };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
-
-    /// Serialize tests that read/write `GROK_DISABLE_SHARED_RATE_LIMIT` or assume
-    /// shared limits are enabled. Cargo runs tests multi-threaded by default.
-    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
-
-    /// Hold the env lock for the duration of a store test (limits must stay enabled).
-    fn with_shared_limits_enabled<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Another test may have left the kill-switch set; clear while we hold the lock.
-        let prev = std::env::var_os(DISABLE_ENV);
-        if prev.is_some() {
-            // SAFETY: exclusive via ENV_LOCK; restored before unlock.
-            unsafe { std::env::remove_var(DISABLE_ENV) };
-        }
-        let out = f();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
-        }
-        out
-    }
 
     #[test]
     fn provider_key_sanitizes() {
@@ -481,12 +483,13 @@ mod tests {
                 )
                 .unwrap();
             let snap = store.snapshot(&key).unwrap();
-            let now = SharedRateLimitStore::now_ms();
-            // Should still be ~5s from first observe (not shortened to 1s).
+            let rem = snap.remaining(SharedRateLimitStore::now_ms());
+            // Strictest wins: a later 1s observe must not replace the 5s
+            // cooldown. Compare against the weaker wait, not wall now+3s —
+            // flock on a busy builder can eat a couple of seconds.
             assert!(
-                snap.not_before_unix_ms >= now + 3000,
-                "not_before too soon: {:?}",
-                snap.remaining(now)
+                rem > Duration::from_secs(1),
+                "weaker 1s observe must not shorten the 5s cooldown, remaining={rem:?}"
             );
             assert_eq!(snap.last_status, Some(429));
         });
@@ -553,24 +556,26 @@ mod tests {
 
     #[tokio::test]
     async fn wait_if_limited_sleeps() {
-        // Lock must outlive the async body; take it for the whole test.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let prev = std::env::var_os(DISABLE_ENV);
         if prev.is_some() {
+            // SAFETY: exclusive via ENV_LOCK; restored before unlock.
             unsafe { std::env::remove_var(DISABLE_ENV) };
         }
         let dir = TempDir::new().unwrap();
         let store = SharedRateLimitStore::open(dir.path()).unwrap();
         let key = ProviderKey::new("wait-me");
+        // Flock plus sync_all on the Nix builder can take longer than 40ms, so
+        // a 40ms cooldown is already zero before remaining() runs. The asserts
+        // stay: remaining is live after observe, then zero after wait.
         store
-            .observe(&key, Duration::from_millis(40), RateLimitMeta::default())
+            .observe(&key, Duration::from_secs(2), RateLimitMeta::default())
             .unwrap();
         assert!(store.remaining(&key) > Duration::ZERO);
         store.wait_if_limited(&key).await;
         assert_eq!(store.remaining(&key), Duration::ZERO);
-        match prev {
-            Some(v) => unsafe { std::env::set_var(DISABLE_ENV, v) },
-            None => {}
+        if let Some(v) = prev {
+            unsafe { std::env::set_var(DISABLE_ENV, v) };
         }
     }
 
@@ -582,7 +587,7 @@ mod tests {
 
     #[test]
     fn disable_env_makes_ops_noop() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.blocking_lock();
         // SAFETY: exclusive via ENV_LOCK; we restore after.
         let prev = std::env::var_os(DISABLE_ENV);
         unsafe {

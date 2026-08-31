@@ -20,6 +20,47 @@ use crate::theme::{self, Theme};
 /// ~0.15 gives a smooth wave that travels the block in ~40 ticks.
 const WAVE_SPEED: f32 = 0.15;
 
+/// Columns reserved on the right of message bubbles for the short timestamp.
+pub(crate) const TIMESTAMP_SHORT_RESERVE: u16 = 10;
+
+/// Gap plus copy glyph after the timestamp so ⧉ sits with the clock and
+/// does not overwrite message text (` ` + ⧉).
+pub(crate) const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
+
+/// Trailing inset when always-on bubble copy is on for a timestamped
+/// message block (user, assistant, /btw).
+pub(crate) fn bubble_copy_trailing_inset(appearance: &AppearanceConfig, is_message: bool) -> u16 {
+    if is_message && appearance.scrollback.display.bubble_copy_buttons {
+        BUBBLE_COPY_TRAILING_INSET
+    } else {
+        0
+    }
+}
+
+/// Right chrome for message bubbles: short timestamp plus copy inset.
+pub(crate) fn message_right_chrome_reserve(appearance: &AppearanceConfig, is_message: bool) -> u16 {
+    let ts = if is_message && appearance.show_timestamps {
+        TIMESTAMP_SHORT_RESERVE
+    } else {
+        0
+    };
+    ts + bubble_copy_trailing_inset(appearance, is_message)
+}
+
+/// Column for the timestamp overlay: right-aligned immediately left of the
+/// copy trailing inset so the clock clusters with the copy control.
+pub(crate) fn timestamp_overlay_x(
+    content_x: u16,
+    content_width: u16,
+    ts_width: u16,
+    copy_inset: u16,
+) -> Option<u16> {
+    if content_width <= ts_width.saturating_add(copy_inset).saturating_add(1) {
+        return None;
+    }
+    Some(content_x + content_width - ts_width - copy_inset)
+}
+
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -339,11 +380,7 @@ impl<'a> EntryRenderer<'a> {
     ///
     /// When non-zero, content is wrapped at `content_width - reserved` so text never collides with the timestamp overlay.
     fn timestamp_reserved(&self) -> u16 {
-        if self.appearance().show_timestamps && self.should_show_timestamp() {
-            10 // max short format: "  12:30 PM"
-        } else {
-            0
-        }
+        message_right_chrome_reserve(self.appearance(), self.should_show_timestamp())
     }
 
     /// Thinking entries take no rows when the Appearance toggle is off.
@@ -1105,6 +1142,25 @@ mod tests {
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "◆");
     }
 
+    /// First column of an ASCII run on a row. Cell `x` is not string index:
+    /// wide glyphs (prompt `❯`) leave empty continuation cells that shrink
+    /// concatenated-symbol offsets.
+    fn ascii_run_x(buf: &Buffer, y: u16, width: u16, needle: &str) -> Option<u16> {
+        let chars: Vec<char> = needle.chars().collect();
+        let n = chars.len() as u16;
+        if n == 0 || n > width {
+            return None;
+        }
+        (0..=width - n).find(|&x| {
+            (0..n).all(|i| {
+                buf.cell((x + i, y)).is_some_and(|c| {
+                    let mut it = c.symbol().chars();
+                    it.next() == Some(chars[i as usize]) && it.next().is_none()
+                })
+            })
+        })
+    }
+
     /// Collect the symbols from a row range in the buffer into a String.
     fn collect_row_symbols(buf: &Buffer, y: u16, x_start: u16, x_end: u16) -> String {
         (x_start..x_end)
@@ -1119,11 +1175,10 @@ mod tests {
         (content_right - renderer.timestamp_reserved())..content_right
     }
 
-    /// Check that a right-aligned timestamp ending with "AM" or "PM" exists on a row.
-    /// Only scans the rightmost 16 columns to avoid false positives from content text.
+    /// Check that a short AM/PM timestamp exists on a row. Clocks sit in the
+    /// right chrome with copy, so scan the whole row.
     fn has_ampm_timestamp(buf: &Buffer, y: u16, x_end: u16) -> bool {
-        let x_start = x_end.saturating_sub(16);
-        let text = collect_row_symbols(buf, y, x_start, x_end);
+        let text = collect_row_symbols(buf, y, 0, x_end);
         text.contains("AM") || text.contains("PM")
     }
 
@@ -1142,14 +1197,50 @@ mod tests {
 
         // UserPrompt has vpad=true, first content row is y=1.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
-        let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
         let content_row = 1u16;
+        let row = collect_row_symbols(&buf, content_row, 0, width);
+        assert!(
+            row.contains(&expected),
+            "Expected short timestamp '{expected}' on the first content row, got {row:?}"
+        );
+    }
 
-        let rendered = collect_row_symbols(&buf, content_row, ts_x, ts_x + ts_width);
-        assert_eq!(
-            rendered, expected,
-            "Expected short timestamp '{expected}' at row {content_row}"
+    /// On a wide pane the clock must still paint (not drop, not off-buffer)
+    /// and must not overwrite the prompt text.
+    #[test]
+    fn short_user_prompt_timestamp_still_paints_on_wide_pane() {
+        let theme = Theme::current();
+        const BODY: &str = "No timestamps visible here :(";
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(BODY));
+        let appearance = AppearanceConfig {
+            show_timestamps: true,
+            ..Default::default()
+        };
+        let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
+
+        let width: u16 = 160;
+        let height = renderer.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let content_row = 1u16;
+        let row = collect_row_symbols(&buf, content_row, 0, width);
+        let ts = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let body_end = row
+            .find(BODY)
+            .expect("message body must paint on the first content row")
+            + BODY.len();
+        let ts_start = row
+            .find(&ts)
+            .expect("short timestamp must paint on the first content row");
+        assert!(
+            ts_start >= body_end,
+            "timestamp must not overlap the message; ts_start={ts_start} body_end={body_end} row={row:?}"
+        );
+        assert!(
+            ts_start < width as usize,
+            "timestamp must stay inside the pane, not 115 columns off-screen; ts_start={ts_start} row={row:?}"
         );
     }
 
@@ -1167,14 +1258,141 @@ mod tests {
 
         // AgentMessage has vpad=false, first content row is y=0.
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
-        let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
-
-        let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
-        assert_eq!(
-            rendered, expected,
-            "Expected short timestamp '{expected}' at row 0"
+        let row = collect_row_symbols(&buf, 0, 0, width);
+        assert!(
+            row.contains(&expected),
+            "Expected short timestamp '{expected}' at row 0, got {row:?}"
         );
+    }
+
+    /// Copy sits with the right-aligned timestamp chrome, not on the
+    /// message body. Painting ⧉ immediately after the first-line text
+    /// overlaps the transcript (the operator-visible bug).
+    #[test]
+    fn bubble_copy_sits_with_timestamps_and_does_not_overlap_message_text() {
+        let theme = Theme::current();
+        const BODY: &str = "HELLOCOPYLAYOUT";
+        let entry = ScrollbackEntry::new(RenderBlock::agent_message(BODY));
+        let mut appearance = AppearanceConfig {
+            show_timestamps: true,
+            ..Default::default()
+        };
+        appearance.scrollback.display.bubble_copy_buttons = true;
+        let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
+
+        let width: u16 = 80;
+        let height = renderer.desired_height(width);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let row = collect_row_symbols(&buf, 0, 0, width);
+        let icon = crate::glyphs::copy_icon();
+        let icon_x = (0..width)
+            .find(|&x| buf.cell((x, 0)).is_some_and(|c| c.symbol() == icon))
+            .expect("bubble copy must paint on the first content row");
+        let body_start =
+            row.find(BODY)
+                .expect("message body must paint on the first content row") as u16;
+        let body_end = body_start + BODY.len() as u16;
+        let ts = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let ts_start =
+            row.find(&ts)
+                .expect("short timestamp must paint on the first content row") as u16;
+        let ts_end = ts_start + ts.len() as u16;
+
+        assert!(
+            (body_start..body_end).all(|x| x != icon_x),
+            "copy must not overlap message text {BODY:?}; icon_x={icon_x} body={body_start}..{body_end} row={row:?}"
+        );
+        assert!(
+            icon_x >= ts_end.saturating_sub(1),
+            "copy must sit with the timestamp (at or just after it), not after the body; icon_x={icon_x} ts={ts_start}..{ts_end} body_end={body_end} row={row:?}"
+        );
+        assert!(
+            icon_x.saturating_sub(ts_end) <= 2,
+            "copy and timestamp form a tight right-edge cluster; icon_x={icon_x} ts_end={ts_end} row={row:?}"
+        );
+        assert!(
+            icon_x > body_end + 2,
+            "copy must not sit on the message body; icon_x={icon_x} body_end={body_end} row={row:?}"
+        );
+        assert!(
+            icon_x == width - renderer.appearance().scrollback.layout.block_pad_right - 1,
+            "copy sits at the content right edge with the timestamps; icon_x={icon_x} row={row:?}"
+        );
+    }
+
+    /// Enabled timestamps sit immediately left of the copy control, clustered
+    /// on the right of the message row. Short first lines used to park the
+    /// clock after the body (middle of a wide pane) while copy stayed on the
+    /// far right.
+    #[test]
+    fn enabled_timestamps_cluster_immediately_left_of_copy_on_right_edge() {
+        fn assert_cluster(kind: &str, block: RenderBlock, content_row: u16) {
+            let theme = Theme::current();
+            let entry = ScrollbackEntry::new(block);
+            let mut appearance = AppearanceConfig {
+                show_timestamps: true,
+                ..Default::default()
+            };
+            appearance.scrollback.display.bubble_copy_buttons = true;
+            let renderer = EntryRenderer::new(&entry, &theme).with_appearance(appearance);
+
+            let width: u16 = 160;
+            let height = renderer.desired_height(width);
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            renderer.render(area, &mut buf);
+
+            let row = collect_row_symbols(&buf, content_row, 0, width);
+            let ts = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+            let ts_start = ascii_run_x(&buf, content_row, width, &ts).unwrap_or_else(|| {
+                panic!("{kind}: enabled timestamp must paint on the first content row, got {row:?}")
+            });
+            let ts_end = ts_start + ts.len() as u16;
+            let icon = crate::glyphs::copy_icon();
+            let icon_x = (0..width)
+                .find(|&x| {
+                    buf.cell((x, content_row))
+                        .is_some_and(|c| c.symbol() == icon)
+                })
+                .unwrap_or_else(|| panic!("{kind}: copy must paint, row={row:?}"));
+
+            assert!(
+                ts_end <= icon_x,
+                "{kind}: timestamp must not cover the copy control; ts={ts_start}..{ts_end} icon_x={icon_x} row={row:?}"
+            );
+            let gap = icon_x - ts_end;
+            assert!(
+                gap <= 2,
+                "{kind}: timestamp must sit immediately left of copy; gap={gap} ts_end={ts_end} icon_x={icon_x} row={row:?}"
+            );
+            let content_right = width - renderer.appearance().scrollback.layout.block_pad_right;
+            assert_eq!(
+                icon_x,
+                content_right - 1,
+                "{kind}: copy stays on the right edge; icon_x={icon_x} content_right={content_right} row={row:?}"
+            );
+            assert!(
+                ts_start
+                    >= content_right
+                        .saturating_sub(TIMESTAMP_SHORT_RESERVE + BUBBLE_COPY_TRAILING_INSET + 2),
+                "{kind}: timestamp+copy cluster is on the right of the message row, not after the body; ts_start={ts_start} content_right={content_right} row={row:?}"
+            );
+        }
+
+        assert_cluster("agent", RenderBlock::agent_message("short agent body"), 0);
+        assert_cluster("human", RenderBlock::user_prompt("short human body"), 1);
+    }
+
+    #[test]
+    fn timestamp_overlay_x_right_aligns_immediately_left_of_copy_inset() {
+        // Wide slack after a short first line must not pull the clock next
+        // to the body. The overlay sits in the right chrome, left of copy.
+        assert_eq!(timestamp_overlay_x(0, 100, 10, 2), Some(88));
+        assert_eq!(timestamp_overlay_x(5, 100, 10, 2), Some(93));
+        assert_eq!(timestamp_overlay_x(0, 12, 10, 2), None);
     }
 
     #[test]
@@ -1190,6 +1408,15 @@ mod tests {
 
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
+        let mut buf_short = Buffer::empty(area);
+        renderer.render(area, &mut buf_short);
+        let short = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let row_short = collect_row_symbols(&buf_short, 0, 0, width);
+        let hover_x = row_short
+            .find(&short)
+            .expect("short timestamp locates the hover target") as u16;
+
+        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
@@ -1200,13 +1427,10 @@ mod tests {
             .unwrap()
             .format("%H:%M:%S | %b %d")
             .to_string();
-        let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
-
-        let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
-        assert_eq!(
-            rendered, expected,
-            "Mouse-hovered timestamp should show expanded format '{expected}'"
+        let row = collect_row_symbols(&buf, 0, 0, width);
+        assert!(
+            row.contains(&expected),
+            "Mouse-hovered timestamp should show expanded format '{expected}', got {row:?}"
         );
     }
 
@@ -1221,6 +1445,15 @@ mod tests {
         let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
+        let mut buf_short = Buffer::empty(area);
+        renderer.render(area, &mut buf_short);
+        let short = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let row_short = collect_row_symbols(&buf_short, 0, 0, width);
+        let hover_x = row_short
+            .find(&short)
+            .expect("short timestamp locates the hover target") as u16;
+
+        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
         let mut buf_hover = Buffer::empty(area);
         renderer.render(area, &mut buf_hover);
 
@@ -1237,8 +1470,8 @@ mod tests {
 
         let row_away = collect_row_symbols(&buf_away, 0, 0, width);
         assert!(
-            has_ampm_timestamp(&buf_away, 0, width),
-            "Non-hovered should show short AM/PM timestamp"
+            row_away.contains(&short),
+            "Non-hovered should show short AM/PM timestamp, got {row_away:?}"
         );
         assert!(
             !row_away.contains('|'),
@@ -1421,12 +1654,10 @@ mod tests {
 
         // AgentMessage has no vpad, so the first content row is y=0
         let expected = entry.created_at.unwrap().format("%-I:%M %p").to_string();
-        let ts_width = expected.len() as u16;
-        let ts_x = width - 2 - ts_width;
-        let rendered = collect_row_symbols(&buf, 0, ts_x, ts_x + ts_width);
-        assert_eq!(
-            rendered, expected,
-            "timestamp must survive the gutter clear on the first row"
+        let row = collect_row_symbols(&buf, 0, 0, width);
+        assert!(
+            row.contains(&expected),
+            "timestamp must survive the gutter clear on the first row, got {row:?}"
         );
     }
 

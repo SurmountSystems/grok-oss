@@ -89,6 +89,20 @@ pub(crate) fn timed_out_while(step: &str) -> String {
          background, so give it a moment before trying again."
     )
 }
+/// Operator-facing copy when the session RPC never completed after the
+/// warn window plus an equal keep-waiting window.
+pub(super) fn format_session_rpc_gave_up(action: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "{action} gave up after {}. The session did not finish loading.",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+/// True when `error` is the client-side session RPC timeout copy: the
+/// request may still finish, so the pager must not treat the session as
+/// dead or drain prompts into `session/prompt`.
+pub(crate) fn is_session_rpc_timeout_error(error: &str) -> bool {
+    error.contains("timed out after") && error.contains("may still finish in the background")
+}
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
@@ -559,6 +573,11 @@ impl SessionFlags {
                 self.yolo_mode,
                 self.auto_mode
             )),
+        );
+        let auto = super::dispatch::effective_auto(self.yolo_mode, self.auto_mode);
+        meta.insert(
+            "contextOnly".into(),
+            serde_json::json!(self.context_only_mode && !self.yolo_mode && !auto),
         );
         if meta.is_empty() { None } else { Some(meta) }
     }
@@ -1316,6 +1335,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "ulid_session_ids" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("ulid_session_ids", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_ulid_session_ids(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "plan_approval_park" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("plan_approval_park", "Enum", &value));
@@ -1883,18 +1910,24 @@ pub(super) fn credit_balance_from_config(
     // Same included SuperGrok period used percent as /limits
     // (`credit_balance_from_billing_config`). Do not invent a second formula.
     let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
-    let period_end_display = c
+    // Same RFC 3339 parse as CLI `credit_balance_from_billing_config`: keep
+    // the UTC instant so included SuperGrok period limits pace can compute.
+    // Missing or unparseable end → omit pace (do not invent).
+    let period_end_raw = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
+        .or(c.billing_period_end);
+    let period_end_at = period_end_raw.as_ref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let period_end_display = period_end_at.map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%B %-d, %H:%M")
+            .to_string()
+    });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1923,6 +1956,7 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
+        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),

@@ -951,13 +951,13 @@ impl TasksPane {
     }
     pub fn tick(&mut self) -> bool {
         self.tick += 1;
-        self.entries.iter().any(|e| e.is_running())
+        self.needs_tick()
     }
     pub fn tick_count(&self) -> u64 {
         self.tick
     }
     pub fn needs_tick(&self) -> bool {
-        self.entries.iter().any(|e| e.is_running())
+        self.items.iter().any(|e| e.is_running()) || self.entries.iter().any(|e| e.is_running())
     }
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
         if crate::key!('h').matches(key) && self.list_state.input_mode().is_none() {
@@ -1395,13 +1395,11 @@ impl TasksPane {
                 Style::default().fg(theme.accent_error),
             )
         } else if info.is_running() {
-            let frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = info.display_elapsed();
             (
                 frames.get(frame_idx).copied().unwrap_or(""),
                 Style::default().fg(theme.accent_running),
-                format!("{elapsed} "),
+                format!("{} ", format_duration(elapsed)),
                 Style::default().fg(theme.gray),
             )
         } else if info.attempt.status.as_deref() == Some("completed") {
@@ -2616,6 +2614,27 @@ mod tests {
             "no activity suffix on finished rows: {styled:?}"
         );
     }
+    #[test]
+    fn subagent_activity_suffix_skips_stale_preparing_and_uses_last_tool() {
+        let mut info = make_info();
+        info.activity_label = Some("Preparing search_replace…".into());
+        info.tools_used = vec![Arc::from("read_file")];
+        let entry = TaskEntry::from_subagent(&info);
+        let styled = match &entry {
+            TaskEntry::Agent { styled, .. } => styled,
+            _ => panic!("expected Agent variant"),
+        };
+        let joined: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            joined.contains("read_file"),
+            "list row must show the last live tool, got {joined:?}"
+        );
+        assert!(
+            !joined.to_ascii_lowercase().contains("preparing"),
+            "stale Preparing search_replace must not suffix the list row, got {joined:?}"
+        );
+    }
+
     #[test]
     fn subagent_activity_suffix_caps_description() {
         let long_desc = "d".repeat(60);

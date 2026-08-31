@@ -56,11 +56,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             || self.completed.contains_key(&id)
             || self.queued.contains_id(&id)
         {
-            let _ = result_tx.send(rejected_spawn_result(
-                &id,
-                &format!("Subagent id '{id}' already exists"),
-                false,
-            ));
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(&id, &format!("Subagent id '{id}' already exists"), false),
+            );
             return;
         }
         // Capture before `insert_nested` moves `spawner`.
@@ -301,6 +301,34 @@ pub(super) enum BackgroundStartAck {
     OnRegister,
     /// Leave `result_tx` for completion or a foreground-budget handoff.
     Hold,
+}
+
+fn reply_admitted(admitted_tx: Option<oneshot::Sender<Result<(), String>>>) {
+    if let Some(tx) = admitted_tx {
+        let _ = tx.send(Ok(()));
+    }
+}
+
+fn reply_admitted_err(
+    admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
+    result: &SubagentResult,
+) {
+    if let Some(tx) = admitted_tx {
+        let message = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "spawn rejected".to_owned());
+        let _ = tx.send(Err(message));
+    }
+}
+
+fn reply_rejected(
+    admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
+    result_tx: oneshot::Sender<SubagentResult>,
+    result: SubagentResult,
+) {
+    reply_admitted_err(admitted_tx, &result);
+    let _ = result_tx.send(result);
 }
 
 /// A spawn refused before it ever became a child record.

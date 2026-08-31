@@ -108,12 +108,15 @@ fn version_flag_exits_zero_when_stdin_is_dev_null() {
 #[test]
 fn version_flag_exits_zero_when_stdin_pipe_is_closed() {
     let (_home, mut cmd) = isolated_version_command(&["--version"]);
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("spawn grok-oss --version");
+    cmd.stdin(Stdio::piped());
+    #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+    let mut child = cmd.spawn().expect("spawn grok-oss --version");
+    let scope = xai_tty_utils::ProcessScope::new();
+    let group = scope.enroll_std(&child).expect("enroll grok-oss --version");
     drop(child.stdin.take());
     let output = child.wait_with_output().expect("wait grok-oss --version");
+    drop(group);
+    drop(scope);
     assert_version_ok(output, "stdin closed pipe");
 }
 

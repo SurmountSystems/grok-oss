@@ -281,6 +281,7 @@ pub(crate) async fn spawn_session_actor(
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
     session_auto_mode: bool,
+    session_context_only: bool,
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
@@ -1833,6 +1834,9 @@ pub(crate) async fn spawn_session_actor(
             client_caps: client_caps.clone(),
         },
         permissions,
+        context_only: std::sync::atomic::AtomicBool::new(
+            session_context_only && !session_yolo_mode && !session_auto_mode,
+        ),
         tool_context,
         deny_read_globs,
         mcp_state: mcp_state.clone(),
@@ -2658,6 +2662,7 @@ pub(crate) async fn spawn_session_on_thread(
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
     session_auto_mode: bool,
+    session_context_only: bool,
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
@@ -2851,6 +2856,7 @@ pub(crate) async fn spawn_session_on_thread(
                         session_model_id,
                         session_yolo_mode,
                         session_auto_mode,
+                        session_context_only,
                         session_client_identifier,
                         inference_idle_timeout_secs,
                         max_retries,
@@ -3242,18 +3248,44 @@ mod seed_sampling_window_tests {
     #[test]
     fn spawn_seeds_sampling_window_at_economic_cap_when_disk_economic_is_on() {
         let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
+        let nested = seed_sampling_context_window(catalog, None, true);
+        assert_eq!(
+            nested.get(),
+            ECONOMIC_CONTEXT_CAP,
+            "nested spawn seeds the 200k nested budget, not catalog 500k"
+        );
+        assert_eq!(nested.get(), 200_000);
+        let main = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(main.get(), 500_000, "L1 spawn seeds the catalog window");
+    }
+
+    /// L1 / parent TUI session uses the catalog window (500k on Grok 4.5).
+    /// Nested agents still cap at 200k; that nested budget must not be the L1
+    /// AUTO compact knee.
+    #[test]
+    fn main_session_sampling_window_is_catalog_500k_even_when_economic_is_on() {
+        let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
+        let seeded = seed_sampling_context_window(catalog, None, false);
+        assert_eq!(
+            seeded.get(),
+            500_000,
+            "L1 sampling/compaction window is the catalog 500k, not the nested 200k cap"
+        );
+        assert_ne!(
+            seeded.get(),
+            ECONOMIC_CONTEXT_CAP,
+            "auto-compact must not fire at the old 200k L1 knee"
+        );
+    }
+
+    #[test]
+    fn nested_session_sampling_window_stays_200k_when_catalog_is_500k() {
+        let catalog = std::num::NonZeroU64::new(500_000).expect("catalog");
         let seeded = seed_sampling_context_window(catalog, None, true);
         assert_eq!(
             seeded.get(),
-            ECONOMIC_CONTEXT_CAP,
-            "first pre-header sampling window must be the economic cap"
-        );
-        assert_eq!(seeded.get(), 200_000);
-        let uncapped = seed_sampling_context_window(catalog, None, false);
-        assert_eq!(
-            uncapped.get(),
-            500_000,
-            "economic off keeps the catalog window"
+            200_000,
+            "nested L2/L3 sampling stays 200k even if catalog is 500k"
         );
     }
 }

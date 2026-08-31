@@ -522,6 +522,11 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness_with_op
         )
         .run(),
     );
+    let resume = ChildReporter {
+        subagent_id: "harness".to_owned(),
+        tx: coordinator.internal_tx.clone(),
+    };
+    let actor = tokio::spawn(coordinator.run());
     Harness {
         // Unbound by default so tests can set request.parent_session_id
         // freely (e.g. nested reparent). ParentSession APIs must use
@@ -541,6 +546,7 @@ pub(in crate::implementations::grok_build::task::coordinator) fn harness_with_op
         wake_runs,
         admitted_messages,
         actor,
+        resume,
     }
 }
 
@@ -4369,6 +4375,59 @@ async fn an_out_of_band_token_cancel_resolves_without_other_actor_traffic() {
     harness.actor.abort();
 }
 
+/// After the child runner completes, wait already returned. Kill then says
+/// already finished. The child's cancellation token must already be cancelled
+/// so leftover progress / sampling / compact cannot keep the session live.
+#[tokio::test]
+async fn complete_then_cancel_already_finished_cancels_child_token() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("already-done-session", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("already-done-session")
+    );
+    let token = harness
+        .tokens
+        .recv()
+        .await
+        .expect("runner must expose the child cancellation token");
+    assert!(
+        !token.is_cancelled(),
+        "precondition: token is live while the child is running"
+    );
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    let _ = harness.completions.recv().await;
+
+    assert!(
+        token.is_cancelled(),
+        "complete must cancel the child token so the session is not still sampling"
+    );
+    assert!(
+        harness.backend.list_running("parent").await.is_empty(),
+        "completed child must not stay in the running set"
+    );
+    assert!(
+        matches!(
+            harness.backend.cancel("already-done-session").await,
+            SubagentCancelOutcome::AlreadyFinished { status } if status == "completed"
+        ),
+        "kill after complete must report already finished"
+    );
+    assert!(
+        token.is_cancelled(),
+        "kill already-finished must not leave the child token live"
+    );
+    assert!(
+        harness.backend.list_running("parent").await.is_empty(),
+        "kill already-finished must not revive a running child"
+    );
+    harness.actor.abort();
+}
+
 #[tokio::test]
 async fn a_cancel_command_by_id_resolves_a_queued_spawn() {
     let mut harness = harness_with_config(false, limited(1, LimitBehavior::Queue));
@@ -5280,6 +5339,62 @@ async fn task_spawn_rejects_or_replaces_second_live_same_description() {
     harness.actor.abort();
 }
 
+/// Harness classifier seats three auditors with one description
+/// (`goal achievement skeptic`). Duplicate-job uniqueness must not reject
+/// the second or third live copy of that reserved description.
+#[tokio::test]
+async fn task_spawn_admits_three_live_goal_achievement_skeptics() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let desc = "goal achievement skeptic";
+    let ids = ["sk-0", "sk-1", "sk-2"];
+    let mut joins = Vec::new();
+    for id in ids {
+        let mut req = request(id, true);
+        req.description = desc.to_owned();
+        let backend = harness.backend.clone();
+        joins.push(tokio::spawn(async move { backend.spawn(req).await }));
+        for _ in 0..64 {
+            if harness
+                .backend
+                .query(id, false, None)
+                .await
+                .is_some_and(|s| s.is_running())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            harness
+                .backend
+                .query(id, false, None)
+                .await
+                .is_some_and(|s| s.is_running() && s.description == desc),
+            "reserved panel skeptic {id} must be admitted while siblings are live"
+        );
+    }
+    let live = ids
+        .iter()
+        .map(|id| harness.backend.query(id, false, None))
+        .collect::<Vec<_>>();
+    let mut live_count = 0;
+    for fut in live {
+        if fut
+            .await
+            .is_some_and(|s| s.is_running() && s.description == desc)
+        {
+            live_count += 1;
+        }
+    }
+    assert_eq!(
+        live_count, 3,
+        "three concurrent reserved panel skeptics must all stay live"
+    );
+    drop(joins);
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
 /// Implement-loop effort 2 without an operator ask admits one Review
 /// description on the coordinator spawn path the TUI Subagent list uses.
 /// Distinct Review text still counts as a second Review row.
@@ -5383,7 +5498,7 @@ async fn implement_loop_effort_two_without_operator_ask_admits_one_review_descri
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,
@@ -5546,7 +5661,7 @@ async fn spawn_admits_one_review_at_implement_loop_effort(effort: u8) {
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row at effort {effort}"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,

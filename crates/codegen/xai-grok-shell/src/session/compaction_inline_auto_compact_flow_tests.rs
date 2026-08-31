@@ -96,6 +96,7 @@ async fn create_test_actor(
             persistence_tx,
         ),
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -1881,6 +1882,10 @@ fn classify_suppress_reason_maps_error_text() {
         SuppressReason::CreditBlock
     );
     assert_eq!(
+        classify("API error (status 402 Payment Required): Payment Required"),
+        SuppressReason::CreditBlock
+    );
+    assert_eq!(
         classify("Grok Build usage limit reached"),
         SuppressReason::CreditBlock
     );
@@ -2124,6 +2129,81 @@ async fn get_transcript_path_returns_some_when_file_exists() {
             assert!(actor.transcript_hint().is_none());
             let _ = std::fs::remove_file(&updates_path);
             let _ = std::fs::remove_dir_all(&session_dir);
+        })
+        .await;
+}
+
+/// L3 specialists never AUTO compact. 95% of the nested 200k window must
+/// not start compact-and-continue.
+#[tokio::test(flavor = "current_thread")]
+async fn l3_auto_compact_does_not_fire_when_nested_window_is_full() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "L3 at 95% of the nested 200k window must not AUTO compact"
+            );
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "L3 must not start two-pass prefire compact"
+            );
+        })
+        .await;
+}
+
+/// L3 overflow must not compact or CompactAndResubmit. L2 still uses last
+/// assistant text / the on-disk report when the child ends.
+#[tokio::test(flavor = "current_thread")]
+async fn l3_preflight_overflow_does_not_compact_and_resubmit() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(214_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            let overflow = api_error_with_context_window(200_000);
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "L3 must not start preflight overflow compact"
+            );
+            assert!(
+                !actor.should_compact_on_error(&overflow).await,
+                "L3 overflow must not CompactAndResubmit"
+            );
+        })
+        .await;
+}
+
+/// L2 nested sessions still AUTO compact at 95% of the 200k window.
+#[tokio::test(flavor = "current_thread")]
+async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 1;
+            let trigger = actor.check_auto_compact_needed().await;
+            assert!(
+                trigger.is_some(),
+                "L2 at 95% of the nested 200k window must still AUTO compact"
+            );
+            let info = trigger.expect("L2 AUTO trigger");
+            assert_eq!(info.context_window, 200_000);
+            assert_eq!(info.tokens_used, 190_000);
         })
         .await;
 }

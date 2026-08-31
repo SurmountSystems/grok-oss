@@ -21,7 +21,11 @@ impl SlashCommand for PlanCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let trimmed = args.trim();
+        let (hold, rest) = split_schedule_token(args);
+        if hold {
+            return queue_later_command(plan_command_text(rest));
+        }
+        let trimmed = rest;
         if trimmed.is_empty() {
             return CommandResult::Action(Action::SetPlanMode(PlanModeKind::On));
         }

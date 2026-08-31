@@ -1320,6 +1320,12 @@ async fn run_agent_command(
         None,
         xai_grok_shell::util::config::PermissionMode::Ask,
     );
+    agent_config.default_context_only_mode =
+        xai_grok_shell::util::config::effective_context_only_for_launch(
+            agent_args.yolo,
+            permission_mode_flag.as_deref(),
+            None,
+        );
     agent_config.agent_profile_path = agent_args
         .agent_profile
         .as_deref()
@@ -1426,6 +1432,9 @@ async fn run_agent_command(
         let capabilities = ClientCapabilities {
             yolo_mode: launch_yolo.yolo,
             auto_mode: agent_config.default_auto_mode && !launch_yolo.yolo,
+            context_only: agent_config.default_context_only_mode
+                && !launch_yolo.yolo
+                && !agent_config.default_auto_mode,
             default_model,
             client_version: Some(PAGER_CLIENT_VERSION.to_string()),
             code_nav_enabled: false,
@@ -1907,14 +1916,12 @@ fn purge_jemalloc_retained_pages() {
 fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorStats> {
     /// SAFETY: callers pass fixed NUL-terminated `stats.*` size_t ctl names.
     unsafe fn gauge(name: &[u8]) -> Option<u64> {
-        unsafe {
-            tikv_jemalloc_ctl::raw::read::<usize>(name)
-                .ok()
-                .map(|v| v as u64)
-        }
+        unsafe { mallctl_read::<usize>(name).map(|v| v as u64) }
     }
     unsafe {
-        tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).ok()?;
+        if !mallctl_write(b"epoch\0", 1u64) {
+            return None;
+        }
         Some(xai_grok_pager::memory_trace::AllocatorStats {
             allocated: gauge(b"stats.allocated\0")?,
             active: gauge(b"stats.active\0")?,
@@ -1949,9 +1956,11 @@ fn jemalloc_stats_dump() -> String {
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> {
     unsafe {
-        tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).ok()?;
-        let allocated = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.allocated\0").ok()? as u64;
-        let resident = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.resident\0").ok()? as u64;
+        if !mallctl_write(b"epoch\0", 1u64) {
+            return None;
+        }
+        let allocated = mallctl_read::<usize>(b"stats.allocated\0")? as u64;
+        let resident = mallctl_read::<usize>(b"stats.resident\0")? as u64;
         Some(xai_grok_shell::heap_profile::JemallocStats {
             allocated,
             resident,
@@ -1960,15 +1969,15 @@ fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> 
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_set_prof_active(active: bool) -> bool {
-    unsafe { tikv_jemalloc_ctl::raw::write(b"prof.active\0", active).is_ok() }
+    unsafe { mallctl_write(b"prof.active\0", active) }
 }
 #[cfg(all(test, feature = "jemalloc", unix))]
 fn jemalloc_read_prof_active() -> Option<bool> {
-    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0").ok() }
+    unsafe { mallctl_read::<bool>(b"prof.active\0") }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_prof_available() -> bool {
-    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0").unwrap_or(false) }
+    unsafe { mallctl_read::<bool>(b"opt.prof\0").unwrap_or(false) }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
@@ -1977,7 +1986,11 @@ fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
         return Err("opt.prof false".into());
     }
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c.as_ptr()) }.map_err(|e| e.to_string())
+    if unsafe { mallctl_write(b"prof.dump\0", c.as_ptr()) } {
+        Ok(())
+    } else {
+        Err("prof.dump mallctl failed".into())
+    }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn install_heap_profile_hooks() {
@@ -2914,6 +2927,18 @@ mod tests {
     #[serial_test::serial(jemalloc_heap_profile)]
     fn jemalloc_stats_readable_after_epoch() {
         assert_stats_sane(jemalloc_heap_stats().expect("stats readable"));
+    }
+    #[cfg(all(feature = "jemalloc", unix))]
+    #[test]
+    #[serial_test::serial(jemalloc_heap_profile)]
+    fn jemalloc_allocator_stats_readable_after_epoch() {
+        let stats = jemalloc_allocator_stats().expect("allocator gauges readable");
+        assert_stats_sane(xai_grok_shell::heap_profile::JemallocStats {
+            allocated: stats.allocated,
+            resident: stats.resident,
+        });
+        assert!(stats.active >= stats.allocated, "active={}", stats.active);
+        assert!(stats.mapped >= stats.resident, "mapped={}", stats.mapped);
     }
     #[cfg(all(feature = "jemalloc", unix))]
     #[test]

@@ -270,6 +270,11 @@ pub(super) fn handle_exit_plan_mode(
             new_tool_call_id = %params.tool_call_id,
             "Replacing active plan approval — dismissing previous"
         );
+        if is_restore {
+            carried_comments = std::mem::take(&mut old.comments);
+            carried_next_comment_id = old.next_comment_id;
+            carried_feedback_draft = old.feedback_draft.take();
+        }
         old.send_stale_cancel();
     }
 
@@ -286,6 +291,10 @@ pub(super) fn handle_exit_plan_mode(
     // Taking `casual_stashed_prompt` also clears it, so the stale draft cannot dangle into the next casual entry
     if let Some(stashed) = agent.casual_stashed_prompt.take() {
         agent.prompt.restore(stashed);
+    }
+    if agent.composer_holds_view_plan_slash() {
+        agent.view_plan_requested = true;
+        agent.prompt.set_text("");
     }
 
     // While a permission is open, the session draft is `permission_stashed_prompt` and the live composer holds the followup
@@ -328,17 +337,30 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.clear_kept_plan();
     }
-    // New present re-arms decision CTAs after a prior Approve/Quit and
-    // clears Revise/Clarify in-flight so CTAs arm once.
-    agent.clear_plan_loop_flags_for_new_present();
+    // Live present re-arms decision CTAs after a prior Approve/Quit and
+    // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
+    // clear sticky resolved (leftover/approved plan.md stays decided).
+    if !is_restore {
+        agent.clear_plan_loop_flags_for_new_present();
+    }
     agent.plan_approval_view = Some(state);
+    if is_restore {
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.comments = carried_comments;
+            pav.next_comment_id = carried_next_comment_id;
+            pav.feedback_draft = carried_feedback_draft;
+        }
+        agent.plan_next_comment_id = carried_next_comment_id;
+        agent.restore_plan_feedback_draft_if_composer_lost();
+        if !agent.prompt.text().trim().is_empty() && !agent.composer_holds_view_plan_slash() {
+            agent.snapshot_or_clear_plan_feedback_draft();
+        }
+    }
     // Keep a mid-compose draft visible. stash() copies text and does not
     // clear it; only wipe when the composer was already empty so empty-prompt
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
-    } else {
-        agent.prompt.set_text("");
     }
 
     agent.casual_commenting_range = None;
@@ -369,6 +391,8 @@ pub(super) fn handle_exit_plan_mode(
     } else if !permission_still_open && let Some(ref mut pav) = agent.plan_approval_view {
         pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
     }
+    agent.restore_plan_feedback_draft_if_composer_lost();
+    agent.persist_unsent_composer_draft();
 
     tracing::info!(
         target_active = is_active,
@@ -377,6 +401,14 @@ pub(super) fn handle_exit_plan_mode(
 
     // An approval parked on a background session renders when the user switches to it; only the active view needs an immediate redraw
     is_active
+}
+
+/// Apply a restore `exit_plan_mode` that arrived before the session was bound.
+pub(crate) fn flush_pending_exit_plan_mode(app: &mut AppView) -> bool {
+    let Some(ext) = app.pending_exit_plan_mode.take() else {
+        return false;
+    };
+    handle_exit_plan_mode(ext, app)
 }
 
 pub(super) fn plan_review_source_for_tool(

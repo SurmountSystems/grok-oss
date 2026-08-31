@@ -1,0 +1,19 @@
+name: JSON
+file_extensions: [json, jsonc]
+scope: source.json
+contexts:
+  main:
+    - match: '"'
+      push: string
+    - match: '\b(true|false|null)\b'
+      scope: constant.language.json
+    - match: '-?\d+(\.\d+)?([eE][+-]?\d+)?'
+      scope: constant.numeric.json
+    - match: '[{}\[\],:]'
+      scope: punctuation.separator.json
+  string:
+    - meta_scope: string.quoted.double.json
+    - match: '\\.'
+      scope: constant.character.escape.json
+    - match: '"'
+      pop: true

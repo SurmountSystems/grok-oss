@@ -1,0 +1,5 @@
+# grok-nix-helper is a nix/git argv wrapper, not grok-oss session chrome.
+# Clippy uses the nearest clippy.toml with no merge. Repo-root clippy.toml
+# forbids Command::spawn so TUI children enroll in ProcessScope. This crate
+# waits on nix/git children. Keep this file nearest.
+disallowed-methods = []

@@ -194,6 +194,7 @@ fn compute_snapshot(cwd: &Path) -> GitSnapshot {
     // The empty-string sentinel means "detached HEAD"; the pager's notification path uses the same convention
     let branch = repo.head().ok().map(|head| {
         head.shorthand()
+            .ok()
             .filter(|s| *s != "HEAD")
             .map(str::to_string)
             .unwrap_or_default()

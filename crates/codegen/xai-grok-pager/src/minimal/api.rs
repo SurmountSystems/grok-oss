@@ -120,7 +120,7 @@ pub struct TranscriptBuild {
 /// Minimal-mode-only state held on [`AppView::minimal_state`].
 #[derive(Default)]
 pub(crate) struct MinimalState {
-    /// Pin the todo panel visible (minimal reuses Ctrl+T for this).
+    /// Pin the todo panel visible (minimal uses Ctrl+Shift+T for this).
     pub(crate) show_todos: bool,
     /// A welcome card is queued to commit into native scrollback next draw.
     pub(crate) welcome_pending: bool,
@@ -164,7 +164,7 @@ pub fn minimal_pending_expand(app: &AppView) -> &[EntryId] {
     &app.minimal_state.pending_expand
 }
 
-/// Drain `AppView::minimal_state.pending_expand` (Ctrl+E / `/expand` queue).
+/// Drain `AppView::minimal_state.pending_expand` (Ctrl+T / `/expand` queue).
 pub fn take_minimal_pending_expand(app: &mut AppView) -> Vec<EntryId> {
     std::mem::take(&mut app.minimal_state.pending_expand)
 }

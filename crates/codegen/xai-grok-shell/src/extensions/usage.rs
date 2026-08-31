@@ -49,7 +49,7 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         .chat_state_handle
         .try_get_session_usage()
         .await
-        .map_err(|()| acp::Error::internal_error().data("failed to read session usage"))?;
+        .map_err(|_| acp::Error::internal_error().data("failed to read session usage"))?;
 
     to_raw_response(&SessionUsageResponse {
         usage: PromptUsage::from(&ledger),

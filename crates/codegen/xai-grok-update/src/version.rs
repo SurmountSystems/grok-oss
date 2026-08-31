@@ -85,6 +85,25 @@ pub struct UpdateConfig {
     pub npm_registry: Option<String>,
 }
 
+impl std::fmt::Debug for UpdateConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateConfig")
+            .field("proxy_base_url", &self.proxy_base_url)
+            .field("auth_scope", &self.auth_scope)
+            .field(
+                "deployment_key",
+                &self.deployment_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "alpha_test_key",
+                &self.alpha_test_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field("channel", &self.channel)
+            .field("npm_registry", &self.npm_registry)
+            .finish()
+    }
+}
+
 impl UpdateConfig {
     pub fn from_environment(env: &GrokBuildEnvironment) -> Self {
         Self {

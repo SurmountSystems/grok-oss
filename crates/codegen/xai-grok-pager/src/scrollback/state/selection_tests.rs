@@ -644,11 +644,11 @@ fn test_global_fold_ops_clear_pins_scoped() {
     h.state.expand_all_thinking();
     assert!(
         !h.state.get_by_id(think_id).unwrap().display_mode_pinned,
-        "Ctrl+E clears thinking pins"
+        "Ctrl+T clears thinking pins"
     );
     assert!(
         h.state.get_by_id(tool_id).unwrap().display_mode_pinned,
-        "Ctrl+E leaves tool pins alone"
+        "Ctrl+T leaves tool pins alone"
     );
 
     h.state.expand_all();
@@ -924,10 +924,53 @@ fn push_thought(state: &mut ScrollbackState, text: &str) -> EntryId {
 }
 
 #[test]
+fn thinking_fold_label_expands_when_any_thinking_is_collapsed_or_truncated() {
+    let mut state = ScrollbackState::new();
+    assert_eq!(
+        state.thinking_fold_label(),
+        "collapse thinking",
+        "no thinking blocks: next Ctrl+T/hyphen would collapse (none)"
+    );
+    let collapsed = push_thought(&mut state, "hidden thought");
+    assert_eq!(state.thinking_fold_label(), "expand thinking");
+    state
+        .get_by_id_mut(collapsed)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    assert_eq!(state.thinking_fold_label(), "collapse thinking");
+    state
+        .get_by_id_mut(collapsed)
+        .unwrap()
+        .set_display_mode(DisplayMode::Truncated);
+    assert_eq!(
+        state.thinking_fold_label(),
+        "expand thinking",
+        "truncated thinking is not expanded; the advertised expand must open it"
+    );
+}
+
+#[test]
+fn expand_all_thinking_opens_truncated_thinking() {
+    let mut state = ScrollbackState::new();
+    let truncated = state.push_block(RenderBlock::thinking("preview"));
+    state
+        .get_by_id_mut(truncated)
+        .unwrap()
+        .set_display_mode(DisplayMode::Truncated);
+    assert_eq!(state.thinking_fold_label(), "expand thinking");
+    state.expand_all_thinking();
+    assert_eq!(
+        state.get_by_id(truncated).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "hyphen/Ctrl+T must expand truncated thinking, not collapse it"
+    );
+}
+
+#[test]
 fn verb_group_hidden_thinking_is_transparent() {
     let mut state = verb_state();
     push_reads(&mut state, 1);
-    state.push_block(RenderBlock::thinking("hmm"));
+    let thought = state.push_block(RenderBlock::thinking("hmm"));
     push_reads(&mut state, 1);
     state.prepare_layout(80, 40);
 
@@ -938,6 +981,10 @@ fn verb_group_hidden_thinking_is_transparent() {
 
     // Shown non-collapsed thinking keeps its own rows; the run folds around it instead of splitting
     crate::appearance::cache::set_show_thinking_blocks(true);
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
     state.rebuild_layout();
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
@@ -987,7 +1034,7 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
     assert!(cached_height_at(&state, 0) > 1, "anchor thought opened");
     assert!(
         cached_height_at(&state, 2) > 0,
-        "members stay expanded across Ctrl+E on the anchoring thought"
+        "members stay expanded across Ctrl+T on the anchoring thought"
     );
     let cache = state.layout_cache.as_ref().unwrap();
     let tool_height = EntryRenderer::new(state.entries.get_index(1).unwrap().1, &Theme::current())

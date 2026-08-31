@@ -762,6 +762,7 @@ impl AgentView {
                 None
             },
             placeholder_when_focused: false,
+            hide_idle_placeholder: self.session.state.is_busy(),
             placeholder_override: if let Some(ph) = self
                 .prompt_input_mode
                 .placeholder_override(self.multiline_mode)
@@ -917,6 +918,7 @@ impl AgentView {
             prefix_override: None,
             placeholder_when_focused: false,
             placeholder_override: None,
+            hide_idle_placeholder: false,
             compact: false,
             show_accent_line: false,
             show_borders: false,
@@ -951,6 +953,7 @@ impl AgentView {
                 prefix_override: None,
                 placeholder_when_focused: false,
                 placeholder_override: None,
+                hide_idle_placeholder: false,
                 compact: false,
                 show_accent_line: false,
                 show_borders: false,
@@ -1505,6 +1508,20 @@ impl AgentView {
             width: visible_path_width,
             height: 1,
         });
+        let header_hit = |off: u16, w: u16| {
+            (off + w <= cwd_width && w > 0).then_some(Rect {
+                x: layout.status_bar.x + off,
+                y: layout.status_bar.y,
+                width: w,
+                height: 1,
+            })
+        };
+        self.hit_header_prev
+            .set(header_prev_x.and_then(|(off, w)| header_hit(off, w)));
+        self.hit_header_next
+            .set(header_next_x.and_then(|(off, w)| header_hit(off, w)));
+        self.hit_header_dashboard
+            .set(header_dash_x.and_then(|(off, w)| header_hit(off, w)));
         let mut upgrade_cta_rect = None;
         if let Some((_owner, label, _url)) = upgrade_cta {
             let avail = left_budget.saturating_sub(cwd_width);
@@ -1563,6 +1580,24 @@ impl AgentView {
                 );
             let sb_output = sb_rendered.output;
             sticky_gap_row = sb_output.sticky_gap_row;
+            if !global_paused && !in_dashboard_overlay {
+                let activity = self.resolve_turn_activity();
+                if let Some(label) = turn_status::leftover_viewport_wait_label(&activity) {
+                    let pad = HorizontalLayout::ACCENT.saturating_add(2);
+                    let wait_area = Rect {
+                        x: layout.scrollback_content.x.saturating_add(pad),
+                        y: layout.scrollback_content.y,
+                        width: layout.scrollback_content.width.saturating_sub(pad),
+                        height: layout.scrollback_content.height,
+                    };
+                    turn_status::paint_leftover_viewport_wait(
+                        buf,
+                        wait_area,
+                        &label,
+                        Style::default().fg(theme.text_secondary),
+                    );
+                }
+            }
             self.update_scrollback_selection_state(
                 sb_output.selection_model.clone(),
                 sb_rendered.selection_boundaries,
@@ -2418,6 +2453,7 @@ impl AgentView {
             info
         };
         let mut prompt_cursor_pos: Option<(u16, u16)> = None;
+        let mut prompt_caret_cell: Option<(u16, u16)> = None;
         let mut prompt_post_flush: Option<crate::terminal::overlay::PostFlush> = None;
         if permission_view_h > 0 {
             let perm_area = layout.prompt;
@@ -2449,6 +2485,7 @@ impl AgentView {
                         prefix_override: None,
                         placeholder_when_focused: false,
                         placeholder_override: None,
+                        hide_idle_placeholder: false,
                         compact: false,
                         show_accent_line: false,
                         show_borders: false,
@@ -2914,6 +2951,7 @@ impl AgentView {
                 self.prompt.set_scroll(s);
             }
             prompt_cursor_pos = prompt_result_inner.cursor_pos;
+            prompt_caret_cell = prompt_result_inner.caret_cell;
             if let Some(escapes) = prompt_result_inner.post_flush_escapes {
                 prompt_post_flush = Some(escapes.into());
             }
@@ -3324,7 +3362,6 @@ impl AgentView {
         }
         let line_viewer_toast = self.active_toast_message().map(|s| s.to_string());
         let is_plan_viewer = self.is_plan_viewer();
-        let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
         if self.line_viewer.is_some() {
             use crate::views::file_search::line_viewer::render_line_viewer;
@@ -3455,6 +3492,7 @@ impl AgentView {
                 h.push(HintItem::new(key!('y'), "copy"));
                 h.push(HintItem::new(key!('Y'), "copy plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
+                h.push(HintItem::new(key!(Esc), "close"));
                 h
             } else if is_plan_viewer {
                 let on_casual_comment = viewer
@@ -3472,14 +3510,8 @@ impl AgentView {
                         HintItem::new(key!('y'), "copy plan"),
                     ]
                 } else {
-                    vec![
-                        HintItem::new(key!('c'), "comment"),
-                        HintItem::new(key!('y'), "copy plan"),
-                    ]
+                    vec![HintItem::new(key!('y'), "copy plan")]
                 };
-                if has_plan_comments {
-                    h.push(HintItem::new(key!('s'), "send"));
-                }
                 if self.vim_mode {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
@@ -3515,6 +3547,24 @@ impl AgentView {
             } else {
                 None
             };
+            // Isolated Preview still types in the Human box. Re-paint the
+            // box caret after the plan pane so a right dock cannot hide it.
+            if self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
+                && let Some((cx, cy)) = prompt_caret_cell
+            {
+                let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                crate::views::prompt_widget::paint_composer_box_cursor(
+                    buf,
+                    cx,
+                    cy,
+                    &theme,
+                    theme.bg_base,
+                    allow_block_glyph,
+                );
+            }
             return (viewer_cursor, prompt_post_flush);
         }
         if let Some(ref mut viewer) = self.image_viewer {
@@ -5060,15 +5110,23 @@ mod overlay_cycle_hint_tests {
         assert!(settled_v1.contains("Ctrl+x:stop"), "{settled_v1}");
     }
 }
+
+/// Nested L2 overlay wait chrome: name the live specialist, compact minutes,
+/// and last known tool. Bare `Waiting on task output` is FAIL.
 #[cfg(test)]
-mod overlay_post_flush_tests {
-    use super::super::test_fixtures::make_agent;
+mod nested_l2_overlay_wait_chrome_tests {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::acp::meta::NotificationMeta;
     use crate::actions::ActionRegistry;
     use crate::scrollback::render::ScratchBuffer;
+    use agent_client_protocol as acp;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    fn draw(agent: &mut super::AgentView) -> Option<crate::terminal::overlay::PostFlush> {
-        let area = Rect::new(0, 0, 100, 40);
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn draw_text(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
         agent
@@ -5094,13 +5152,9 @@ mod overlay_post_flush_tests {
     fn png() -> [u8; 8] {
         [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
     }
+
     #[test]
-    fn fullscreen_subagent_propagates_child_clear_to_emitter() {
-        let _guard = crate::terminal::image::set_protocol_for_test(
-            crate::terminal::image::GraphicsProtocol::Kitty,
-        );
-        crate::terminal::overlay::reset_owner();
-        seed_static_owner(41);
+    fn nested_l2_overlay_wait_names_specialist_elapsed_and_progress() {
         let mut parent = make_agent();
         parent.insert_test_child("child".into(), Box::new(make_agent()));
         parent.active_subagent = Some("child".into());

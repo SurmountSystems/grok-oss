@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use super::wait_for_welcome;
-use crate::{ContentController, MousePoint, PtyHarness, pager_binary};
+use crate::{ContentController, MousePoint, PtyHarness, ScriptedResponse, SseEvent, pager_binary};
 
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
@@ -48,6 +48,11 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         "initial plan-drafting turn",
         format!("{SETUP_SENTINEL}: drafted a plan for the user to review."),
     );
+    // ContentController is mock inference, not ACP. A text-only first turn
+    // never intercepts `exit_plan_mode`, so resume has no reverse-request
+    // waiter even if `plan_mode.json` is seeded. Script the tool call so
+    // the bundled shell parks a live waiter before quit.
+    let _park_turn = expect_exit_plan_mode_turn(&content, "call_gbt3703_park");
     let mut implement_turn = content.expect_agent_turn(
         "implementation after approval",
         format!("{IMPLEMENT_SENTINEL}: implementing the approved plan."),
@@ -62,7 +67,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &[],
+        PAGER_E2E_ARGS,
         Some(project.path()),
     )
     .context("spawn first pager")?;
@@ -83,15 +88,18 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     first.inject_keys(b"\x11").context("ctrl-q confirm")?;
     first.quit().context("reap first pager")?;
 
-    let seeded = seed_parked_approval(content.home()).context("seed parked approval")?;
+    let seeded = seed_parked_approval(&content.sandbox().grok_home().join("sessions"))
+        .context("seed parked approval")?;
     assert!(seeded > 0, "no session dir seeded");
 
+    let mut continue_args = PAGER_E2E_ARGS.to_vec();
+    continue_args.insert(0, "--continue");
     let mut resumed = PtyHarness::spawn_with_content_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--continue"],
+        &continue_args,
         Some(project.path()),
     )
     .context("spawn resumed pager")?;
@@ -145,8 +153,8 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Letters type; empty Enter never Approves. Default park auto-opens
-    // the right pane; click the painted Approve word (not card prose).
+    // Letters type; empty Enter never Approves. After /view-plan, click
+    // the painted Approve word (not card prose).
     click_plan_approve_cta(&mut resumed).context("click side-panel Approve CTA")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
@@ -169,7 +177,7 @@ fn seed_parked_approval(home: &Path) -> Result<usize> {
         );
     }
     let mut seeded = 0usize;
-    for cwd_ent in std::fs::read_dir(&sessions_root).context("read sessions root")? {
+    for cwd_ent in std::fs::read_dir(sessions_root).context("read sessions root")? {
         let cwd_ent = cwd_ent.context("cwd entry")?;
         if !cwd_ent.file_type().context("ft")?.is_dir() {
             continue;
@@ -215,6 +223,12 @@ fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
     obj.insert(
         "awaiting_plan_approval".into(),
         serde_json::Value::Bool(true),
+    );
+    // A leftover resolved bit would make the shell skip re-park. This seed
+    // is an outstanding decision, not Approve/Quit.
+    obj.insert(
+        "plan_decision_resolved".into(),
+        serde_json::Value::Bool(false),
     );
     std::fs::write(path, serde_json::to_vec_pretty(&value)?).context("write plan_mode.json")?;
     Ok(())

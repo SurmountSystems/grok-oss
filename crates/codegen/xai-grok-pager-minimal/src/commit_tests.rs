@@ -1167,7 +1167,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
             .collect();
         assert!(row.contains("Thought"), "@{width}: {row:?}");
         assert!(
-            row.contains("ctrl+e to expand"),
+            row.contains("ctrl+t to expand"),
             "@{width}: the only way into a print-once folded block must be \
              advertised: {row:?}"
         );
