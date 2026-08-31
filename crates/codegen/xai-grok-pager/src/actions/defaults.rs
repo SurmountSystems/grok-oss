@@ -308,7 +308,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Folds or unfolds the selected scrollback entry to hide or show its full body.\nHandy for skimming long tool output or reasoning.\nRelated: E folds/unfolds every entry, Ctrl+E toggles all thinking blocks.",
+                "Folds or unfolds the selected scrollback entry to hide or show its full body.\nHandy for skimming long tool output or reasoning.\nRelated: E folds/unfolds every entry, Ctrl+T toggles all thinking blocks.",
             ),
         },
         ActionDef {
@@ -323,22 +323,52 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Folds or unfolds every scrollback entry at once, unlike e which toggles only the selected row.\nCollapse a long transcript to scan headers, then expand it all back.\nThinking blocks have their own toggle, Ctrl+E.",
+                "Folds or unfolds every scrollback entry at once, unlike e which toggles only the selected row.\nCollapse a long transcript to scan headers, then expand it all back.\nThinking blocks have their own toggle, Ctrl+T.",
             ),
         },
         ActionDef {
             id: ActionId::ExpandAllThinking,
             label: "expand/collapse thinking",
             description: "Toggle all thinking blocks",
-            default_key: key!('e', CONTROL),
-            alt_keys: vec![],
+            default_key: key!('t', CONTROL),
+            alt_keys: vec![key!('-')],
             category: Category::ConversationAction,
             context: When::ScrollbackFocused,
             hint_priority: Some(3),
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nSeparate from E, which folds every entry regardless of type.",
+                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nReveal how the agent reached an answer, or hide reasoning to focus on results.\nCtrl+T toggles thinking from the scrollback, the composer, and a nested overlay. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; in the composer, `-` stays a typed hyphen.\nSeparate from E, which folds every entry regardless of type.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::ExpandAllThinking,
+            label: "expand/collapse thinking",
+            description: "Toggle all thinking blocks",
+            default_key: key!('t', CONTROL),
+            alt_keys: vec![],
+            category: Category::ConversationAction,
+            context: When::PromptFocused,
+            hint_priority: Some(3),
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Shows or hides the agent's reasoning (thinking) blocks across the whole transcript in one keypress.\nCtrl+T still toggles thinking while the composer is focused; it does not insert a character.",
+            ),
+        },
+        ActionDef {
+            id: ActionId::ExpandAllThinking,
+            label: "expand/collapse thinking",
+            description: "Toggle all thinking blocks",
+            default_key: key!('t', CONTROL),
+            alt_keys: vec![],
+            category: Category::ConversationAction,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Shows or hides the agent's reasoning (thinking) blocks.\nSame Ctrl+T chord as the scrollback and composer, including inside a nested overlay.",
             ),
         },
         ActionDef {
@@ -539,7 +569,7 @@ pub(super) fn default_actions(
             id: ActionId::ToggleTodos,
             label: "todos",
             description: "Toggle todo pane",
-            default_key: key!('t', CONTROL),
+            default_key: key!('t', CONTROL | SHIFT),
             alt_keys: vec![],
             category: Category::Panels,
             context: When::AgentScreen,
@@ -547,7 +577,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Shows or hides the todo pane: the agent's live task checklist for the current work.\nWatch what it plans to do and what's left as the turn runs.\nA side pane; toggle it off to reclaim width.",
+                "Shows or hides the todo pane: the agent's live task checklist for the current work.\nWatch what it plans to do and what's left as the turn runs.\nCtrl+T expands or collapses thinking; this pane uses Ctrl+Shift+T. Click the status-row tasks N/M badge for the same toggle.",
             ),
         },
         ActionDef {

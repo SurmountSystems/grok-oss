@@ -53,20 +53,17 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
     content_width.saturating_sub(label_w) / 2
 }
 
-/// Width reserved for the timestamp on message blocks.
+/// Width reserved for timestamp plus copy trailing inset on message blocks.
 ///
-/// Matches the constant in `EntryRenderer::timestamp_reserved()`.
+/// Matches `EntryRenderer::timestamp_reserved()`.
 fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    if appearance.show_timestamps
-        && matches!(
+    super::wrappers::message_right_chrome_reserve(
+        appearance,
+        matches!(
             block,
             RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
-    {
-        10
-    } else {
-        0
-    }
+        ),
+    )
 }
 
 /// A reusable scratch buffer for rendering clipped entries.
@@ -578,7 +575,11 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     true,
                 );
             }
-            if let Some(rect) = line.bubble_copy_button_rect(entry_row_layout.content.x, screen_y) {
+            if let Some(rect) = line.bubble_copy_button_rect(
+                entry_row_layout.content.x,
+                entry_row_layout.content.width,
+                screen_y,
+            ) {
                 result.bubble_copy_hits.push((rect, logical_idx));
             }
             if let (Some(range_id), Some(cols)) = (

@@ -1,0 +1,27 @@
+name: Go
+file_extensions: [go]
+scope: source.go
+contexts:
+  main:
+    - match: '\b(func|package|import|var|const|type|struct|interface|map|chan|if|else|for|range|return|go|defer|select|switch|case|break|continue|fallthrough)\b'
+      scope: keyword.control.go
+    - match: '//.*'
+      scope: comment.line.double-slash.go
+    - match: '/\*'
+      push: block_comment
+    - match: '"'
+      push: string
+    - match: '`[^`]*`'
+      scope: string.quoted.raw.go
+    - match: '\b\d[\d_]*(\.[\d_]+)?\b'
+      scope: constant.numeric.go
+  block_comment:
+    - meta_scope: comment.block.go
+    - match: '\*/'
+      pop: true
+  string:
+    - meta_scope: string.quoted.double.go
+    - match: '\\.'
+      scope: constant.character.escape.go
+    - match: '"'
+      pop: true

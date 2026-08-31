@@ -447,7 +447,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
 
     // Drive the ONE frontier walk (`commit_leading_run` — also what the unit
     // tests exercise) with the production per-entry work: finalize, stamp the
-    // print-once display mode, print, then remember folded blocks for Ctrl+E.
+    // print-once display mode, print, then remember folded blocks for Ctrl+T.
     commit_leading_run(sb, turn_running, |sb, i| {
         // If the turn is idle but this entry still carries a stale
         // `is_running` flag, finalize it first so it renders in its
@@ -477,7 +477,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
             }
         }
         // Remember folded blocks (collapsed reasoning / truncated output) so
-        // `Ctrl+E` / `/expand` can re-print them in full later (K10) — only
+        // `Ctrl+T` / `/expand` can re-print them in full later (K10) — only
         // after the print actually succeeded.
         if let Some((id, mode)) = sb.get(i).map(|e| (e.id, e.display_mode()))
             && matches!(mode, DisplayMode::Collapsed | DisplayMode::Truncated)
@@ -503,7 +503,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
     }
 }
 
-/// Re-print the entries queued by `Ctrl+E` / `/expand` into native scrollback,
+/// Re-print the entries queued by `Ctrl+T` / `/expand` into native scrollback,
 /// fully expanded, below the committed conversation (design decision K10).
 ///
 /// Committed terminal text cannot be mutated in place, so "expanding" a folded
@@ -542,7 +542,7 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
     let footer_style = theme.dim();
     // Consume the expand queue only after every guard above has passed: a
     // non-agent active view, a 0-width (probe) frame, or an open app-modal must
-    // leave the IDs queued for a later frame, not silently drop a Ctrl+E /
+    // leave the IDs queued for a later frame, not silently drop a Ctrl+T /
     // /expand request.
     let ids = minimal_api::take_minimal_pending_expand(app);
     let mut requeue: Vec<EntryId> = Vec::new();

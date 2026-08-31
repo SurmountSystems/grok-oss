@@ -42,6 +42,8 @@ pub(crate) enum SamplerFailureRecovery {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
     },
+    /// L3 hit the nested window. End the child. Do not compact-and-continue.
+    EndChildWithoutCompact,
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -61,6 +63,8 @@ pub(crate) enum SamplerTurnOutcome {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
     },
+    /// L3 hit the nested window. End the child. Do not compact-and-continue.
+    EndChildWithoutCompact,
 }
 
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.

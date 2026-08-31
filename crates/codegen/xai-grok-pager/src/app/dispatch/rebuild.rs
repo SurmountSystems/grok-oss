@@ -225,13 +225,24 @@ pub(crate) enum PeerRebuildExitReason {
 /// not only exit. Leader IPC cancel is higher priority in the biased select
 /// than quit-notify; without arming there, peers quit and never come back.
 ///
-/// Does **not** re-exec on ordinary SIGTERM/`/exit` when no rebuild flag is
-/// set (avoids fighting a deliberate kill while a request file is still fresh).
+/// Does **not** re-exec on ordinary SIGTERM/`/exit` / Ctrl-C when no rebuild
+/// flag is set (avoids fighting a deliberate kill while a request file is
+/// still fresh).
+pub(crate) fn should_try_peer_rebuild_arm(reason: PeerRebuildExitReason, signaled: bool) -> bool {
+    if signaled {
+        return true;
+    }
+    matches!(reason, PeerRebuildExitReason::LeaderDisconnect)
+}
+
 pub(crate) fn arm_peer_rebuild_before_exit(
     app: &mut AppView,
     reason: PeerRebuildExitReason,
 ) -> bool {
     let signaled = crate::app::signal_handler::take_peer_rebuild_relaunch();
+    if !should_try_peer_rebuild_arm(reason, signaled) {
+        return app.rebuild_relaunch.is_some();
+    }
     if try_arm_peer_rebuild_relaunch_from_request(app, signaled) {
         return true;
     }
@@ -281,11 +292,14 @@ pub(super) fn handle_rebuild_done(
             // write the marker; first-activity also clears the in-flight stash.
             persist_running_turns_for_rebuild(app);
 
-            // Mid-turn: cancel so the old process does not keep driving the turn.
+            // Mid-turn: cancel the parent turn so this process does not keep
+            // driving it. Do not cancel nested subagents: after re-exec they
+            // resume like a network disconnect, and the Subagents list must
+            // not go empty.
             if let Some(agent) = app.agents.get(&agent_id)
                 && agent.session.state.is_turn_running()
             {
-                effects.extend(do_cancel_turn_for(app, agent_id, true, true));
+                effects.extend(do_cancel_turn_for(app, agent_id, false, true));
             }
 
             // Arm self re-exec onto the new binary with the same session when possible.
@@ -524,6 +538,25 @@ mod tests {
         assert_eq!(r.session_id, "sess-1");
         assert!(!r.minimal);
         assert_eq!(r.installed_exe, PathBuf::from("/tmp/grok-oss-new"));
+    }
+
+    /// Contract: Ctrl-C / SIGINT quit must not opportunistic-relaunch from a
+    /// leftover request file. SIGUSR1 still arms. Leader disconnect still
+    /// tries identity/path gates.
+    #[test]
+    fn sigint_quit_does_not_try_peer_rebuild_arm_without_flag() {
+        assert!(
+            !should_try_peer_rebuild_arm(PeerRebuildExitReason::SignalOrFlag, false),
+            "SIGINT / Ctrl-C must quit and must not arm peer re-exec"
+        );
+        assert!(
+            should_try_peer_rebuild_arm(PeerRebuildExitReason::SignalOrFlag, true),
+            "SIGUSR1 flag must still arm peer rebuild"
+        );
+        assert!(should_try_peer_rebuild_arm(
+            PeerRebuildExitReason::LeaderDisconnect,
+            false
+        ));
     }
 
     /// Contract: peer of a rebuild arms re-exec when identity is older and the
@@ -864,6 +897,7 @@ mod tests {
             leader_outcomes: vec![],
             peer_outcomes: vec![],
             live_sessions: vec![],
+            previous_binary_backup: None,
             summary_lines: vec!["Rebuild complete.".into()],
         }
     }
@@ -875,11 +909,14 @@ mod tests {
     /// and the re-exec SessionLoaded path must auto-continue that prompt.
     /// Silent idle or a lost session is a miss.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn() {
         use crate::app::actions::{Action, Effect, TaskResult};
         use crate::app::agent::{AgentId, AgentState};
         use agent_client_protocol as acp;
 
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
         let proj = tempfile::tempdir().unwrap();
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
@@ -993,6 +1030,107 @@ mod tests {
             "continued turn must be running; state={:?}",
             agent.session.state
         );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Mid-turn cancel-resume plus leftover plan.md must continue the turn
+    /// and must not auto-open the plan side panel.
+    #[test]
+    fn rebuild_or_resume_does_not_auto_open_plan_side_panel_when_turn_is_owed() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS;
+        use agent_client_protocol as acp;
+
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-resume-no-plan-dock";
+        let prompt = "continue this turn without docking plan review";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-rebuild-no-dock".into());
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent.session.in_flight_prompt = None;
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent.plan_mode_active = true;
+            agent.plan_mode_pending = None;
+            agent.plan_decision_resolved = false;
+            agent.latest_inline_plan_content =
+                Some("# Leftover plan\n\nDo not auto-open this pane\n".into());
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            let toast = agent
+                .toast
+                .as_ref()
+                .map(|(msg, _)| msg.as_str())
+                .unwrap_or("");
+            assert!(
+                toast.contains("Continuing interrupted turn"),
+                "re-exec session load must toast continue-interrupted-turn; got {toast:?}"
+            );
+            agent.surface_idle_plan_review_if_needed();
+            assert!(
+                agent.line_viewer.is_none(),
+                "rebuild/resume must not auto-open the plan side panel when a turn is owed"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "must not paint Plan ready. Side panel open while the turn continues"
+            );
+            let _ = PLAN_IDLE_REVIEW_STATUS;
+        }
 
         let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
             &cwd_str, sid,
@@ -1142,16 +1280,159 @@ mod tests {
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
     }
 
+    fn running_l2_subagent(description: &str) -> crate::app::subagent::SubagentInfo {
+        crate::app::subagent::SubagentInfo {
+            subagent_id: "sa-rebuild-nested".into(),
+            child_session_id: "cs-rebuild-nested".into(),
+            description: description.into(),
+            subagent_type: "general-purpose".into(),
+            persona: None,
+            role: Some("implementer".into()),
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: Some("sess-parent".into()),
+            depth: Some(1),
+            started_at: std::time::Instant::now(),
+            last_progress_at: std::time::Instant::now(),
+            finished: false,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: Some("search_replace".into()),
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
+    }
+
+    /// Contract: after rebuild re-exec, nested agents resume like a network
+    /// disconnect. The Subagents list must not go empty. Mid-turn cancel must
+    /// not cancel nested subagents.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_keeps_nested_subagents_for_resume() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::app::subagent::live_subagent_list;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some("sess-parent".into());
+            agent.session.cwd = proj.path().to_path_buf();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-nested-rebuild".into());
+            agent.session.in_flight_prompt = None;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                    "keep nested work",
+                ));
+            agent.subagent_sessions.insert(
+                "cs-rebuild-nested".into(),
+                running_l2_subagent("Rebuild nested resume"),
+            );
+        }
+
+        let before = {
+            let agent = app.agents.get(&agent_id).unwrap();
+            live_subagent_list(agent.subagent_sessions.values()).len()
+        };
+        assert!(
+            before > 0,
+            "fixture must have a live nested row before rebuild"
+        );
+
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let cancelled_nested = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::CancelTurn {
+                    cancel_subagents: true,
+                    ..
+                }
+            )
+        });
+        assert!(
+            !cancelled_nested,
+            "rebuild must not cancel nested subagents; got {effects:?}"
+        );
+
+        let agent = app.agents.get(&agent_id).unwrap();
+        let after = live_subagent_list(agent.subagent_sessions.values());
+        assert!(
+            !after.is_empty(),
+            "Subagents list must not go empty across rebuild re-exec"
+        );
+        assert!(!after[0].finished);
+
+        // Re-exec equivalent: nested rows still present the way a disconnect
+        // reconnect restores them (not cancelled orphans).
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some("sess-parent".into());
+            agent.subagent_sessions.insert(
+                "cs-rebuild-nested".into(),
+                running_l2_subagent("Rebuild nested resume"),
+            );
+        }
+        let restored = live_subagent_list(
+            reopened
+                .agents
+                .get(&agent_id)
+                .unwrap()
+                .subagent_sessions
+                .values(),
+        );
+        assert!(
+            !restored.is_empty(),
+            "after re-exec the Subagents list must still show nested work"
+        );
+    }
+
     /// Named contract: a leftover `canceled_turn_resume.json` from an earlier
     /// interrupt must be dropped on session load when the primary user turn
     /// already finished successfully. Do not re-fire a completed prompt.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully() {
         use crate::app::actions::{Action, Effect, TaskResult};
         use crate::app::agent::{AgentId, AgentState};
         use crate::scrollback::blocks::SessionEvent;
         use agent_client_protocol as acp;
 
+        let _grok_home = crate::test_util::GrokHomeFixture::new();
         let proj = tempfile::tempdir().unwrap();
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();

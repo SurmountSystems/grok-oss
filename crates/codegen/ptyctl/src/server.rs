@@ -425,7 +425,7 @@ mod tests {
     /// requests served mid-wait are exactly what make the wait complete.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_does_not_block_other_endpoints() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![crate::session::tests::sandbox_shell()]).await;
         let router = super::build_router(session);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

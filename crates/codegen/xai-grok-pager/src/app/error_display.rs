@@ -105,6 +105,19 @@ pub(crate) fn format_request_failure(
             .flatten()
     });
     let extracted = extract_error_detail(raw);
+    let team_prepaid = xai_grok_sampling_types::is_console_team_prepaid_message(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(xai_grok_sampling_types::is_console_team_prepaid_message);
+    if team_prepaid {
+        let code = status.unwrap_or(403);
+        return FormattedRequestFailure {
+            status: Some(code),
+            headline: format!("Request denied ({code})"),
+            detail: xai_grok_sampling_types::console_team_prepaid_stay_on_supergrok_user_message()
+                .to_string(),
+        };
+    }
     let class = classify(status, wire);
     let why = extracted
         .filter(|d| !is_server_fault(status, wire) && !is_headline_echo(d, &class.headline))
@@ -612,6 +625,45 @@ mod tests {
         assert_eq!(
             formatted.message(),
             "Request denied (403) \u{2014} Access to the chat endpoint is denied"
+        );
+    }
+
+    /// Operator shot 2026-08-22: yellow banner must not paint console team
+    /// prepaid 403 as included SuperGrok period limits truth.
+    #[test]
+    fn request_denied_403_team_credits_must_not_paint_purchase_more_credits_as_supergrok_included_truth()
+     {
+        let formatted = format_request_failure(
+            None,
+            Some("api"),
+            "API error (status 403 Forbidden): Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb \
+             has either used all available credits or reached its monthly spending limit. \
+             To continue making API requests, please purchase more credits or raise \
+             the spending limit.",
+        );
+        assert_eq!(formatted.headline, "Request denied (403)");
+        let detail = formatted.detail.to_ascii_lowercase();
+        assert!(
+            detail.contains("console team prepaid") && detail.contains("console api credits"),
+            "detail must name console team prepaid / console API credits: {}",
+            formatted.detail
+        );
+        assert!(
+            detail.contains("stay on supergrok"),
+            "detail must say stay on SuperGrok: {}",
+            formatted.detail
+        );
+        assert!(
+            !detail.contains("purchase more")
+                && !detail.contains("add credits")
+                && !detail.contains("used all available credits"),
+            "must not command a SuperGrok included top-up: {}",
+            formatted.detail
+        );
+        assert!(
+            !detail.contains("used up"),
+            "must not say used up: {}",
+            formatted.detail
         );
     }
 

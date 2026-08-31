@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ratatui::{
     CompletedFrame, Frame, TerminalOptions, Viewport,
     backend::{Backend, ClearType},
-    buffer::{Buffer, Cell},
+    buffer::{Buffer, Cell, CellDiffOption},
     layout::{Position, Rect, Size},
 };
 use unicode_width::UnicodeWidthStr as _;
@@ -250,7 +250,7 @@ where
     /// let terminal = Terminal::new(backend)?;
     /// # std::io::Result::Ok(())
     /// ```
-    pub fn new(backend: B) -> io::Result<Self> {
+    pub fn new(backend: B) -> Result<Self, B::Error> {
         Self::with_options(
             backend,
             TerminalOptions {
@@ -273,7 +273,7 @@ where
     /// let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
     /// # std::io::Result::Ok(())
     /// ```
-    pub fn with_options(mut backend: B, options: TerminalOptions) -> io::Result<Self> {
+    pub fn with_options(mut backend: B, options: TerminalOptions) -> Result<Self, B::Error> {
         let area = match options.viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
                 Rect::from((Position::ORIGIN, backend.size()?))
@@ -348,7 +348,7 @@ where
     /// before computing `(x, y)`, which silently wraps around when
     /// `width * height > 65 535`.  On extra-large terminals (e.g. 420×160 = 67 200
     /// cells) this causes the entire UI to be rendered into a tiny corner.
-    pub fn flush(&mut self) -> io::Result<bool> {
+    pub fn flush(&mut self) -> Result<bool, B::Error> {
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
         let updates = diff_large(previous_buffer, current_buffer);
@@ -420,7 +420,7 @@ where
     /// wrapped in a single OSC 8 open/close around the upstream cell draw.
     pub fn flush_with_links(&mut self) -> io::Result<bool>
     where
-        B: Write,
+        B: Backend<Error = io::Error> + Write,
     {
         let cur = self.current;
         let prev = 1 - cur;
@@ -461,7 +461,7 @@ where
     ///
     /// Requested area will be saved to remain consistent when rendering. This leads to a full clear
     /// of the screen.
-    pub fn resize(&mut self, area: Rect) -> io::Result<()> {
+    pub fn resize(&mut self, area: Rect) -> Result<(), B::Error> {
         let next_area = match self.viewport {
             // Full-height inline viewport: the inline viewport currently spans the
             // entire terminal. This is how the viewport is used when the alternate
@@ -506,7 +506,7 @@ where
     }
 
     /// Queries the backend for size and resizes if it doesn't match the previous size.
-    pub fn autoresize(&mut self) -> io::Result<()> {
+    pub fn autoresize(&mut self) -> Result<(), B::Error> {
         // fixed viewports do not get autoresized
         if matches!(self.viewport, Viewport::Fullscreen | Viewport::Inline(_)) {
             let area = Rect::from((Position::ORIGIN, self.size()?));
@@ -519,7 +519,7 @@ where
 
     /// Draws a single frame to the terminal.
     ///
-    /// Returns a [`CompletedFrame`] if successful, otherwise a [`std::io::Error`].
+    /// Returns a [`CompletedFrame`] if successful, otherwise the backend error (`B::Error`).
     ///
     /// If the render callback passed to this method can fail, use [`try_draw`] instead.
     ///
@@ -549,7 +549,7 @@ where
     ///
     /// ```
     /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
+    /// # let mut terminal = ratatui::Terminal::new(backend).unwrap();
     /// use ratatui::{layout::Position, widgets::Paragraph};
     ///
     /// // with a closure
@@ -557,30 +557,29 @@ where
     ///     let area = frame.area();
     ///     frame.render_widget(Paragraph::new("Hello World!"), area);
     ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    /// })?;
+    /// }).unwrap();
     ///
     /// // or with a function
-    /// terminal.draw(render)?;
+    /// terminal.draw(render).unwrap();
     ///
     /// fn render(frame: &mut ratatui::Frame) {
     ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
     /// }
-    /// # std::io::Result::Ok(())
     /// ```
-    pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
+    pub fn draw<F>(&mut self, render_callback: F) -> Result<CompletedFrame<'_>, B::Error>
     where
         F: FnOnce(&mut Frame),
     {
         self.try_draw(|frame| {
             render_callback(frame);
-            io::Result::Ok(())
+            Ok::<(), B::Error>(())
         })
     }
 
     /// Tries to draw a single frame to the terminal.
     ///
     /// Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful, otherwise
-    /// [`Result::Err`] containing the [`std::io::Error`] that caused the failure.
+    /// [`Result::Err`] containing the backend error (`B::Error`) that caused the failure.
     ///
     /// This is the equivalent of [`Terminal::draw`] but the render callback is a function or
     /// closure that returns a `Result` instead of nothing.
@@ -599,10 +598,10 @@ where
     /// - return a [`CompletedFrame`] with the current buffer and the area of the terminal
     ///
     /// The render callback passed to `try_draw` can return any [`Result`] with an error type that
-    /// can be converted into an [`std::io::Error`] using the [`Into`] trait. This makes it possible
-    /// to use the `?` operator to propagate errors that occur during rendering. If the render
-    /// callback returns an error, the error will be returned from `try_draw` as an
-    /// [`std::io::Error`] and the terminal will not be updated.
+    /// can be converted into `B::Error` using the [`Into`] trait. This makes it possible to use
+    /// the `?` operator to propagate errors that occur during rendering. If the render callback
+    /// returns an error, the error will be returned from `try_draw` and the terminal will not be
+    /// updated.
     ///
     /// The [`CompletedFrame`] returned by this method can be useful for debugging or testing
     /// purposes, but it is often not used in regular applicationss.
@@ -615,37 +614,26 @@ where
     ///
     /// # Examples
     ///
-    /// ```should_panic
-    /// # use ratatui::layout::Position;;
+    /// ```
+    /// # use ratatui::layout::Position;
     /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
-    /// use std::io;
-    ///
+    /// # let mut terminal = ratatui::Terminal::new(backend).unwrap();
     /// use ratatui::widgets::Paragraph;
     ///
-    /// // with a closure
-    /// terminal.try_draw(|frame| {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     let area = frame.area();
-    ///     frame.render_widget(Paragraph::new("Hello World!"), area);
-    ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    ///     io::Result::Ok(())
-    /// })?;
-    ///
-    /// // or with a function
-    /// terminal.try_draw(render)?;
-    ///
-    /// fn render(frame: &mut ratatui::Frame) -> io::Result<()> {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
-    ///     Ok(())
-    /// }
-    /// # io::Result::Ok(())
+    /// // TestBackend's error is Infallible, so the callback uses that too.
+    /// terminal
+    ///     .try_draw(|frame| {
+    ///         let area = frame.area();
+    ///         frame.render_widget(Paragraph::new("Hello World!"), area);
+    ///         frame.set_cursor_position(Position { x: 0, y: 0 });
+    ///         Ok::<(), core::convert::Infallible>(())
+    ///     })
+    ///     .unwrap();
     /// ```
-    pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
+    pub fn try_draw<F, E>(&mut self, render_callback: F) -> Result<CompletedFrame<'_>, B::Error>
     where
         F: FnOnce(&mut Frame) -> Result<(), E>,
-        E: Into<io::Error>,
+        E: Into<B::Error>,
     {
         // Autoresize - otherwise we get glitches if shrinking or potential desync between widgets
         // and the terminal (if growing), which may OOB.
@@ -689,14 +677,14 @@ where
     }
 
     /// Hides the cursor.
-    pub fn hide_cursor(&mut self) -> io::Result<()> {
+    pub fn hide_cursor(&mut self) -> Result<(), B::Error> {
         self.backend.hide_cursor()?;
         self.hidden_cursor = true;
         Ok(())
     }
 
     /// Shows the cursor.
-    pub fn show_cursor(&mut self) -> io::Result<()> {
+    pub fn show_cursor(&mut self) -> Result<(), B::Error> {
         self.backend.show_cursor()?;
         self.hidden_cursor = false;
         Ok(())
@@ -707,26 +695,26 @@ where
     /// This is the position of the cursor after the last draw call and is returned as a tuple of
     /// `(x, y)` coordinates.
     #[deprecated = "the method get_cursor_position indicates more clearly what about the cursor to get"]
-    pub fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
+    pub fn get_cursor(&mut self) -> Result<(u16, u16), B::Error> {
         let Position { x, y } = self.get_cursor_position()?;
         Ok((x, y))
     }
 
     /// Sets the cursor position.
     #[deprecated = "the method set_cursor_position indicates more clearly what about the cursor to set"]
-    pub fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
+    pub fn set_cursor(&mut self, x: u16, y: u16) -> Result<(), B::Error> {
         self.set_cursor_position(Position { x, y })
     }
 
     /// Gets the current cursor position.
     ///
     /// This is the position of the cursor after the last draw call.
-    pub fn get_cursor_position(&mut self) -> io::Result<Position> {
+    pub fn get_cursor_position(&mut self) -> Result<Position, B::Error> {
         self.backend.get_cursor_position()
     }
 
     /// Sets the cursor position.
-    pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+    pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), B::Error> {
         let position = position.into();
         self.backend.set_cursor_position(position)?;
         self.last_known_cursor_pos = position;
@@ -734,7 +722,7 @@ where
     }
 
     /// Clear the terminal and force a full redraw on the next draw call.
-    pub fn clear(&mut self) -> io::Result<()> {
+    pub fn clear(&mut self) -> Result<(), B::Error> {
         match self.viewport {
             Viewport::Fullscreen => self.backend.clear_region(ClearType::All)?,
             Viewport::Inline(_) => {
@@ -780,7 +768,7 @@ where
     }
 
     /// Queries the real size of the backend.
-    pub fn size(&self) -> io::Result<Size> {
+    pub fn size(&self) -> Result<Size, B::Error> {
         self.backend.size()
     }
 
@@ -860,7 +848,7 @@ where
     ///     .render(buf.area, buf);
     /// });
     /// ```
-    pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
+    pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> Result<(), B::Error>
     where
         F: FnOnce(&mut Buffer),
     {
@@ -895,7 +883,7 @@ where
     /// // Later, resize the viewport to 12 lines
     /// terminal.set_viewport_height(12)?;
     /// ```
-    pub fn set_viewport_height(&mut self, new_height: u16) -> io::Result<()> {
+    pub fn set_viewport_height(&mut self, new_height: u16) -> Result<(), B::Error> {
         if !matches!(self.viewport, Viewport::Inline(_)) {
             return Ok(());
         }
@@ -957,7 +945,7 @@ where
         &mut self,
         height: u16,
         draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+    ) -> Result<(), B::Error> {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
@@ -1058,7 +1046,7 @@ where
         &mut self,
         mut height: u16,
         draw_fn: impl FnOnce(&mut Buffer),
-    ) -> io::Result<()> {
+    ) -> Result<(), B::Error> {
         // The approach of this function is to first render all of the lines to insert into a
         // temporary buffer, and then to loop drawing chunks from the buffer to the screen. drawing
         // this buffer onto the screen.
@@ -1130,7 +1118,7 @@ where
         y_offset: u16,
         lines_to_draw: u16,
         cells: &'a [Cell],
-    ) -> io::Result<&'a [Cell]> {
+    ) -> Result<&'a [Cell], B::Error> {
         let width: usize = self.last_known_area.width.into();
         let (to_draw, remainder) = cells.split_at(width * lines_to_draw as usize);
         if lines_to_draw > 0 {
@@ -1153,7 +1141,7 @@ where
         y_offset: u16,
         lines_to_draw: u16,
         cells: &'a [Cell],
-    ) -> io::Result<&'a [Cell]> {
+    ) -> Result<&'a [Cell], B::Error> {
         let width: usize = self.last_known_area.width.into();
         let (to_draw, remainder) = cells.split_at(width * lines_to_draw as usize);
         if lines_to_draw > 0 {
@@ -1171,7 +1159,7 @@ where
 
     /// Scroll the whole screen up by the given number of lines.
     #[cfg(not(feature = "scrolling-regions"))]
-    fn scroll_up(&mut self, lines_to_scroll: u16) -> io::Result<()> {
+    fn scroll_up(&mut self, lines_to_scroll: u16) -> Result<(), B::Error> {
         if lines_to_scroll > 0 {
             self.set_cursor_position(Position::new(
                 0,
@@ -1201,7 +1189,10 @@ fn diff_large<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> 
     let mut to_skip: usize = 0;
 
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
-        if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || invalidated > 0)
+            && to_skip == 0
+        {
             // Safe coordinate conversion: divide in usize, then narrow to u16.
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
@@ -1244,7 +1235,9 @@ fn diff_large_with_links<'a>(
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
         let link_changed =
             resolve_link(next_ids, next_table, i) != resolve_link(prev_ids, prev_table, i);
-        if !current.skip && (current != previous || link_changed || invalidated > 0) && to_skip == 0
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || link_changed || invalidated > 0)
+            && to_skip == 0
         {
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
@@ -1267,7 +1260,7 @@ fn diff_large_with_links<'a>(
 /// Keeping a link open across `draw`'s internal cursor moves is correct because
 /// OSC 8 is a sticky terminal mode — only the written cells inherit it, and
 /// unchanged cells in any gap keep whatever link they already had.
-fn emit_frame_with_links<B: Backend + Write>(
+fn emit_frame_with_links<B: Backend<Error = io::Error> + Write>(
     backend: &mut B,
     updates: &[(u16, u16, &Cell)],
     cur_ids: &[u32],
@@ -1321,7 +1314,7 @@ fn compute_inline_size<B: Backend>(
     height: u16,
     size: Size,
     offset_in_previous_viewport: u16,
-) -> io::Result<(Rect, Position)> {
+) -> Result<(Rect, Position), B::Error> {
     let pos = backend.get_cursor_position()?;
     let mut row = pos.y;
 

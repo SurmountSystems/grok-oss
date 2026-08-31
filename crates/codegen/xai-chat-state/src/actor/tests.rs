@@ -1076,7 +1076,7 @@ async fn restore_snapshot_preserves_frozen_estimate_for_overhead() {
     // Rewind-style restore: trim the conversation, keep token fields.
     let mut snap = h.handle.snapshot().await.unwrap();
     assert_eq!(snap.estimate_at_last_response, frozen);
-    snap.conversation.truncate(0);
+    snap.conversation.clear();
     h.handle.restore_snapshot(snap);
 
     let compacted = vec![ConversationItem::user("z".repeat(400))];

@@ -735,6 +735,10 @@ pub struct ConversationRequest {
     pub json_schema: Option<serde_json::Value>,
     /// Sticky routing key for prompt-cache reuse; overrides `x_grok_conv_id` for routing.
     pub prompt_cache_key: Option<String>,
+    /// Session estimate of prompt tokens for this request. Not sent on the
+    /// wire. The sampler uses this with `SamplerConfig.context_window` so an
+    /// already-over-window payload is Fatal instead of a Retrying storm.
+    pub estimated_input_tokens: Option<u64>,
 }
 
 impl ConversationRequest {

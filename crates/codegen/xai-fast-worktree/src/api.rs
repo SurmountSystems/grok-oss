@@ -1528,6 +1528,11 @@ pub mod gc {
         /// `force` does not override never-expire.
         #[serde(default)]
         pub max_age_by_kind: BTreeMap<WorktreeKind, Option<i64>>,
+        /// Age-expiry clock. `None` samples now at GC start. Auto-GC passes the
+        /// pass-start stamp so a same-pass rebuild registration is not aged
+        /// out solely because discovery took more than one second.
+        #[serde(default)]
+        pub now_secs: Option<i64>,
     }
 
     /// `Some(secs)` to age-expire; `None` = never. Order: skip_kinds → map → max_age_secs.
@@ -1794,7 +1799,7 @@ pub mod gc {
         delegate: Option<Arc<dyn BtrfsDelegate>>,
     ) -> Result<GcReport> {
         let mut report = GcReport::default();
-        let now = crate::db::now_epoch_secs();
+        let now = opts.now_secs.unwrap_or_else(crate::db::now_epoch_secs);
 
         // Dead-record reclamation.
         if opts.dry_run {
@@ -3632,11 +3637,13 @@ mod tests {
             };
             db.register(&record).unwrap();
 
-            let mut child = std::process::Command::new("sleep")
-                .arg("30")
-                .current_dir(&nested)
-                .spawn()
-                .expect("spawn sleep");
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30").current_dir(&nested);
+            xai_tty_utils::detach_std_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+            let mut child = cmd.spawn().expect("spawn sleep");
+            let scope = xai_tty_utils::ProcessScope::new();
+            let group = scope.enroll_std(&child).expect("enroll sleep");
             let want = dunce::canonicalize(&nested).unwrap();
             assert!(
                 wait_until(|| scan_has_cwd_under(&want)),
@@ -3660,6 +3667,8 @@ mod tests {
             // Once the process exits, the same expired worktree is reclaimed.
             child.kill().ok();
             child.wait().ok();
+            drop(group);
+            drop(scope);
             assert!(
                 wait_until(|| !scan_has_cwd_under(&want)),
                 "child CWD must leave the scan after exit before reclaim"
@@ -4022,6 +4031,7 @@ mod tests {
                 protect_paths: vec![std::path::PathBuf::from("/tmp/p")],
                 skip_kinds: vec![WorktreeKind::Manual],
                 max_age_by_kind: [(WorktreeKind::Subagent, Some(3600))].into_iter().collect(),
+                now_secs: Some(1_700_000_000),
             };
             let json = serde_json::to_string(&opts).unwrap();
             let deser: gc::GcOptions = serde_json::from_str(&json).unwrap();
@@ -4034,12 +4044,14 @@ mod tests {
                 deser.max_age_by_kind.get(&WorktreeKind::Subagent),
                 Some(&Some(3600))
             );
+            assert_eq!(deser.now_secs, Some(1_700_000_000));
             // Absent new fields deserialize as empty (old agents).
             let legacy = r#"{"max_age_secs":1,"force":false,"dry_run":true}"#;
             let legacy_opts: gc::GcOptions = serde_json::from_str(legacy).unwrap();
             assert!(legacy_opts.protect_paths.is_empty());
             assert!(legacy_opts.skip_kinds.is_empty());
             assert!(legacy_opts.max_age_by_kind.is_empty());
+            assert!(legacy_opts.now_secs.is_none());
 
             // JSON null value in map → never-expire (None).
             let with_null = r#"{

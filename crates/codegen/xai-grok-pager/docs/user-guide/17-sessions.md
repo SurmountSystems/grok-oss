@@ -48,12 +48,12 @@ This is **not** last-session-on-start, and it is **not** the `/resume` picker.
 
 When a mid-turn is interrupted in a cancel-resumable way, Grok OSS may write `canceled_turn_resume.json` with the in-flight prompt identity (not secrets). On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`** is on (default **true**, Settings → Session → **Continue interrupted turn on restart**), Grok OSS re-queues that prompt once and clears the marker.
 
-**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, and `/rebuild` mid-turn before self re-exec.
+**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, `/rebuild` mid-turn before self re-exec, and fearless global pause when it cancels a running turn (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted).
 
 **Does not write a durable cancel-resume marker:**
 
 - Clean success (a successful finish clears any leftover marker)
-- Global pause (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted). That is an in-process stash only
+- Global pause when nothing is mid-turn. The pause gate itself stays in this process in RAM; only a canceled running prompt writes `canceled_turn_resume.json`
 - Soft stop (`Ctrl+Shift+S` only). That holds the queue after the current turn
 - `SIGKILL` before any turn-start write
 
@@ -105,7 +105,7 @@ Confirms, then permanently removes the session history. Returns to the welcome s
 
 ## The session todo board
 
-The live session board is the TODO list. `resources_state.json` is the live snapshot. `plan.json` is a resume fallback. Open the pane with `Ctrl+T`.
+The live session board is the TODO list. `resources_state.json` is the live snapshot. `plan.json` is a resume fallback. Open the pane with `Ctrl+Shift+T`, or click the status-row **tasks N/M** badge. The pane starts closed. A nested overlay shows that nested session's board, not the parent L1 list. `Ctrl+T` expands or collapses thinking.
 
 When the board is open and at least one completed or cancelled row exists, the todo header shows compact **`[−]`** (U+2212 minus) next to close. The icon paints whether or not the todo pane has keyboard focus. It does not paint when the board is hidden or nothing is finished.
 

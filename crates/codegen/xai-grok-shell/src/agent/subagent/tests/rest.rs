@@ -598,15 +598,28 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
 }
 /// Subagent spawns carry concrete ask_user_question timeout params (the
-/// session-level config follows the child) while bash stays on tool
-/// defaults. Tier precedence itself is pinned by the resolver's own
-/// tests; asserting concrete values here would read the host's disk
-/// layers and flake on configured dev machines.
+/// session-level config follows the child) and production bash wait
+/// policy (auto-background on timeout, 10h foreground ceiling). Nested
+/// agents must not fall back to the tool-server 5-minute kill.
+/// Asserting ask-user-question concrete values from disk would flake on
+/// configured dev machines; bash production defaults are in-process.
 #[test]
 fn subagent_tool_params_carry_ask_user_question_timeouts() {
     let ctx = ctx_with_toggle(std::collections::HashMap::new());
     let params = ctx.resolve_tool_params_json();
-    assert!(params.bash.is_none(), "bash must stay on tool defaults");
+    let bash = params
+        .bash
+        .expect("subagents must inherit production bash wait params");
+    assert_eq!(
+        bash.get("auto_background_on_timeout").and_then(|v| v.as_bool()),
+        Some(true),
+        "nested bash must auto-background a still-running command at the wait cap"
+    );
+    assert_eq!(
+        bash.get("max_timeout_secs").and_then(|v| v.as_f64()),
+        Some(crate::tools::config::PRODUCTION_MAX_TIMEOUT_SECS),
+        "nested bash must use the production 10h foreground ceiling, not the 5-minute kill"
+    );
     let ask = params
         .ask_user_question
         .expect("subagents must receive resolved ask_user_question params");

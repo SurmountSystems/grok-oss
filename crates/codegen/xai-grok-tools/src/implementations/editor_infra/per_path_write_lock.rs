@@ -10,6 +10,10 @@
 //!
 //! This is a fail-fast table, not the unused FIFO waiter in
 //! [`super::file_operation_lock`].
+//!
+//! Spawn may also claim paths for a live subagent (`write_paths` on
+//! `task` / `spawn_subagent`). That claim lasts until the child
+//! finishes. Edit tools still take the short in-flight lock on top.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,9 +21,12 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::types::resources::{OwnerSessionId, SharedResources};
 
-/// Process-wide table: normalized path to the agent that is writing it.
+/// Process-wide table: in-flight writes and spawn-time claims.
 struct WriteLockTable {
+    /// Path currently inside an edit-tool call.
     held: HashMap<PathBuf, String>,
+    /// Path claimed by a live subagent until [`release_holder`].
+    reserved: HashMap<PathBuf, String>,
 }
 
 static TABLE: OnceLock<Mutex<WriteLockTable>> = OnceLock::new();
@@ -28,8 +35,35 @@ fn table() -> &'static Mutex<WriteLockTable> {
     TABLE.get_or_init(|| {
         Mutex::new(WriteLockTable {
             held: HashMap::new(),
+            reserved: HashMap::new(),
         })
     })
+}
+
+fn unique_normalized_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        let key = normalize_lock_path(path.as_ref());
+        if seen.insert(key.clone()) {
+            unique.push(key);
+        }
+    }
+    unique
+}
+
+fn holder_conflict<'a>(table: &'a WriteLockTable, key: &Path, holder: &str) -> Option<&'a str> {
+    if let Some(existing) = table.held.get(key)
+        && existing != holder
+    {
+        return Some(existing.as_str());
+    }
+    if let Some(existing) = table.reserved.get(key)
+        && existing != holder
+    {
+        return Some(existing.as_str());
+    }
+    None
 }
 
 fn lock_table() -> MutexGuard<'static, WriteLockTable> {
@@ -123,10 +157,10 @@ impl Drop for PerPathWriteGuard {
 pub fn try_acquire_write(path: &Path, holder: &str) -> Result<PerPathWriteGuard, PathHeldError> {
     let key = normalize_lock_path(path);
     let mut table = lock_table();
-    if let Some(existing) = table.held.get(&key) {
+    if let Some(existing) = holder_conflict(&table, &key, holder) {
         return Err(PathHeldError {
             path: key,
-            holder: existing.clone(),
+            holder: existing.to_string(),
         });
     }
     table.held.insert(key.clone(), holder.to_string());
@@ -142,20 +176,43 @@ pub fn try_acquire_writes(
     paths: impl IntoIterator<Item = impl AsRef<Path>>,
     holder: &str,
 ) -> Result<Vec<PerPathWriteGuard>, PathHeldError> {
-    let mut unique = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        let key = normalize_lock_path(path.as_ref());
-        if seen.insert(key.clone()) {
-            unique.push(key);
-        }
-    }
+    let unique = unique_normalized_paths(paths);
     let mut guards = Vec::with_capacity(unique.len());
     for key in unique {
         let guard = try_acquire_write(&key, holder)?;
         guards.push(guard);
     }
     Ok(guards)
+}
+
+/// Claim paths for a live subagent until [`release_holder`].
+///
+/// All-or-nothing. The same holder may claim a path twice. Another
+/// holder, or an in-flight write by someone else, is a [`PathHeldError`].
+pub fn try_reserve_writes(
+    paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    holder: &str,
+) -> Result<(), PathHeldError> {
+    let unique = unique_normalized_paths(paths);
+    let mut table = lock_table();
+    for key in &unique {
+        if let Some(existing) = holder_conflict(&table, key, holder) {
+            return Err(PathHeldError {
+                path: key.clone(),
+                holder: existing.to_string(),
+            });
+        }
+    }
+    for key in unique {
+        table.reserved.insert(key, holder.to_string());
+    }
+    Ok(())
+}
+
+/// Drop every spawn-time path claim for this holder.
+pub fn release_holder(holder: &str) {
+    let mut table = lock_table();
+    table.reserved.retain(|_, existing| existing != holder);
 }
 
 /// Who should be named if this call holds the path.
@@ -266,5 +323,60 @@ mod tests {
             !lower.contains("press ") && !lower.contains("[s]"),
             "error must not be a human choice list: {message}"
         );
+    }
+
+    #[test]
+    fn reserved_path_blocks_another_agent_until_holder_released() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("claimed.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        // Holder ids must be unique across parallel tests: release_holder
+        // drops every claim for that id.
+        let first = format!("reserve-until-{}", path.display());
+        let second = format!("reserve-until-other-{}", path.display());
+        try_reserve_writes([&path], &first).unwrap();
+        let err = try_reserve_writes([&path], &second).unwrap_err();
+        assert_eq!(err.holder, first);
+        let message = err.message();
+        assert!(
+            message.contains(&first),
+            "error must name the holder: {message}"
+        );
+        assert!(
+            message.contains("claimed.txt"),
+            "error must name the file: {message}"
+        );
+        release_holder(&first);
+        try_reserve_writes([&path], &second).expect("path must be free after the holder finishes");
+        release_holder(&second);
+    }
+
+    #[test]
+    fn same_holder_can_write_a_path_they_reserved() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("own.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let holder = format!("same-holder-{}", path.display());
+        try_reserve_writes([&path], &holder).unwrap();
+        let write = try_acquire_write(&path, &holder);
+        assert!(
+            write.is_ok(),
+            "the agent that claimed the path must still be able to write it"
+        );
+        drop(write);
+        release_holder(&holder);
+    }
+
+    #[test]
+    fn reserved_path_blocks_another_agent_in_flight_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("other.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let first = format!("inflight-reserve-{}", path.display());
+        let second = format!("inflight-other-{}", path.display());
+        try_reserve_writes([&path], &first).unwrap();
+        let err = try_acquire_write(&path, &second).unwrap_err();
+        assert_eq!(err.holder, first);
+        release_holder(&first);
     }
 }

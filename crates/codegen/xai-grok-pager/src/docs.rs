@@ -418,7 +418,8 @@ mod tests {
     }
 
     /// Named contract: user-guide spend-order sentences match source
-    /// (Business / Team included first, combined remaining, one fetcher).
+    /// (personal SuperGrok paying JWT first, Team JWT omitted while personal
+    /// exists, combined remaining, one fetcher).
     #[test]
     fn user_guide_names_token_economy_spend_order() {
         let auth = USER_GUIDE
@@ -435,13 +436,13 @@ mod tests {
         ] {
             assert!(
                 content.contains(
-                    "spend included SuperGrok period limits on stored Business / Team SuperGrok logins first"
+                    "spend included SuperGrok period limits on a stored personal SuperGrok login first"
                 ),
-                "{name} must spend Business / Team included SuperGrok period limits first"
+                "{name} must spend personal included SuperGrok period limits first"
             );
             assert!(
-                content.contains("then personal included"),
-                "{name} must spend personal included SuperGrok period limits after Team"
+                content.contains("A Team / Business SuperGrok JWT is not the paying source"),
+                "{name} must say a Team / Business SuperGrok JWT is not the paying source while a personal login exists"
             );
             assert!(
                 content.contains("SuperGrok dollar credits that never expire"),
@@ -496,6 +497,86 @@ mod tests {
         }
     }
 
+    /// Named contract: `/limits` user-guide keeps fail-open plus named
+    /// commands. grok-oss limits is a client printout, not xAI billing truth.
+    #[test]
+    fn user_guide_limits_names_fail_open_and_named_commands() {
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        for (name, content) in [
+            ("02-authentication.md", auth.content),
+            ("04-slash-commands.md", slash.content),
+        ] {
+            assert!(
+                content.contains("stay-supergrok"),
+                "{name} must name stay-supergrok"
+            );
+            assert!(
+                content.contains("use-console"),
+                "{name} must name use-console"
+            );
+            assert!(
+                content.contains("limits_pins.json"),
+                "{name} must name the limits_pins.json sidecar"
+            );
+            assert!(
+                content.contains("not xAI billing truth"),
+                "{name} must say grok-oss limits is not xAI billing truth"
+            );
+            assert!(
+                content.contains("must not mark SuperGrok used up"),
+                "{name} must say a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up"
+            );
+            assert!(
+                !content.contains("free SuperGrok"),
+                "{name} must not call SuperGrok free"
+            );
+        }
+        assert!(
+            slash.content.contains("meter included")
+                && slash.content.contains("dollar-credits")
+                && slash.content.contains("refresh"),
+            "04-slash-commands.md must name meter included|dollar-credits|console|combined and refresh"
+        );
+        assert!(
+            slash.content.contains("preferred_method") && slash.content.contains("api_key"),
+            "04-slash-commands.md must say stock preferred_method = api_key still pins console"
+        );
+        assert!(
+            slash.content.contains("does not require console credits"),
+            "04-slash-commands.md must say hop-back does not require console credits"
+        );
+        let auth_lower = auth.content.to_ascii_lowercase();
+        assert!(
+            auth_lower.contains("fetches the console.x.ai billing credits card")
+                && auth_lower.contains("prepaidcredits")
+                && auth_lower.contains("prepaidcreditsused")
+                && auth_lower.contains("postpaid/invoice/preview"),
+            "02-authentication.md must say grok-oss fetches GetAmountToPay remaining"
+        );
+        assert!(
+            auth_lower.contains("total.val")
+                && auth_lower.contains("prepaidbalance.val")
+                && auth_lower.contains("does not hop sampling from this card"),
+            "02-authentication.md must keep total.val / prepaidBalance.val distinct and not hop from the card"
+        );
+        assert!(
+            !auth_lower.contains("does not fetch the console.x.ai billing credits card"),
+            "02-authentication.md must not claim grok-oss never fetches the Billing Credits card"
+        );
+        assert!(
+            !auth_lower.contains("billing credits card is console team prepaid")
+                && !auth_lower.contains("billing credits card is supergrok dollar credits"),
+            "02-authentication.md must not classify the Billing Credits card as another meter"
+        );
+    }
+
     /// Named contract: product skills are not a Python runtime. Restack must
     /// not drop this from user-guide `08-skills.md`.
     #[test]
@@ -525,6 +606,78 @@ mod tests {
                 && skills.content.contains("xlsx")
                 && skills.content.contains("pdf"),
             "08-skills.md must name the office/PDF exception"
+        );
+        assert!(
+            skills.content.contains("default Grok OSS skill")
+                || skills.content.contains("default product skills"),
+            "08-skills.md must say polish/subagent/what are default Grok OSS skills"
+        );
+        assert!(
+            skills
+                .content
+                .contains("crates/codegen/xai-grok-bundle/skills/")
+                && skills.content.contains("/polish")
+                && skills.content.contains("/subagent")
+                && skills.content.contains("/what"),
+            "08-skills.md must name the in-tree default skill source and /polish /subagent /what"
+        );
+        assert!(
+            skills
+                .content
+                .contains("not project packs at `.agents/skills/polish/`")
+                || skills
+                    .content
+                    .contains("Do not ship them as project `.agents/skills/polish`"),
+            "08-skills.md must not treat polish/subagent as project-only packs"
+        );
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("default Grok OSS skill")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/polish/")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/subagent/")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/what"),
+            "04-slash-commands.md must describe /polish /subagent /what as default Grok OSS skills"
+        );
+        assert!(
+            !slash
+                .content
+                .contains("version-controlled **repo skill** at `.agents/skills/polish"),
+            "04-slash-commands.md must not call /polish a project repo skill"
+        );
+    }
+
+    /// Contract: `/rebuild` documents the sibling previous-binary rollback and
+    /// staged-only compile in complete sentences.
+    #[test]
+    fn user_guide_rebuild_documents_prev_binary_rollback_and_staged_index() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("grok-oss.prev"),
+            "04-slash-commands.md must name the sibling grok-oss.prev rollback file"
+        );
+        assert!(
+            slash.content.contains("copy") && slash.content.contains("roll back"),
+            "04-slash-commands.md must say how to roll back by copying grok-oss.prev over grok-oss"
+        );
+        assert!(
+            slash.content.contains("git index") || slash.content.contains("staged files"),
+            "04-slash-commands.md must say /rebuild compiles staged files"
+        );
+        assert!(
+            slash.content.contains("Stock `grok` is not signaled"),
+            "04-slash-commands.md must say stock grok is not SIGUSR1'd"
         );
     }
 

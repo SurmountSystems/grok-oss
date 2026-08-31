@@ -91,6 +91,7 @@ async fn create_test_actor(
             disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -350,7 +351,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             assert!(actor.check_auto_compact_needed().await.is_some());
             assert!(actor.should_compact_on_error(&err).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Other, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             assert!(!actor.should_compact_on_error(&err).await);
@@ -362,7 +363,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -388,7 +389,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::Size, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Size, 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
@@ -425,7 +426,9 @@ async fn model_switch_clears_sticky_suppression() {
             let actor =
                 Arc::new(create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await);
             for reason in [SuppressReason::Size, SuppressReason::Other] {
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 assert_ne!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     SUPPRESS_NONE,
@@ -466,7 +469,9 @@ async fn model_switch_keeps_account_state_suppression() {
                 (SuppressReason::CreditBlock, SUPPRESS_UNTIL_SUCCESS),
                 (SuppressReason::Auth, SUPPRESS_AUTH),
             ] {
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
                     expected,
@@ -505,7 +510,7 @@ async fn auth_suppress_clears_on_credential_recovery() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -533,7 +538,7 @@ async fn clear_auth_suppress_leaves_credit_suppress() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, 1_000, 200_000, None)
                 .await;
             actor.clear_auth_compact_suppression();
             assert_eq!(
@@ -557,7 +562,7 @@ async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -865,7 +870,9 @@ async fn suppression_notification_is_reason_specific() {
                 let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
                 let actor =
                     create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
-                actor.suppress_auto_compaction(reason, 1_000, 200_000).await;
+                actor
+                    .suppress_auto_compaction(reason, 1_000, 200_000, None)
+                    .await;
                 let mut text = None;
                 while let Ok(msg) = persistence_rx.try_recv() {
                     if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(
@@ -881,7 +888,14 @@ async fn suppression_notification_is_reason_specific() {
                 text.expect("expected an AutoCompactFailed notification")
             }
             let credit = notification_for(SuppressReason::CreditBlock).await;
-            assert!(credit.contains("spending limit"), "credit_block: {credit}");
+            assert!(
+                !credit.to_ascii_lowercase().contains("add credits"),
+                "credit_block must not command add credits: {credit}"
+            );
+            assert!(
+                credit.contains("client printout") || credit.contains("not xAI billing truth"),
+                "credit_block: {credit}"
+            );
             let auth = notification_for(SuppressReason::Auth).await;
             assert!(auth.contains("/login"), "auth: {auth}");
             let size = notification_for(SuppressReason::Size).await;
@@ -1141,7 +1155,7 @@ async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
             let actor =
                 Arc::new(create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -1390,6 +1404,10 @@ fn classify_suppress_reason_maps_error_text() {
     );
     assert_eq!(
         classify("API error (status 402 Payment Required): Grok Build usage balance exhausted"),
+        SuppressReason::CreditBlock
+    );
+    assert_eq!(
+        classify("API error (status 402 Payment Required): Payment Required"),
         SuppressReason::CreditBlock
     );
     assert_eq!(
@@ -1724,10 +1742,10 @@ async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
         })
         .await;
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Used tokens over the session sampling window compact even when error
+/// metadata is missing.
 #[tokio::test(flavor = "current_thread")]
-async fn test_compact_on_error_noop_without_model_metadata() {
+async fn test_compact_on_error_uses_session_window_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1748,10 +1766,172 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 doom_loop_aborted_at_chunk: None,
                 credential: xai_grok_sampling_types::SentCredential::Unknown,
             };
-            assert!(!actor.should_compact_on_error(&err).await);
+            assert!(
+                actor.should_compact_on_error(&err).await,
+                "used 500k over the 200k session sampling window must compact even without error metadata"
+            );
         })
         .await;
 }
+
+/// Catalog metadata 500k must not hide an already-over 200k session sampling
+/// window. Compact once (L1/L2) instead of retrying the same payload.
+#[tokio::test(flavor = "current_thread")]
+async fn over_window_model_failure_compacts_against_session_sampling_window() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(411_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            let catalog = api_error_with_context_window(500_000);
+            assert!(
+                actor.should_compact_on_error(&catalog).await,
+                "411k used over 200k sampling must compact even if catalog metadata is 500k"
+            );
+            let timeout = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::Http,
+                status_code: None,
+                message: "timed out waiting for response headers".to_string(),
+                is_retryable: true,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                model_metadata: Some(crate::sampling::ResponseModelMetadata {
+                    context_window: Some(500_000),
+                    max_completion_tokens: None,
+                    models_etag: None,
+                }),
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            assert!(
+                actor.should_compact_on_error(&timeout).await,
+                "over-window timeout must compact once, not increment Retrying attempts"
+            );
+        })
+        .await;
+}
+
+/// Http/timeout errors carry `model_metadata: None`. Compact recovery must
+/// use the session sampling window, not panic on missing catalog metadata.
+#[tokio::test(flavor = "current_thread")]
+async fn over_window_timeout_without_catalog_metadata_does_not_panic() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(411_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            let actor = Arc::new(actor);
+            let err = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::Http,
+                status_code: None,
+                message: "timed out waiting for response headers".into(),
+                is_retryable: true,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                model_metadata: None,
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            assert!(actor.should_compact_on_error(&err).await);
+            let result = actor.handle_sampling_failure(err).await;
+            match result {
+                Ok(crate::session::acp_session::SamplerFailureRecovery::CompactAndResubmit)
+                | Err(_) => {}
+                Ok(crate::session::acp_session::SamplerFailureRecovery::EndChildWithoutCompact)
+                | Ok(
+                    crate::session::acp_session::SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        ..
+                    },
+                ) => panic!(
+                    "over-window timeout with no catalog metadata must compact once \
+                     or fail honestly, not panic"
+                ),
+            }
+        })
+        .await;
+}
+
+/// Catalog 500k on a 5xx must not replace this session's 200k sampling window.
+#[tokio::test(flavor = "current_thread")]
+async fn over_window_5xx_catalog_metadata_does_not_widen_session_sampling_window() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(411_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            let actor = Arc::new(actor);
+            let err = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::Api,
+                status_code: Some(500),
+                message: "internal server error".into(),
+                is_retryable: true,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                model_metadata: Some(crate::sampling::ResponseModelMetadata {
+                    context_window: Some(500_000),
+                    max_completion_tokens: None,
+                    models_etag: None,
+                }),
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            let _ = actor.handle_sampling_failure(err).await;
+            let cw = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .unwrap()
+                .context_window
+                .get();
+            assert_eq!(
+                cw, 200_000,
+                "catalog 500k on a 5xx must not replace this session's 200k sampling window"
+            );
+        })
+        .await;
+}
+
+/// Sticky tiny-savings suppress: do not CompactAndResubmit again. Fail
+/// honestly instead of spinning Retrying the model request.
+#[tokio::test(flavor = "current_thread")]
+async fn over_window_sticky_suppress_does_not_rearm_overflow_compact() {
+    use crate::session::compaction_config::SUPPRESS_STICKY;
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(411_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor
+                .compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_STICKY, Relaxed);
+            let overflow = api_error_with_context_window(200_000);
+            assert!(
+                !actor.should_compact_on_error(&overflow).await,
+                "sticky suppress must not compact-and-resubmit forever"
+            );
+            assert!(
+                actor.sampling_window_is_full().await,
+                "411k of 200k must still be over the sampling window so the turn can fail honestly"
+            );
+        })
+        .await;
+}
+
 /// Pre-sampling check uses estimated tokens (includes tool-result delta).
 #[tokio::test(flavor = "current_thread")]
 async fn test_pre_sampling_uses_estimated_tokens() {
@@ -1834,6 +2014,81 @@ async fn get_transcript_path_returns_some_when_file_exists() {
             assert!(actor.transcript_hint().is_none());
             let _ = std::fs::remove_file(&updates_path);
             let _ = std::fs::remove_dir_all(&session_dir);
+        })
+        .await;
+}
+
+/// L3 specialists never AUTO compact. 95% of the nested 200k window must
+/// not start compact-and-continue.
+#[tokio::test(flavor = "current_thread")]
+async fn l3_auto_compact_does_not_fire_when_nested_window_is_full() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "L3 at 95% of the nested 200k window must not AUTO compact"
+            );
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "L3 must not start two-pass prefire compact"
+            );
+        })
+        .await;
+}
+
+/// L3 overflow must not compact or CompactAndResubmit. L2 still uses last
+/// assistant text / the on-disk report when the child ends.
+#[tokio::test(flavor = "current_thread")]
+async fn l3_preflight_overflow_does_not_compact_and_resubmit() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(214_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            let overflow = api_error_with_context_window(200_000);
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "L3 must not start preflight overflow compact"
+            );
+            assert!(
+                !actor.should_compact_on_error(&overflow).await,
+                "L3 overflow must not CompactAndResubmit"
+            );
+        })
+        .await;
+}
+
+/// L2 nested sessions still AUTO compact at 95% of the 200k window.
+#[tokio::test(flavor = "current_thread")]
+async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 1;
+            let trigger = actor.check_auto_compact_needed().await;
+            assert!(
+                trigger.is_some(),
+                "L2 at 95% of the nested 200k window must still AUTO compact"
+            );
+            let info = trigger.expect("L2 AUTO trigger");
+            assert_eq!(info.context_window, 200_000);
+            assert_eq!(info.tokens_used, 190_000);
         })
         .await;
 }

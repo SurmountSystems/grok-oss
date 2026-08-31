@@ -263,7 +263,12 @@ fn plan_reconnect_load(
     // this agent's own `auto_mode` so a background tab reconnects with ITS mode,
     // not the active tab's global `current_ui` mirror.
     let auto = super::dispatch::effective_auto(yolo, agent.session.is_auto());
-    let mut meta = serde_json::json!({ "yoloMode": yolo, "autoMode": auto });
+    let context_only = agent.session.is_context_only() && !yolo && !auto;
+    let mut meta = serde_json::json!({
+        "yoloMode": yolo,
+        "autoMode": auto,
+        "contextOnly": context_only,
+    });
     if let Some(ref cursor) = agent.last_seen_event_id {
         meta["cursor"] = serde_json::Value::String(cursor.clone());
     }
@@ -924,8 +929,15 @@ pub(crate) async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
+    let launch_context_only = xai_grok_shell::util::config::effective_context_only_for_launch(
+        args.yolo,
+        args.permission_mode_flag.as_deref(),
+        remote_permission_mode,
+    );
     if launch_auto {
         app.current_ui.permission_mode = Some("auto".into());
+    } else if launch_context_only {
+        app.current_ui.permission_mode = Some("context-only".into());
     }
     // One effective-config read for launch-mode ownership + the display
     // resolve below (the launch resolvers above keep their own internal read).
@@ -1474,6 +1486,8 @@ pub(crate) async fn run(
         "auto"
     } else if launch_yolo.yolo {
         "always-approve"
+    } else if launch_context_only {
+        "context-only"
     } else if let Some(cli) = args.permission_mode_flag.as_deref() {
         // CLI always-approve/auto that did not become launch_yolo/launch_auto
         // (policy pin / gate) display as Ask.
@@ -2750,9 +2764,7 @@ pub(crate) async fn run(
                             None,
                             Some(serde_json::json!({ "attempt": attempt })),
                         );
-                        app.show_toast(&format!(
-                            "Disconnected. Reconnecting... (attempt {attempt})"
-                        ));
+                        app.handle_session_disconnect_toast(attempt);
                         presenter.request(false);
                     }
                     ConnectionStatus::Connected { generation }
@@ -4156,6 +4168,11 @@ pub(crate) fn session_flags_for_effects(
             app.default_yolo,
             matches!(app.current_ui.permission_mode.as_deref(), Some("auto")),
         ),
+        context_only_mode: !app.default_yolo
+            && matches!(
+                app.current_ui.permission_mode.as_deref(),
+                Some("context-only")
+            ),
         chat_mode: {
             #[cfg(feature = "local-workspace")]
             {

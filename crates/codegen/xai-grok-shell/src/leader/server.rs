@@ -680,6 +680,7 @@ fn inject_session_request_context(
         .is_some_and(|m| !m.is_empty());
     if !capabilities.yolo_mode
         && !capabilities.auto_mode
+        && !capabilities.context_only
         && !has_model
         && client_type.is_empty()
         && !capabilities.code_nav_enabled
@@ -710,6 +711,14 @@ fn inject_session_request_context(
             {
                 meta_obj.insert("autoMode".to_string(), serde_json::json!(true));
                 debug!("Injected autoMode=true into session request");
+            }
+            if capabilities.context_only
+                && !capabilities.yolo_mode
+                && !capabilities.auto_mode
+                && !meta_obj.contains_key("contextOnly")
+            {
+                meta_obj.insert("contextOnly".to_string(), serde_json::json!(true));
+                debug!("Injected contextOnly=true into session request");
             }
             if is_session_new
                 && let Some(ref model_id) = capabilities.default_model
@@ -830,7 +839,7 @@ fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
     }
     match params.get("permission_mode").and_then(|v| v.as_str()) {
         Some("auto") => Some(true),
-        Some("always-approve" | "ask" | "default") => Some(false),
+        Some("always-approve" | "ask" | "default" | "context-only") => Some(false),
         _ => None,
     }
 }

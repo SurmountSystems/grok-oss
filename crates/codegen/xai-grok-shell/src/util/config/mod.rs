@@ -21,8 +21,10 @@ pub use campaigns::{
     set_remote_campaigns_from_settings, sync_campaign_fields,
 };
 pub use economic_mode::{
-    ECONOMIC_CONTEXT_CAP, ECONOMIC_MODE_DEFAULT, apply_economic_context_cap,
-    economic_mode_from_disk, economic_mode_from_toml, resolve_economic_mode,
+    ECONOMIC_CONTEXT_CAP, ECONOMIC_MODE_DEFAULT, NESTED_SESSION_CONTEXT_CAP,
+    SESSION_ATTENTION_TARGET_PERCENT, apply_economic_context_cap, economic_mode_from_disk,
+    economic_mode_from_toml, resolve_economic_mode, session_attention_target_tokens,
+    session_sampling_window,
 };
 pub use hints::*;
 pub use load::*;

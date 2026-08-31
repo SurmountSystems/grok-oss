@@ -132,6 +132,11 @@ pub struct SubagentSpawnRequest {
     pub request: Box<SubagentRequest>,
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<SubagentResult>,
+    /// Fired when the coordinator has admitted the child (pending, queued,
+    /// or started) or rejected spawn. Background `TaskTool` waits on this
+    /// so the returned id is already visible to wait.
+    #[educe(Debug(ignore))]
+    pub admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 impl std::ops::Deref for SubagentSpawnRequest {
@@ -152,6 +157,17 @@ impl SubagentSpawnRequest {
         build: impl FnOnce(&SubagentRequest) -> SubagentResult,
     ) -> Result<(), SubagentResult> {
         let result = build(&self.request);
+        if let Some(admitted_tx) = self.admitted_tx {
+            let admission = if result.success {
+                Ok(())
+            } else {
+                Err(result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "spawn rejected".to_owned()))
+            };
+            let _ = admitted_tx.send(admission);
+        }
         self.result_tx.send(result)
     }
 }
@@ -195,6 +211,10 @@ pub struct SubagentRuntimeOverrides {
     pub harness_agent_type: Option<String>,
     pub completion_output_cap: Option<usize>,
     pub spawn_depth: Option<u32>,
+    /// Immediate spawner session, even when limits reparent to the root.
+    /// L3 specialists keep their L2 parent here so list chrome and tool
+    /// policy do not treat them as L2.
+    pub immediate_parent_session_id: Option<String>,
     pub output_token_budget: Option<u64>,
     pub output_schema: Option<serde_json::Value>,
     pub loop_task_id: Option<String>,

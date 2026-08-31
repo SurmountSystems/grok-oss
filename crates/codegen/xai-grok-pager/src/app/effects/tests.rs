@@ -31,6 +31,87 @@ fn session_rpc_timeout_copy_uses_minutes_not_raw_seconds() {
         "raw second budget must not leak: {msg}"
     );
 }
+
+#[tokio::test]
+async fn session_rpc_timeout_wait_or_warn_then_keep_returns_the_value() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let _ = tx.send("loaded");
+    });
+    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let warned_flag = warned.clone();
+    let out = wait_or_warn_then_keep(
+        async { rx.await.expect("oneshot") },
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(200),
+        || {
+            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .await;
+    assert_eq!(out, Some("loaded"));
+    assert!(
+        warned.load(std::sync::atomic::Ordering::SeqCst),
+        "the timeout warning must fire without dropping the in-flight wait"
+    );
+}
+
+#[tokio::test]
+async fn session_rpc_hard_cap_gives_up_if_the_rpc_never_returns() {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let warned_flag = warned.clone();
+    let started = std::time::Instant::now();
+    let out = wait_or_warn_then_keep(
+        async {
+            rx.await.ok();
+            "never"
+        },
+        std::time::Duration::from_millis(15),
+        std::time::Duration::from_millis(40),
+        || {
+            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .await;
+    drop(tx);
+    assert!(
+        out.is_none(),
+        "a stuck session/load must give up, not hang the spinner"
+    );
+    assert!(
+        warned.load(std::sync::atomic::Ordering::SeqCst),
+        "the 3m-style warning must still fire before give-up"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "give-up must be the hard cap, not an unbounded wait: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn session_rpc_gave_up_copy_is_not_the_keep_waiting_timeout() {
+    let msg = format_session_rpc_gave_up("Session loading", std::time::Duration::from_secs(360));
+    assert!(
+        msg.contains("gave up after 6m0s"),
+        "hard cap must print as minutes, got: {msg}"
+    );
+    assert!(
+        !is_session_rpc_timeout_error(&msg),
+        "give-up must clear the loading placeholder (not keep-waiting copy)"
+    );
+}
+
+#[test]
+fn session_rpc_timeout_error_is_detected() {
+    let msg = format_session_rpc_timeout("Session loading", std::time::Duration::from_secs(180));
+    assert!(is_session_rpc_timeout_error(&msg));
+    assert!(!is_session_rpc_timeout_error("transient"));
+    assert!(!is_session_rpc_timeout_error("Couldn't load session: boom"));
+}
+
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -491,6 +572,11 @@ fn expected_period_end_display(rfc3339: &str) -> String {
         .format("%B %-d, %H:%M")
         .to_string()
 }
+fn expected_period_end_at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .expect("test fixture is valid RFC 3339")
+        .with_timezone(&chrono::Utc)
+}
 #[test]
 fn credit_balance_prefers_current_period_end_over_billing_period_end() {
     let end = "2026-06-08T20:00:00Z";
@@ -504,9 +590,19 @@ fn credit_balance_prefers_current_period_end_over_billing_period_end() {
         billing_period_end: Some("2026-07-01T20:00:00Z".into()),
         ..empty_billing_config()
     };
+    let bal = credit_balance_from_config(c);
     assert_eq!(
-            credit_balance_from_config(c).period_end_display.as_deref(),
+            bal.period_end_display.as_deref(),
             Some(expected_period_end_display(end).as_str())
+        );
+    assert_eq!(
+            bal.period_end_at,
+            Some(expected_period_end_at(end)),
+            "live FetchBilling mapper must keep the RFC 3339 period end so included SuperGrok period limits pace can compute"
+        );
+    assert_eq!(
+            bal.period_type.as_deref(),
+            Some("USAGE_PERIOD_TYPE_WEEKLY")
         );
 }
 #[test]
@@ -545,9 +641,15 @@ fn credit_balance_falls_back_to_billing_period_end() {
         billing_period_end: Some(end.into()),
         ..empty_billing_config()
     };
+    let bal = credit_balance_from_config(c);
     assert_eq!(
-            credit_balance_from_config(c).period_end_display.as_deref(),
+            bal.period_end_display.as_deref(),
             Some(expected_period_end_display(end).as_str())
+        );
+    assert_eq!(
+            bal.period_end_at,
+            Some(expected_period_end_at(end)),
+            "billing_period_end fallback must also set period_end_at"
         );
 }
 #[test]
@@ -569,10 +671,11 @@ fn credit_balance_period_end_falls_back_when_current_period_has_no_end() {
 }
 #[test]
 fn credit_balance_period_end_none_when_unavailable() {
+    let bal = credit_balance_from_config(empty_billing_config());
+    assert!(bal.period_end_display.is_none());
     assert!(
-            credit_balance_from_config(empty_billing_config())
-                .period_end_display
-                .is_none()
+            bal.period_end_at.is_none(),
+            "unknown reset must not invent a period end timestamp"
         );
 }
 #[test]
@@ -1050,6 +1153,17 @@ fn unregister_best_effort_swallows_io_error() {
     let bad_root = file.path().join("not-a-dir");
     unregister_active_session_best_effort_in(&bad_root, &acp::SessionId::new("s1"));
 }
+#[test]
+fn permission_mode_changed_params_context_only_payload() {
+    let params = permission_mode_changed_params("context-only");
+    assert_eq!(params["context_only"], true);
+    assert_eq!(params["yolo_mode"], false);
+    assert_eq!(params["auto_mode"], false);
+    assert_eq!(params["permission_mode"], "context-only");
+    let ask = permission_mode_changed_params("ask");
+    assert_eq!(ask["context_only"], false);
+}
+
 /// BestEffort path fires exactly one ACP notification regardless
 /// of disk outcome.
 #[tokio::test]

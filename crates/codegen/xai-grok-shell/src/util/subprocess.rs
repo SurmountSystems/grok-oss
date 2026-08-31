@@ -72,6 +72,11 @@ pub(crate) fn sh_c(script: &str) -> Command {
     cmd
 }
 
+/// Alias kept for call sites still using the old name.
+pub(crate) fn shell_c(script: &str) -> Command {
+    sh_c(script)
+}
+
 /// Whether the command text may appear in spawn-failure/timeout logs.
 /// `Redacted` (the safe default) keeps it out for commands whose text may
 /// embed secrets; `Shown` includes it for diagnostics.
@@ -388,9 +393,4 @@ mod tests {
             start.elapsed()
         );
     }
-}
-
-/// Alias kept for call sites still using the old name.
-pub(crate) fn shell_c(script: &str) -> Command {
-    sh_c(script)
 }

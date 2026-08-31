@@ -3,6 +3,7 @@ pub mod base64_images;
 pub mod binary;
 pub mod bulk_edit_policy;
 pub mod command_display;
+pub mod compiler_probe_junk;
 pub mod env;
 pub mod fs;
 pub mod git_detect;

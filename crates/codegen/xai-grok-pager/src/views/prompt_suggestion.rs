@@ -117,6 +117,28 @@ impl PromptSuggestionController {
         Some(rest)
     }
 
+    /// After a few typed characters, install a stored draft or template
+    /// match. A novel prefix leaves the current suggestion in place so
+    /// [`Self::ghost_for`] can hide it (typed text is no longer a prefix).
+    /// Prefixes shorter than
+    /// [`xai_grok_shell::grok_oss::STORED_PROMPT_SUGGEST_MIN_CHARS`] are
+    /// ignored so a turn-end next-prompt prediction can stay on an empty
+    /// composer.
+    pub fn apply_stored_lookup(&mut self, typed: &str, suggestion: Option<&str>) {
+        if typed.chars().count() < xai_grok_shell::grok_oss::STORED_PROMPT_SUGGEST_MIN_CHARS {
+            return;
+        }
+        match suggestion {
+            Some(text) if !text.trim().is_empty() && !text.contains('\n') => {
+                self.generation = self.generation.wrapping_add(1);
+                self.full_text = text.to_owned();
+                self.dismissed = false;
+                self.shown_logged = false;
+            }
+            _ => {}
+        }
+    }
+
     /// Dismiss the current suggestion (Esc) until a new one loads.
     pub fn dismiss(&mut self) {
         self.dismissed = true;
@@ -342,6 +364,38 @@ mod tests {
         assert!(c.mark_shown_logged());
         c.clear();
         assert!(!c.mark_shown_logged(), "clear keeps the latch marked");
+    }
+
+    #[test]
+    fn stored_lookup_installs_after_a_few_characters() {
+        let mut c = PromptSuggestionController {
+            enabled: true,
+            ..Default::default()
+        };
+        c.apply_stored_lookup("fi", Some("finish the schema slice"));
+        assert_eq!(
+            c.ghost_for("fi"),
+            None,
+            "two characters stay silent so turn-end prediction can keep the empty composer"
+        );
+        c.apply_stored_lookup("fin", Some("finish the schema slice"));
+        assert_eq!(c.ghost_for("fin"), Some("ish the schema slice"));
+        assert_eq!(
+            c.accept("fin").as_deref(),
+            Some("ish the schema slice"),
+            "accept inserts the stored remainder"
+        );
+    }
+
+    #[test]
+    fn stored_lookup_novel_prefix_hides_without_installing() {
+        let mut c = PromptSuggestionController {
+            enabled: true,
+            ..Default::default()
+        };
+        c.apply_stored_lookup("xyz", None);
+        assert_eq!(c.ghost_for("xyz"), None);
+        assert!(!c.has_suggestion());
     }
 
     #[test]

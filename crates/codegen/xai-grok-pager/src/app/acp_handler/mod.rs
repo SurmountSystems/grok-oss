@@ -59,8 +59,8 @@ use permissions::{
 
 // Hub + child modules (via `use super::*`) need sibling symbols in this scope.
 use routing::{
-    SessionMatch, find_session_match, interaction_target_agent, is_matched_agent_active,
-    mcp_target_agent, resolve_notif_agent, resolve_target_view,
+    SessionMatch, find_session_match, interaction_target_agent, interaction_target_bound_agent,
+    is_matched_agent_active, mcp_target_agent, resolve_notif_agent, resolve_target_view,
 };
 
 use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
@@ -70,7 +70,9 @@ pub(crate) use prompt_origin::{
 };
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
-use subagent_activity::{subagent_activity_label, sync_subagent_activity};
+use subagent_activity::{
+    queue_kill_if_nested_write_capped, subagent_activity_label, sync_subagent_activity,
+};
 
 use workflow_ingest::ingest_workflow_update;
 
@@ -92,6 +94,7 @@ use background::{
     route_bg_task_stdout,
 };
 use follow_ups::handle_follow_ups;
+pub(crate) use interactions::flush_pending_exit_plan_mode;
 pub(crate) use interactions::handle_ask_user_question;
 use interactions::handle_exit_plan_mode;
 use mcp::{
@@ -271,11 +274,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         // re-render). Not a mutation, so no redraw.
                         false
                     } else if let acp::SessionUpdate::Plan(plan) = notif.request.update {
-                        let items: Vec<_> = plan
+                        let mut items: Vec<_> = plan
                             .entries
                             .into_iter()
                             .map(todo_item_from_plan_entry)
                             .collect();
+                        agent.stamp_todos_with_live_prompt_task(&mut items);
                         agent.todo.update_todos(items);
                         agent.mark_reload_todo_update();
                         advance_reconnect_cursor(agent, &mut meta);

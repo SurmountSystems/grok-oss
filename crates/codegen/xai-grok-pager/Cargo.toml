@@ -102,6 +102,7 @@ xai-grok-config = { workspace = true }
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
 xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
+xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-workspace = { workspace = true }
 # Foreign coding-agent session discovery.
 xai-grok-foreign-sessions = { workspace = true }
@@ -134,7 +135,7 @@ shellexpand = "3.1"
 
 # libgit2 for the startup git-info populator (no fork/exec, runs once on launch
 # in spawn_blocking; the render path never touches git directly).
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 urlencoding = { workspace = true }

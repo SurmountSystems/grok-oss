@@ -376,6 +376,7 @@ impl AgentView {
                     entry.display_as_skill = false;
                 }
                 crate::prompt_images::drain_and_cleanup(&mut images);
+                self.persist_pending_prompts();
                 self.exit_editing_mode();
                 if drain {
                     InputOutcome::Action(Action::DrainQueue)

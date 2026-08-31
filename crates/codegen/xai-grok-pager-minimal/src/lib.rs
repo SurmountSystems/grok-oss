@@ -64,7 +64,7 @@ use xai_grok_pager::app::app_view::AppView;
 ///    stranded the prompt at the top of the screen ("input snaps to the top").
 /// 3. Commit finalized blocks into native scrollback (each `insert_before`
 ///    scrolls committed rows up above the pinned viewport), then re-print any
-///    `Ctrl+E` / `/expand` re-prints fully expanded below.
+///    `Ctrl+T` / `/expand` re-prints fully expanded below.
 /// 4. Redraw the live region (tail · status · overlay · prompt) into the
 ///    viewport's final position.
 ///

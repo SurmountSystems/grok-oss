@@ -1,9 +1,9 @@
 //! Agent-scoped interactive PTY manager. PTYs are keyed by `terminalId`,
 //! outlive sessions, and multiplex I/O over the existing ACP WebSocket.
-//! Shells enroll in the process-global scope as terminal owners, so teardown
-//! hangs a live shell up and it forwards that to its jobs. A shell that exits
-//! on its own leaves them running, as a terminal does: their process groups are
-//! their own and nothing here holds a handle to them.
+//! Shells enroll in the process-global scope as terminal owners. Closing a
+//! PTY hangs the shell up and then signals every descendant process group, so
+//! a background job with its own pgid cannot keep the slave open. A shell that
+//! exits on its own still leaves those jobs running, as a terminal does.
 
 // A panic here loses a shell: teardown paths run inside `Drop`, where an
 // unwind during another unwind aborts the process. Tests panic freely.
@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -448,9 +449,15 @@ async fn run_pty_output_loop(
 
     // The reader ending does not prove the shell did, so poll rather than
     // blocking on `wait`: teardown needs this lock to hang the shell up.
+    // Bound the wait so a leftover slave holder cannot pin the test runtime
+    // (or a disconnect) until that job's own sleep finishes.
     let (exit_code, signal, target_client_id, was_busy) = tokio::task::spawn_blocking({
         let pty = pty.clone();
         move || {
+            let deadline = std::time::Instant::now()
+                + REAP_GRACE
+                + xai_tty_utils::HANGUP_GRACE
+                + std::time::Duration::from_secs(2);
             loop {
                 {
                     let mut session = pty.blocking_lock();
@@ -463,6 +470,9 @@ async fn run_pty_output_loop(
                             target_client_id,
                             was_busy,
                         );
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return (None, None, target_client_id, was_busy);
                     }
                 }
                 std::thread::sleep(EXIT_POLL_INTERVAL);
@@ -634,6 +644,10 @@ pub(crate) async fn close_pty(pty_id: &str) -> Result<(), String> {
 /// Dropping the master would not hang the shell up: the reader and writer hold
 /// their own dups of it, and SIGHUP needs the last one closed.
 fn reap(entry: &Arc<Mutex<PtySession>>) {
+    // Snapshot job groups while the shell is still the parent. After it exits
+    // they reparent to init and a walk from the shell pid finds nothing.
+    #[cfg(unix)]
+    let extra_groups = descendant_groups_besides_shell(&entry.blocking_lock().shell);
     let hung_up = {
         let mut session = entry.blocking_lock();
         session.master.take();
@@ -641,11 +655,134 @@ fn reap(entry: &Arc<Mutex<PtySession>>) {
         session.input_tx.take();
         session.shell.hangup()
     };
+    // Job-control children live in their own groups. Hangup of the shell group
+    // does not reach them, and a surviving grandchild keeps the slave open.
+    #[cfg(unix)]
+    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGHUP);
     if hung_up && wait_for_exit(entry, xai_tty_utils::HANGUP_GRACE) {
+        #[cfg(unix)]
+        signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
         return;
     }
+    #[cfg(unix)]
+    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
     entry.blocking_lock().shell.kill();
     wait_for_exit(entry, REAP_GRACE);
+}
+
+/// Process groups of the shell's descendant tree, excluding the shell's own.
+/// Those extra groups are the background jobs `killpg` on the shell misses.
+#[cfg(unix)]
+fn descendant_groups_besides_shell(shell: &Shell) -> Vec<xai_tty_utils::ProcessGroupId> {
+    let Some(root) = shell.pid() else {
+        return Vec::new();
+    };
+    // SAFETY: getpgid on a live or zombie pid is a query; ESRCH yields -1.
+    let shell_pgid = unsafe { libc::getpgid(root as i32) };
+    let mut extra = Vec::new();
+    for pgid in descendant_pgids(root) {
+        if i64::from(pgid) == i64::from(shell_pgid) {
+            continue;
+        }
+        if let Ok(id) = xai_tty_utils::ProcessGroupId::new(pgid) {
+            extra.push(id);
+        }
+    }
+    extra
+}
+
+#[cfg(unix)]
+fn descendant_pgids(root: u32) -> Vec<u32> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut stack = vec![root];
+    let mut pgids = Vec::new();
+    while let Some(pid) = stack.pop() {
+        // SAFETY: getpgid on a live or zombie pid is a query; ESRCH yields -1.
+        let pgid = unsafe { libc::getpgid(pid as i32) };
+        if pgid > 1 {
+            pgids.push(pgid as u32);
+        }
+        for child in child_pids(pid) {
+            if seen.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    pgids.sort_unstable();
+    pgids.dedup();
+    pgids
+}
+
+#[cfg(unix)]
+fn child_pids(parent: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        children_from_proc_tasks(parent).unwrap_or_else(|| children_from_proc_scan(parent))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = parent;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn children_from_proc_tasks(parent: u32) -> Option<Vec<u32>> {
+    let task_dir = std::fs::read_dir(format!("/proc/{parent}/task")).ok()?;
+    let mut kids = Vec::new();
+    let mut saw_children_file = false;
+    for task in task_dir.flatten() {
+        let path = task.path().join("children");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        saw_children_file = true;
+        for tok in text.split_whitespace() {
+            if let Ok(pid) = tok.parse() {
+                kids.push(pid);
+            }
+        }
+    }
+    saw_children_file.then_some(kids)
+}
+
+#[cfg(target_os = "linux")]
+fn children_from_proc_scan(parent: u32) -> Vec<u32> {
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut kids = Vec::new();
+    for ent in proc_dir.flatten() {
+        let pid: u32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let Ok(stat) = std::fs::read_to_string(ent.path().join("stat")) else {
+            continue;
+        };
+        if parse_stat_ppid_pgid(&stat).is_some_and(|(ppid, _)| ppid == parent) {
+            kids.push(pid);
+        }
+    }
+    kids
+}
+
+/// `/proc/pid/stat` after the comm's closing paren: state, ppid, pgrp.
+#[cfg(target_os = "linux")]
+fn parse_stat_ppid_pgid(stat: &str) -> Option<(u32, u32)> {
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let pgid = fields.next()?.parse().ok()?;
+    Some((ppid, pgid))
+}
+
+#[cfg(unix)]
+fn signal_groups(groups: &[xai_tty_utils::ProcessGroupId], sig: nix::sys::signal::Signal) {
+    for group in groups {
+        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(group.get() as i32), sig);
+    }
 }
 
 /// Polls rather than blocking on `wait`, re-locking each turn: a shell that
@@ -674,16 +811,45 @@ pub(crate) async fn close_all() {
     }
 }
 
+/// PATH lookup for a basename (`bash`, `sh`) when `/bin/bash` is missing
+/// (Nix quality / NixOS).
+fn unix_shell_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(name);
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    })
+}
+
+/// If `requested` is not on disk, use PATH `bash`/`sh`. Prefer a real file.
+fn existing_unix_shell(requested: &str) -> String {
+    let path = Path::new(requested);
+    if path.is_file() {
+        return requested.to_string();
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("bash");
+    unix_shell_on_path(name)
+        .or_else(|| unix_shell_on_path("bash"))
+        .or_else(|| unix_shell_on_path("sh"))
+        .unwrap_or_else(|| requested.to_string())
+}
+
 /// Explicit `shell` param, then `$SHELL`, then the platform default. Windows
 /// has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
 fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell {
-        return (s.to_string(), vec![]);
+        return (existing_unix_shell(s), vec![]);
     }
 
     #[cfg(unix)]
     {
-        let path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let path = std::env::var("SHELL")
+            .ok()
+            .filter(|p| Path::new(p).is_file())
+            .or_else(|| unix_shell_on_path("bash"))
+            .unwrap_or_else(|| "/bin/bash".to_string());
         (path, vec!["-l".to_string()])
     }
 
@@ -948,13 +1114,13 @@ mod tests {
                 let (gateway, _) = recording_gateway();
                 let pty_id = create_test_pty(gateway).await;
 
-                write_pty_input(&pty_id, b"sleep 300 & echo pid=$!\n")
+                write_pty_input(&pty_id, BACKGROUND_SLEEP_CMD)
                     .await
                     .expect("write command");
                 let grandchild = wait_for_reported_pid(&pty_id).await;
 
                 // Without job control the job shares the shell's group and the
-                // group kill alone would pass this test.
+                // shell-group kill alone would pass this test.
                 let shell = require_pty(&pty_id)
                     .await
                     .expect("pty")
@@ -993,7 +1159,7 @@ mod tests {
                 let (gateway, _) = recording_gateway();
                 let pty_id = create_test_pty(gateway).await;
 
-                write_pty_input(&pty_id, b"sleep 300 & echo pid=$!\n")
+                write_pty_input(&pty_id, BACKGROUND_SLEEP_CMD)
                     .await
                     .expect("write command");
                 let grandchild = wait_for_reported_pid(&pty_id).await;
@@ -1041,11 +1207,26 @@ mod tests {
                 pixel_height: 0,
             })
             .expect("openpty");
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("sleep 300");
+        // Same spawn as [`create_pty`]: resolved PATH bash + login args +
+        // TERM. A raw `sleep` store path ENOENTs under portable_pty here;
+        // `create_test_pty` already proves this CommandBuilder shape works.
+        let (shell_path, shell_args) = resolve_pty_shell(Some("/bin/bash"));
+        let mut cmd = CommandBuilder::new(&shell_path);
+        for arg in &shell_args {
+            cmd.arg(arg);
+        }
+        if let Ok(dir) = std::env::current_dir() {
+            cmd.cwd(dir);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("LC_ALL", "en_US.UTF-8");
         #[allow(clippy::disallowed_methods)]
-        let child = pair.slave.spawn_command(cmd).expect("spawn shell");
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .unwrap_or_else(|e| panic!("spawn {shell_path}: {e}"));
         let pid = child.process_id().expect("shell pid") as i32;
 
         drop(UnregisteredShell::new(child));
@@ -1060,28 +1241,61 @@ mod tests {
         }
     }
 
+    /// Job-control on, `command sleep` so Nix wrappers/functions cannot hide a
+    /// coreutils `sleep` that dies when its process group is signaled.
+    #[cfg(unix)]
+    const BACKGROUND_SLEEP_CMD: &[u8] = b"set -m; command sleep 300 & echo pid=$!\n";
+
+    #[cfg(unix)]
+    fn parse_reported_pids(text: &str) -> Vec<i32> {
+        text.split("pid=")
+            .skip(1)
+            .filter_map(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    async fn pty_output_text(pty_id: &str) -> String {
+        let entry = require_pty(pty_id).await.expect("pty");
+        let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     #[cfg(unix)]
     async fn wait_for_reported_pid(pty_id: &str) -> i32 {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let entry = require_pty(pty_id).await.expect("pty");
-            let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
-            let text = String::from_utf8_lossy(&out);
-            // Every occurrence, since the shell echoes the command's own `pid=$!`.
-            if let Some(pid) = text
-                .split("pid=")
-                .skip(1)
-                .filter_map(|rest| rest.split_whitespace().next())
-                .find_map(|digits| digits.trim().parse::<i32>().ok())
-            {
+            let text = pty_output_text(pty_id).await;
+            if let Some(pid) = parse_reported_pids(&text).last().copied() {
                 return pid;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "shell never reported a background pid: {text}"
-            );
+            if tokio::time::Instant::now() >= deadline {
+                let _ = close_pty(pty_id).await;
+                panic!("shell never reported a background pid within 5s: {text}");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_reported_pid_skips_echoed_dollar_bang() {
+        assert_eq!(
+            parse_reported_pids("sleep 300 & echo pid=$!\r\npid=4321\r\n"),
+            vec![4321]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_stat_ppid_pgid_reads_ppid_and_pgrp() {
+        assert_eq!(
+            parse_stat_ppid_pgid("4321 (sleep) S 100 200 200 0"),
+            Some((100, 200))
+        );
     }
 
     #[tokio::test]

@@ -5,15 +5,18 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued — Enter to send now` only on a parked
+//!   sendable wait where bare Enter actually force-sends. Running chrome
+//!   (including a foreground subagent wait, where the footer is
+//!   `Enter:interject`) may show `· N queued` but must not say Enter sends now.
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Pause button `[pause]` / `[resume]` (quiet white on hover; global pause)
 //! - Cancel button `[stop]` (right-aligned, red on hover; hard cancel)
 //!
 //! Hidden when idle (0 height) unless watchers, drain-blocked, starting
-//! session, or global work pause is active. Appears between scrollback and
-//! prompt.
+//! session, global work pause, or a mouse-host idle `[pause]` row. Appears
+//! between scrollback and prompt.
 
 use std::time::{Duration, Instant};
 
@@ -27,7 +30,8 @@ use xai_grok_workspace::permission::mcp_pretty_name_if_qualified;
 use crate::acp::tracker::{TurnActivity, WaitingReason};
 use crate::app::agent::{AgentCommand, AgentState};
 use crate::app::agent_view::McpInitProgress;
-use crate::render::line_utils::truncate_str;
+use crate::render::SafeBuf;
+use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 
 /// Show each spinner frame for this many animation ticks.
@@ -253,6 +257,89 @@ pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
     )
 }
 
+/// Parked cue stem: the wait reason without its spinner ellipsis, so the
+/// interrupt suffix can keep the `Sleeping · send a message` cadence.
+/// Unknown activity falls back to generic `waiting`.
+fn parked_wait_name(activity: &Option<TurnActivity>) -> String {
+    match activity {
+        Some(TurnActivity::Waiting(reason)) => reason.label().trim_end_matches('…').to_string(),
+        _ => "waiting".to_string(),
+    }
+}
+
+/// First-token / retry wait that otherwise leaves the transcript empty under
+/// the last prompt (page-flip pins that prompt at the top until tokens
+/// arrive). Footer chrome alone looks like a black broken pane.
+pub(crate) fn leftover_viewport_wait_label(activity: &Option<TurnActivity>) -> Option<String> {
+    match activity {
+        Some(TurnActivity::Waiting(WaitingReason::Model)) => Some(WaitingReason::Model.label()),
+        Some(TurnActivity::Retrying { attempt, .. }) => {
+            Some(format!("Retrying the model request (attempt {attempt})…"))
+        }
+        _ => None,
+    }
+}
+
+fn row_has_glyph(buf: &Buffer, area: Rect, y: u16) -> bool {
+    (area.x..area.right()).any(|x| {
+        buf.cell((x, y)).is_some_and(|c| {
+            c.symbol()
+                .chars()
+                .any(|ch| !ch.is_whitespace() && ch != '\0')
+        })
+    })
+}
+
+fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+    (area.x..area.right())
+        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+        .collect()
+}
+
+fn last_non_blank_row(buf: &Buffer, area: Rect) -> Option<u16> {
+    (area.y..area.bottom())
+        .rev()
+        .find(|&y| row_has_glyph(buf, area, y))
+}
+
+/// Paint the live-turn wait in leftover scrollback rows so a first-token wait
+/// is not a black void under the last human line.
+///
+/// Stable across frames: if the last content row is already this label,
+/// rewrite that row instead of stacking another copy.
+pub(crate) fn paint_leftover_viewport_wait(
+    buf: &mut Buffer,
+    area: Rect,
+    label: &str,
+    style: Style,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let y = match last_non_blank_row(buf, area) {
+        None => area.y,
+        Some(last) if row_text(buf, area, last).contains(label.trim_end_matches('…')) => last,
+        Some(last) => {
+            let with_gap = last.saturating_add(2);
+            if with_gap < area.bottom() {
+                with_gap
+            } else {
+                let tight = last.saturating_add(1);
+                if tight < area.bottom() {
+                    tight
+                } else {
+                    return;
+                }
+            }
+        }
+    };
+    let line = truncate_line(
+        Line::from(Span::styled(label.to_string(), style)),
+        area.width as usize,
+    );
+    buf.set_line_safe(area.x, y, &line, area.width);
+}
+
 /// Inputs to [`render_turn_status`] — one frame's worth of turn state.
 #[derive(Debug)]
 pub struct TurnStatusArgs<'a> {
@@ -372,11 +459,10 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Idle or parked: persistent cue (not scrollback — it must never scroll
+    // Idle or parked: persistent cue (not scrollback; it must never scroll
     // away). Lower priority than the starting-session and drain-blocked cues
     // above. Parked never falls through to the running-turn chrome
-    // (spinner/timers/[stop]) — the wait aborts the moment the user types,
-    // so that chrome would lie.
+    // (spinner/timers). Pause/stop stay: the session is still TurnRunning.
     if state.is_idle() || parked {
         // Parked with held queued rows: the queued hint IS the input-semantics
         // story (Enter acts on the queue immediately), so it replaces the
@@ -388,10 +474,17 @@ pub fn render_turn_status(
         } else {
             " \u{00b7} send a message to interrupt".to_string()
         };
+        let parked_elapsed = match turn_elapsed {
+            Some(d) if d.as_secs() >= 60 => format!(" {}", format_turn_timer(d)),
+            _ => String::new(),
+        };
         let cue = match (still_running_label(watchers), parked) {
-            (Some(label), true) => Some(format!("{label}{parked_suffix}")),
+            (Some(label), true) => Some(format!("{label}{parked_elapsed}{parked_suffix}")),
             (Some(label), false) => Some(label),
-            (None, true) => Some(format!("waiting{parked_suffix}")),
+            (None, true) => Some(format!(
+                "{}{parked_elapsed}{parked_suffix}",
+                parked_wait_name(activity)
+            )),
             (None, false) => None,
         };
         if let Some(cue) = cue {
@@ -406,13 +499,10 @@ pub fn render_turn_status(
             } else {
                 theme.gray
             };
-            // Parked: no pause/stop (wait aborts on type). Idle: subagents
-            // or global pause unlock discoverable work controls.
-            let chrome = if parked {
-                WorkControlChrome::default()
-            } else {
-                work_control_chrome(show_buttons, false, watchers.subagents, global_paused)
-            };
+            // Parked is still TurnRunning: pause/stop stay discoverable.
+            // Idle: subagents or global pause unlock those controls.
+            let chrome =
+                work_control_chrome(show_buttons, parked, watchers.subagents, global_paused);
             let mut pause_str = if chrome.show_pause {
                 pause_button_str(chrome.pause_is_resume, false)
             } else {
@@ -490,8 +580,25 @@ pub fn render_turn_status(
         if parked {
             return TurnStatusOutput::default();
         }
-        // Idle with no watchers: keep a resume target when globally paused.
+        // Idle with no watchers: mouse host keeps a one-line [pause] row.
+        // Keyboard-only stays empty. Global pause uses the resume row below.
         if !global_paused {
+            if show_buttons && state.is_idle() && mcp_init_progress.is_none() {
+                let pause_str = pause_button_str(false, true);
+                let right_width = pause_str.width();
+                let pause_x = area.x + area.width.saturating_sub(right_width as u16);
+                let pause_fg = if pause_hovered {
+                    theme.text_primary
+                } else {
+                    theme.gray
+                };
+                let span = Span::styled(pause_str, right_style(pause_fg));
+                buf.set_span(pause_x, area.y, &span, right_width as u16);
+                return TurnStatusOutput {
+                    pause_button: Some(Rect::new(pause_x, area.y, right_width as u16, 1)),
+                    ..TurnStatusOutput::default()
+                };
+            }
             return TurnStatusOutput::default();
         }
     }
@@ -553,8 +660,14 @@ pub fn render_turn_status(
     let show_pause = chrome.show_pause;
 
     // ── Compute activity style and label ──
-    let (activity_style, label, is_tool) =
+    let (mut activity_style, mut label, is_tool) =
         compute_activity(&theme, state, activity, is_bash_turn, goal_verifying);
+    // Pause must unstick first-token / Retrying chrome immediately. Cancel
+    // is in flight; do not keep "Waiting for the model…" on the live row.
+    if global_paused && is_pauseable_sampler_wait(activity) {
+        activity_style = Style::default().fg(theme.gray);
+        label = "Paused all work".to_string();
+    }
 
     // Early return for idle (shouldn't happen if should_show is respected, but be safe).
     if matches!(state, AgentState::Idle) {
@@ -624,9 +737,10 @@ pub fn render_turn_status(
     let spinner_str = if is_pending_user_input {
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
-        let frames = crate::glyphs::braille_spinner_frames();
-        let frame_idx = (tick / SPINNER_DIVISOR) as usize % frames.len();
-        format!("{} ", frames[frame_idx])
+        let elapsed_ms = activity_started_at
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or(tick.saturating_mul(crate::glyphs::SPARKLER_FRAME_MS));
+        format!("{} ", crate::glyphs::sparkler_frame_at_ms(elapsed_ms))
     };
     let spinner_width = spinner_str.width();
 
@@ -639,8 +753,11 @@ pub fn render_turn_status(
                 if title.starts_with("Ask: ") || title.starts_with("Ask ")
         );
 
-    // Phase timer (gray, same as turn timer) — hidden for ask tools
-    let phase_timer_str = if is_asking {
+    // Phase timer (gray, same as turn timer) — hidden for ask tools, and
+    // hidden when Retrying chrome already names the wait (`next try in 29s`).
+    // Appending elapsed `26s` there paints `29s 26s`, which reads as 29
+    // minutes 26 seconds or a stuck dual countdown.
+    let phase_timer_str = if is_asking || retry_reason_already_names_wait(activity) {
         String::new()
     } else {
         activity_started_at
@@ -682,7 +799,7 @@ pub fn render_turn_status(
         let diamond_color = pending_diamond_color(&theme, theme.accent_user, tick);
         Style::default().fg(diamond_color)
     } else {
-        activity_style
+        Style::default().fg(theme.accent_running)
     };
     left_spans.push(Span::styled(spinner_str, spinner_style));
 
@@ -748,19 +865,13 @@ pub fn render_turn_status(
             }
         }
     } else {
-        // Sendable wait holding queued messages: the persistent inline hint
-        // saying why the queue is paused and how to send anyway. On the status
-        // row (not an ephemeral tip) so it stays visible for the whole wait,
-        // and dropped before the label truncates on a narrow terminal.
-        // "Enter to send now" is advertised only when Enter would actually
-        // send the top row (bash / client-expanded local rows refuse with a
-        // toast — see `AgentView::held_queue_top_sendable`).
+        // Sendable wait holding queued messages: count on the status row so
+        // it stays visible for the whole wait. Running chrome is the
+        // `Enter:interject` / `Ctrl+Enter:send now` footer (subagent waits
+        // included). Do not advertise "Enter to send now" here — that copy
+        // belongs only on the parked cue, where bare Enter force-sends.
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
-            if held_queue_top_sendable {
-                format!(" · {held_queue} queued — Enter to send now")
-            } else {
-                format!(" · {held_queue} queued")
-            }
+            format!(" · {held_queue} queued")
         } else {
             String::new()
         };
@@ -854,6 +965,26 @@ pub fn render_turn_status(
     }
 }
 
+/// First-token model wait or Retrying chrome that `[pause]` must replace.
+fn is_pauseable_sampler_wait(activity: &Option<TurnActivity>) -> bool {
+    matches!(
+        activity,
+        Some(TurnActivity::Waiting(WaitingReason::Model) | TurnActivity::Retrying { .. })
+    )
+}
+
+/// True when Retrying chrome already includes a wait duration. The phase
+/// timer must not sit after that duration (`next try in 29s` + `26s`).
+fn retry_reason_already_names_wait(activity: &Option<TurnActivity>) -> bool {
+    match activity {
+        Some(TurnActivity::Retrying { reason, .. }) => {
+            let r = reason.as_str();
+            r.contains("next try in") || r.contains("shared wait") || r.contains(" · wait ")
+        }
+        _ => false,
+    }
+}
+
 /// Compute activity style, label, and whether it's a tool.
 fn compute_activity(
     theme: &Theme,
@@ -912,16 +1043,36 @@ fn compute_activity(
             "Compacting…".to_string(),
             false,
         ),
-        (AgentState::TurnRunning, Some(TurnActivity::Retrying { attempt, .. })) => (
-            Style::default().fg(theme.warning),
-            format!("Retrying (attempt {attempt})…"),
-            false,
-        ),
-        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
-            Style::default().fg(theme.text_secondary),
-            writing.label(),
-            false,
-        ),
+        (
+            AgentState::TurnRunning,
+            Some(TurnActivity::Retrying {
+                attempt, reason, ..
+            }),
+        ) => {
+            let reason = reason.trim();
+            let label = if reason.is_empty() {
+                format!("Retrying the model request (attempt {attempt})…")
+            } else {
+                format!("Retrying the model request (attempt {attempt}): {reason}")
+            };
+            (Style::default().fg(theme.warning), label, false)
+        }
+        (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => {
+            // Name the live tool. Overlay wait chrome must not sit on
+            // Preparing search_replace while the list has no nested job.
+            let label = writing
+                .tool_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter(|name| !xai_grok_tools::is_task_tool_id(name))
+                .map(|name| {
+                    let name = mcp_pretty_name_if_qualified(name);
+                    format!("{}…", crate::acp::tracker::clamp_activity_subject(&name))
+                })
+                .unwrap_or_else(|| writing.label());
+            (Style::default().fg(theme.text_secondary), label, false)
+        }
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
             // Explicit wait reason (model / subagent / task output / tasks /
             // sleep): name what the agent is blocked on instead of a generic
@@ -1015,7 +1166,8 @@ fn render_starting_session(
 /// completion/events, scheduled `/loop` tasks fire prompts, and background
 /// subagents inject a completion turn, any of which can start a new turn.
 ///
-/// A parked turn always shows the row, watchers or not.
+/// A parked turn always shows the row, watchers or not. A mouse-host idle
+/// session with no other cue keeps a one-line `[pause]` row.
 ///
 /// Real MCP progress (`total > 0`) renders as a compact chip in the top status
 /// bar instead, so it does not affect this row.
@@ -1033,12 +1185,14 @@ pub fn should_show(
         watchers,
         parked,
         false,
+        false,
     )
 }
 
 /// [`should_show`] plus the Work B resume row: global pause keeps the
 /// turn-status line visible after every session goes idle so `[resume]`
-/// stays discoverable.
+/// stays discoverable. `mouse_host` also keeps a one-line idle `[pause]`
+/// row when nothing else is showing.
 pub fn should_show_with_global_pause(
     state: &AgentState,
     drain_blocked: bool,
@@ -1046,11 +1200,20 @@ pub fn should_show_with_global_pause(
     watchers: Watchers,
     parked: bool,
     global_paused: bool,
+    mouse_host: bool,
 ) -> bool {
     if global_paused && !parked {
         return true;
     }
     if parked {
+        return true;
+    }
+    if mouse_host
+        && state.is_idle()
+        && !drain_blocked
+        && mcp_init_progress.is_none()
+        && watchers.total() == 0
+    {
         return true;
     }
     !state.is_idle()
@@ -1099,7 +1262,7 @@ fn format_tokens_short(tokens: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -1163,7 +1326,34 @@ mod tests {
     fn format_minutes() {
         assert_eq!(format_turn_timer(Duration::from_secs(60)), "1m0s");
         assert_eq!(format_turn_timer(Duration::from_secs(80)), "1m20s");
+        assert_eq!(format_turn_timer(Duration::from_secs(133)), "2m13s");
         assert_eq!(format_turn_timer(Duration::from_secs(600)), "10m0s");
+    }
+
+    /// While AUTO compact runs, the status row must tick a live phase
+    /// timer in minutes, not sit on a frozen `Compacting…` with no
+    /// elapsed. Product already did this; this pins the honesty contract
+    /// for a multi-minute summarizer wait (no fake speedup).
+    #[test]
+    fn compacting_status_shows_live_minutes_phase_timer() {
+        let activity = Some(TurnActivity::AutoCompacting);
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(133));
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("Compacting"),
+            "status must name Compacting while AUTO compact runs, got: {text:?}"
+        );
+        assert!(
+            text.contains("2m13s"),
+            "live compact wait of 133s must paint 2m13s, got: {text:?}"
+        );
+        assert!(
+            !text.contains("133s") && !text.contains("133 s"),
+            "must not print raw seconds for a 2m13s compact wait, got: {text:?}"
+        );
     }
 
     #[test]
@@ -1200,11 +1390,206 @@ mod tests {
     }
 
     #[test]
+    fn retrying_chrome_names_the_model_request() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: "transient error".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            "Retrying the model request (attempt 1): transient error"
+        );
+        assert!(!is_tool);
+        assert!(
+            !label.starts_with("Retrying (attempt"),
+            "bare Retrying (attempt N) looks like the whole session restarted: {label}"
+        );
+        assert!(
+            label.contains("transient error"),
+            "retry chrome must name the cause, not hide it behind attempt N: {label}"
+        );
+    }
+
+    /// HTTP 502 retry chrome already names the wait (`next try in 29s`).
+    /// The phase timer must not sit immediately after that and paint
+    /// `29s 26s`, which reads as 29 minutes 26 seconds or a stuck dual wait.
+    #[test]
+    fn retrying_502_wait_must_not_glue_phase_timer_as_seconds_pair() {
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "xAI unavailable (HTTP 502) · next try in 29s".into(),
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(26));
+        args.turn_elapsed = Some(Duration::from_secs(80));
+        let (output, buf) = render_row(args, 160);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("xAI unavailable (HTTP 502)"),
+            "502 retry must name the outage, got: {text:?}"
+        );
+        assert!(
+            text.contains("next try in 29s"),
+            "502 retry must keep the backoff wait, got: {text:?}"
+        );
+        assert!(
+            !text.contains("29s 26s"),
+            "phase elapsed must not glue onto next-try seconds (looks like 29m26s): {text:?}"
+        );
+        assert!(
+            text.contains("[pause]") && text.contains("[stop]"),
+            "pause and stop must stay clickable during a 502 retry wait, got: {text:?}"
+        );
+        assert!(
+            output.pause_button.is_some() && output.cancel_button.is_some(),
+            "502 retry must keep pause/stop hit targets, pause={:?} stop={:?}",
+            output.pause_button,
+            output.cancel_button
+        );
+    }
+
+    /// StreamResumed chrome after a timeout retry is a first-token wait,
+    /// not leftover "reconnecting". The 28s next to the label is the phase
+    /// timer, not a reconnect countdown.
+    #[test]
+    fn retrying_chrome_names_first_token_wait_not_reconnecting() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 1,
+                max_retries: u32::MAX,
+                reason: "waiting for first token".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            "Retrying the model request (attempt 1): waiting for first token"
+        );
+        assert!(!is_tool);
+        assert!(
+            !label.to_ascii_lowercase().contains("reconnect"),
+            "must not paint reconnecting for a first-token wait: {label}"
+        );
+    }
+
+    /// Pre-first-token chrome must name the model request. A generic
+    /// "Waiting for response…" looks idle while the sampler has not
+    /// produced a token, which is the live hang.
+    #[test]
+    fn waiting_on_model_names_the_model_request_not_a_generic_wait() {
+        use crate::acp::tracker::WaitingReason;
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Waiting(WaitingReason::Model)),
+            false,
+            false,
+        );
+        let lower = label.to_ascii_lowercase();
+        assert!(
+            lower.contains("model"),
+            "pre-first-token wait must name the model request, got {label}"
+        );
+        assert!(
+            !label.contains("Waiting for response"),
+            "generic 'Waiting for response' looks idle when no first token has arrived: {label}"
+        );
+        assert!(!is_tool, "model wait is not a tool activity");
+        assert!(
+            label.contains('…') || label.ends_with("..."),
+            "busy-row wait still uses an ellipsis: {label}"
+        );
+    }
+
+    fn leftover_area_text(buf: &Buffer, area: Rect) -> String {
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Named contract: first-token wait must occupy leftover transcript rows,
+    /// not only the footer. A sent prompt with no tokens yet leaves a black
+    /// pane otherwise.
+    #[test]
+    fn leftover_viewport_wait_paints_below_the_last_prompt_row() {
+        let prompt = "Can you look into this please: [Image #1]";
+        // 40 columns clips this prompt (`[Image #1]` is past column 40).
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(0, 0, prompt, Style::default());
+        let label = WaitingReason::Model.label();
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let text = leftover_area_text(&buf, area);
+        let rows: Vec<&str> = text.lines().collect();
+        let prompt_row = rows
+            .iter()
+            .rposition(|r| r.contains("[Image #1]"))
+            .unwrap_or_else(|| panic!("prompt row must stay, got:\n{text}"));
+        assert!(
+            rows[prompt_row + 1..]
+                .iter()
+                .any(|r| r.contains("Waiting for the model")),
+            "wait must land in leftover rows below the prompt, got:\n{text}"
+        );
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let again = leftover_area_text(&buf, area);
+        let count = again.matches("Waiting for the model").count();
+        assert_eq!(
+            count, 1,
+            "a second frame must not stack another wait line, got:\n{again}"
+        );
+    }
+
+    #[test]
+    fn leftover_viewport_wait_label_is_model_or_retry_only() {
+        assert_eq!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Waiting(WaitingReason::Model)))
+                .as_deref(),
+            Some("Waiting for the model…")
+        );
+        assert!(leftover_viewport_wait_label(&Some(TurnActivity::Thinking)).is_none());
+        assert!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Waiting(WaitingReason::subagent())))
+                .is_none()
+        );
+        assert!(
+            leftover_viewport_wait_label(&Some(TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: 3,
+                reason: "timeout".into(),
+            }))
+            .as_deref()
+            .is_some_and(|s| s.contains("Retrying the model request"))
+        );
+    }
+
+    #[test]
     fn waiting_reason_renders_specific_label() {
         use crate::acp::tracker::WaitingReason;
         let theme = Theme::current();
         let cases = [
-            (WaitingReason::Model, "Waiting for response…"),
+            (WaitingReason::Model, "Waiting for the model…"),
             (WaitingReason::subagent(), "Waiting on subagent…"),
             (
                 WaitingReason::Subagent {
@@ -1275,6 +1660,81 @@ mod tests {
             Watchers::default(),
             false
         ));
+    }
+
+    /// Live-work sparkler must change glyphs from a wall clock and paint
+    /// magenta `accent_running` while a turn is running.
+    #[test]
+    fn turn_status_sparkler_advances_and_uses_accent_running() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let theme = Theme::current();
+        let early = Duration::from_millis(0);
+        let later = Duration::from_millis(crate::glyphs::SPARKLER_FRAME_MS);
+        let early_glyph = crate::glyphs::sparkler_frame_at_ms(early.as_millis() as u64);
+        let later_glyph = crate::glyphs::sparkler_frame_at_ms(later.as_millis() as u64);
+        assert_ne!(
+            early_glyph, later_glyph,
+            "sparkler clock must change glyphs after one frame dwell"
+        );
+        assert_ne!(theme.accent_running, ratatui::style::Color::Green);
+        assert_ne!(theme.accent_running, ratatui::style::Color::Cyan);
+
+        fn paint(elapsed: Duration) -> (String, Option<ratatui::style::Color>) {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
+            let _ = render_turn_status(
+                &mut buf,
+                Rect::new(0, 0, 80, 1),
+                TurnStatusArgs {
+                    state: &AgentState::TurnRunning,
+                    activity: &Some(TurnActivity::Responding),
+                    turn_elapsed: Some(elapsed),
+                    activity_started_at: Some(Instant::now() - elapsed),
+                    tick: 0,
+                    drain_blocked: false,
+                    buttons: Some(MouseButtons::default()),
+                    has_running_execute: false,
+                    total_tokens: None,
+                    mcp_init_progress: None,
+                    is_bash_turn: false,
+                    is_pending_user_input: false,
+                    goal_verifying: false,
+                    watchers: Watchers::default(),
+                    parked: false,
+                    flat_background: false,
+                    held_queue: 0,
+                    held_queue_top_sendable: false,
+                    global_paused: false,
+                },
+            );
+            let text = buffer_text(&buf, Rect::new(0, 0, 80, 1));
+            let fg = buf.cell((0, 0)).and_then(|c| match c.fg {
+                ratatui::style::Color::Reset => None,
+                color => Some(color),
+            });
+            (text, fg)
+        }
+
+        let (early_text, early_fg) = paint(early);
+        let (later_text, later_fg) = paint(later);
+        assert!(
+            early_text.contains(early_glyph),
+            "early turn-status sparkler must paint {early_glyph:?}: {early_text:?}"
+        );
+        assert!(
+            later_text.contains(later_glyph),
+            "later turn-status sparkler must paint {later_glyph:?}: {later_text:?}"
+        );
+        assert_eq!(
+            early_fg,
+            Some(theme.accent_running),
+            "running sparkler must use accent_running, got {early_fg:?}"
+        );
+        assert_eq!(
+            later_fg,
+            Some(theme.accent_running),
+            "running sparkler must stay accent_running, got {later_fg:?}"
+        );
     }
 
     /// Cancelling keeps `[stop]` clickable (the retry affordance for a lost
@@ -1558,10 +2018,12 @@ mod tests {
 
     #[test]
     fn idle_with_no_monitors_renders_nothing() {
-        let text = render_idle_with_monitors(0);
+        let mut args = idle_args(Watchers::default());
+        args.buttons = None;
+        let text = render_row_text(args, 72);
         assert!(
             text.trim().is_empty(),
-            "idle with no monitors must render nothing, got: {text:?}"
+            "keyboard-only idle with no monitors must render nothing, got: {text:?}"
         );
     }
 
@@ -1731,7 +2193,8 @@ mod tests {
 
     #[test]
     fn parked_with_watchers_renders_cue_not_running_chrome() {
-        // The wait aborts as soon as the user types, so busy chrome would lie.
+        // Counts-first cue stays; parked is still TurnRunning so pause/stop
+        // paint. Spinner/thinking chrome must not come back.
         let text = render_parked_with_watchers(Watchers {
             commands: 2,
             ..Watchers::default()
@@ -1741,8 +2204,12 @@ mod tests {
             "parked with bg work must render the interruptible still-running cue, got: {text:?}"
         );
         assert!(
-            !text.contains("Waiting") && !text.contains("[stop]"),
-            "parked must not render the running-turn chrome, got: {text:?}"
+            text.contains("[pause]") && text.contains("[stop]"),
+            "parked must paint pause and stop, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Thinking"),
+            "parked must not render the thinking spinner, got: {text:?}"
         );
     }
 
@@ -1750,12 +2217,147 @@ mod tests {
     fn parked_without_watchers_renders_waiting_cue() {
         let text = render_parked_with_watchers(Watchers::default());
         assert!(
-            text.contains("waiting \u{00b7} send a message to interrupt"),
-            "watcherless parked must render the waiting interrupt cue, got: {text:?}"
+            text.contains("Waiting on tasks \u{00b7} send a message to interrupt"),
+            "watcherless parked must name the wait, got: {text:?}"
+        );
+        assert!(
+            text.contains("[pause]") && text.contains("[stop]"),
+            "watcherless parked must paint pause and stop, got: {text:?}"
+        );
+    }
+
+    /// Parked Sleep must name the wait. Generic `waiting` hides why the
+    /// session is blocked (iso 6:11).
+    #[test]
+    fn parked_sleep_names_sleep_not_generic_waiting() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Sleep));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("Sleeping") && text.contains("send a message to interrupt"),
+            "parked Sleep must name Sleeping, got: {text:?}"
+        );
+        assert!(
+            !text.contains("waiting \u{00b7}"),
+            "parked Sleep must not fall back to generic waiting, got: {text:?}"
+        );
+    }
+
+    /// Nested L2 parked wait on a named specialist must paint the specialist
+    /// and compact minutes when the wait is at least a minute. Bare
+    /// `Waiting on task output` is FAIL.
+    #[test]
+    fn parked_nested_specialist_wait_names_elapsed_not_generic_output() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
+            task_ids: vec!["l3-cert".into()],
+            subject: Some("Subagent (prove cert DNS-01): read_file".into()),
+            waits: true,
+        }));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        args.turn_elapsed = Some(Duration::from_secs(15 * 60 + 9));
+        let text = render_row_text(args, 100);
+        assert!(
+            text.contains("prove cert DNS-01"),
+            "parked nested wait must name the specialist, got: {text:?}"
+        );
+        assert!(
+            text.contains("15m9s"),
+            "parked wait of at least a minute must use compact minutes, got: {text:?}"
+        );
+        assert!(
+            !text.contains("909s") && !text.contains("909 s"),
+            "must not print raw seconds for a 15m9s wait, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL, got: {text:?}"
+        );
+        assert!(
+            text.contains("send a message to interrupt"),
+            "parked cue still carries interrupt copy, got: {text:?}"
+        );
+    }
+
+    /// Parked `wait_tasks` must name the wait, not generic `waiting`.
+    #[test]
+    fn parked_tasks_complete_names_tasks_wait() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::TasksComplete));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("Waiting on tasks") && text.contains("send a message to interrupt"),
+            "parked TasksComplete must name Waiting on tasks, got: {text:?}"
+        );
+    }
+
+    /// Parked is still TurnRunning: mouse hosts keep [pause] and [stop].
+    /// Do not bring back the thinking spinner.
+    #[test]
+    fn parked_wait_paints_pause_and_stop() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Sleep));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        let (output, buf) = render_row(args, 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("[pause]") && text.contains("[stop]"),
+            "parked wait must paint pause and stop, got: {text:?}"
+        );
+        assert!(
+            output.pause_button.is_some() && output.cancel_button.is_some(),
+            "parked wait must arm both hit rects on a mouse host"
+        );
+        assert!(
+            !text.contains("Thinking"),
+            "parked must not bring back the thinking spinner, got: {text:?}"
+        );
+    }
+
+    /// Idle with no live work: mouse host keeps a one-line [pause] row.
+    /// [stop] stays off because there is nothing to cancel.
+    #[test]
+    fn idle_mouse_host_paints_pause_without_stop() {
+        assert!(should_show_with_global_pause(
+            &AgentState::Idle,
+            false,
+            None,
+            Watchers::default(),
+            false,
+            false,
+            true,
+        ));
+        assert!(!should_show(
+            &AgentState::Idle,
+            false,
+            None,
+            Watchers::default(),
+            false
+        ));
+        let (output, buf) = render_row(idle_args(Watchers::default()), 80);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("[pause]"),
+            "idle mouse host must paint [pause], got: {text:?}"
         );
         assert!(
             !text.contains("[stop]"),
-            "watcherless parked must not render the running-turn chrome, got: {text:?}"
+            "idle with no live work must not paint [stop], got: {text:?}"
+        );
+        assert!(output.pause_button.is_some(), "pause hit rect must arm");
+        assert!(
+            output.cancel_button.is_none(),
+            "stop hit rect must stay off when nothing is live"
         );
     }
 
@@ -1785,10 +2387,12 @@ mod tests {
 
     #[test]
     fn idle_with_no_watchers_renders_nothing() {
-        let text = render_idle_with_watchers(Watchers::default());
+        let mut args = idle_args(Watchers::default());
+        args.buttons = None;
+        let text = render_row_text(args, 72);
         assert!(
             text.trim().is_empty(),
-            "idle with no watchers must render nothing, got: {text:?}"
+            "keyboard-only idle with no watchers must render nothing, got: {text:?}"
         );
     }
 
@@ -1803,8 +2407,38 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
-            "phase timer must sit between the wait label and the queued hint, got: {text:?}"
+            text.contains("Waiting on subagent… 5m59s · 1 queued"),
+            "phase timer must sit between the wait label and the queued count, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter to send now"),
+            "running chrome (footer Enter:interject) must not advertise Enter as send now, got: {text:?}"
+        );
+    }
+
+    /// Screenshot 16-10-13: seven queued rows while subagents run, footer
+    /// `Enter:interject` / `Ctrl+Enter:send now`. Status may count the queue
+    /// but must not say `N queued - Enter to send now`.
+    #[test]
+    fn running_subagent_wait_must_not_advertise_enter_to_send_now() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::subagent()));
+        let mut args = idle_args(Watchers {
+            subagents: 7,
+            ..Watchers::default()
+        });
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = false;
+        args.held_queue = 7;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 120);
+        assert!(
+            text.contains("7 queued"),
+            "running chrome may still count the queue, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Enter to send now"),
+            "must not contradict Enter:interject, got: {text:?}"
         );
     }
 
@@ -2132,6 +2766,54 @@ mod tests {
         assert!(output.pause_button.is_none() && output.cancel_button.is_none());
     }
 
+    /// After `[pause]` during first-token wait, the row must not keep
+    /// `Waiting for the model…` — that is the hang the operator still sees.
+    #[test]
+    fn global_paused_waiting_for_model_paints_paused_not_waiting() {
+        use crate::acp::tracker::WaitingReason;
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.global_paused = true;
+        args.turn_elapsed = Some(Duration::from_secs(23));
+        let (output, buf) = render_row(args, 90);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("Paused all work") && text.contains("[resume]"),
+            "pause must replace the model wait chrome, got: {text:?}"
+        );
+        assert!(
+            !text.contains("Waiting for the model"),
+            "must not stay stuck on Waiting for the model after pause, got: {text:?}"
+        );
+        assert!(output.pause_button.is_some(), "resume hit target must stay");
+        assert!(
+            output.cancel_button.is_some(),
+            "[stop] must still cancel the live sampler wait"
+        );
+    }
+
+    #[test]
+    fn global_paused_retrying_paints_paused_not_retrying() {
+        let activity = Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "waiting for first token".into(),
+        });
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.global_paused = true;
+        let (_output, buf) = render_row(args, 90);
+        let text = buffer_text(&buf, buf.area);
+        assert!(
+            text.contains("Paused all work") && !text.contains("Retrying"),
+            "pause must replace Retrying chrome, got: {text:?}"
+        );
+        assert!(!text.contains("Waiting for the model"), "got: {text:?}");
+    }
+
     /// Global pause with idle sessions: row stays visible with `[resume]` only.
     #[test]
     fn global_paused_idle_paints_resume_not_stop() {
@@ -2141,7 +2823,8 @@ mod tests {
             None,
             Watchers::default(),
             false,
-            true
+            true,
+            false,
         ));
         let mut args = idle_args(Watchers::default());
         args.global_paused = true;

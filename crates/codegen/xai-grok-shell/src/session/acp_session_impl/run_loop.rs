@@ -501,7 +501,11 @@ pub(super) async fn run_session(
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
                         }
-                        SessionCommand::RestorePlanApproval => {
+                        SessionCommand::AdoptParkedPlanApprovalFromDisk { respond_to } => {
+                            session.adopt_parked_plan_approval_from_disk();
+                            let _ = respond_to.send(());
+                        }
+                        SessionCommand::RestorePlanApproval { snapshot } => {
                             // Resume re-park: spawn the approval
                             // round-trip so the command loop is not blocked on
                             // the (open-ended) user decision.
@@ -513,6 +517,9 @@ pub(super) async fn run_session(
                             // cannot outlive the actor. `resume_plan_approval`
                             // also self-guards against a concurrent/duplicate
                             // re-park via the `pending_interactions` registry.
+                            if let Some(snapshot) = snapshot {
+                                session.adopt_parked_plan_snapshot(snapshot);
+                            }
                             let s = session.clone();
                             let completion_tx = completion_tx.clone();
                             tokio::task::spawn_local(async move {
@@ -1041,6 +1048,11 @@ pub(super) async fn run_session(
                             let was = session.permissions.is_yolo_mode();
                             tracing::info!("Session received SetYoloMode: {}", enabled);
                             session.permissions.set_yolo_mode(enabled);
+                            if enabled {
+                                session
+                                    .context_only
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
                             // Report the ACTUAL state, not the request: the manager
                             // clamps a requested ON to OFF under the always-approve
                             // pin, so emitting `enabled` would announce a turn-on
@@ -1059,8 +1071,20 @@ pub(super) async fn run_session(
                             tracing::info!("Session received SetAutoMode: {}", enabled);
                             session.permissions.set_auto_mode(enabled);
                             if enabled {
+                                session.context_only.store(false, std::sync::atomic::Ordering::Relaxed);
                                 session.wire_permission_auto_llm_classifier().await;
                             } else {
+                                session.permissions.set_llm_side_query_wired(false);
+                            }
+                        }
+                        SessionCommand::SetContextOnlyMode { enabled } => {
+                            tracing::info!("Session received SetContextOnlyMode: {}", enabled);
+                            session
+                                .context_only
+                                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+                            if enabled {
+                                session.permissions.set_yolo_mode(false);
+                                session.permissions.set_auto_mode(false);
                                 session.permissions.set_llm_side_query_wired(false);
                             }
                         }
@@ -1165,7 +1189,7 @@ pub(super) async fn run_session(
                                                 false,
                                             )
                                         }
-                                        Err(()) => {
+                                        Err(_) => {
                                             crate::extensions::notification::PromptUsage::for_error_path(
                                                 None, true,
                                             )

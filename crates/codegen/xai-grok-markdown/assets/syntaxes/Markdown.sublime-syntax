@@ -1,0 +1,17 @@
+name: Markdown
+file_extensions: [md, markdown]
+scope: text.html.markdown
+contexts:
+  main:
+    - match: '^#{1,6}\s+.*'
+      scope: markup.heading.markdown
+    - match: '^\s*[-*+]\s+'
+      scope: markup.list.unnumbered.markdown
+    - match: '^\s*\d+\.\s+'
+      scope: markup.list.numbered.markdown
+    - match: '`[^`]+`'
+      scope: markup.raw.inline.markdown
+    - match: '\*\*[^*]+\*\*'
+      scope: markup.bold.markdown
+    - match: '\*[^*]+\*'
+      scope: markup.italic.markdown

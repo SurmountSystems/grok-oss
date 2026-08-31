@@ -58,6 +58,11 @@ pub fn is_project_dir(cwd: &Path) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn is_platform_system_dir(cwd: &Path) -> bool {
+    // Process TMPDIR (Nix `/build`, `$TMPDIR`) is scratch, same as `/tmp`.
+    let tmp = std::env::temp_dir();
+    if cwd == tmp.as_path() || cwd.starts_with(&tmp) {
+        return true;
+    }
     if cwd == Path::new("/tmp")
         || cwd.starts_with("/tmp/")
         || cwd == Path::new("/var/tmp")
@@ -180,6 +185,16 @@ mod tests {
         fn tmp_is_unsafe() {
             assert!(!is_project_dir(Path::new("/tmp")));
             assert!(!is_project_dir(Path::new("/tmp/scratch")));
+        }
+
+        #[test]
+        fn process_tempdir_without_git_is_not_a_project() {
+            let tmp = tempfile::tempdir().unwrap();
+            assert!(
+                !is_project_dir(tmp.path()),
+                "scratch under {:?} must not classify as a project",
+                std::env::temp_dir()
+            );
         }
 
         #[test]

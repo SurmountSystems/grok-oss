@@ -83,6 +83,8 @@ pub async fn fork_session(
         .new_session_id
         .clone()
         .unwrap_or_else(|| generate_fork_session_id(&request.source_session_id));
+    // Fail-open grok-oss UUID ↔ ULID map. Fork wire id stays UUIDv7.
+    crate::grok_oss::ensure_session_ids_fail_open(&new_session_id);
 
     let target_info = Info {
         id: acp::SessionId::new(new_session_id.clone()),

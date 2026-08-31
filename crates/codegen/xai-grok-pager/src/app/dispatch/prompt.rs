@@ -181,6 +181,42 @@ pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effec
     )
 }
 
+/// Mid-turn Enter interjects when the turn can take it. If interject
+/// produces no effect (no session, L3 overlay refuse), enqueue locally
+/// instead of clearing the composer into nowhere. Ctrl-Z recovering a
+/// vanished draft is the failure this avoids.
+fn enqueue_if_interject_dropped(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    let effects = interject::dispatch_interject(app, text.clone(), images.clone());
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    if effects.is_empty() {
+        agent.start_pending_live_prompt_task(&text);
+        let qid = agent.session.next_queue_id;
+        agent.session.next_queue_id += 1;
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::agent::QueuedPrompt {
+                images,
+                ..crate::app::agent::QueuedPrompt::plain(
+                    qid,
+                    text,
+                    crate::app::agent::QueueEntryKind::Prompt,
+                )
+            });
+        agent.persist_pending_prompts();
+    }
+    agent.prompt.set_text("");
+    agent.persist_unsent_composer_draft();
+    effects
+}
+
 /// Clear the active prompt and record non-empty text in prompt history (Esc Esc).
 pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
@@ -448,12 +484,13 @@ pub(super) fn dispatch_send_prompt_inner(
     );
     let text = implement_rewrite.command;
 
-    if app.reconnect_pending {
-        app.show_toast("Reconnecting, please wait...");
-        return vec![];
-    }
-
     let ActiveView::Agent(id) = app.active_view else {
+        // `/view-plan` after `--continue` can land while welcome still owns
+        // the view. Stick the request so SessionLoaded / restore docks
+        // Approve. Other prompts stay a no-op off the agent view.
+        if matches!(text.trim(), "/view-plan" | "/show-plan" | "/plan-view") {
+            super::modes::stick_view_plan_request(app);
+        }
         return vec![];
     };
     // Capture app-level fields before the mut-borrow on `agent`.
@@ -467,13 +504,27 @@ pub(super) fn dispatch_send_prompt_inner(
     // Set when a plain prompt is queued while a turn is running (local path);
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
+    let mut skip_drain = false;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
+    let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    match interject::overlay_operator_clarify(agent) {
+        interject::OverlayOperatorClarify::L3Unbothered => {
+            agent.show_toast(
+                "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
+            );
+            return vec![];
+        }
+        interject::OverlayOperatorClarify::L2(_) => {
+            return interject::dispatch_interject(app, text, Vec::new());
+        }
+        interject::OverlayOperatorClarify::None => {}
+    }
     if let Some(toast) = implement_rewrite.toast {
         agent.show_toast(&toast);
     }
@@ -552,6 +603,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
+                    context_only_mode: agent.session.is_context_only(),
                     current_model_name: agent.session.models.current_model_name(),
                     available_models: agent
                         .session
@@ -638,6 +690,19 @@ pub(super) fn dispatch_send_prompt_inner(
             }
         };
 
+        if reconnect_pending
+            && matches!(
+                exec_result,
+                CommandResult::PassThrough(_)
+                    | CommandResult::QueueCommand(_)
+                    | CommandResult::QueueLater { .. }
+                    | CommandResult::InjectSkill { .. }
+            )
+        {
+            agent.show_toast("Reconnecting, please wait...");
+            return vec![];
+        }
+
         // Map CommandResult to pager behavior. (MRU persistence is queued
         // off-thread inside `record_command_use` above.)
         match exec_result {
@@ -684,10 +749,40 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
+                // Local slash actions (including `/view-plan`) must run even
+                // while a leader reconnect is in progress. The reconnect
+                // guard below only blocks model prompts and PassThrough.
                 return dispatch(action, app);
             }
             CommandResult::QueueCommand(cmd_text) => {
                 agent.session.enqueue_command(cmd_text);
+            }
+            CommandResult::QueueLater {
+                text: held,
+                as_command,
+                wire_blocks,
+                display_as_skill,
+            } => {
+                if as_command {
+                    agent.session.enqueue_command(held);
+                } else {
+                    let qid = agent.session.next_queue_id;
+                    agent.session.next_queue_id += 1;
+                    agent.start_pending_live_prompt_task(&held);
+                    agent
+                        .session
+                        .pending_prompts
+                        .push_back(crate::app::agent::QueuedPrompt {
+                            wire_blocks,
+                            display_as_skill,
+                            ..crate::app::agent::QueuedPrompt::plain(
+                                qid,
+                                held,
+                                crate::app::agent::QueueEntryKind::Prompt,
+                            )
+                        });
+                }
+                skip_drain = true;
             }
             CommandResult::InjectSkill {
                 display_text,
@@ -700,6 +795,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 // invocation: display_as_skill owns styling (no ranges).
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
+                agent.start_pending_live_prompt_task(&display_text);
                 agent
                     .session
                     .pending_prompts
@@ -735,11 +831,19 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                // Mid-turn Enter: slash PassThrough that is not a named hold
+                // (`/goal ...`, unknown shell builtins) merges into this turn.
+                // `/queue /finish` is QueueLater above, not this arm.
+                if consume_input && agent.session.state.is_turn_running() {
+                    let images = agent.prompt.drain_images();
+                    return enqueue_if_interject_dropped(app, id, pass_text, images);
+                }
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
                     .slash_controller
                     .recognized_token_ranges(&pass_text, &agent.session.models);
+                agent.start_pending_live_prompt_task(&pass_text);
                 agent
                     .session
                     .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
@@ -756,13 +860,17 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         return dispatch(Action::Quit, app);
     } else {
-        // ── Server-authoritative immediate send (plain prompt only) ──
-        // A plain prompt typed while a turn is RUNNING is sent to the agent
-        // immediately instead of being held in the local drip-feed queue. The
-        // agent appends it to its authoritative `pending_inputs` (no concurrent
-        // turn starts — validated keystone) and drives the drain via
-        // `x.ai/queue/changed`. We render an optimistic echo into the shared
-        // queue keyed by `prompt_id`; the broadcast reconciles it by id.
+        if reconnect_pending {
+            agent.show_toast("Reconnecting, please wait...");
+            return vec![];
+        }
+        // ── Composer Enter while a turn is running: soft interject ──
+        // Freeform text (and slash PassThrough that is not a named hold) is
+        // merged into this turn via `x.ai/interject`. It must not wait on
+        // `pending_prompts` / `pending_inputs` as the next serial prompt.
+        // Immediate server-send below is for follow-up chips, palette
+        // dispatch, and the leader-mode idle-with-nonempty-shared-queue
+        // window, not for mid-turn Enter.
         //
         // The IDLE case is unchanged (falls through to the local path below,
         // which drains instantly and renders the user block) — preserving the
@@ -790,9 +898,23 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.clear_follow_ups();
         }
 
+        // Mid-turn composer Enter with text merges into the running turn
+        // (soft interject). A parked sendable wait (task-output / wait-all)
+        // is send-now, not interject — the named tests encode immediate
+        // `SendPrompt`. Named `/queue` hold and empty Enter (plan Approve /
+        // force-send of a queued row) are other paths. Ctrl+Enter stays
+        // cancel-and-send (`SendPromptNow`).
+        if consume_input
+            && agent.session.state.is_turn_running()
+            && !agent.is_parked_on_sendable_wait()
+        {
+            let images = agent.prompt.drain_images();
+            return enqueue_if_interject_dropped(app, id, text, images);
+        }
+
         // If the user queues a follow-up while a turn is already running, surface
-        // a short tip advertising send-now — plain Enter queues; Enter again on
-        // the emptied composer sends the queued message now (cancel-and-send).
+        // a short tip advertising send-now — empty Enter on the composer
+        // force-sends the top queued row (cancel-and-send for a local row).
         let queued_while_running = agent.session.state.is_turn_running();
 
         // Composer-recognized slash tokens at submit time: styles the
@@ -852,6 +974,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
             agent.note_self_originated_prompt(&prompt_id);
+            agent.start_and_bind_live_prompt_task(&prompt_id, &text);
             // Plain image-free sends stay unarmed: shell queue state and cancelTrigger decide disposition.
 
             if consume_input {
@@ -894,6 +1017,9 @@ pub(super) fn dispatch_send_prompt_inner(
             if queued_while_running && let Some(agent) = app.agents.get_mut(&id) {
                 agent.maybe_toast_plan_feedback_queue();
             }
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.persist_pending_prompts();
+            }
             return vec![Effect::SendPrompt {
                 agent_id,
                 session_id,
@@ -903,6 +1029,7 @@ pub(super) fn dispatch_send_prompt_inner(
             }];
         }
 
+        agent.start_pending_live_prompt_task(&text);
         agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
@@ -931,6 +1058,29 @@ pub(super) fn dispatch_send_prompt_inner(
         }
     }
 
+    if skip_drain {
+        if let Some(agent) = app.agents.get_mut(&id)
+            && consume_input
+        {
+            let trimmed_key = text.trim().to_string();
+            if !trimmed_key.is_empty() {
+                agent
+                    .session
+                    .prompt_history
+                    .retain(|p| p.trim() != trimmed_key);
+                agent.session.prompt_history.insert(0, text.clone());
+                if agent.session.prompt_history.len() > 200 {
+                    agent.session.prompt_history.truncate(200);
+                }
+            }
+        }
+        app.show_toast("Queued on the prompt queue. It will not run this turn.");
+        if let Some(agent) = app.agents.get_mut(&id) {
+            agent.persist_pending_prompts();
+        }
+        return vec![];
+    }
+
     let drain = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return effects;
@@ -956,6 +1106,9 @@ pub(super) fn dispatch_send_prompt_inner(
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.persist_pending_prompts();
+    }
     effects
 }
 
@@ -1137,6 +1290,13 @@ pub(super) fn handle_prompt_response(
                 .map(str::to_string),
             Err(_) => prompt_id.clone(),
         };
+        // Driver PromptResponse owns exec metrics (usage lives here). Fail-open
+        // if grok_oss.db is missing. Stale/discarded ids no-op if unbound.
+        let usage_meta = result.as_ref().ok().and_then(|pr| pr.meta.as_ref());
+        agent.complete_live_prompt_task(
+            response_pid.as_deref().or(prompt_id.as_deref()),
+            usage_meta,
+        );
         // The turn-end RPC for this prompt arrived — disarm the
         // lost-response reconcile that `handle_prompt_complete` armed
         // for it (the broadcast is emitted before the RPC response, so
@@ -1565,6 +1725,14 @@ pub(super) fn handle_prompt_response(
         } else {
             None
         };
+
+        // Auto-run trailing `## Next implement prompt` `/implement` before
+        // drain. `bash_turn` is already cleared; skip bash via `was_bash_turn`.
+        // A failed 502 turn never reaches here as `Ok`. A 502 retry that later
+        // succeeded is a successful turn and must loop.
+        if result.is_ok() && !was_cancelling && !was_bash_turn {
+            crate::app::auto_implement::on_successful_turn_end(agent);
+        }
 
         let drain = maybe_drain_queue(agent);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);

@@ -1856,8 +1856,19 @@ pool_size = 3
         );
     }
 
+    fn pin_writable_grok_home() {
+        if std::env::var_os("GROK_HOME").is_none() {
+            let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&home);
+            unsafe {
+                std::env::set_var("GROK_HOME", home);
+            }
+        }
+    }
+
     fn create_temp_git_repo(file_count: usize) -> (tempfile::TempDir, PathBuf) {
         crate::test_support::ensure_hermetic_git_on_path();
+        pin_writable_grok_home();
         let dir = tempfile::tempdir().expect("create tempdir");
         let repo_path = dir.path().to_path_buf();
 

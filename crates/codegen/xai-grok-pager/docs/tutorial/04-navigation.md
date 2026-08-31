@@ -18,11 +18,13 @@ scrollback gets a selection you can move with the arrow keys.
 - **`←`/`→`** — collapse/expand the selected entry; long tool output stays
   out of your way until you want it.
 - **`Enter`** — open the selected entry in a fullscreen viewer.
+- **`Ctrl+T`** — expand or collapse thinking (chain of thought). Same chord
+  with the composer focused or in a nested overlay.
 
 ## Panes
 
-- **`Ctrl+T`** — toggle the **todos pane**: Grok's live plan for the
-  current task.
+- **`Ctrl+Shift+T`** — toggle the **todos pane**: Grok's live plan for the
+  current task. The status-row **tasks N/M** badge is the same toggle.
 - **`Ctrl+G`** — toggle the **tasks pane**: everything running in the
   background, with its status.
 

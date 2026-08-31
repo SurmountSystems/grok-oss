@@ -184,6 +184,32 @@ fn merge_tool_params(
         }
     }
 }
+
+/// Restricted toolsets without Agent cannot observe or cancel background
+/// work. Force every bash background mode off so finalize does not keep
+/// `auto_background_on_timeout` true while `enabled_background` is false.
+fn disable_all_background_bash_modes(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+) {
+    let mut disabled = serde_json::Map::new();
+    disabled.insert("enabled_background".into(), serde_json::Value::Bool(false));
+    disabled.insert(
+        "auto_background_on_timeout".into(),
+        serde_json::Value::Bool(false),
+    );
+    disabled.insert(
+        "allow_background_operator".into(),
+        serde_json::Value::Bool(false),
+    );
+    merge_tool_params(
+        tool_config,
+        &[
+            "GrokBuild:run_terminal_cmd",
+            "GrokBuildConcise:run_terminal_cmd",
+        ],
+        &disabled,
+    );
+}
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
@@ -950,10 +976,17 @@ impl AgentBuilder {
                 );
             }
             if unresolved.is_empty() {
+                let bash_in_allowlist = definition.tools.iter().any(|t| {
+                    claude_tool_kind(t) == Some(ToolKind::Execute)
+                        || tool_id_eq(t, "run_terminal_cmd")
+                        || tool_id_eq(t, "run_terminal_command")
+                });
+                let bash_lifecycle = ["get_task_output", "kill_task", "wait_tasks"];
                 tool_config.tools.retain(|tc| {
                     tool_id_matches(&definition.tools, &tc.id)
                         || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
                         || (has_agent_entry && task_deps.contains(&short_tool_name(&tc.id)))
+                        || (bash_in_allowlist && bash_lifecycle.contains(&short_tool_name(&tc.id)))
                         || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
                 });
                 tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
@@ -1023,17 +1056,17 @@ impl AgentBuilder {
             }
         }
         if definition.allowed_subagent_types.as_deref() == Some(&[]) {
-            let task_deps = ["task", "get_task_output", "kill_task", "wait_tasks"];
+            // Spawning is blocked: disable every bash background mode and
+            // drop get_task_output/kill_task/wait_tasks so finalize does
+            // not require a background-capable bash tool. Nested grok-oss
+            // with an unrestricted toolset (empty tools allowlist) does
+            // not take this branch and still auto-backgrounds at the wait
+            // cap when background is allowed.
+            disable_all_background_bash_modes(&mut tool_config);
+            let lifecycle = ["task", "get_task_output", "wait_tasks", "kill_task"];
             tool_config
                 .tools
-                .retain(|tc| !task_deps.contains(&short_tool_name(&tc.id)));
-            for tc in &mut tool_config.tools {
-                if short_tool_name(&tc.id) == "run_terminal_cmd" {
-                    let params = tc.params.get_or_insert_with(Default::default);
-                    params.insert("enabled_background".into(), false.into());
-                    params.insert("auto_background_on_timeout".into(), false.into());
-                }
-            }
+                .retain(|tc| !lifecycle.contains(&short_tool_name(&tc.id)));
         }
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();
@@ -1238,10 +1271,11 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     resume_from_param: "${{ params.task.resume_from }}",
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
+    write_paths_param: "${{ params.task.write_paths }}",
 };
-/// Concise task-tool description for child (L2) sessions. L2 always
-/// spawns L3 for any tools/work. L2 never does greps, edits, or tests.
-/// Three layers always. Do not compact-and-continue a product restore on L2.
+/// Concise task-tool description for child (L2) sessions. Spawn L3 only
+/// if the problem is actually hard. Easy work can stay on L2. L2 may
+/// compact. L3 must not compact-and-continue.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
@@ -1249,10 +1283,8 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Whenever work is to be done and tools are to be called, agents are \
-three layers deep. Always. Including implement loops. \
-You MUST always spawn L3 for any tools/work. L2 never does greps, edits, or tests. \
-Do not compact-and-continue a product restore on L2. \
+Spawn L3 only if the problem is actually hard. Easy work can stay on L2. \
+Including implement loops. L2 may compact. L3 must not compact-and-continue. \
 Give each L3 a distinct description. One reviewer unless the operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\
@@ -1666,24 +1698,40 @@ mod tests {
     #[test]
     fn child_task_description_is_concise() {
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("three layers deep. Always"),
-            "child description must teach three layers always"
+            CHILD_TASK_DESCRIPTION.contains("Spawn L3 only if the problem is actually hard"),
+            "child description must match 2026-08-20: spawn L3 only if actually hard"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3 for any tools/work"),
-            "child description must tell L2 to always spawn L3 for any tools/work"
+            CHILD_TASK_DESCRIPTION.contains("Easy work can stay on L2"),
+            "child description must allow easy work to stay on L2"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
-            "child description must forbid L2 greps, edits, and tests"
+            !CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3"),
+            "child description must not force MUST always spawn L3"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("MUST spawn L3 for all tool work"),
+            "nested L2 prompt must not teach MUST spawn L3 for all tool work"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
+            "child description must not ban L2 tool work when the job is easy"
         );
         assert!(
             CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
-            "child description must include implement loops in the three-layer rule"
+            "child description must include implement loops"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Do not compact-and-continue"),
-            "child description must forbid compact-and-continue on L2"
+            CHILD_TASK_DESCRIPTION.contains("L3 must not compact-and-continue"),
+            "child description must forbid compact-and-continue on L3"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("L2 may compact"),
+            "child description must keep L2 allowed to compact"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("product restore on L2"),
+            "child description must not keep the old L2 compact-and-continue ban"
         );
         assert!(
             !CHILD_TASK_DESCRIPTION.contains("many greps"),

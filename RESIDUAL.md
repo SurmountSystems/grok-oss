@@ -6,6 +6,67 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Queue Send now, rebuild identity, and honest live work are in the tree with named `just test-remote` green (2026-08-28).** Rebuild identity signals only grok-oss with SIGUSR1, does not arm peer re-exec on Ctrl-C, keeps nested agents for resume, copies the previous binary to `grok-oss.prev`, and compiles from the git index. Queue Send now paints a mouse `[Send now]` hit on each visible queue row, does not advertise Enter as send-now during a running subagent wait, and persists the pager queue in session `pending_prompts.json`. Honest live work covers the sparkler, overlay tool name, Subagents **X**, overlay **stop**, and idle plan footer (Approve / Comment / Revise / Exit; Clarify is not idle; empty Enter never Approves). The overlay test that names the tool when there is no specialist is green. Reports: `/home/hunter/.agents/reports/impl-rebuild-identity.md`, `/home/hunter/.agents/reports/impl-queue-send-now.md`, `/home/hunter/.agents/reports/impl-honest-live-work.md`, `/home/hunter/.agents/reports/impl-honest-live-work-proof.md`. This running grok-oss binary will not show these changes until you install grok-oss and reopen the session.
+
+- **Full workspace quality (`just check-remote`) is green (2026-08-28).** Wrapper printed `EXIT:0`. Store path `/nix/store/q2isvv5dpy44jphzhj1gspvadn0g5ndv-workspace-cargo-quality-1.0.3`. Receipt: `fmt: cargo fmt --all -- --check`, clippy-as-check `--workspace --all-targets`, `Summary [ 132.949s] 30874 tests run: 30874 passed, 449 skipped`, `doctests: cargo test --workspace --doc`. `flake/workspace-quality.nix` puts `pkgs.ripgrep` on that drv and tees nextest stderr into `nextest.log`. `check-remote` takes only the `/nix/store` quality path out of `nix_retry` `-L` stdout. `nix_retry` does not pass `--eval-store` to `nix store cat`. Named contract: grok-nix-helper `check_remote_prints_quality_receipt_on_cache_hit`. This running grok-oss binary will not show the queue and rebuild work until you install grok-oss and reopen the session. Report: `/home/hunter/.agents/reports/impl-queue-rebuild-chrome-closeout.md`.
+
+- **`is_grok_process` still matches a `grok` substring on kill-safety paths other than `/rebuild` SIGUSR1.** Production rebuild signaling uses `pid_is_grok_oss_product` / `is_grok_oss_cli_identity`. On Linux, `is_grok_process` still reads `/proc/<pid>/cmdline` and returns true when those bytes contain `grok`. Callers include pager-bin leader kill, running-session filters, and `is_grok_process_strict` on Linux and Windows. Tightening those paths so a stock process named `grok` is not killed is leftover in this tree.
+
+- **Image bytes are not stored in `pending_prompts.json`.** Restored queue rows keep `[Image #N]` tokens in the text. Pixel files stay under the session `assets/` and `images/` directories.
+
+- **`aws-sdk-s3` / `lru` 0.16.4 (`RUSTSEC-2026-0253`) is still deferred to fargo.** This closeout did not bump Amazon S3 1.141.0. Resume that bump in fargo. Do not fetch crates.io to skip the delayed crate index. See the cargo-audit Open bullet below.
+
+- **fargo still owns delayed-index / parent bumps (pinned 2026-08-27).** Audit-wave path copies under `third_party/` (async-openai, syntect, bm25, rhai, pdf_oxide, ttf-parser) were **deleted** so `just install` is not compiling those trees. crates.io / delayed-index crates are back (and `cargo audit` warnings for backoff, bincode, fxhash, smartstring, ttf-parser will return). `chacha20` stays a git tag pin (`chacha20-v0.10.2`). Resume in fargo: delayed-index bumps (including `aws-sdk-s3` 1.144.0 / `lru` 0.16.4), Surmount git forks that later enter that index, or drop parents. Do not add grok-oss path vendoring again. Do not fetch crates.io to skip the wait. fargo is not specified in this tree.
+
+- **Workspace `cargo audit` (2026-08-27).** **0 vulnerabilities.** `quick-xml` 0.41.0. `rsa` 0.9 / RUSTSEC-2023-0071 is gone (`jsonwebtoken` uses `aws_lc_rs`). `git2` 0.21. `yaml-rust` gone (syntect yaml-load uses yaml-rust2). `bincode` / RUSTSEC-2025-0141 is gone (syntect path patch, no dump-load; report `impl-syntect-bincode.md`). `async-std` gone (dark-light 3). `rustybuzz` gone (resvg/fontdb bump). `lru` 0.12.5 gone (`ratatui` 0.30). Helpers are workspace members. **`aws-sdk-s3` / `lru` 0.16.4 (`RUSTSEC-2026-0253`) is deferred to fargo (pinned 2026-08-27).** Operator order: do not bump Amazon S3 1.141.0 to 1.144.0 in this grok-oss wave. The delayed crate index still tops at 1.142.0 (same unsound `lru` 0.16). Do not fetch crates.io to skip that wait. Resume this bump in fargo. It is not forgotten. fargo is not specified in this tree. Yanked `aes` 0.9.0, `chacha20` 0.10.0, and `spin` 0.9.8 / 0.10.0 are gone (aes 0.9.2 and spin 0.9.9 / 0.10.1 on the delayed index; chacha20 0.10.2 path-patched from git tag `chacha20-v0.10.2`; report `impl-yanked-aes-spin.md`). `ttf-parser` / RUSTSEC-2026-0192 is gone (path-patched `third_party/ttf-parser` on skrifa; pdf_oxide 0.3.77 still the delayed-index latest). `smartstring` / RUSTSEC-2026-0249 is gone (vendored `rhai` uses `compact_str`; report `impl-rhai-smartstring.md`). `fxhash` / RUSTSEC-2025-0057 is gone (vendored `bm25` uses `rustc-hash`; report `impl-bm25-fxhash.md`). `backoff`/`instant` are gone (path-patched `third_party/async-openai` keeps `ReasoningEffort::Max` without the `backoff` crate). `paste` / RUSTSEC-2024-0436 is gone (`tikv-jemalloc-ctl` dropped; pager-bin mallctl goes through `tikv-jemalloc-sys`). Named PPTX contracts unchanged. Reports: `impl-rsa-marvin.md`, `impl-audit-warnings.md`, `impl-audit-warnings-round2.md`, `impl-workspace-members.md`, `impl-jemalloc-paste.md`.
+
+- **`just update` exists (shipped 2026-08-27; one lock 2026-08-27).** The
+  recipe refreshes the one workspace `Cargo.lock` (members include
+  `cargo-mem-guard` and `grok-nix-helper`), then `flake.lock`. It does not
+  compile and does not run `just check-remote`. The parent or operator
+  runs it. Named test: grok-nix-helper `justfile_contracts`
+  `just_update_refreshes_workspace_and_flake_locks`. **CDN
+  `.sha256` publish stays operator-owned** (same remaining-shell bullet).
+  Quality order fmt, then clippy, then nextest is landed (next Open
+  bullet). Helper bootstrap no longer blocks `just check-remote` (same
+  remaining-shell bullet). Report:
+  `/home/hunter/.agents/reports/impl-polish-update.md`.
+
+- **Quality nextest link OOM (2026-08-26).** The named quality drv
+  `/nix/store/1mi3sjz6q2cakj10mbn40zxa8x6jbvkw-workspace-cargo-quality-1.0.3.drv`
+  died after clippy: `cargo nextest run --workspace --locked` internally
+  compiled workspace test binaries, and several mold
+  processes were SIGKILL'd (`ld returned 137`, 128+9) while linking
+  `xai-grok-shell` test binaries including `test_leader_death_repro`.
+  That is not a rustc type error. Not a test to skip. The builder host
+  has about 256GiB RAM; nix-daemon MemoryMax is 32GiB. cargo-mem-guard
+  reads host `/proc/meminfo`, so wrapping quality nextest would not
+  have restarted. **Landed in tree:** nextest `--build-jobs` (and
+  `cargo test --doc --jobs`, named-test `cargo test --jobs`) capped at
+  4 (`CARGO_LINK_JOBS`); clippy stays at 32; `just nix_retry` retries
+  `ld returned 137` instead of fail-fast could-not-compile. Quality
+  clippy-as-check is workspace `--all-targets` (members include
+  grok-nix-helper and cargo-mem-guard), so a helper `E0106` fails at
+  clippy instead of a late `cargo test`. Named-test stays one
+  cargo kind (no late helper `cargo test` there). **Leftover is
+  operator-owned:** retry `just check-remote` on this new drv. If
+  four parallel mold links still SIGKILL, raise nix-daemon MemoryMax
+  on the VPS (32GiB on a 256GiB host is the cgroup, not host RAM).
+  Do not drop `--locked`. Named tests: `linker_sigkill_is_transient_even_when_could_not_compile`,
+  `test-nix-retry-linker-sigkill-retries`, quality/named-test
+  `--build-jobs` `$CARGO_LINK_JOBS` contracts,
+  `workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests`.
+  Reports: `/home/hunter/.agents/reports/impl-mold-sigkill.md`,
+  `/home/hunter/.agents/reports/impl-quality-fmt-clippy-nextest.md`.
+
+- **Remaining shell after recon conversion (open; 2026-08-25; installer SHA-256 and helper contracts 2026-08-25).** Git recon is `grok-nix-helper` (`put-history-on-xai`, `import-upstream-export`, `join-main-into-onto`, `detect-upstream-export`, `recon-status`, `sync-upstream`, `replay-onto-upstream`). Import and join **prepare** the tree and **hand** `git commit -S` to a human TTY (`DO_COMMIT=1` tries a signed commit). Default import **stays on `import/*`** until that signed commit exists; it does not `git checkout` back onto a dirty index. Never `commit.gpgsign=false`. **POSIX `install.sh` / `install-enterprise.sh` stay shell** so a host without Nix can curl-install. They now pin SHA-256 of the published `${artifact}.sha256` file (fail-closed on miss or mismatch). Not SHA-1. Not a Nix-only installer. Named tests in `xai-grok-update` `test_install_sh.rs`: `install_scripts_refuse_when_sha256_does_not_match`, `install_scripts_refuse_when_sha256_checksum_file_is_missing`, `install_scripts_refuse_when_sha256_checksum_file_is_unreadable`, `install_scripts_fetch_published_sha256_and_install_when_it_matches`. **PowerShell `install.ps1` / `install-enterprise.ps1` now pin the same SHA-256 file** with built-in `Get-FileHash -Algorithm SHA256` (no Nix). Named tests: `windows_install_scripts_pin_published_sha256_not_sha1`. **The SpaceXAI internal auto-updater now pins SHA-256 of those bytes, then still smoke-tests `--version`.** Named tests: `install_internal_refuses_when_sha256_does_not_match`, `install_internal_refuses_when_sha256_checksum_file_is_missing`, `install_internal_refuses_when_sha256_checksum_file_is_unreadable`, `install_internal_installs_when_published_sha256_matches`. **The GitHub Releases installer now pins SHA-256 of those same published checksum bytes** (GitHub release asset `${artifact}.sha256`). Named tests: `install_gh_release_refuses_when_sha256_does_not_match`, `install_gh_release_refuses_when_sha256_checksum_file_is_missing`, `install_gh_release_refuses_when_sha256_checksum_file_is_unreadable`, `install_gh_release_installs_when_published_sha256_matches`. **Still leftover on that path:** xAI CDN must actually publish the `.sha256` files or curl-install and Windows `irm | iex` fail closed. GitHub Releases must actually publish `${artifact}.sha256` assets or `install_gh_release` fails closed. Those publishes are operator-owned, not a grok-build patch. npm installs still use npm's own integrity pin, not this published `.sha256` file. Hook **examples** under `xai-grok-hooks/examples/hooks/bin/*.sh` stay `.sh` because operators write hooks in shell. **justfile:** product recon recipes are thin `grok-nix-helper` trampolines. Grep-only justfile/flake contracts moved into grok-nix-helper `justfile_contracts` (workspace nextest). Isolated crane `grok-nix-helper-tests` skips those when the repo root is not next to the crate. **`just require_system` / `just current_system` are a justfile CI_SYSTEM/uname check (shipped 2026-08-26).** They must not require a prebuilt `grok-nix-helper` and must not tell the operator to realize `.#grok-nix-helper` first. **`just check-remote` / `just require_remote_builder` must not `nix build .#grok-nix-helper` (shipped 2026-08-26).** Preflight is justfile/uname/SSH (builders file, known_hosts, inject `GROK_NIX_REMOTE_SYSTEM_FEATURES` or live BatchMode). **`just nix_retry` / `just flake-meta` / the `just check-remote` metadata step must not require `grok_nix_helper_bin` (shipped 2026-08-26).** The live `nix_retry` body is the justfile recipe (argv exec of `"$@"`, fail-fast on quality/SSH, force-remote flags). Do not tell the operator to realize `.#grok-nix-helper` first. That realize copied gigabytes and contended the ssh-ng upload lock next to a specs `nix flake check`. `grok_helper` assigns the helper path before exec (bash `set -e` does not stop `exec "$(failing-cmd)"`; that became `exec: : not found`). Locate order for later recipes that still need the helper: `GROK_NIX_HELPER`, PATH, `result/bin`, crate target. Never cargo/rustc the helper on this laptop. Never nix-build the helper from `grok_nix_helper_bin`. Named tests: `require_system_and_current_system_do_not_require_helper_binary`, `nix_retry_flake_meta_and_check_remote_do_not_require_helper_binary`, `grok_helper_does_not_exec_empty_helper_path`, `grok_nix_helper_bin_locate_order_does_not_cargo_on_force_remote`, `check_remote_exports_force_remote_before_require_remote_builder`, `require_remote_builder_is_justfile_preflight_without_helper`, `check_remote_and_require_remote_builder_do_not_nix_build_helper`. **What still is bash, on purpose:** bootstrap `grok_nix_helper_bin`, `grok_helper` trampoline, live `nix_retry` justfile body `"$@"` (so `#` in a word cannot become a bash comment), `require_remote_builder` preflight, `check-remote` env + quoted `.#` attr, `cargo-remote` / `test-remote` argv trampolines, `cargo-ci`, `dev` / `dev-ci`, `upstream-assert-process-pins` / `upstream-land-filters` argv, limits live recipes, runtime smokes (`test-nix-retry-*`, `test-ensure-working-nix-path`, `test-check-remote-builders-file-smoke`, preflight helpers that invoke `just require_remote_builder` without grepping the recipe body, `test-test-remote-requires-filter`), and `test-extra` recipes that still `nix eval` instantiated quality attrs (`test-clippy-all-targets`, `test-check-remote-cargo-is-remote-nix-derivation`, vendor/cores/clippy-workers/deps/omits-local-big-parallel/workspace-rustc-not-local-eligible). **`just nix_retry` / `just flake-meta` / the `just check-remote` metadata step no longer need a locatable helper binary (shipped 2026-08-26).** The live `nix_retry` body is the justfile recipe. **Still leftover:** later recipes (`cargo-remote` / `test-remote`, recon) still need a locatable helper binary (`GROK_NIX_HELPER` / PATH / `result/bin` / crate target only; no realize). The helper `retry` subcommand remains for `grok-nix-helper retry` unit tests; keep those fail-fast classes aligned with the live justfile `nix_retry` body. The Rust `require-remote-builder` subcommand remains for `remote-named-cargo` and unit tests; keep it aligned with the justfile preflight. Onto recovery may still `nix build` the helper by hand when it is not in an early cherry-pick tree (not the check-remote path). Local `just ci` still needs PATH / `GROK_NIX_HELPER` / `result/bin`. Force-remote max-jobs / system-features bind `force_remote.rs`. Host `~/.agents/skills/git-recon` (and `upstream-export-import`) now name `grok-nix-helper`, not deleted `scripts/*.sh`. Do not wrap old `.sh` in `writeShellApplication` (**no bash-in-nix**). Operator owns `just check-remote`. SHA-1 is git object ids only. Helper logs must not print tokens, API keys, or secret env values. Law: `AGENTS.md` hard constraint 16; `FORK.md` Packaging **SHA-1 is git object ids only**. **Workspace `--locked` lockfile (shipped 2026-08-26).** Root `Cargo.lock` records `sha2` on `xai-grok-update` so quality deps `cargo check --locked --all-targets` matches member manifests. `cargo-mem-guard` and `grok-nix-helper` are workspace members (one lock). Isolated crane filesets still avoid the parent workspace `Cargo.toml`. Do not drop `--locked`. Named tests: `workspace_root_members_include_cargo_mem_guard_and_grok_nix_helper`, `workspace_quality_deps_cargo_check_stays_locked`. Quality flake comments still say cargo 1.97 in a few places while `rust-toolchain.toml` is stable 1.98.0 (no global `cargo --jobs` is still true). Operator owns `just check-remote` on this tree.
+
+- **Task tracking system (open; Grok OSS product; named 2026-08-22).** Unique to this product, not GitHub. More formal than the session todo board. Less formal than Linear or GitHub issues. Local first always. Do not replace the session todo board (Ctrl+T, status chip `tasks N/M`). Do not shorten the name. The live HITL board is already there. Intended chrome is **not** shipped: tasks on a left sidebar, plan stays a right sidebar, like an AI-assisted Gantt chart in grok-oss. Durable rows already live in `$GROK_HOME/grok_oss.db` (`prompt_tasks`, drafts, templates, `prompt_exec_metrics`). That store already records tokens and honest wall duration on composer submit. It does not yet fill or average the estimate columns, and it has no occupancy column. This is not a second GitHub. Host `AGENTS.md` is not dual-pinned for this product name. Board `feat:task-tracking-system`. Report: `~/.agents/reports/feat-task-tracking-system.md`.
+
+- **2026-08-22 mid-turn Enter interjects (product shipped in source; process leftover).** Composer Enter with explaining-work text while a turn is running is `x.ai/interject` into this turn, not a serial `#1` queue row. Named `/queue /finish` still holds. Empty Enter does not Approve a plan. Ctrl+Enter is still cancel-and-send. **Process leftover:** L1 must treat that interjected user text as additive immediately (board, remaining pointer, spawn). Do not wait for idle. **Docs leftover:** `FORK.md` still says Ctrl+Enter never cancels; user-guide `03-keyboard-shortcuts` matches that stale story. Code and PTY say Ctrl+Enter is cancel-and-send; Enter is now interject. Live TUI needs rebuild/install. Report: `/home/hunter/.agents/reports/fix-prompt-queue-blocks-explain.md`. Law: `AGENTS.md` additive asks, mid-turn Enter is this turn.
+
+- **2026-08-22 polish, billing honesty, sluggish nested agents, compact occupancy.** Pointer only. The inventory lives on the operator machine reports home at `~/.agents/reports/remaining-2026-08-22-incidents.md`. That report is not in git. `/polish` is a default Grok OSS skill (product tree `crates/codegen/xai-grok-bundle/skills/polish/`). SuperGrok is paid. grok-oss limits is a client printout, not xAI billing truth. Do not call any pool used up. Do not paste that inventory into D1.
+
 - **Running grok-oss sessions (shipped 2026-08-16).** Slash `/running` (alias `/windows`) and CLI `grok-oss running` / `grok-oss running --json` list live grok-oss TUI windows from `$GROK_HOME/active_sessions.json`. Identity is `(pid, session_id)`. Missing heartbeat is activity `unknown`. Title is the on-disk session summary. Default headless stays unlisted unless `GROK_TRACK_HEADLESS` is already set. Leader daemons stay on `grok-oss leader list`. `/rebuild` still signals each live grok-oss PID once (dedupe by PID). This is not Agent Dashboard. Lasting truth: [`FORK.md`](FORK.md) Product **Running grok-oss sessions**; user-guide `04-slash-commands`, `17-sessions`, `23-dashboard` (cite only). Reports: `.agents/reports/impl-running-registry.md`, `impl-running-heartbeat.md`, `impl-running-slash-cli.md`, `impl-running-rebuild.md`, `impl-running-docs.md`. Live TUI still needs install plus quit/reopen before `/running` appears in an already-open window. **Not leftover implement of this feature:** the plan-present idle cue, sparse UI, or SuperGrok Heavy ranking. Those stay their own Open items.
 
 - **SuperGrok Heavy ranking leftover (open; not a product-code diagnose).** Live chrome now says SuperGrok dollar credits for the prepaid SuperGrok top-up meter (slice 5 shipped). Omit the word extras in user-facing copy, residual, reports, board titles, comments that humans read, and process law. SuperGrok is paid. Never call SuperGrok free. **SuperGrok Heavy ranking optional label is not implemented.** SuperGrok Heavy is a real tier, distinct from standard SuperGrok. Personal SuperGrok Heavy and Business/Team SuperGrok Heavy are separate weekly compute pools. They do not combine. Switching workspace switches which pool is drawn from. Standard Business seats are SuperGrok. Heavy is an explicit upgrade. xAI does not publish fixed numeric quotas. Remaining percent is in the product Usage view for that workspace. The operator has SuperGrok Heavy and does not see it used. Board `bug:supergrok-heavy-not-used` owns the diagnose. This pin does not diagnose product code. Law: `AGENTS.md` hard constraint 4. Report: `.agents/reports/pin-omit-extras.md`. An occupancy check on this host (2026-08-16) found two SuperGrok OIDC principals already stored, one personal and one Team/Business; synthesis: `.agents/reports/ask-te-second-supergrok-login-stored.md`.
@@ -23,9 +84,11 @@ or code — not only here. Closed campaign history:
   dark seam, theme+hooks, shell stack/interject/usage/stream/external-auth.
   Package clippy mop for shell / pager / tools / update / workflow is green
   under `-D warnings`. **Still open (not this mop):** operator dogfood after
-  install (first Open bullet); PTY grandchild-kill flake reliability
-  (`close_pty_kills_a_background_grandchild`); a later second onto/join
-  after this mop is finalized. Do not start a second onto from residual.
+  install (first Open bullet); a later second onto/join after this mop is
+  finalized. Do not start a second onto from residual. PTY close now signals
+  descendant process groups so `close_pty_kills_a_background_grandchild`
+  cannot sit on a leftover `sleep 300` (report:
+  `/home/hunter/.agents/reports/fix-close-pty-grandchild-hang.md`).
 
 - **Dogfood / next-session gate (2026-08-09; open until install + dogfood done).**
   Tree work for the plan wave (A/B/C/E chrome, plan Revise, stale plan batch,
@@ -51,7 +114,10 @@ or code — not only here. Closed campaign history:
   marker (the older rebuild-auto-resume-after-error slice). Soft-stop
   **button** and mid-sample freeze-without-cancel are **not** shipped.
   CLI `grok-oss rebuild` is documented; clap has no `Rebuild` variant.
-  TUI `/rebuild` is the wired operator path. Included SuperGrok period C4
+  TUI `/rebuild` is the wired operator path. `/economic-mode` is a pager
+  command that queues text only; the shell has no BuiltinAction. Do not
+  list that slash as shipped. Lasting leftover honesty: [`FORK.md`](FORK.md)
+  Product **Economic mode** and **Versioning**. Included SuperGrok period C4
   stays server ticket (below §4). Post-dogfood process feature still open:
   thoughtful todos (next Open bullet). Operator dogfood after install stays
   open in this item until someone actually runs `/rebuild` (this wave did
@@ -72,28 +138,26 @@ or code — not only here. Closed campaign history:
   bullet below. Live snapshot:
   `.agents/reports/live-tasks-2026-08-15.md`.
 
-- **ACP edit tools take a per-path write lock (shipped 2026-08-15).**
-  `search_replace`, `apply_patch`, `write`, OpenCode `edit`, and
-  `hashline_edit` (`GrokBuildHashline:hashline_edit`) acquire the path
+- **ACP edit tools take a per-path write lock (shipped 2026-08-15;
+  spawn `write_paths` 2026-08-22).** `search_replace`, `apply_patch`,
+  `write`, OpenCode `edit`, and `hashline_edit` acquire the path
   automatically as part of the tool call. Happy path is silent (no lock
   argument). A held path is a tool error that names the holder and the
   file. The tool does not write, wait, or show a human steal, skip, or
-  wait menu. Agents resolve the conflict by talking to each other. Lock
-  releases when the call finishes. File-level infer-from-path verify
-  still runs under the same hold. OpenCode `edit` acquires after
-  directory, same-string, and bulk-edit checks, and holds the lock
-  through rustfmt and clippy-driver on the same `.rs` path.
-  `hashline_edit` acquires on the joined path after
-  `resolve_model_path` so it collides with the other tools on the same
-  file. FORK subsection **ACP per-path write lock**. Named tests:
-  module filter `per_path_write_lock` (original ACP fixtures plus
-  `hashline_edit_refuses_when_another_agent_holds_the_path` and
-  `hashline_edit_happy_path_does_not_mention_the_lock`); OpenCode edit
-  module `opencode_edit_cannot_write_a_path_another_agent_already_holds`
-  (not in the `per_path_write_lock` module). Reports:
-  `.agents/reports/impl-acp-file-edit-lock.md`,
-  `.agents/reports/impl-opencode-edit-lock.md`,
-  `.agents/reports/impl-hashline-edit-lock.md`.
+  wait menu. Agents resolve the conflict by talking to each other. The
+  in-flight lock releases when the call finishes. Spawn may also pass
+  `write_paths` on `task` / `spawn_subagent` to claim files until the
+  child finishes. That claim is optional. Omit it when paths are
+  unknown. File-level infer-from-path verify still runs under the
+  in-flight hold. FORK subsection **ACP per-path write lock**. Named
+  tests: module filter `per_path_write_lock`; spawn
+  `spawn_rejects_when_write_paths_overlap_a_live_claim`; OpenCode edit
+  `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
+  Report: `/home/hunter/.agents/reports/feat-subagent-write-coordination.md`.
+  Spawn claims stay optional. Session board todos do not claim files.
+  Nested agents do not get a sibling-writer list. The table is in this
+  process only. "Preparing write" is a TUI activity label, not a lock
+  wait.
 
 - **Tools improve tools (pinned 2026-08-15; process law, not a product
   slice).** Do not write disposable bash, Python, or one-off `curl` as
@@ -160,7 +224,9 @@ or code — not only here. Closed campaign history:
   todos in this wave. Plan as its own design slice after dogfood priority work.
   Board: `feat:thoughtful-todo-tracking-process`. Shipped baseline remains in
   [`FORK.md`](FORK.md) (fib progress, clear finished, also-guard bind). Soft
-  remainders under Open item 0 (structured todos) still apply.
+  remainders under Open item 0 (structured todos) still apply. The **task
+  tracking system** (Open, named 2026-08-22) is the local durable tracker in
+  `grok_oss.db`, not a second session board.
 
 - **Plan approval UI (product chrome shipped → FORK; agent freeform still soft):**
   soft-park **auto-opens** the plan side panel; footer mouse CTAs hit-tested;
@@ -704,7 +770,11 @@ or code — not only here. Closed campaign history:
      SuperGrok session traffic can still settle on **team postpaid OAuth /
      Grok Build class** and can change **console team prepaid remaining**
      (team Billing Credits) without included SuperGrok period used % moving and
-     without the console API key being live. **Shipped honesty + chrome:**
+     without the console API key being live. **Client hop 2026-08-23:** sampling
+     hop omits a Team / Business SuperGrok JWT while a stored personal SuperGrok
+     login exists (that JWT is not the paying source). Team-only login still
+     uses the Team JWT. Server settlement of a personal SuperGrok JWT is still
+     unproven live. **Shipped honesty + chrome:**
      human Console line **Team prepaid remaining**; note
      `NOTE_ACTIVE_DRIVER_IS_INTENT_NOT_SETTLEMENT`; doctor dogfood block; Work C
      status compact `included SuperGrok period limits · N%` (not bare `intent ·`); SuperGrok-live
@@ -1141,7 +1211,7 @@ Focused filters for **remaining** open areas (and quick regression on shipped
 neighbors). **Durable full catalog** (survives D0 demotion):
 [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
 + FORK § *Upstream regression filters*. Process pins still required:
-`./scripts/assert-process-pins.sh` (item 11) — path gate only; product seams
+`grok-nix-helper assert-process-pins` (item 11) is a path gate only; product seams
 need the cargo blocks below or `just check`. Full historical closed block:
 [`doc/dev/campaigns/interject-todos-closed-2026-07.md`](doc/dev/campaigns/interject-todos-closed-2026-07.md).
 
@@ -1234,10 +1304,14 @@ need the cargo blocks below or `just check`. Full historical closed block:
    `cargo test -p xai-grok-workspace --lib -- enter_plan_mode_not_auto enter_plan_mode_fast_path`
 9. **D1 usage:** `cargo test -p xai-grok-shell --lib -- usage_log record_response_token_usage`
 10. Full gate before push: `just check`
-11. Process pins: `./scripts/assert-process-pins.sh`
+11. Process pins: `grok-nix-helper assert-process-pins` / `just upstream-assert-process-pins`
 
 ## Local quality before push
 
 ```bash
 just check    # or just ci
 ```
+
+## Next implement prompt
+
+implement leftover that is not this quality receipt. `is_grok_process` still matches a grok substring on kill-safety paths other than `/rebuild` SIGUSR1. Image bytes are not stored in `pending_prompts.json`. `aws-sdk-s3` / `lru` 0.16.4 stays fargo. This running grok-oss binary will not show the queue and rebuild work until you install grok-oss and reopen the session.

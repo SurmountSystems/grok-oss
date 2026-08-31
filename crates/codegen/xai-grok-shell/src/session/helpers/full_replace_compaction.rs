@@ -77,9 +77,7 @@ pub(crate) struct ShellCompactionSampler {
     tools: Vec<ToolSpec>,
     hosted_tools: Vec<HostedTool>,
     compaction_tool_tokens: u64,
-    client: OaiCompatClient,
     session_id: acp::SessionId,
-    sampling_config: SamplingConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`: a stalled
     /// summarizer stream (no model-output chunk for this long) fails instead of
     /// hanging.
@@ -89,6 +87,8 @@ pub(crate) struct ShellCompactionSampler {
     wall_clock_budget_secs: u64,
     tool_choice: crate::util::config::CompactionToolChoice,
     cancel: tokio_util::sync::CancellationToken,
+    client: Mutex<OaiCompatClient>,
+    sampling_config: Mutex<SamplingConfig>,
     state: Mutex<SamplerState>,
 }
 
@@ -114,13 +114,13 @@ impl ShellCompactionSampler {
             tools,
             hosted_tools,
             compaction_tool_tokens,
-            client,
             session_id,
-            sampling_config,
             idle_timeout,
             wall_clock_budget_secs,
             tool_choice,
             cancel,
+            client: Mutex::new(client),
+            sampling_config: Mutex::new(sampling_config),
             state: Mutex::new(SamplerState::default()),
         }
     }
@@ -157,31 +157,81 @@ impl CompactionSampler for ShellCompactionSampler {
         );
         self.state.lock().unwrap().record_attempt(&chat_history);
 
-        match generate_session_compact(
+        let (client, sampling_config) = {
+            (
+                self.client.lock().unwrap().clone(),
+                self.sampling_config.lock().unwrap().clone(),
+            )
+        };
+        match self
+            .generate(chat_history, client.clone(), &sampling_config)
+            .await
+        {
+            Ok(output) => Ok(self.stash_success(output)),
+            Err(failure) if compact_failure_is_credit(&failure) => {
+                let mut cfg = sampling_config;
+                let mut hopped = client;
+                match xai_grok_sampler::rotate_sampling_client_after_credit_exhaust(
+                    &mut cfg,
+                    &mut hopped,
+                ) {
+                    Some(reason) => {
+                        tracing::info!(
+                            hop = %reason,
+                            "compaction sampler hopped after credit/payment-required response"
+                        );
+                        *self.client.lock().unwrap() = hopped.clone();
+                        *self.sampling_config.lock().unwrap() = cfg.clone();
+                        let retry_history = build_compaction_chat_history(
+                            turns.to_vec(),
+                            self.user_context.as_deref(),
+                            self.use_short_prompt,
+                            self.compaction_tool_tokens,
+                        );
+                        self.state.lock().unwrap().record_attempt(&retry_history);
+                        match self.generate(retry_history, hopped, &cfg).await {
+                            Ok(output) => Ok(self.stash_success(output)),
+                            Err(second) => Err(compact_failure_to_sample_error(second)),
+                        }
+                    }
+                    None => Err(compact_failure_to_sample_error(failure)),
+                }
+            }
+            Err(failure) => Err(compact_failure_to_sample_error(failure)),
+        }
+    }
+}
+
+impl ShellCompactionSampler {
+    fn stash_success(&self, output: CompactOutput) -> LlmCompactionOutput {
+        let response = output.content.clone();
+        self.state.lock().unwrap().last_success = Some(output);
+        LlmCompactionOutput {
+            response,
+            thinking: String::new(),
+        }
+    }
+
+    async fn generate(
+        &self,
+        chat_history: PreparedCompactionHistory,
+        client: OaiCompatClient,
+        sampling_config: &SamplingConfig,
+    ) -> Result<CompactOutput, CompactFailure> {
+        generate_session_compact(
             chat_history,
             self.compaction_tool_tokens,
             self.tools.clone(),
             self.hosted_tools.clone(),
-            self.client.clone(),
+            client,
             self.session_id.clone(),
-            &self.sampling_config,
+            sampling_config,
             self.idle_timeout,
             self.wall_clock_budget_secs,
             self.tool_choice,
             &self.cancel,
         )
         .await
-        {
-            Ok(output) => {
-                let response = output.content.clone();
-                self.state.lock().unwrap().last_success = Some(output);
-                Ok(LlmCompactionOutput {
-                    response,
-                    thinking: String::new(),
-                })
-            }
-            Err(failure) => Err(compact_failure_to_sample_error(failure)),
-        }
     }
 }
 
@@ -195,6 +245,17 @@ impl CompactionSampler for ShellCompactionSampler {
 ///   sets `context_overflow`.
 /// - `Transient` → [`CompactionSampleError::Other`] (`is_deterministic()` is
 ///   `false`), so the engine retries it.
+fn compact_failure_is_credit(failure: &CompactFailure) -> bool {
+    match failure {
+        CompactFailure::Cancelled => false,
+        CompactFailure::Deterministic(err) | CompactFailure::Transient(err) => {
+            // Fail-open: bare "Payment Required" without HTTP 402 (or 400/403/429
+            // plus credit wording) must not hop. 5xx / Bad Gateway still does not.
+            xai_grok_sampling_types::is_credit_exhausted_compact_wrap(&acp_error_message(err))
+        }
+    }
+}
+
 fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleError {
     let (deterministic, err) = match failure {
         CompactFailure::Deterministic(err) => (true, err),

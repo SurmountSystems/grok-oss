@@ -282,6 +282,12 @@ impl MvpAgent {
             self.default_auto_mode,
             session_yolo_mode,
         );
+        let session_context_only = resolve_session_context_only(
+            arguments.meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
+        );
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s).map_err(|e| {
@@ -294,6 +300,8 @@ impl MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
+        // Fail-open grok-oss UUID ↔ ULID map. Wire session id stays UUID.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         #[cfg(all(feature = "local-workspace", unix))]
         let mut local_ws_reap_guard =
             self.new_local_workspace_reap_guard(session_id.clone(), false);
@@ -481,6 +489,7 @@ impl MvpAgent {
                     session_model_id,
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
                     prompt_display_cwd: None,
                     is_chat_kind: false,
                 }
@@ -515,6 +524,8 @@ impl MvpAgent {
                 && crate::util::config::auto_permission_mode_enabled_from_disk()
             {
                 xai_grok_telemetry::enums::PermissionMode::Auto
+            } else if session_context_only {
+                xai_grok_telemetry::enums::PermissionMode::ContextOnly
             } else {
                 xai_grok_telemetry::enums::PermissionMode::Ask
             };
@@ -672,6 +683,8 @@ impl MvpAgent {
             meta: request_meta,
             ..
         } = arguments;
+        // Fail-open grok-oss UUID ↔ ULID map. Resume/load wire id stays UUID.
+        crate::grok_oss::ensure_session_ids_fail_open(session_id.0.as_ref());
         let policy = AttachPolicy::resolve(op, request_meta.as_ref(), self.restore_code);
         let SessionWorkspace {
             cwd,
@@ -694,8 +707,17 @@ impl MvpAgent {
         }
         let session_info = begin_session(&session_id, &cwd);
         let current_session_dir = crate::session::persistence::session_dir(&session_info);
+        // Capture parked approval before reconnect flush or stale-session
+        // cleanup. The PTY harness seeds `plan_mode.json` after quit; resident
+        // Inactive memory must not persist over that bit.
+        let disk_plan_before_flush = std::fs::read(current_session_dir.join("plan_mode.json"))
+            .ok()
+            .and_then(|bytes| {
+                serde_json::from_slice::<crate::session::plan_mode::PlanModeSnapshot>(&bytes).ok()
+            });
+        let cleanup_session_dir = current_session_dir.clone();
         tokio::task::spawn_blocking(move || {
-            crate::session::persistence::cleanup_stale_sessions(Some(&current_session_dir));
+            crate::session::persistence::cleanup_stale_sessions(Some(&cleanup_session_dir));
         });
         let session_exists = self.is_resident(&session_id);
         let no_replay = policy.no_replay;
@@ -704,6 +726,17 @@ impl MvpAgent {
                 session_id = %session_id.0,
                 "Reconnect detected: flushing persistence buffer before replay"
             );
+            if let Some(handle) = self.resident_handle(&session_id) {
+                let (adopt_tx, adopt_rx) = tokio::sync::oneshot::channel();
+                let _ = handle.cmd_tx.send(SessionCommand::AdoptParkedPlanApprovalFromDisk {
+                    respond_to: adopt_tx,
+                });
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    adopt_rx,
+                )
+                .await;
+            }
             if !no_replay && let Some(handle) = self.resident_handle(&session_id) {
                 handle
                     .gateway_enabled
@@ -763,6 +796,13 @@ impl MvpAgent {
         } = persistence_info;
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
+        let restore_plan_snapshot = disk_plan_before_flush
+            .filter(|snapshot| snapshot.awaiting_plan_approval)
+            .or_else(|| {
+                persisted_plan_mode
+                    .clone()
+                    .filter(|snapshot| snapshot.awaiting_plan_approval)
+            });
         self.set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
@@ -783,6 +823,12 @@ impl MvpAgent {
             request_meta.as_ref(),
             self.default_auto_mode,
             session_yolo_mode,
+        );
+        let session_context_only = resolve_session_context_only(
+            request_meta.as_ref(),
+            self.default_context_only_mode,
+            session_yolo_mode,
+            session_auto_mode,
         );
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(request_meta.as_ref())?;
@@ -880,6 +926,7 @@ impl MvpAgent {
                     session_model_id: summary.current_model_id.clone(),
                     session_yolo_mode,
                     session_auto_mode: session_auto_mode && !session_yolo_mode,
+                    session_context_only,
                     prompt_display_cwd,
                     is_chat_kind: false,
                 },
@@ -941,6 +988,7 @@ impl MvpAgent {
             client_code_nav_enabled,
             session_yolo_mode,
             session_auto_mode,
+            session_context_only,
         );
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
@@ -959,9 +1007,14 @@ impl MvpAgent {
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.resident_handle(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
-            if restored.awaiting_plan_approval {
-                let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
-            }
+            // Re-park even when load_light missed the bit: resume still
+            // adopts disk. Carry a pre-flush snapshot when the client seeded
+            // `plan_mode.json` after quit. Resume still does not auto-dock.
+            // Send now so SessionLoaded can flush a held reverse-request;
+            // restore uses a bound-session hold instead of dropping.
+            let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval {
+                snapshot: restore_plan_snapshot,
+            });
         }
         if self.product_analytics_enabled() {
             log_event(xai_grok_telemetry::events::SessionLoad {
@@ -976,6 +1029,8 @@ impl MvpAgent {
                     && crate::util::config::auto_permission_mode_enabled_from_disk()
                 {
                     xai_grok_telemetry::enums::PermissionMode::Auto
+                } else if session_context_only {
+                    xai_grok_telemetry::enums::PermissionMode::ContextOnly
                 } else {
                     xai_grok_telemetry::enums::PermissionMode::Ask
                 },
@@ -1139,6 +1194,7 @@ impl MvpAgent {
         client_code_nav_enabled: bool,
         session_yolo_mode: bool,
         session_auto_mode: bool,
+        session_context_only: bool,
     ) {
         let session_id = session_id.clone();
         self.with_resident_mut(&session_id, |handle| {
@@ -1165,6 +1221,15 @@ impl MvpAgent {
                 let _ = handle
                     .cmd_tx
                     .send(SessionCommand::SetAutoMode { enabled: true });
+            }
+            if session_context_only && !session_yolo_mode && !session_auto_mode {
+                tracing::debug!(
+                    session_id = %session_id.0,
+                    "Setting context-only on reconnect from load_session request metadata"
+                );
+                let _ = handle
+                    .cmd_tx
+                    .send(SessionCommand::SetContextOnlyMode { enabled: true });
             }
         });
     }

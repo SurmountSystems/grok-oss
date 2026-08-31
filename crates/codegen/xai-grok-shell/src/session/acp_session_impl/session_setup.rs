@@ -515,9 +515,9 @@ impl SessionActor {
         if let Some(new_cw) = metadata.context_window.and_then(std::num::NonZeroU64::new)
             && self.compaction.context_window_override.is_none()
         {
-            let effective = crate::util::config::apply_economic_context_cap(
+            let effective = crate::util::config::session_sampling_window(
                 new_cw.get(),
-                self.compaction.economic_mode.get(),
+                self.startup_hints.is_subagent,
             );
             let effective_cw = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
             if new_cw < current_config.context_window {

@@ -621,13 +621,18 @@ pub(crate) async fn run_shell_child(
             .map(|m| format!("{m:?}")),
         depth: child_depth,
     };
+    let notify_parent = request
+        .runtime_overrides
+        .immediate_parent_session_id
+        .as_ref()
+        .unwrap_or(&ctx.parent_session_id);
     emit_subagent_notification(
         gateway,
         &ctx.parent_session_id,
         SessionUpdate::SubagentSpawned {
             subagent_id: subagent_id.clone(),
             child_session_id: child_session_id.0.to_string(),
-            parent_session_id: ctx.parent_session_id.clone(),
+            parent_session_id: notify_parent.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
             subagent_type: request.subagent_type.clone(),
             description: request.description.clone(),
@@ -1100,6 +1105,7 @@ pub(crate) async fn run_shell_child(
                 agent_permission_mode,
                 xai_grok_agent::config::PermissionMode::BypassPermissions
             ),
+        false,
         false,
         None,
         ctx.inference_idle_timeout_secs,
@@ -1664,7 +1670,7 @@ pub(crate) async fn run_shell_child(
                     Some(total_tokens),
                 )
             }
-            Err(()) => (None, true, None, None),
+            Err(_) => (None, true, None, None),
         };
     result.total_tokens_used = total_tokens_used.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = task_budget_usage {

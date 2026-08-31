@@ -124,7 +124,10 @@ fn start_on_idle_clean_session_does_not_invent_a_turn() {
 }
 
 #[test]
+#[serial_test::serial(GROK_HOME)]
 fn start_with_cancel_resume_marker_continues_interrupted_turn() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let sid = "start-cmd-resume-sess";

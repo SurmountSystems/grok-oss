@@ -1138,6 +1138,11 @@ fn test_classify_install_error() {
         classify_install_error(&anyhow::anyhow!("npm install failed")),
         CliUpdateErrorKind::Other
     );
+    let checksum: anyhow::Error = crate::artifact_sha256::ChecksumVerifyFailure::Mismatch.into();
+    assert_eq!(
+        classify_install_error(&checksum),
+        CliUpdateErrorKind::Download
+    );
     for (smoke, expected) in [
         (SmokeTestFailure::Timeout, CliUpdateErrorKind::SmokeTimeout),
         (

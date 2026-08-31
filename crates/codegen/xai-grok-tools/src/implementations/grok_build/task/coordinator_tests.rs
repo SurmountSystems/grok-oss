@@ -5,7 +5,7 @@ use crate::implementations::grok_build::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
     SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
     SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentQueryRequest,
-    SubagentRegistryCounts, SubagentRequest, SubagentSnapshotStatus,
+    SubagentRegistryCounts, SubagentRequest, SubagentResumeLookup, SubagentSnapshotStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -42,6 +42,7 @@ struct TestRunner {
     completions: mpsc::UnboundedSender<CompletionDisposition>,
     requests: mpsc::UnboundedSender<SubagentRequest>,
     started: mpsc::UnboundedSender<String>,
+    tokens: mpsc::UnboundedSender<CancellationToken>,
     queue_waits: mpsc::UnboundedSender<(String, Option<std::time::Duration>, usize)>,
 }
 
@@ -59,6 +60,7 @@ impl ChildRunner for TestRunner {
         let mut finish = self.finish.subscribe();
         let requests = self.requests.clone();
         let started = self.started.clone();
+        let tokens = self.tokens.clone();
         let queue_waits = self.queue_waits.clone();
         Box::pin(async move {
             let ChildRunRequest {
@@ -108,6 +110,7 @@ impl ChildRunner for TestRunner {
                 };
             }
             let _ = started.send(request.id.clone());
+            let _ = tokens.send(cancellation.clone());
             let result = tokio::select! {
                 _ = cancellation.cancelled() => {
                     if wait_after_cancel {
@@ -197,8 +200,10 @@ struct Harness {
     completions: mpsc::UnboundedReceiver<CompletionDisposition>,
     requests: mpsc::UnboundedReceiver<SubagentRequest>,
     started: mpsc::UnboundedReceiver<String>,
+    tokens: mpsc::UnboundedReceiver<CancellationToken>,
     queue_waits: mpsc::UnboundedReceiver<(String, Option<std::time::Duration>, usize)>,
     actor: tokio::task::JoinHandle<()>,
+    resume: ChildReporter<TestControl>,
 }
 
 fn harness(wait_before_start: bool, foreground_budget: std::time::Duration) -> Harness {
@@ -226,24 +231,28 @@ fn harness_with_options(
     let (completion_tx, completions) = mpsc::unbounded_channel();
     let (request_tx, requests) = mpsc::unbounded_channel();
     let (started_tx, started) = mpsc::unbounded_channel();
+    let (token_tx, tokens) = mpsc::unbounded_channel();
     let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
-    let actor = tokio::spawn(
-        SubagentCoordinator::new(
-            command_rx,
-            TestRunner {
-                wait_before_start,
-                wait_after_cancel,
-                start: start.clone(),
-                finish: finish.clone(),
-                completions: completion_tx,
-                requests: request_tx,
-                started: started_tx,
-                queue_waits: queue_wait_tx,
-            },
-            config,
-        )
-        .run(),
+    let coordinator = SubagentCoordinator::new(
+        command_rx,
+        TestRunner {
+            wait_before_start,
+            wait_after_cancel,
+            start: start.clone(),
+            finish: finish.clone(),
+            completions: completion_tx,
+            requests: request_tx,
+            started: started_tx,
+            tokens: token_tx,
+            queue_waits: queue_wait_tx,
+        },
+        config,
     );
+    let resume = ChildReporter {
+        subagent_id: "harness".to_owned(),
+        tx: coordinator.internal_tx.clone(),
+    };
+    let actor = tokio::spawn(coordinator.run());
     Harness {
         // Unbound by default so tests can set request.parent_session_id
         // freely (e.g. nested reparent). ParentSession APIs must use
@@ -254,8 +263,10 @@ fn harness_with_options(
         completions,
         requests,
         started,
+        tokens,
         queue_waits,
         actor,
+        resume,
     }
 }
 
@@ -1539,6 +1550,63 @@ async fn spawner_can_wait_on_the_id_it_just_received_while_the_task_is_live() {
     harness.actor.abort();
 }
 
+/// Limits still reparent to the root session. The request must keep the
+/// immediate L2 parent and L3 depth so SubagentSpawned and tool policy
+/// do not advertise the specialist as an L2.
+#[tokio::test]
+async fn nested_reparent_stamps_l3_depth_and_immediate_parent() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let l2 = request("l2", true);
+    let l2_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(l2).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("l2")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l2"));
+
+    let l2_backend = ChannelBackend::for_session(harness.backend.sender(), "l2");
+    let l3 = request("l3", true);
+    let l3_spawn = tokio::spawn({
+        let backend = l2_backend.clone();
+        async move { backend.spawn(l3).await }
+    });
+    let observed = harness.requests.recv().await.expect("l3 spawn observed");
+    assert_eq!(
+        observed.parent_session_id, "parent",
+        "limits still reparent the nested spawn to the root session"
+    );
+    assert_eq!(
+        observed
+            .runtime_overrides
+            .immediate_parent_session_id
+            .as_deref(),
+        Some("l2"),
+        "immediate parent must stay the L2 child session"
+    );
+    assert_eq!(
+        observed.runtime_overrides.spawn_depth,
+        Some(2),
+        "reparented specialist must stay depth 2 so spawn is stripped"
+    );
+
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
+    let _ = harness.finish.send(());
+    assert!(l3_spawn.await.unwrap().unwrap().success);
+    assert!(l2_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
 /// Fire-and-forget spawn returns the id before the coordinator processes
 /// Spawn. A blocking wait on that id must not resolve as not_found in that
 /// window. After Spawn is processed, the wait stays attached through finish.
@@ -1623,6 +1691,67 @@ async fn returned_spawn_id_is_waitable_before_coordinator_processes_spawn() {
     );
 
     assert!(l3_spawn.await.unwrap().unwrap().success);
+    assert!(l2_spawn.await.unwrap().unwrap().success);
+    harness.actor.abort();
+}
+
+/// After nested reparent, the finished L3 is stored under the root
+/// parent. Resume lookup from the L2 that spawned it must still find
+/// that child. Matching only `request.parent_session_id` misses.
+#[tokio::test]
+async fn nested_spawner_can_resume_from_completed_reparented_child() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    let l2 = request("l2", true);
+    let l2_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(l2).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|request| request.id.as_str()),
+        Some("l2")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l2"));
+
+    let l2_backend = ChannelBackend::for_session(harness.backend.sender(), "l2");
+    let l3 = request("l3", true);
+    let l3_spawn = tokio::spawn({
+        let backend = l2_backend.clone();
+        async move { backend.spawn(l3).await }
+    });
+    let observed = harness.requests.recv().await.expect("l3 spawn observed");
+    assert_eq!(observed.parent_session_id, "parent");
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("l3"));
+    let _ = harness.finish.send(());
+    assert!(l3_spawn.await.unwrap().unwrap().success);
+
+    let lookup = harness.resume.resume_source("l3", "l2").await;
+    match lookup {
+        SubagentResumeLookup::Completed(source) => {
+            assert_eq!(source.subagent_id, "l3");
+        }
+        other => panic!(
+            "L2 resume_from of its finished L3 must find the child stored under the root parent, got {other:?}"
+        ),
+    }
+    let root_lookup = harness.resume.resume_source("l3", "parent").await;
+    assert!(
+        matches!(root_lookup, SubagentResumeLookup::Completed(_)),
+        "root session must still resume the reparented child, got {root_lookup:?}"
+    );
+    let foreign = harness.resume.resume_source("l3", "foreign").await;
+    assert!(
+        matches!(foreign, SubagentResumeLookup::Missing),
+        "a session that did not spawn the child must not resume it, got {foreign:?}"
+    );
+
     assert!(l2_spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }
@@ -1946,6 +2075,59 @@ async fn blocking_query_of_completed_child_returns_immediately() {
         started.elapsed() < std::time::Duration::from_secs(2),
         "already-completed query must not burn the 600s cap; elapsed {:?}",
         started.elapsed()
+    );
+    harness.actor.abort();
+}
+
+/// After the child runner completes, wait already returned. Kill then says
+/// already finished. The child's cancellation token must already be cancelled
+/// so leftover progress / sampling / compact cannot keep the session live.
+#[tokio::test]
+async fn complete_then_cancel_already_finished_cancels_child_token() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("already-done-session", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("already-done-session")
+    );
+    let token = harness
+        .tokens
+        .recv()
+        .await
+        .expect("runner must expose the child cancellation token");
+    assert!(
+        !token.is_cancelled(),
+        "precondition: token is live while the child is running"
+    );
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    let _ = harness.completions.recv().await;
+
+    assert!(
+        token.is_cancelled(),
+        "complete must cancel the child token so the session is not still sampling"
+    );
+    assert!(
+        harness.backend.list_running("parent").await.is_empty(),
+        "completed child must not stay in the running set"
+    );
+    assert!(
+        matches!(
+            harness.backend.cancel("already-done-session").await,
+            SubagentCancelOutcome::AlreadyFinished { status } if status == "completed"
+        ),
+        "kill after complete must report already finished"
+    );
+    assert!(
+        token.is_cancelled(),
+        "kill already-finished must not leave the child token live"
+    );
+    assert!(
+        harness.backend.list_running("parent").await.is_empty(),
+        "kill already-finished must not revive a running child"
     );
     harness.actor.abort();
 }
@@ -2853,6 +3035,62 @@ async fn task_spawn_rejects_or_replaces_second_live_same_description() {
     harness.actor.abort();
 }
 
+/// Harness classifier seats three auditors with one description
+/// (`goal achievement skeptic`). Duplicate-job uniqueness must not reject
+/// the second or third live copy of that reserved description.
+#[tokio::test]
+async fn task_spawn_admits_three_live_goal_achievement_skeptics() {
+    let harness = harness(false, std::time::Duration::from_secs(60));
+    let desc = "goal achievement skeptic";
+    let ids = ["sk-0", "sk-1", "sk-2"];
+    let mut joins = Vec::new();
+    for id in ids {
+        let mut req = request(id, true);
+        req.description = desc.to_owned();
+        let backend = harness.backend.clone();
+        joins.push(tokio::spawn(async move { backend.spawn(req).await }));
+        for _ in 0..64 {
+            if harness
+                .backend
+                .query(id, false, None)
+                .await
+                .is_some_and(|s| s.is_running())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            harness
+                .backend
+                .query(id, false, None)
+                .await
+                .is_some_and(|s| s.is_running() && s.description == desc),
+            "reserved panel skeptic {id} must be admitted while siblings are live"
+        );
+    }
+    let live = ids
+        .iter()
+        .map(|id| harness.backend.query(id, false, None))
+        .collect::<Vec<_>>();
+    let mut live_count = 0;
+    for fut in live {
+        if fut
+            .await
+            .is_some_and(|s| s.is_running() && s.description == desc)
+        {
+            live_count += 1;
+        }
+    }
+    assert_eq!(
+        live_count, 3,
+        "three concurrent reserved panel skeptics must all stay live"
+    );
+    drop(joins);
+    let _ = harness.finish.send(());
+    harness.actor.abort();
+}
+
 /// Implement-loop effort 2 without an operator ask admits one Review
 /// description on the coordinator spawn path the TUI Subagent list uses.
 /// Distinct Review text still counts as a second Review row.
@@ -2956,7 +3194,7 @@ async fn implement_loop_effort_two_without_operator_ask_admits_one_review_descri
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,
@@ -3119,7 +3357,7 @@ async fn spawn_admits_one_review_at_implement_loop_effort(effort: u8) {
             .is_some_and(|s| s.is_running()),
         "a non-Review description must still be admitted next to the one Review row at effort {effort}"
     );
-    let _ = implementer_spawn;
+    std::mem::drop(implementer_spawn);
 
     use crate::implementations::grok_build::task::admission::{
         ImplementLoopReviewAdmit, admit_implement_loop_review_description,

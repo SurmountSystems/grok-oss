@@ -160,6 +160,44 @@ async fn inactive_plan_mode_does_not_gate_edits() {
         .await;
 }
 
+/// Context-only refuse is on the live tool loop: a search_replace call does
+/// not execute (file contents stay put) and the result is Continue + refusal.
+#[tokio::test(flavor = "current_thread")]
+async fn context_only_tool_loop_refuses_without_executing() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("marker.rs");
+            std::fs::write(&path, "a").expect("write marker");
+            let path_str = path.to_string_lossy().into_owned();
+            let actor = build_gate_actor().await;
+            actor
+                .context_only
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let loop_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                actor.execute_tool_calls(vec![search_replace_call("call_co", &path_str)]),
+            )
+            .await
+            .expect("execute_tool_calls must not hang")
+            .expect("execute_tool_calls must not error");
+            assert!(
+                matches!(loop_result, ToolLoop::Continue),
+                "context-only refuse must Continue without executing; got {loop_result:?}"
+            );
+            let text = tool_result_text(&actor, "call_co").await;
+            assert!(text.contains("context-only"), "refusal text: {text}");
+            assert!(text.contains("no tools"), "refusal text: {text}");
+            let after = std::fs::read_to_string(&path).expect("read marker");
+            assert_eq!(
+                after, "a",
+                "search_replace must not execute in context-only (invoke count 0)"
+            );
+        })
+        .await;
+}
+
 fn ask_user_question_call(id: &str) -> ToolCallResponse {
     ToolCallResponse {
         id: id.to_string(),

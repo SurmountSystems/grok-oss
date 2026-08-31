@@ -103,6 +103,37 @@ const DATA_FILENAME: &str = "active_sessions.json";
 const LOCK_FILENAME: &str = "active_sessions.lock";
 const TMP_FILENAME: &str = "active_sessions.json.tmp";
 
+/// Product CLI basename used to classify rebuild SIGUSR1 targets.
+///
+/// Same string as the pager product CLI name. Stock `grok` is not this product.
+pub const PRODUCT_CLI_NAME: &str = "grok-oss";
+
+fn basename_is_product_cli(path: &str) -> bool {
+    let trimmed = path.trim();
+    let without_deleted = trimmed.strip_suffix(" (deleted)").unwrap_or(trimmed).trim();
+    let name = Path::new(without_deleted)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(without_deleted);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    name.eq_ignore_ascii_case(PRODUCT_CLI_NAME)
+}
+
+/// True when argv0 or the exe path is `grok-oss`, not a stock `grok` comm prefix.
+///
+/// `/rebuild` SIGUSR1 must use this classifier. A substring `grok` match is too
+/// wide: Systems Lean `grok` would be terminated by SIGUSR1.
+pub fn is_grok_oss_cli_identity(cmdline: &str, exe_path: Option<&str>) -> bool {
+    if let Some(exe) = exe_path
+        && basename_is_product_cli(exe)
+    {
+        return true;
+    }
+    let argv0 = cmdline.split('\0').next().unwrap_or(cmdline);
+    let argv0 = argv0.split_whitespace().next().unwrap_or(argv0);
+    basename_is_product_cli(argv0)
+}
+
 // -- Public API (delegates to `_in` variants with default grok home) --------
 
 /// Register a session as active (idempotent by `(pid, session_id)`).
@@ -541,6 +572,34 @@ mod tests {
         ActiveSession::new(acp::SessionId::new(id), pid, "/tmp/test", Utc::now())
     }
 
+    /// Contract: stock process named `grok` is not grok-oss. Rebuild SIGUSR1
+    /// must not target it. Product CLI / exe basename is `grok-oss`.
+    #[test]
+    fn grok_oss_cli_identity_rejects_stock_grok_and_accepts_product_exe() {
+        assert!(
+            !is_grok_oss_cli_identity("grok", Some("/usr/bin/grok")),
+            "stock grok comm must not look like grok-oss"
+        );
+        assert!(!is_grok_oss_cli_identity(
+            "/usr/bin/grok\0--resume\0sess",
+            Some("/usr/bin/grok")
+        ));
+        assert!(
+            !is_grok_oss_cli_identity("xai-grok-update-abc123", None),
+            "a cargo test binary whose path contains grok is not grok-oss"
+        );
+        assert!(is_grok_oss_cli_identity(
+            "/home/me/.cargo/bin/grok-oss\0--resume\0sess",
+            Some("/home/me/.cargo/bin/grok-oss")
+        ));
+        assert!(is_grok_oss_cli_identity(
+            "grok-oss",
+            Some("/home/me/.cargo/bin/grok-oss (deleted)")
+        ));
+        assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
+        assert_ne!(PRODUCT_CLI_NAME, "grok");
+    }
+
     #[test]
     fn register_is_idempotent() {
         let dir = TempDir::new().unwrap();
@@ -599,21 +658,29 @@ mod tests {
         assert_eq!(list_in(dir.path()).unwrap().len(), 1);
     }
 
-    fn spawn_live_child() -> std::process::Child {
-        std::process::Command::new("sleep")
-            .arg("60")
+    fn spawn_live_child() -> (
+        std::process::Child,
+        xai_tty_utils::ProcessScope,
+        std::sync::Arc<xai_tty_utils::ProcessGroup>,
+    ) {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("60")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sleep as a second live pid")
+            .stderr(std::process::Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // enrolled into ProcessScope below
+        let child = cmd.spawn().expect("spawn sleep as a second live pid");
+        let scope = xai_tty_utils::ProcessScope::new();
+        let group = scope.enroll_std(&child).expect("enroll sleep");
+        (child, scope, group)
     }
 
     #[test]
     fn list_live_includes_two_windows_on_the_same_session_id() {
         let dir = TempDir::new().unwrap();
         let self_pid = std::process::id();
-        let mut child = spawn_live_child();
+        let (mut child, scope, group) = spawn_live_child();
         let child_pid = child.id();
         let session_id = "shared-conversation";
         register_in(dir.path(), make_session(session_id, self_pid)).unwrap();
@@ -621,6 +688,8 @@ mod tests {
         let live = list_live_in(dir.path()).unwrap();
         let _ = child.kill();
         let _ = child.wait();
+        drop(group);
+        drop(scope);
         assert_eq!(
             live.len(),
             2,
@@ -649,7 +718,7 @@ mod tests {
     fn unregister_one_window_leaves_sibling_on_the_same_session_id() {
         let dir = TempDir::new().unwrap();
         let self_pid = std::process::id();
-        let mut child = spawn_live_child();
+        let (mut child, scope, group) = spawn_live_child();
         let child_pid = child.id();
         let sid = acp::SessionId::new("shared-conversation");
         register_in(dir.path(), make_session("shared-conversation", self_pid)).unwrap();
@@ -658,6 +727,8 @@ mod tests {
         let remaining = list_in(dir.path()).unwrap();
         let _ = child.kill();
         let _ = child.wait();
+        drop(group);
+        drop(scope);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].pid, self_pid);
         assert_eq!(&*remaining[0].session_id.0, "shared-conversation");

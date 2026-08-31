@@ -115,6 +115,83 @@ fn plan_mode_blocked_ask_user_name_matcher() {
     assert!(!is_plan_mode_blocked_ask_user_tool_name("AskQuestion"));
     assert!(!is_plan_mode_blocked_ask_user_tool_name("read_file"));
 }
+
+/// Context-only must advertise no tools (the redteam point: the model works
+/// from context and instructions only). Plan and normal still keep tools.
+#[test]
+fn context_only_advertises_no_tools() {
+    let defs = vec![
+        fn_def("read_file"),
+        fn_def("run_terminal_command"),
+        fn_def("search_replace"),
+        fn_def("spawn_subagent"),
+        fn_def("exit_plan_mode"),
+    ];
+    let empty = advertise_tools_for_turn(defs.clone(), false, true);
+    assert!(
+        empty.is_empty(),
+        "context-only must send an empty tool list, got {empty:?}"
+    );
+    let empty_in_plan = advertise_tools_for_turn(defs.clone(), true, true);
+    assert!(
+        empty_in_plan.is_empty(),
+        "context-only wins over plan-mode filtering"
+    );
+    let normal = advertise_tools_for_turn(defs.clone(), false, false);
+    assert_eq!(names(&normal).len(), defs.len());
+    let in_plan = advertise_tools_for_turn(
+        vec![fn_def("read_file"), fn_def("ask_user_question")],
+        true,
+        false,
+    );
+    let in_names = names(&in_plan);
+    assert!(in_names.contains(&"read_file"));
+    assert!(!in_names.contains(&"ask_user_question"));
+}
+
+#[test]
+fn context_only_strips_hosted_tools() {
+    let hosted = vec!["web_search", "code_execution"];
+    assert!(advertise_hosted_tools_for_turn(hosted.clone(), true).is_empty());
+    assert_eq!(advertise_hosted_tools_for_turn(hosted, false).len(), 2);
+}
+
+#[test]
+fn context_only_refuses_tool_calls_without_executing() {
+    assert!(should_refuse_tool_in_context_only(true));
+    assert!(!should_refuse_tool_in_context_only(false));
+    let msg = context_only_tool_refusal_message();
+    assert!(msg.contains("context-only"));
+    assert!(msg.contains("no tools"));
+}
+
+/// Context-only plus a JSON schema still advertises no tools (no StructuredOutput).
+#[test]
+fn context_only_structured_output_turn_advertises_no_tools() {
+    let base = vec![ToolSpec {
+        name: "read_file".into(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+    }];
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+    });
+    let tools = effective_tools_for_turn(base.clone(), true, Some(schema.clone()));
+    assert!(
+        tools.is_empty(),
+        "context-only + JSON schema must keep an empty tool list, got {tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|t| t.name == STRUCTURED_OUTPUT_TOOL),
+        "must not push StructuredOutput in context-only"
+    );
+    let with_schema = effective_tools_for_turn(base, false, Some(schema));
+    assert!(
+        with_schema.iter().any(|t| t.name == STRUCTURED_OUTPUT_TOOL),
+        "without context-only, structured-output is advertised"
+    );
+}
 /// Pins the `reconcile_plan_mode_with_prompt` transitions:
 /// Plan → Pending, idempotent, non-plan modes exit cleanly.
 #[test]

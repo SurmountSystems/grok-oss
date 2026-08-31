@@ -27,7 +27,14 @@ The agent exited plan mode without writing a plan.
 /// Status-line label while plan mode is active without a live reverse-request
 /// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
 /// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
+/// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
+/// Short status that used to paint while a plan was parked and the side
+/// panel was shut. Do not return this while the composer is Enter:send.
+/// Open-pane review uses [`plan_approval_status_label`]. Leftover / rebuild
+/// `plan.md` is view-only until `/view-plan` or a live present docks.
+pub const PLAN_READY_STATUS: &str = "Plan ready";
 
 /// Toast when freeform Enter cannot attach to a live plan-feedback channel
 /// (Revise/Clarify already unparked) and the message will queue as a normal
@@ -41,6 +48,16 @@ pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
 
 /// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
 pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
+
+/// Model-facing text after a real plan-panel Approve with no live waiter.
+/// Mid-turn Approve uses the same sentence in the shell tool result.
+pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
+    "The user approved the plan. Implement the plan in plan.md.";
+
+/// Lead-in when Approve sends typed review comments with the implement turn.
+/// A `/implement` block after this line is that turn, not a later auto-run.
+pub const PLAN_APPROVED_REVIEW_COMMENTS_LEAD: &str =
+    "The user approved the plan with the following review comments:";
 
 /// Status while Revise unparked and the agent is rewriting `plan.md`
 /// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.
@@ -134,6 +151,9 @@ pub struct PlanApprovalViewState {
     pub commenting_range: Option<std::ops::Range<usize>>,
 
     pub stashed_feedback_prompt: Option<StashedPrompt>,
+    /// Last non-slash Revise / Comment box text. Survives `/view-plan`,
+    /// pane close, and resume replace. Not the pre-panel agent-prompt stash.
+    pub feedback_draft: Option<String>,
     /// Local idle decision park: no live `exit_plan_mode` reverse-request.
     /// Approve / Revise / Quit still work; Revise Interjects a rewrite.
     pub is_local_idle_decision: bool,
@@ -175,6 +195,7 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            feedback_draft: None,
             is_local_idle_decision: false,
         }
     }
@@ -200,6 +221,7 @@ impl PlanApprovalViewState {
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            feedback_draft: None,
             is_local_idle_decision: true,
         }
     }
@@ -475,6 +497,7 @@ mod tests {
         assert!(state.editing_comment_id.is_none());
         assert!(state.commenting_range.is_none());
         assert!(state.stashed_feedback_prompt.is_none());
+        assert!(state.feedback_draft.is_none());
     }
 
     fn make_empty_plan_state() -> (

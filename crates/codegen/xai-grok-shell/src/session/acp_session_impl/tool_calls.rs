@@ -294,6 +294,62 @@ fn ext_method_no_client(err: &acp::Error) -> bool {
 /// Model-facing turn injected after a resumed plan is approved.
 const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
     "The user approved the plan. Implement the plan in plan.md.";
+/// Model-facing tool result after a live mid-turn Approve CTA.
+///
+/// Completes the parked `exit_plan_mode` call. Does not run the
+/// present-only `ExitPlanModeTool` body.
+fn mid_turn_approved_tool_result() -> &'static str {
+    PLAN_APPROVED_IMPLEMENT_MESSAGE
+}
+
+/// What the mid-turn `exit_plan_mode` intercept does with a panel decision.
+///
+/// Every outcome completes the parked tool. Approve must not fall through
+/// to present-only [`ExitPlanModeTool`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MidTurnDecision {
+    message: String,
+    leave_plan_mode: bool,
+    completes_parked_tool: bool,
+}
+
+fn mid_turn_decision(
+    outcome: PlanApprovalOutcome,
+    feedback: Option<&str>,
+    has_plan: bool,
+    tool_name: &str,
+) -> MidTurnDecision {
+    match outcome {
+        PlanApprovalOutcome::Abandoned => MidTurnDecision {
+            message: format!(
+                "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {tool_name} again unless the user explicitly asks to re-enter plan mode."
+            ),
+            leave_plan_mode: true,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Cancelled => MidTurnDecision {
+            message: if has_plan {
+                revise_plan_message(feedback.unwrap_or(""))
+            } else {
+                "The user does not want to exit plan mode. \
+                 Continue planning and ask the user what they would like to do."
+                    .to_string()
+            },
+            leave_plan_mode: false,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Questions => MidTurnDecision {
+            message: questions_plan_message(feedback.unwrap_or("")),
+            leave_plan_mode: false,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Approved => MidTurnDecision {
+            message: mid_turn_approved_tool_result().to_string(),
+            leave_plan_mode: true,
+            completes_parked_tool: true,
+        },
+    }
+}
 /// Shared "revise the plan" message for the request-changes outcome, used by
 /// both the mid-turn intercept and the resume re-park.
 fn revise_plan_message(feedback: &str) -> String {
@@ -1058,6 +1114,26 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        if should_refuse_tool_in_context_only(
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        ) {
+            tracing::info_span!(
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "context_only",
+                wait_ms = 0_i64,
+            )
+            .in_scope(|| {});
+            self.handle_tool_not_executed(
+                &call.id,
+                &tool_call_id,
+                context_only_tool_refusal_message().to_string(),
+            )
+            .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         let plan_active = self.plan_mode.lock().is_active();
         if plan_active
             && super::session_mode::is_plan_mode_blocked_ask_user_tool_name(
@@ -1423,74 +1499,52 @@ impl SessionActor {
                 .request_plan_approval(&tool_call_id, plan_content.clone())
                 .await;
             match resp {
-                Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
-                    PlanApprovalOutcome::Abandoned => {
-                        tracing::info!("[exit_plan_mode] user abandoned plan — deactivating");
+                Ok(parsed) => {
+                    let outcome = PlanApprovalOutcome::from_response(&parsed);
+                    let decision = mid_turn_decision(
+                        outcome,
+                        parsed.feedback.as_deref(),
+                        plan_content.is_some(),
+                        call.function.name.as_str(),
+                    );
+                    debug_assert!(
+                        decision.completes_parked_tool,
+                        "mid-turn plan intercept must complete the parked tool"
+                    );
+                    match outcome {
+                        PlanApprovalOutcome::Abandoned => {
+                            tracing::info!("[exit_plan_mode] user abandoned plan — deactivating");
+                        }
+                        PlanApprovalOutcome::Approved => {
+                            tracing::info!(
+                                "[exit_plan_mode] user approved — completing tool and implementing"
+                            );
+                        }
+                        PlanApprovalOutcome::Questions => {
+                            tracing::info!(
+                                "[exit_plan_mode] user questions about plan — staying in plan mode"
+                            );
+                        }
+                        PlanApprovalOutcome::Cancelled => {}
+                    }
+                    if decision.leave_plan_mode {
                         self.leave_plan_mode_to_default();
-                        let message = format!(
-                            "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
-                            call.function.name
-                        );
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
                     }
-                    PlanApprovalOutcome::Cancelled => {
-                        let message = if plan_content.is_some() {
-                            revise_plan_message(parsed.feedback.as_deref().unwrap_or(""))
-                        } else {
-                            "The user does not want to exit plan mode. \
-                             Continue planning and ask the user what they would like to do."
-                                .to_string()
-                        };
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
-                    }
-                    PlanApprovalOutcome::Questions => {
-                        tracing::info!(
-                            "[exit_plan_mode] user questions about plan — staying in plan mode"
-                        );
-                        let message =
-                            questions_plan_message(parsed.feedback.as_deref().unwrap_or(""));
-                        let tool_update = acp::ToolCallUpdate::new(
-                            tool_call_id.clone(),
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(acp::ToolCallStatus::Completed))
-                                .content(Some(vec![acp::ToolCallContent::from(
-                                    acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
-                                )])),
-                        );
-                        self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                            .await;
-                        let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                        self.chat_state_handle.push_tool_result(tool_chat);
-                        return Ok(Err(ToolLoop::Continue));
-                    }
-                    PlanApprovalOutcome::Approved => {
-                        tracing::info!("[exit_plan_mode] user approved — executing tool");
-                    }
-                },
+                    let message = decision.message;
+                    let tool_update = acp::ToolCallUpdate::new(
+                        tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Completed))
+                            .content(Some(vec![acp::ToolCallContent::from(
+                                acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                            )])),
+                    );
+                    self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                        .await;
+                    let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                    self.chat_state_handle.push_tool_result(tool_chat);
+                    return Ok(Err(ToolLoop::Continue));
+                }
                 Err(err) => {
                     if ext_method_no_client(&err) {
                         tracing::debug!(
@@ -1653,6 +1707,100 @@ impl SessionActor {
             ));
         }
     }
+    /// Re-issue `x.ai/exit_plan_mode` after resume. A successful send waits
+    /// for the user. Transport failure retries with backoff so the pager can
+    /// bind before the reverse-request is dropped. Does not auto-dock.
+    async fn request_plan_approval_after_resume(
+        &self,
+        tool_call_id: &acp::ToolCallId,
+        plan_content: String,
+    ) -> Result<
+        xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse,
+        acp::Error,
+    > {
+        const BACKOFF_MS: [u64; 6] = [0, 50, 100, 200, 400, 800];
+        const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        let started = std::time::Instant::now();
+        let mut attempt = 0usize;
+        loop {
+            let delay_ms = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            match self
+                .request_plan_approval(tool_call_id, Some(plan_content.clone()))
+                .await
+            {
+                Ok(parsed) => return Ok(parsed),
+                Err(err) => {
+                    tracing::debug!(
+                        %err,
+                        attempt,
+                        delay_ms,
+                        "resume exit_plan_mode reverse-request failed; retry after bind"
+                    );
+                    attempt = attempt.saturating_add(1);
+                    if started.elapsed() >= RETRY_BUDGET {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resident `--continue` can leave in-memory `awaiting_plan_approval`
+    /// false after the client writes `plan_mode.json` while disconnected
+    /// (the pager PTY seeds that file after quit). Disk parked approval is
+    /// the resume source of truth.
+    pub(super) fn adopt_parked_plan_snapshot(
+        &self,
+        snapshot: crate::session::plan_mode::PlanModeSnapshot,
+    ) {
+        if self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        if !snapshot.awaiting_plan_approval && !snapshot.plan_decision_resolved {
+            return;
+        }
+        let Some(session_dir) = self
+            .plan_mode
+            .lock()
+            .plan_file_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        *self.plan_mode.lock() =
+            crate::session::plan_mode::PlanModeTracker::from_snapshot(session_dir, snapshot);
+        self.persist_plan_mode_state();
+    }
+
+    pub(super) fn adopt_parked_plan_approval_from_disk(&self) {
+        if self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        let Some(session_dir) = self
+            .plan_mode
+            .lock()
+            .plan_file_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let path = session_dir.join("plan_mode.json");
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
+        let Ok(snapshot) =
+            serde_json::from_slice::<crate::session::plan_mode::PlanModeSnapshot>(&bytes)
+        else {
+            return;
+        };
+        self.adopt_parked_plan_snapshot(snapshot);
+    }
+
     /// Resume hook: re-issue the parked `exit_plan_mode` approval
     /// after a session restored with `awaiting_plan_approval == true`, so the
     /// client re-shows approval chrome over a real live waiter. Handles the
@@ -1663,13 +1811,27 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        self.adopt_parked_plan_approval_from_disk();
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
+            return;
+        }
+        if self.plan_mode.lock().is_plan_decision_resolved() {
+            tracing::info!("[exit_plan_mode] resume: plan already decided; skip re-park");
+            self.plan_mode.lock().set_awaiting_plan_approval(false);
+            self.persist_plan_mode_state();
             return;
         }
         if crate::session::pending_interaction::has_parked_plan_approval(&self.pending_interactions)
         {
             tracing::debug!("[exit_plan_mode] resume: approval already pending; skip re-park");
             return;
+        }
+        if self.plan_mode.lock().is_active() {
+            *self.current_prompt_mode.lock() = PromptMode::Plan;
+            *self.turn_prompt_mode.lock() = PromptMode::Plan;
+            self.enqueue_current_mode_update(acp::SessionModeId::new(
+                xai_grok_tools::types::SessionMode::Plan.as_id(),
+            ));
         }
         let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
         let plan_content = match tokio::fs::read_to_string(&plan_path).await {
@@ -1689,7 +1851,7 @@ impl SessionActor {
             "[exit_plan_mode] re-parking approval after resume"
         );
         let parsed = match self
-            .request_plan_approval(&tool_call_id, Some(plan_content))
+            .request_plan_approval_after_resume(&tool_call_id, plan_content)
             .await
         {
             Ok(parsed) => parsed,
@@ -3294,8 +3456,8 @@ mod plan_mode_edit_gate_tests {
 #[cfg(test)]
 mod plan_approval_helper_tests {
     use super::{
-        PlanApprovalOutcome, ResumeAction, ext_method_no_client, questions_plan_message,
-        resume_action_for, revise_plan_message,
+        PlanApprovalOutcome, ResumeAction, ext_method_no_client, mid_turn_approved_tool_result,
+        mid_turn_decision, questions_plan_message, resume_action_for, revise_plan_message,
     };
     use xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse;
     fn resp(outcome: &str) -> ExitPlanModeExtResponse {
@@ -3366,6 +3528,49 @@ mod plan_approval_helper_tests {
             }
             other => panic!("expected StayAndAnswer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mid_turn_approve_tool_result_is_implement_facing_not_present_only() {
+        let body = mid_turn_approved_tool_result();
+        assert!(
+            body.contains("The user approved the plan. Implement"),
+            "mid-turn Approve must tell the model to implement: {body}"
+        );
+        assert!(
+            !body.contains("do not implement yet") && !body.contains("NOT operator approval"),
+            "mid-turn Approve must not deliver the present-only tool body: {body}"
+        );
+    }
+
+    /// Intercept wiring: Approve must complete the parked tool via
+    /// `mid_turn_decision`. A helper-only string check would still pass if
+    /// the match fell through to present-only `ExitPlanModeTool`.
+    #[test]
+    fn mid_turn_approve_intercept_completes_parked_tool_not_exit_plan_mode_tool() {
+        let decision =
+            mid_turn_decision(PlanApprovalOutcome::Approved, None, true, "exit_plan_mode");
+        assert!(
+            decision.completes_parked_tool,
+            "Approve must complete the parked tool, not run present-only ExitPlanModeTool"
+        );
+        assert!(
+            decision.leave_plan_mode,
+            "Approve must leave plan mode instead of falling through to ExitPlanModeTool"
+        );
+        assert!(
+            decision
+                .message
+                .contains("The user approved the plan. Implement"),
+            "Approve intercept must be implement-facing: {}",
+            decision.message
+        );
+        assert!(
+            !decision.message.contains("do not implement yet")
+                && !decision.message.contains("NOT operator approval"),
+            "Approve intercept must not use the present-only tool body: {}",
+            decision.message
+        );
     }
 
     #[test]

@@ -46,6 +46,61 @@ where
         }
     }
 }
+/// Wait `warn_after` for `fut`. On expiry, run `on_warn` and keep waiting
+/// until `hard_after` (total elapsed). If the future is still pending at
+/// `hard_after`, return `None`.
+///
+/// Session/load uses this: a 3m backstop must warn, not drop the RPC,
+/// because a large `updates.jsonl` replay can outlive the floor. A second
+/// equal window is the give-up: an eternal spinner is not a load.
+pub(super) async fn wait_or_warn_then_keep<F, T>(
+    fut: F,
+    warn_after: std::time::Duration,
+    hard_after: std::time::Duration,
+    on_warn: impl FnOnce(),
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let mut fut = std::pin::pin!(fut);
+    tokio::select! {
+        result = &mut fut => return Some(result),
+        () = tokio::time::sleep(warn_after) => {
+            on_warn();
+        }
+    }
+    let rest = hard_after.saturating_sub(warn_after);
+    tokio::select! {
+        result = &mut fut => Some(result),
+        () = tokio::time::sleep(rest) => None,
+    }
+}
+/// Same as [`acp_send_bounded`], but a timeout warns via `on_timeout` and
+/// keeps waiting for the RPC instead of returning an error.
+pub(super) async fn acp_send_keep_waiting_after_timeout<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+    on_timeout: impl FnOnce(String),
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    let hard = timeout + timeout;
+    match wait_or_warn_then_keep(acp_send(request, tx), timeout, hard, || {
+        on_timeout(format_session_rpc_timeout(action, timeout));
+    })
+    .await
+    {
+        Some(result) => result,
+        None => Err(acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            format_session_rpc_gave_up(action, hard),
+        )),
+    }
+}
 /// Operator-facing session RPC timeout copy.
 pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Duration) -> String {
     format!(
@@ -53,6 +108,20 @@ pub(super) fn format_session_rpc_timeout(action: &str, timeout: std::time::Durat
          retrying right away can run into the same delay.",
         xai_tty_utils::format_human_duration(timeout)
     )
+}
+/// Operator-facing copy when the session RPC never completed after the
+/// warn window plus an equal keep-waiting window.
+pub(super) fn format_session_rpc_gave_up(action: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "{action} gave up after {}. The session did not finish loading.",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+/// True when `error` is the client-side session RPC timeout copy: the
+/// request may still finish, so the pager must not treat the session as
+/// dead or drain prompts into `session/prompt`.
+pub(crate) fn is_session_rpc_timeout_error(error: &str) -> bool {
+    error.contains("timed out after") && error.contains("may still finish in the background")
 }
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
@@ -335,6 +404,8 @@ pub(crate) struct SessionFlags {
     /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
     /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
     pub auto_mode: bool,
+    /// Diagnostic context-only (`_meta.contextOnly`). Yolo and auto win.
+    pub context_only_mode: bool,
     /// Gateway light-frontend (`kind: "chat"`) — `--chat` / `/chat`.
     /// Mutual exclusivity with Build plan profiles: profiles are omitted and a
     /// warn is logged when plan flags are also set (K12).
@@ -413,6 +484,11 @@ impl SessionFlags {
                 self.yolo_mode,
                 self.auto_mode
             )),
+        );
+        let auto = super::dispatch::effective_auto(self.yolo_mode, self.auto_mode);
+        meta.insert(
+            "contextOnly".into(),
+            serde_json::json!(self.context_only_mode && !self.yolo_mode && !auto),
         );
         if meta.is_empty() { None } else { Some(meta) }
     }
@@ -1344,6 +1420,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "ulid_session_ids" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("ulid_session_ids", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_ulid_session_ids(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "plan_approval_park" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("plan_approval_park", "Enum", &value));
@@ -1730,6 +1814,16 @@ pub(crate) async fn notify_auto_compact_threshold_changed(
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
+/// ACP `x.ai/yolo_mode_changed` body for a persisted canonical permission mode.
+pub(crate) fn permission_mode_changed_params(canonical: &str) -> serde_json::Value {
+    serde_json::json!({
+        "yolo_mode": canonical == "always-approve",
+        "auto_mode": canonical == "auto",
+        "context_only": canonical == "context-only",
+        "permission_mode": canonical,
+    })
+}
+
 /// 1. Persist `ui.permission_mode` to disk.
 /// 2. Fire ACP `x.ai/yolo_mode_changed` (gated on disk success for
 ///    `WithRollback`; always for `BestEffort`).
@@ -1740,8 +1834,6 @@ pub(crate) async fn persist_permission_mode_and_notify(
     persist: PermissionModePersist,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let enabled = canonical == "always-approve";
-    let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
     let disk_result = xai_grok_shell::util::config::update_config(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
@@ -1750,11 +1842,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
     if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
     {
-        let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
-            "permission_mode": config_str,
-        });
+        let params = permission_mode_changed_params(canonical);
         let notification = acp::ExtNotification::new(
             "x.ai/yolo_mode_changed",
             serde_json::value::to_raw_value(&params)
@@ -1917,18 +2005,24 @@ pub(super) fn credit_balance_from_config(
     // Same included SuperGrok period used percent as /limits
     // (`credit_balance_from_billing_config`). Do not invent a second formula.
     let usage_pct = included_opt.map(|pct| pct.clamp(0.0, 100.0)).unwrap_or(0.0);
-    let period_end_display = c
+    // Same RFC 3339 parse as CLI `credit_balance_from_billing_config`: keep
+    // the UTC instant so included SuperGrok period limits pace can compute.
+    // Missing or unparseable end → omit pace (do not invent).
+    let period_end_raw = c
         .current_period
         .as_ref()
         .and_then(|p| p.end.clone())
-        .or(c.billing_period_end)
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local).format("%B %-d, %H:%M").to_string()
-                })
-        });
+        .or(c.billing_period_end);
+    let period_end_at = period_end_raw.as_ref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let period_end_display = period_end_at.map(|dt| {
+        dt.with_timezone(&chrono::Local)
+            .format("%B %-d, %H:%M")
+            .to_string()
+    });
     let on_demand_val = c.on_demand_cap.map(|v| v.val).unwrap_or(0);
     let pay_as_you_go = on_demand_val > 0;
     let on_demand_cap_cents = if on_demand_val > 0 { Some(on_demand_val) } else { None };
@@ -1957,6 +2051,7 @@ pub(super) fn credit_balance_from_config(
         usage_pct,
         effective_usage_pct,
         period_end_display,
+        period_end_at,
         pay_as_you_go,
         on_demand_cap_cents,
         on_demand_used_cents: Some(on_demand_used_cents),

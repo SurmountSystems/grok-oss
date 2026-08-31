@@ -239,8 +239,9 @@ impl AgentCommand {
 }
 /// Maximum in-memory stdout per background task (10 MB).
 pub const BG_TASK_MAX_STDOUT: usize = 10 * 1024 * 1024;
-/// How long to wait for a kill response before auto-clearing `pending_kill`
-/// so the user can retry. Applied to both bg tasks and subagents.
+/// How long to wait for a kill response before treating a nested-agent row
+/// as cancelled (so Subagents **X** cannot sit on `killing...` forever).
+/// Background tasks still clear `pending_kill` so the operator can retry.
 pub const PENDING_KILL_TIMEOUT_SECS: u64 = 10;
 /// Prefix baked into monitor commands by backends predating the structured
 /// `monitor_description` field (and by reparented monitors). Shared
@@ -789,9 +790,9 @@ pub struct AgentSession {
     /// Whether this session is running inside a git worktree.
     pub is_worktree: bool,
     /// `AgentId` of the parent session if this session was created via
-    /// `/fork`. Display-only (status bar, future agent picker grouping);
-    /// navigation does not consult it -- the session picker is the
-    /// source of truth for navigation history.
+    /// `/fork`, or restored on load from `summary.json` `parent_session_id`.
+    /// Status header switcher and `[Dashboard]` consult it. The session
+    /// picker is still the source of truth for navigation history.
     pub forked_from: Option<AgentId>,
     /// Prompts waiting to be sent. Drained front-to-back when
     /// `state` becomes [`AgentState::Idle`].
@@ -806,6 +807,9 @@ pub struct AgentSession {
     /// Kept in sync wherever the pager applies the mode; mutually exclusive with
     /// `yolo_mode` (yolo wins).
     pub(crate) auto_mode: bool,
+    /// Diagnostic context-only mode (no tools). Mutually exclusive with yolo
+    /// and auto (those win). Read via `is_context_only()`.
+    pub(crate) context_only_mode: bool,
     /// Prompt history for the current session, fetched from ACP
     /// (`x.ai/prompt_history` scoped via `filter_session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
@@ -943,6 +947,11 @@ impl AgentSession {
     /// field access. Mutually exclusive with `is_yolo()` (yolo wins).
     pub fn is_auto(&self) -> bool {
         self.auto_mode
+    }
+    /// Diagnostic context-only (no tools). Prefer this over direct field access.
+    /// False when `is_yolo()` or `is_auto()` is true.
+    pub fn is_context_only(&self) -> bool {
+        self.context_only_mode && !self.yolo_mode && !self.auto_mode
     }
     /// Test-only setter for `yolo_mode` (the field is private; production toggles
     /// it via the permission-mode facade). Available to sibling crates' test
@@ -1256,6 +1265,7 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

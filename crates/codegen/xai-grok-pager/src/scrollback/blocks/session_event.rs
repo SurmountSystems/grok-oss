@@ -242,6 +242,16 @@ impl SessionEvent {
                 if error.trim().is_empty() {
                     "Compaction failed.".to_string()
                 } else {
+                    let error = if xai_grok_sampling_types::is_compact_credit_block_add_credits_lie(
+                        error,
+                    ) {
+                        xai_grok_sampling_types::compact_credit_block_user_message(
+                            Some(error),
+                            None,
+                        )
+                    } else {
+                        error.clone()
+                    };
                     format!("Compaction failed: {error}")
                 }
             }
@@ -933,6 +943,23 @@ mod tests {
         );
     }
 
+    /// Operator screenshot contract: AUTO compact wall of 133s paints
+    /// `(2m13s)` on the completed line, not raw seconds. This is the
+    /// formatter, not a claim that compact itself got faster.
+    #[test]
+    fn compaction_completed_133000ms_paints_2m13s() {
+        let event = SessionEvent::CompactionCompleted {
+            tokens_before: Some(509_400),
+            tokens_after: 422_100,
+            elapsed_ms: Some(133_000),
+            saved_too_little: false,
+        };
+        assert_eq!(
+            event.message(),
+            "Context compacted: 509.4k → 422.1k tokens (2m13s)"
+        );
+    }
+
     #[test]
     fn compaction_completed_tiny_savings_says_will_not_run_again() {
         let event = SessionEvent::CompactionCompleted {
@@ -1015,11 +1042,33 @@ mod tests {
     #[test]
     fn compaction_failed_curated_error_is_appended() {
         let event = SessionEvent::CompactionFailed {
-            error: "out of credits or over your spending limit. Add credits and retry.".into(),
+            error: "this conversation is too large to compact.".into(),
         };
         assert_eq!(
             event.message(),
-            "Compaction failed: out of credits or over your spending limit. Add credits and retry."
+            "Compaction failed: this conversation is too large to compact."
+        );
+    }
+
+    /// Operator shot 2026-08-21: leftover canned compact credits copy must
+    /// not paint "Add credits" while the live chip can show console remaining.
+    #[test]
+    fn compaction_failed_must_not_paint_add_credits_lie() {
+        let event = SessionEvent::CompactionFailed {
+            error: xai_grok_sampling_types::COMPACT_CREDIT_BLOCK_ADD_CREDITS_LIE.into(),
+        };
+        let msg = event.message();
+        assert!(
+            msg.starts_with("Compaction failed:"),
+            "must keep the compact-failed prefix: {msg}"
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("add credits"),
+            "must not paint add credits while console remaining can be on the chip: {msg}"
+        );
+        assert!(
+            msg.contains("client printout") || msg.contains("not xAI billing truth"),
+            "must say remaining is a client printout: {msg}"
         );
     }
 

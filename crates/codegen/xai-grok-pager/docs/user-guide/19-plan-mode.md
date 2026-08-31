@@ -44,7 +44,7 @@ You can enter plan mode yourself in two ways:
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
 - **Shift+Tab** -- Cycle the session mode: Normal, then Plan, then Always-approve, then back to Normal. From Normal, a single press lands on Plan.
 
-After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen its saved preview.
+After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen the pane. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. A dot marks the option recorded in grok-oss.db when the operator explicitly chose Approve, Comment, Revise, or Exit. Present, empty Enter, and always-approve tool permissions do not write that row. Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
 
 ---
 

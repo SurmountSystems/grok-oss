@@ -32,6 +32,7 @@ impl AgentView {
         }
         self.queue.select_after_delete(id);
         let prompt = self.session.pending_prompts.remove(pos);
+        self.persist_pending_prompts();
         if self.visible_queue_is_empty() {
             self.hide_queue_pane();
         }

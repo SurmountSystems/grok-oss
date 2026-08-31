@@ -6,6 +6,8 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use super::context_bar::fmt_pct5;
+use super::progress_bar::progress_bar_spans;
 use crate::theme::Theme;
 
 /// Credit balance state from the billing API.
@@ -179,6 +181,30 @@ pub fn resolve_console_team_prepaid_gap_after_billing_fetch() -> ConsoleTeamPrep
     )
 }
 
+/// Compact footer console prepaid cents + gap.
+///
+/// The live TUI used `AgentView.console_team_prepaid_cents` (never filled) plus
+/// the cold [`from_management_config`] gap, so `console · loading team prepaid...`
+/// stuck after Management cents were already in the process cache, and after a
+/// finished fetch that still had no cents.
+pub fn compact_footer_console_prepaid(
+    agent_cents: Option<i64>,
+    cached_cents: Option<i64>,
+    billing_settled: bool,
+    has_management_key: bool,
+    has_management_team_id: bool,
+) -> (Option<i64>, ConsoleTeamPrepaidGap) {
+    let cents = agent_cents.or(cached_cents);
+    let gap = if cents.is_some() {
+        ConsoleTeamPrepaidGap::Loading
+    } else if billing_settled {
+        ConsoleTeamPrepaidGap::after_billing_fetch(has_management_key, has_management_team_id)
+    } else {
+        ConsoleTeamPrepaidGap::from_management_config(has_management_key, has_management_team_id)
+    };
+    (cents, gap)
+}
+
 /// Map a dual-auth hop status/toast reason to the **destination** identity.
 ///
 /// Returns `None` when `reason` is not a known identity-switch string.
@@ -275,22 +301,49 @@ impl ActiveSpendDriver {
 
 /// Combined remaining included SuperGrok period limits from process cache
 /// plus the active credit balance. Unknown identities do not add.
+///
+/// Does **not** copy the live JWT `is_unified_billing_user` onto sibling
+/// SuperGrok cache rows. Wire `is_unified_billing_user == true` on a row
+/// still counts that identity once. Combined remaining groups by SuperGrok
+/// `identity_id`. Compact identity still uses
+/// [`independent_included_from_active_and_process_cache`].
 pub fn combined_included_from_active_and_process_cache(
     active: Option<&CreditBalance>,
 ) -> xai_grok_shell::auth::CombinedIncludedRemaining {
-    use xai_grok_shell::auth::{
-        IncludedPoolReading, combined_included_remaining, included_billing_fields_snapshot,
-    };
+    xai_grok_shell::auth::combined_included_remaining(
+        &included_pool_readings_from_active_and_process_cache(active),
+    )
+}
+
+/// Distinct included SuperGrok period pools without a live JWT unified
+/// flag on sibling cache rows.
+///
+/// Compact identity uses this count. A live `is_unified_billing_user` is
+/// not proof two independently polled percents are one workspace.
+pub fn independent_included_from_active_and_process_cache(
+    active: Option<&CreditBalance>,
+) -> xai_grok_shell::auth::CombinedIncludedRemaining {
+    xai_grok_shell::auth::combined_included_remaining(
+        &included_pool_readings_from_active_and_process_cache(active),
+    )
+}
+
+fn included_pool_readings_from_active_and_process_cache(
+    active: Option<&CreditBalance>,
+) -> Vec<xai_grok_shell::auth::IncludedPoolReading> {
+    use xai_grok_shell::auth::{IncludedPoolReading, included_billing_fields_snapshot};
 
     let snap = included_billing_fields_snapshot();
-    let unified = active.and_then(|b| b.is_unified_billing_user);
     let mut readings: Vec<IncludedPoolReading> = snap
         .into_iter()
         .map(|(identity_id, fields)| IncludedPoolReading {
             identity_id,
             usage_pct: fields.usage_pct,
             reset_at: fields.reset_at,
-            is_unified_billing_user: unified,
+            // Sibling SuperGrok identities must not inherit the live JWT
+            // unified-billing flag. Process cache does not store that flag
+            // per identity; leave it unset.
+            is_unified_billing_user: None,
         })
         .collect();
     if readings.is_empty()
@@ -301,10 +354,11 @@ pub fn combined_included_from_active_and_process_cache(
             identity_id: "active".into(),
             usage_pct: Some(bal.usage_pct),
             reset_at: bal.period_end_at,
+            // No sibling: this row's own wire flag still counts once.
             is_unified_billing_user: bal.is_unified_billing_user,
         });
     }
-    combined_included_remaining(&readings)
+    readings
 }
 
 /// Active spend driver from live sampling identity, included SuperGrok period
@@ -331,28 +385,29 @@ pub fn active_spend_driver(
     ActiveSpendDriver::SuperGrokFreePeriod
 }
 
-/// Status compact-meter sampling identity under free-period-first chrome law.
+/// Status compact-meter sampling identity under included-period-first chrome law.
 ///
-/// **Smoking gun fix:** sticky exhaust memo (`memo_out_of_allowance_console_ready`)
-/// must **not** force console chrome when live free SuperGrok period still has
-/// headroom (usage known and used percent below 100). Live poll and free-period
-/// headroom win over a false "out of allowance" memo for status paint.
+/// Sticky exhaust memo (`memo_out_of_allowance_console_ready`) and a tracked
+/// console sampling identity must **not** force console chrome when included
+/// SuperGrok period limits are known and still have room (used percent below
+/// 100). Compact names that included pool, not `console · $N`.
 ///
-/// When free period is full (≥ 100%) or usage unknown, sticky memo may still pin
-/// console (true after-full / cold sticky path). Tracked console always stays
-/// console (actual live sampling is console).
+/// When included SuperGrok period limits are full (≥ 100%) or usage unknown,
+/// sticky memo may still pin console (true after-full / cold sticky path).
+/// Tracked console stays console only on that after-full or unknown path.
 pub fn status_sampling_identity_for_compact_meter(
     tracked: SamplingIdentityKind,
     free_period_usage_known: bool,
     free_period_usage_pct: f64,
     memo_out_of_allowance_console_ready: bool,
 ) -> SamplingIdentityKind {
-    if tracked.is_console() {
-        return SamplingIdentityKind::ConsoleKey;
-    }
-    // Live free SuperGrok period headroom blocks false sticky console paint.
+    // Included SuperGrok period limits with room win compact paint, even if
+    // tracked sampling is console (sticky hop, fail-open, preferred_method).
     if free_period_usage_known && free_period_usage_pct < 100.0 {
         return SamplingIdentityKind::SuperGrokSession;
+    }
+    if tracked.is_console() {
+        return SamplingIdentityKind::ConsoleKey;
     }
     if memo_out_of_allowance_console_ready {
         return SamplingIdentityKind::ConsoleKey;
@@ -837,6 +892,7 @@ pub fn format_usage_summary_with_live_identity_gap_and_honesty(
             // Default credits live on `/limits` postpaid preview, not `/usage`.
             has_team_default_credits_reading: false,
             turns_blocked_free_period_debit_unproven: turns_blocked,
+            billing_credits_card: Default::default(),
         },
     );
     for note in notes {
@@ -1335,43 +1391,97 @@ pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) ->
 /// dollar credits remain, paints SuperGrok dollar credits `$`, not bare included
 /// `100%` as if included still drives. When included usage is unknown, paints
 /// honest `...%`, never a silent `0%`.
+///
+/// Hover (`hovered = true`) swaps the included SuperGrok period limits chip in
+/// place to a progress bar plus [`fmt_pct5`], same pattern as the context-window
+/// chip. SuperGrok dollar credits and console team prepaid keep their `$` text.
 pub fn credit_bar_line_for_session(
     balance: &CreditBalance,
     hovered: bool,
     theme: &Theme,
     gateway_chat: bool,
 ) -> Option<Line<'static>> {
+    credit_bar_line_for_session_with_workspace(balance, hovered, theme, gateway_chat, None)
+}
+
+/// Like [`credit_bar_line_for_session`] with an honest workspace word when
+/// the compact percent is a single known pool (`personal` / `business`) or
+/// combined remaining across distinct pools (`combined`).
+pub fn credit_bar_line_for_session_with_workspace(
+    balance: &CreditBalance,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+    live_principal_role: Option<&str>,
+) -> Option<Line<'static>> {
+    credit_bar_line_for_session_emphasizing_meter_source(
+        balance,
+        hovered,
+        theme,
+        gateway_chat,
+        live_principal_role,
+        None,
+        ConsoleTeamPrepaidGap::MissingManagementKey,
+        None,
+    )
+}
+
+/// SuperGrok compact chip that can emphasize a `/limits meter` pin.
+pub fn credit_bar_line_for_session_emphasizing_meter_source(
+    balance: &CreditBalance,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+    live_principal_role: Option<&str>,
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+    meter_source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+) -> Option<Line<'static>> {
     if gateway_chat {
         return None;
     }
     let active_auth_failed = active_supergrok_poll_auth_failed_from_process();
-    if !balance.included_usage_known || active_auth_failed {
-        // Auth-failed active: honest cold even if balance still has a %
-        // (sibling fill / stale cache must not paint free-period success).
+    let pin_skips_included_loading = matches!(
+        meter_source,
+        Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+            | Some(xai_grok_shell::auth::limits_pins::MeterSource::Console)
+    );
+    if (!balance.included_usage_known || active_auth_failed) && !pin_skips_included_loading {
         return Some(credit_bar_loading_line(hovered, theme));
     }
 
     let combined = combined_included_from_active_and_process_cache(Some(balance));
     let (included_known, included_pct) = xai_grok_shell::auth::chrome_included_usage_from_combined(
-        true,
+        balance.included_usage_known,
         balance.usage_pct,
         &combined,
     );
-    let meter = compact_meter_text_for_live_identity_with_active_poll(
+    // Identity must not use the unified-collapsed pool count. Copying the live
+    // JWT flag onto sibling rows can make distinct_pool_count 1 while the
+    // painted percent is another workspace's poll.
+    let independent = independent_included_from_active_and_process_cache(Some(balance));
+    let meter = compact_meter_text_for_meter_source(
+        meter_source,
         SamplingIdentityKind::SuperGrokSession,
         included_known,
         included_pct,
-        None,
-        ConsoleTeamPrepaidGap::MissingManagementKey,
+        console_prepaid_cents,
+        console_gap,
         balance.prepaid_balance_cents,
-        false,
+        compact_included_workspace_qualifier_for_painted(
+            independent.distinct_pool_count,
+            live_principal_role,
+            Some(balance.usage_pct),
+            Some(included_pct),
+        ),
     );
 
     // Included SuperGrok period limits % path may append linear-burn pacing.
     // SuperGrok dollar credits $ path does not (period is full; pacing is about
     // included burn).
     let on_extras = meter.contains("SuperGrok dollar credits");
-    let text = if on_extras {
+    let on_console = meter.starts_with("console");
+    let text = if on_extras || on_console {
         meter
     } else {
         match balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now()) {
@@ -1380,6 +1490,16 @@ pub fn credit_bar_line_for_session(
         }
     };
 
+    // Combined remaining is for multi-pool chrome (stay on included while
+    // a sibling pool still has room). Color thresholds are on the live
+    // reading when there is only one distinct pool so 79.9 stays success
+    // and 80.0 is warning. Reconstructing used % from floored remaining
+    // would turn 79.9 into 80 and paint the wrong color.
+    let included_fill_pct = if combined.distinct_pool_count > 1 {
+        included_pct
+    } else {
+        balance.usage_pct
+    };
     let color = if on_extras {
         let cents = balance.prepaid_balance_cents.map(i64::abs).unwrap_or(0);
         if cents <= LOW_BALANCE_CENTS {
@@ -1387,25 +1507,38 @@ pub fn credit_bar_line_for_session(
         } else {
             theme.accent_success
         }
+    } else if included_fill_pct >= 100.0 {
+        theme.accent_error
+    } else if included_fill_pct >= 80.0 {
+        theme.warning
     } else {
-        // Combined remaining is for multi-pool chrome (stay on included while
-        // a sibling pool still has room). Color thresholds are on the live
-        // reading when there is only one distinct pool so 79.9 stays success
-        // and 80.0 is warning. Reconstructing used % from floored remaining
-        // would turn 79.9 into 80 and paint the wrong color.
-        let pct = if combined.distinct_pool_count > 1 {
-            included_pct
-        } else {
-            balance.usage_pct
-        };
-        if pct >= 100.0 {
-            theme.accent_error
-        } else if pct >= 80.0 {
-            theme.warning
-        } else {
-            theme.accent_success
-        }
+        theme.accent_success
     };
+
+    // In-place hover swap, same as the context-window chip: progress bar plus
+    // fmt_pct5 at the default chip width. Only when this chip is naming
+    // included SuperGrok period limits. SuperGrok dollar credits stay `$`.
+    // CreditBalance has used %, not a remaining count. Do not invent 490/510.
+    if hovered && !on_extras && !on_console {
+        const PCT_WIDTH: u16 = 5;
+        const BAR_PCT_GAP: u16 = 1;
+        let min_width = BAR_PCT_GAP + PCT_WIDTH;
+        let natural_width = text.chars().count() as u16;
+        let total_width = natural_width.max(min_width);
+        let bar_width = total_width.saturating_sub(min_width);
+        let mut spans = progress_bar_spans(
+            bar_width,
+            (included_fill_pct / 100.0) as f32,
+            color,
+            theme.bg_highlight,
+        );
+        spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+        spans.push(Span::styled(
+            fmt_pct5(included_fill_pct),
+            Style::default().fg(color).bg(theme.bg_base),
+        ));
+        return Some(Line::from(spans));
+    }
 
     let style = Style::default().fg(color).bg(theme.bg_base);
     Some(Line::from(Span::styled(text, style)))
@@ -1421,7 +1554,7 @@ pub fn credit_bar_line_for_session(
 /// ellipsis). Dim so warm percent still reads as the primary signal once data
 /// arrives.
 pub fn credit_bar_loading_line(hovered: bool, theme: &Theme) -> Line<'static> {
-    let text = included_supergrok_period_limits_compact_meter("...%");
+    let text = included_supergrok_period_limits_compact_meter("...%", None);
     let mut style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
     if hovered {
         style = style.add_modifier(ratatui::style::Modifier::BOLD);
@@ -1435,13 +1568,77 @@ pub fn credit_bar_loading_line(hovered: bool, theme: &Theme) -> Line<'static> {
 /// ([`ActiveSpendDriver::as_human`]) both name included SuperGrok period limits.
 const INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT: &str = "included SuperGrok period limits";
 
+/// Workspace word for compact included SuperGrok period limits chrome.
+///
+/// Named contract: chrome must not imply a workspace it did not poll.
+/// Two or more distinct included pools paint `combined`, never personal or
+/// business alone. One known pool paints `personal` or `business` when that
+/// role is known. Unknown role stays unlabeled (`None`); do not invent a
+/// workspace. SuperGrok Heavy is not this meter.
+///
+/// Prefer [`compact_included_workspace_qualifier_for_painted`] on the live
+/// paint path so a unified-collapsed remaining percent cannot wear the live
+/// JWT `personal` / `business` word.
+pub fn compact_included_workspace_qualifier(
+    distinct_pool_count: usize,
+    live_principal_role: Option<&str>,
+) -> Option<&'static str> {
+    compact_included_workspace_qualifier_for_painted(
+        distinct_pool_count,
+        live_principal_role,
+        None,
+        None,
+    )
+}
+
+/// Compact identity when remaining chrome may have collapsed pools.
+///
+/// `independent_distinct_pool_count` is the pool count **without** copying
+/// the live JWT `is_unified_billing_user` onto sibling rows. If that count
+/// is more than one, paint `combined`. If the painted used percent (floored)
+/// is not the live JWT's own included used percent (floored), paint
+/// `combined` even when collapsed remaining reports one pool. Unknown role
+/// stays unlabeled only when the painted percent is that live poll. Do not
+/// stamp `personal` or `business` on a percent that workspace did not
+/// independently poll.
+pub fn compact_included_workspace_qualifier_for_painted(
+    independent_distinct_pool_count: usize,
+    live_principal_role: Option<&str>,
+    live_included_used_pct: Option<f64>,
+    painted_included_used_pct: Option<f64>,
+) -> Option<&'static str> {
+    // Compact paints `{pct:.0}%`. Combined remaining reconstructs used
+    // percent from remaining units (33.7 live can paint 34). Compare the
+    // compact display unit, not raw floor, so one poll is not labeled
+    // combined. 40 vs 5 is still a foreign percent.
+    let painted_is_not_live_poll = match (live_included_used_pct, painted_included_used_pct) {
+        (Some(live), Some(painted)) => format!("{live:.0}") != format!("{painted:.0}"),
+        _ => false,
+    };
+    if independent_distinct_pool_count > 1 || painted_is_not_live_poll {
+        return Some("combined");
+    }
+    match live_principal_role.map(str::trim) {
+        Some("personal") => Some("personal"),
+        Some("business") => Some("business"),
+        _ => None,
+    }
+}
+
 /// Compact status label for included SuperGrok period limits used percent.
 ///
 /// Plain American English meter name, never bare "intent", never "free
 /// SuperGrok period". `pct_display` is already formatted (e.g. `"24%"` or
-/// `"...%"`).
-fn included_supergrok_period_limits_compact_meter(pct_display: &str) -> String {
-    format!("{INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT} · {pct_display}")
+/// `"...%"`). `workspace` is `personal` / `business` / `combined` when the
+/// chrome can name the pool honestly.
+fn included_supergrok_period_limits_compact_meter(
+    pct_display: &str,
+    workspace: Option<&str>,
+) -> String {
+    match workspace.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => format!("{INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT} · {w} · {pct_display}"),
+        None => format!("{INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT} · {pct_display}"),
+    }
 }
 
 /// True when the **active** SuperGrok principal's last billing poll was
@@ -1455,14 +1652,36 @@ pub fn active_supergrok_poll_auth_failed_from_process() -> bool {
     xai_grok_shell::auth::supergrok_identity_last_poll_auth_failed(&id)
 }
 
+/// Live SuperGrok principal role for compact chrome (`personal` / `business`).
+///
+/// Reads the stored session listing for [`active_supergrok_identity_id`]. Does
+/// not invent a workspace when the listing is missing. SuperGrok Heavy is not
+/// this field.
+pub fn compact_live_principal_role_from_process() -> Option<&'static str> {
+    let home = xai_grok_shell::util::grok_home::grok_home();
+    let id = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
+    let map = xai_grok_shell::auth::read_auth_json(&home.join("auth.json")).ok()?;
+    let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
+    listings
+        .iter()
+        .find(|l| l.identity_id == id)
+        .and_then(|l| match l.role_label {
+            "personal" => Some("personal"),
+            "business" => Some("business"),
+            _ => None,
+        })
+}
+
 /// Compact status meter text for the live sampling identity.
 ///
 /// Design A (active meter only = spend-order chrome, not settlement proof):
-/// - **Console live** → console team prepaid `$N` or honest gap. Never bare
-///   SuperGrok included-period `...%` / `N%` (that implies included period
-///   limits drive the turn).
-/// - **SuperGrok live + included period has room** (`included < 100%`) →
-///   `included SuperGrok period limits · N%`.
+/// - **Included SuperGrok period limits known with room** (`included < 100%`) →
+///   `included SuperGrok period limits · N%` (workspace word when known).
+///   Console sampling identity and Management prepaid `$N` do not lead the
+///   compact chip while that included pool is still the primary meter.
+/// - **Console live** (included full or unknown) → console team prepaid `$N`
+///   or honest gap. Never bare SuperGrok included-period `...%` / `N%` as if
+///   included SuperGrok period limits drive the turn when they do not.
 /// - **SuperGrok live + included period full** (`≥ 100%`) + positive SuperGrok
 ///   dollar credits → SuperGrok dollar credits `$` (not bare `100%` as if included
 ///   period still drives after-burner spend).
@@ -1488,6 +1707,28 @@ pub fn compact_meter_text_for_live_identity(
     console_gap: ConsoleTeamPrepaidGap,
     supergrok_extras_cents: Option<i64>,
 ) -> String {
+    compact_meter_text_for_live_identity_with_workspace(
+        live,
+        included_usage_known,
+        included_usage_pct,
+        console_prepaid_cents,
+        console_gap,
+        supergrok_extras_cents,
+        None,
+    )
+}
+
+/// Compact status meter with an honest workspace word (`personal` /
+/// `business` / `combined`) when the chrome can name the pool it polled.
+pub fn compact_meter_text_for_live_identity_with_workspace(
+    live: SamplingIdentityKind,
+    included_usage_known: bool,
+    included_usage_pct: f64,
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+    supergrok_extras_cents: Option<i64>,
+    workspace: Option<&str>,
+) -> String {
     compact_meter_text_for_live_identity_with_active_poll(
         live,
         included_usage_known,
@@ -1496,6 +1737,7 @@ pub fn compact_meter_text_for_live_identity(
         console_gap,
         supergrok_extras_cents,
         false,
+        workspace,
     )
 }
 
@@ -1513,41 +1755,137 @@ pub fn compact_meter_text_for_live_identity_with_active_poll(
     console_gap: ConsoleTeamPrepaidGap,
     supergrok_extras_cents: Option<i64>,
     active_supergrok_poll_auth_failed: bool,
+    workspace: Option<&str>,
 ) -> String {
-    if live.is_console() {
-        match console_prepaid_cents {
-            Some(cents) => {
-                let dollars = cents.abs() as f64 / 100.0;
-                if dollars.fract() == 0.0 {
-                    format!("console · ${dollars:.0}")
-                } else {
-                    format!("console · ${dollars:.2}")
-                }
-            }
-            None => format!("console · {}", console_gap.as_display_str()),
-        }
-    } else if active_supergrok_poll_auth_failed {
+    if active_supergrok_poll_auth_failed && !live.is_console() {
         // Active JWT auth-failed: do not paint included-period success from
         // sibling fill or stale cache as if this login polled OK. Still name
         // the meter.
-        included_supergrok_period_limits_compact_meter("...%")
+        included_supergrok_period_limits_compact_meter("...%", workspace)
+    } else if included_usage_known && included_usage_pct < 100.0 {
+        // Included SuperGrok period limits still have room: this is the
+        // spend-order driver. Do not lead with Management prepaid `console · $N`.
+        included_supergrok_period_limits_compact_meter(
+            &format!("{included_usage_pct:.0}%"),
+            workspace,
+        )
+    } else if live.is_console() {
+        console_compact_meter_text(console_prepaid_cents, console_gap)
     } else if !included_usage_known {
-        included_supergrok_period_limits_compact_meter("...%")
+        included_supergrok_period_limits_compact_meter("...%", workspace)
     } else if included_usage_pct >= 100.0 {
         // Included SuperGrok period limits full: after-burner spend is SuperGrok
         // $ credits when any remain. Do not paint bare included % as the live
         // driver.
         match supergrok_extras_cents.map(i64::abs).filter(|c| *c > 0) {
             Some(cents) => format!("SuperGrok dollar credits · {}", fmt_dollars(cents)),
-            None => {
-                included_supergrok_period_limits_compact_meter(&format!("{included_usage_pct:.0}%"))
-            }
+            None => included_supergrok_period_limits_compact_meter(
+                &format!("{included_usage_pct:.0}%"),
+                workspace,
+            ),
         }
     } else {
-        // Included SuperGrok period limits have room: this is the spend-order
-        // driver (not secondary team prepaid). Name the real meter so operators
-        // do not confuse it with footer team $ or a bare abstraction label.
-        included_supergrok_period_limits_compact_meter(&format!("{included_usage_pct:.0}%"))
+        included_supergrok_period_limits_compact_meter("...%", workspace)
+    }
+}
+
+/// Compact status / `/limits` chrome for a named [`MeterSource`] pin.
+///
+/// `None` is Design A spend-order chrome. A pin names the meter that drives
+/// the compact line so the operator can tell included SuperGrok period limits
+/// from SuperGrok dollar credits from console. Combined is only when remaining
+/// is across distinct SuperGrok identities (`workspace == Some("combined")`).
+/// grok-oss limits JSON is a client printout, not xAI billing truth.
+pub fn compact_meter_text_for_meter_source(
+    source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+    live: SamplingIdentityKind,
+    included_usage_known: bool,
+    included_usage_pct: f64,
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+    supergrok_extras_cents: Option<i64>,
+    workspace: Option<&str>,
+) -> String {
+    use xai_grok_shell::auth::limits_pins::MeterSource;
+
+    match source {
+        None => compact_meter_text_for_live_identity_with_active_poll(
+            live,
+            included_usage_known,
+            included_usage_pct,
+            console_prepaid_cents,
+            console_gap,
+            supergrok_extras_cents,
+            false,
+            workspace,
+        ),
+        Some(MeterSource::Included) => {
+            included_compact_pct(included_usage_known, included_usage_pct, workspace)
+        }
+        Some(MeterSource::DollarCredits) => match supergrok_extras_cents.map(i64::abs) {
+            Some(cents) => format!("SuperGrok dollar credits · {}", fmt_dollars(cents)),
+            None => "SuperGrok dollar credits · ...".to_string(),
+        },
+        Some(MeterSource::Console) => match console_prepaid_cents {
+            Some(cents) => format!(
+                "{} · {}",
+                MeterSource::Console.as_human(),
+                fmt_dollars(cents.abs())
+            ),
+            None => format!(
+                "{} · {}",
+                MeterSource::Console.as_human(),
+                console_gap.as_display_str()
+            ),
+        },
+        Some(MeterSource::Combined) => {
+            if workspace == Some("combined") {
+                included_compact_pct(included_usage_known, included_usage_pct, Some("combined"))
+            } else {
+                compact_meter_text_for_live_identity_with_active_poll(
+                    live,
+                    included_usage_known,
+                    included_usage_pct,
+                    console_prepaid_cents,
+                    console_gap,
+                    supergrok_extras_cents,
+                    false,
+                    workspace,
+                )
+            }
+        }
+    }
+}
+
+fn included_compact_pct(
+    included_usage_known: bool,
+    included_usage_pct: f64,
+    workspace: Option<&str>,
+) -> String {
+    if included_usage_known {
+        included_supergrok_period_limits_compact_meter(
+            &format!("{included_usage_pct:.0}%"),
+            workspace,
+        )
+    } else {
+        included_supergrok_period_limits_compact_meter("...%", workspace)
+    }
+}
+
+fn console_compact_meter_text(
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+) -> String {
+    match console_prepaid_cents {
+        Some(cents) => {
+            let dollars = cents.abs() as f64 / 100.0;
+            if dollars.fract() == 0.0 {
+                format!("console · ${dollars:.0}")
+            } else {
+                format!("console · ${dollars:.2}")
+            }
+        }
+        None => format!("console · {}", console_gap.as_display_str()),
     }
 }
 
@@ -1567,10 +1905,60 @@ pub fn credit_status_line_for_live_session(
     theme: &Theme,
     gateway_chat: bool,
 ) -> Option<Line<'static>> {
+    credit_status_line_for_live_session_with_workspace(
+        balance,
+        live,
+        console_prepaid_cents,
+        console_gap,
+        hovered,
+        theme,
+        gateway_chat,
+        None,
+    )
+}
+
+/// Like [`credit_status_line_for_live_session`] with a workspace word when
+/// SuperGrok included chrome can name the pool honestly.
+pub fn credit_status_line_for_live_session_with_workspace(
+    balance: Option<&CreditBalance>,
+    live: SamplingIdentityKind,
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+    live_principal_role: Option<&str>,
+) -> Option<Line<'static>> {
+    credit_status_line_for_live_session_emphasizing_meter_source(
+        balance,
+        live,
+        console_prepaid_cents,
+        console_gap,
+        hovered,
+        theme,
+        gateway_chat,
+        live_principal_role,
+        None,
+    )
+}
+
+/// Status compact chip that can emphasize a `/limits meter` pin.
+pub fn credit_status_line_for_live_session_emphasizing_meter_source(
+    balance: Option<&CreditBalance>,
+    live: SamplingIdentityKind,
+    console_prepaid_cents: Option<i64>,
+    console_gap: ConsoleTeamPrepaidGap,
+    hovered: bool,
+    theme: &Theme,
+    gateway_chat: bool,
+    live_principal_role: Option<&str>,
+    meter_source: Option<xai_grok_shell::auth::limits_pins::MeterSource>,
+) -> Option<Line<'static>> {
     if gateway_chat {
         return None;
     }
-    if live.is_console() {
+    let included_has_room = balance.is_some_and(|b| b.included_usage_known && b.usage_pct < 100.0);
+    if live.is_console() && meter_source.is_none() && !included_has_room {
         let text = compact_meter_text_for_live_identity(
             live,
             balance.is_some_and(|b| b.included_usage_known),
@@ -1591,8 +1979,33 @@ pub fn credit_status_line_for_live_session(
         return Some(Line::from(Span::styled(text, style)));
     }
     match balance {
-        Some(bal) => credit_bar_line_for_session(bal, hovered, theme, false),
-        None => Some(credit_bar_loading_line(hovered, theme)),
+        Some(bal) => credit_bar_line_for_session_emphasizing_meter_source(
+            bal,
+            hovered,
+            theme,
+            false,
+            live_principal_role,
+            console_prepaid_cents,
+            console_gap,
+            meter_source,
+        ),
+        None => {
+            let text = compact_meter_text_for_meter_source(
+                meter_source,
+                live,
+                false,
+                0.0,
+                console_prepaid_cents,
+                console_gap,
+                None,
+                None,
+            );
+            let mut style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            if hovered {
+                style = style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            Some(Line::from(Span::styled(text, style)))
+        }
     }
 }
 
@@ -1615,6 +2028,10 @@ mod tests {
             grok_build_usage_pct: None,
             included_usage_known: true,
         }
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     fn or_bal(cents: i64) -> OpenRouterCreditBalance {
@@ -2864,13 +3281,540 @@ mod tests {
     fn test_credit_bar_line_shows_percentage() {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text = line_text(&line);
         // Compact status: included SuperGrok period limits used % (no "Credits used").
         assert_eq!(text, "included SuperGrok period limits · 24%");
         assert!(!text.contains("Credits"));
         assert!(
             !text.contains("intent ·") && !text.split_whitespace().any(|w| w == "intent"),
             "must not use bare intent as paying-path label: {text}"
+        );
+    }
+
+    /// Named contract: hovering the credits chip while it names included
+    /// SuperGrok period limits swaps the chip in place to a progress bar plus
+    /// [`crate::views::context_bar::fmt_pct5`], same pattern as the
+    /// context-window hover. CreditBalance has used %, not a remaining count.
+    /// Do not invent 490/510, SuperGrok Heavy remaining, or dollar credits.
+    #[test]
+    fn included_supergrok_period_limits_hover_shows_bar_and_fmt_pct5() {
+        let theme = Theme::default();
+        let line = credit_bar_line(&bal(3.0), true, &theme);
+        let text = line_text(&line);
+        assert!(
+            text.ends_with("3.00%"),
+            "hovered included SuperGrok period limits must use fmt_pct5, got: {text:?}"
+        );
+        let has_bar_glyph = text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            has_bar_glyph,
+            "hovered included SuperGrok period limits must paint a progress bar, got: {text:?}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "hover swaps the whole chip like context (name disappears while hovered): {text:?}"
+        );
+        assert!(
+            !text.contains("490") && !text.contains("510"),
+            "must not invent a 490/510 remaining count: {text:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("heavy"),
+            "must not flatten SuperGrok Heavy into this hover: {text:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text:?}"
+        );
+        let bar_span = line.spans.iter().find(|s| {
+            let c = s.content.as_ref();
+            !c.trim().is_empty() && !c.contains('%')
+        });
+        assert_eq!(
+            bar_span.and_then(|s| s.style.fg),
+            Some(theme.accent_success),
+            "included hover bar stays included success color at 3%, not the context gradient"
+        );
+    }
+
+    fn bal_with_weekly_period_end(
+        pct: f64,
+        period_end_at: chrono::DateTime<chrono::Utc>,
+    ) -> CreditBalance {
+        CreditBalance {
+            period_end_at: Some(period_end_at),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..bal(pct)
+        }
+    }
+
+    /// Named contract: when the live mapper has set `period_end_at` and the
+    /// period type is weekly, the default (non-hover) included SuperGrok period
+    /// limits chip appends compact linear-burn pace. Do not invent remaining.
+    #[test]
+    fn included_supergrok_period_limits_default_chip_appends_compact_pace_when_period_end_known() {
+        let theme = Theme::default();
+        let now = chrono::Utc::now();
+        // Mid weekly period: end is 3.5 days from now so start (end - 7 days)
+        // is 3.5 days ago (~50% elapsed). 62% used → ahead of linear burn.
+        let end = now + chrono::Duration::hours(84);
+        let start = end - chrono::Duration::days(7);
+        let usage = 62.0;
+        let expected_chip =
+            xai_grok_shell::token_economy::compute_period_pacing(usage, start, end, now)
+                .expect("mid-period weekly bounds compute")
+                .compact_label();
+        assert!(
+            expected_chip.contains("ahead of linear burn"),
+            "fixture must be ahead of linear burn, got {expected_chip:?}"
+        );
+        let line = credit_bar_line(&bal_with_weekly_period_end(usage, end), false, &theme);
+        let text = line_text(&line);
+        assert_eq!(
+            text,
+            format!("included SuperGrok period limits · 62% · {expected_chip}")
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("remaining"),
+            "must not invent remaining: {text:?}"
+        );
+    }
+
+    /// Hover still swaps to a bar plus fmt_pct5. Width matches the default
+    /// string after compact pace is appended.
+    #[test]
+    fn included_supergrok_period_limits_hover_keeps_bar_when_default_includes_pace() {
+        let theme = Theme::default();
+        let now = chrono::Utc::now();
+        let end = now + chrono::Duration::hours(84);
+        let bal = bal_with_weekly_period_end(62.0, end);
+        let default = credit_bar_line(&bal, false, &theme);
+        let hover = credit_bar_line(&bal, true, &theme);
+        let default_text = line_text(&default);
+        let hover_text = line_text(&hover);
+        assert!(
+            default_text.contains("ahead of linear burn"),
+            "default must include compact pace so hover width includes it: {default_text:?}"
+        );
+        assert!(
+            hover_text.ends_with(fmt_pct5(62.0).as_str()),
+            "hovered included SuperGrok period limits must use fmt_pct5, got: {hover_text:?}"
+        );
+        let has_bar_glyph = hover_text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            has_bar_glyph,
+            "hovered included SuperGrok period limits must paint a progress bar, got: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains("included SuperGrok period limits"),
+            "hover swaps the whole chip like context: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains("ahead of linear burn")
+                && !hover_text.contains("behind linear burn")
+                && !hover_text.contains("on linear burn"),
+            "hover does not paint pace glyphs; they stay on the default string: {hover_text:?}"
+        );
+        assert_eq!(
+            default.width(),
+            hover.width(),
+            "hover width must match paced default: default={default_text:?} hover={hover_text:?}"
+        );
+    }
+
+    /// Unknown reset timestamp: omit pace. Do not invent an ahead percent.
+    #[test]
+    fn included_supergrok_period_limits_omits_pace_when_period_end_unknown() {
+        let theme = Theme::default();
+        let text = line_text(&credit_bar_line(&bal(24.0), false, &theme));
+        assert_eq!(text, "included SuperGrok period limits · 24%");
+        assert!(!text.contains("ahead of linear burn"));
+        assert!(!text.contains("behind linear burn"));
+        assert!(!text.contains("on linear burn"));
+    }
+
+    /// Hovered included SuperGrok period limits chip must keep the default
+    /// chip width so the status row does not shift.
+    #[test]
+    fn included_supergrok_period_limits_hover_width_matches_default() {
+        let theme = Theme::default();
+        for pct in [0.0, 3.0, 24.0, 79.9, 80.0, 99.4] {
+            let default = credit_bar_line(&bal(pct), false, &theme);
+            let hover = credit_bar_line(&bal(pct), true, &theme);
+            assert_eq!(
+                default.width(),
+                hover.width(),
+                "default vs hover width mismatch at {pct}%: default={:?} hover={:?}",
+                line_text(&default),
+                line_text(&hover),
+            );
+        }
+    }
+
+    /// SuperGrok dollar credits on the same chip (included period full) must
+    /// not pretend they are included SuperGrok period limits on hover.
+    #[test]
+    fn supergrok_dollar_credits_hover_does_not_paint_included_period_bar() {
+        let theme = Theme::default();
+        let extras = CreditBalance {
+            prepaid_balance_cents: Some(453),
+            ..bal(100.0)
+        };
+        let default = credit_bar_line_for_session(&extras, false, &theme, false)
+            .expect("SuperGrok dollar credits meter must paint");
+        let hover = credit_bar_line_for_session(&extras, true, &theme, false)
+            .expect("SuperGrok dollar credits meter must paint");
+        let hover_text = line_text(&hover);
+        assert_eq!(line_text(&default), hover_text);
+        assert!(
+            hover_text.contains("SuperGrok dollar credits") && hover_text.contains("4.53"),
+            "hover must keep SuperGrok dollar credits $, got: {hover_text:?}"
+        );
+        assert!(
+            !hover_text.contains('%'),
+            "must not paint included-period % while SuperGrok dollar credits drive: {hover_text:?}"
+        );
+        let has_bar_glyph = hover_text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            !has_bar_glyph,
+            "must not paint an included-period bar on SuperGrok dollar credits: {hover_text:?}"
+        );
+    }
+
+    /// Console team prepaid on the same chip must not become an included
+    /// SuperGrok period limits bar on hover when included SuperGrok period
+    /// limits are full (console is the live compact meter).
+    #[test]
+    fn console_live_hover_does_not_paint_included_period_bar() {
+        let theme = Theme::default();
+        let hover = credit_status_line_for_live_session(
+            Some(&bal(100.0)),
+            SamplingIdentityKind::ConsoleKey,
+            Some(25_00),
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            true,
+            &theme,
+            false,
+        )
+        .expect("console live meter must paint");
+        let text = line_text(&hover);
+        assert!(
+            text.contains("console") && text.contains("$25"),
+            "console hover must stay console team prepaid, got: {text:?}"
+        );
+        assert!(
+            !text.contains('%'),
+            "must not paint included SuperGrok period limits % on console live hover: {text:?}"
+        );
+        let has_bar_glyph = text.chars().any(|c| {
+            matches!(
+                c,
+                '█' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉' | '░' | '▒' | '▓'
+            )
+        });
+        assert!(
+            !has_bar_glyph,
+            "must not paint an included-period bar on console live: {text:?}"
+        );
+    }
+
+    /// Named contract: compact `/limits` chrome names the `meter_source` pin
+    /// (included SuperGrok period limits vs SuperGrok dollar credits vs
+    /// console vs combined when that is honest), never a bare unlabeled
+    /// percent. SuperGrok is paid. grok-oss limits JSON is a client printout,
+    /// not xAI billing truth. Do not invent remaining. Do not call any pool
+    /// used up.
+    #[test]
+    fn compact_chrome_names_meter_source_not_bare_percent() {
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+
+        let included = compact_meter_text_for_meter_source(
+            Some(MeterSource::Included),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            100.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            Some(453),
+            None,
+        );
+        assert_eq!(
+            included, "included SuperGrok period limits · 100%",
+            "included pin must name included SuperGrok period limits, not SuperGrok dollar credits after-burner: {included}"
+        );
+        assert_ne!(included, "100%", "must not paint a bare unlabeled percent");
+
+        let dollars = compact_meter_text_for_meter_source(
+            Some(MeterSource::DollarCredits),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            15.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            Some(453),
+            None,
+        );
+        assert!(
+            dollars.contains("SuperGrok dollar credits") && dollars.contains("4.53"),
+            "dollar-credits pin must name SuperGrok dollar credits: {dollars}"
+        );
+        assert!(
+            !dollars.contains('%'),
+            "dollar-credits pin must not paint included SuperGrok period limits %: {dollars}"
+        );
+        assert_ne!(dollars, "15%", "must not paint a bare unlabeled percent");
+        assert!(
+            !dollars.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {dollars}"
+        );
+
+        let console = compact_meter_text_for_meter_source(
+            Some(MeterSource::Console),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            15.0,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(453),
+            None,
+        );
+        assert!(
+            console.contains("console") && console.contains("340"),
+            "console pin must name console, not included SuperGrok period limits %: {console}"
+        );
+        assert!(
+            !console.contains('%'),
+            "console pin must not paint included SuperGrok period limits %: {console}"
+        );
+        assert_ne!(console, "15%", "must not paint a bare unlabeled percent");
+
+        let combined = compact_meter_text_for_meter_source(
+            Some(MeterSource::Combined),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            100.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            Some(453),
+            Some("combined"),
+        );
+        assert!(
+            combined.contains("included SuperGrok period limits")
+                && combined.contains("combined")
+                && combined.contains("100%"),
+            "combined pin when honest must name combined included SuperGrok period limits: {combined}"
+        );
+        assert!(
+            !combined.contains("SuperGrok dollar credits"),
+            "combined remaining is not SuperGrok dollar credits: {combined}"
+        );
+        assert_ne!(combined, "100%", "must not paint a bare unlabeled percent");
+        assert!(
+            !combined.contains("personal") && !combined.contains("business"),
+            "combined chrome must not flatten two identities into one workspace word: {combined}"
+        );
+    }
+
+    /// Named contract: Combined pin names `combined` only when remaining is
+    /// across distinct SuperGrok identities. Combined pin plus one honest
+    /// pool (`None` / `personal` / `business`) must not print `combined`.
+    /// SuperGrok is paid. grok-oss limits JSON is a client printout, not
+    /// xAI billing truth. Do not invent remaining. Do not call any pool
+    /// used up.
+    #[test]
+    fn combined_pin_does_not_name_combined_for_one_honest_pool() {
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+
+        let compact = |workspace: Option<&str>| {
+            compact_meter_text_for_meter_source(
+                Some(MeterSource::Combined),
+                SamplingIdentityKind::SuperGrokSession,
+                true,
+                100.0,
+                None,
+                ConsoleTeamPrepaidGap::MissingManagementKey,
+                Some(453),
+                workspace,
+            )
+        };
+
+        for workspace in [None, Some("personal"), Some("business")] {
+            let text = compact(workspace);
+            assert!(
+                !text.to_ascii_lowercase().contains("combined"),
+                "combined pin with one honest pool must not name combined (workspace={workspace:?}): {text}"
+            );
+        }
+
+        let honest = compact(Some("combined"));
+        assert!(
+            honest.contains("included SuperGrok period limits")
+                && honest.contains("combined")
+                && honest.contains("100%"),
+            "combined pin plus two distinct SuperGrok identities must name combined: {honest}"
+        );
+        assert!(
+            !honest.contains("personal") && !honest.contains("business"),
+            "combined chrome must not flatten two identities into one workspace word: {honest}"
+        );
+    }
+
+    /// Named contract: compact `/limits meter console` pin uses the full
+    /// words `console team prepaid / console API credits`, not a bare
+    /// `console · $N`. Compact chrome is the short status line, not the JSON
+    /// body. Live Design A console without a pin may still use `console · $N`
+    /// when included SuperGrok period limits are full. SuperGrok is paid.
+    /// grok-oss limits JSON is a client printout, not xAI billing truth. Do
+    /// not invent remaining. Do not call any pool used up.
+    #[test]
+    fn compact_console_pin_uses_complete_american_english() {
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+
+        let pinned = compact_meter_text_for_meter_source(
+            Some(MeterSource::Console),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            15.0,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(453),
+            None,
+        );
+        assert_eq!(
+            pinned, "console team prepaid / console API credits · $340",
+            "console pin compact chrome must be a complete American English thought, not bare console: {pinned}"
+        );
+        assert!(
+            !pinned.starts_with("console ·"),
+            "must not paint bare console · $N for the console pin: {pinned}"
+        );
+        assert!(
+            !pinned.contains('%'),
+            "console pin must not paint included SuperGrok period limits %: {pinned}"
+        );
+        assert!(
+            !pinned.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {pinned}"
+        );
+
+        let gap = compact_meter_text_for_meter_source(
+            Some(MeterSource::Console),
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            15.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            Some(453),
+            None,
+        );
+        assert!(
+            gap.contains("console team prepaid / console API credits"),
+            "console pin with a prepaid gap must still use complete words: {gap}"
+        );
+        assert!(
+            !gap.starts_with("console ·"),
+            "gap chrome must not be a bare console · prefix: {gap}"
+        );
+
+        let live_console = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            100.0,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(453),
+        );
+        assert_eq!(
+            live_console, "console · $340",
+            "Design A live console compact chrome stays console · $N when included SuperGrok period limits are full and there is no meter pin"
+        );
+    }
+
+    /// Live grok-build footer 2026-08-21 7:03: `console · loading team prepaid...`
+    /// while Management cents can already sit in the process cache. Compact
+    /// must paint the dollars, not a forever-loading gap.
+    #[test]
+    fn live_console_compact_uses_cached_prepaid_cents_not_loading() {
+        let (cents, gap) = compact_footer_console_prepaid(None, Some(22_675), true, true, true);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            100.0,
+            cents,
+            gap,
+            Some(453),
+        );
+        assert!(
+            !text.contains("loading team prepaid"),
+            "must not stick on loading when cache has cents: {text}"
+        );
+        assert!(
+            text.contains("226.75") || text.contains("$226"),
+            "compact must paint cached console team prepaid dollars: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text}"
+        );
+    }
+
+    /// After billing settled with no cents, key+team present: honest
+    /// unavailable, not loading forever.
+    #[test]
+    fn live_console_compact_after_settled_fetch_without_cents_is_unavailable() {
+        let (cents, gap) = compact_footer_console_prepaid(None, None, true, true, true);
+        assert_eq!(cents, None);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::Unavailable);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            100.0,
+            cents,
+            gap,
+            None,
+        );
+        assert!(
+            !text.contains("loading team prepaid"),
+            "settled miss must not stay loading: {text}"
+        );
+        assert!(
+            text.contains("team prepaid unavailable"),
+            "settled miss must name unavailable: {text}"
+        );
+    }
+
+    /// Cold: no cents yet, fetch not settled, key present. Loading is honest.
+    #[test]
+    fn live_console_compact_cold_fetch_may_say_loading() {
+        let (cents, gap) = compact_footer_console_prepaid(None, None, false, true, true);
+        assert_eq!(cents, None);
+        assert_eq!(gap, ConsoleTeamPrepaidGap::Loading);
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::ConsoleKey,
+            true,
+            100.0,
+            cents,
+            gap,
+            None,
+        );
+        assert!(
+            text.contains("loading team prepaid"),
+            "cold path may still say loading: {text}"
         );
     }
 
@@ -3554,6 +4498,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             Some(500),
             true, // active poll AuthFailed
+            None,
         );
         assert_eq!(
             text, "included SuperGrok period limits · ...%",
@@ -3689,6 +4634,110 @@ mod tests {
         );
     }
 
+    /// Named contract (operator shot 2026-08-21 11:41): compact footer
+    /// `353K / 500K | console · $12.45`. SuperGrok is live. Included SuperGrok
+    /// period limits are known and still have room. Compact must name included
+    /// SuperGrok period limits, not lead with `console · $12.45`.
+    ///
+    /// `$12.45` is grok-oss printout of Management prepaid remaining, not
+    /// console.x.ai Billing Credits. SuperGrok is paid. grok-oss compact chrome
+    /// is a client printout, not xAI billing truth. Do not hide included
+    /// SuperGrok period limits behind console dollars.
+    #[test]
+    fn compact_bar_must_not_lead_with_console_dollars_while_included_period_has_room() {
+        let theme = Theme::default();
+        let balance = bal(15.0);
+        let management_prepaid_cents = Some(1_245);
+
+        let assert_included_not_console_dollars = |live: SamplingIdentityKind, path: &str| {
+            let line = credit_status_line_for_live_session(
+                Some(&balance),
+                live,
+                management_prepaid_cents,
+                ConsoleTeamPrepaidGap::Loading,
+                false,
+                &theme,
+                false,
+            )
+            .expect("Build session paints compact credits");
+            let text = line_text(&line);
+            assert!(
+                !text.starts_with("console · $12.45") && !text.starts_with("console · $"),
+                "{path}: compact bar with SuperGrok live and included SuperGrok period limits known must not lead with console · $12.45: {text}"
+            );
+            assert!(
+                text.contains("included SuperGrok period limits") && text.contains("15%"),
+                "{path}: compact must name included SuperGrok period limits: {text}"
+            );
+            assert!(
+                !text.to_ascii_lowercase().contains("extras"),
+                "{path}: must not teach extras as a nickname: {text}"
+            );
+        };
+
+        assert_included_not_console_dollars(
+            SamplingIdentityKind::SuperGrokSession,
+            "SuperGrok live identity",
+        );
+        // 11:41 chip: compact treated console as the live payer while included
+        // SuperGrok period limits still had room.
+        assert_included_not_console_dollars(
+            SamplingIdentityKind::ConsoleKey,
+            "console sampling identity with included SuperGrok period limits still the primary pool",
+        );
+    }
+
+    /// Included SuperGrok period limits used percent is not the console
+    /// Billing Credits dollar. Compact must paint included %, never $47.03.
+    #[test]
+    fn included_supergrok_period_limits_percent_is_not_the_billing_credits_dollar_balance() {
+        use xai_grok_sampling_types::billing_credits_usd_from_included_period_percent;
+
+        assert_eq!(
+            billing_credits_usd_from_included_period_percent(47.03),
+            None
+        );
+        let text = compact_meter_text_for_live_identity(
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            47.03,
+            Some(8_994),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(4_703),
+        );
+        assert_eq!(text, "included SuperGrok period limits · 47%");
+        assert!(
+            !text.contains("$47.03") && !text.contains("$89.94") && !text.contains('$'),
+            "included used % must not paint as Billing Credits dollars: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("billing credits"),
+            "compact must not treat included % as the Billing Credits card: {text}"
+        );
+        let theme = Theme::default();
+        let mut balance = bal(47.03);
+        balance.prepaid_balance_cents = Some(4_703);
+        let line = credit_status_line_for_live_session(
+            Some(&balance),
+            SamplingIdentityKind::SuperGrokSession,
+            Some(8_994),
+            ConsoleTeamPrepaidGap::Loading,
+            false,
+            &theme,
+            false,
+        )
+        .expect("Build session paints compact credits");
+        let painted = line_text(&line);
+        assert!(
+            painted.contains("included SuperGrok period limits") && painted.contains('%'),
+            "compact must name included SuperGrok period limits, not Credits-card dollars: {painted}"
+        );
+        assert!(
+            !painted.contains("$47.03") && !painted.contains("$89.94"),
+            "compact must not paint Credits-card dollars from included %: {painted}"
+        );
+    }
+
     /// Sticky pin still applies when free period is full (true after-full path).
     #[test]
     fn status_identity_sticky_console_when_free_period_full_and_memo_out() {
@@ -3711,7 +4760,19 @@ mod tests {
             ),
             SamplingIdentityKind::ConsoleKey
         );
-        // Tracked console stays console even with free-period headroom.
+        // Tracked console stays console when included SuperGrok period limits
+        // are full (true after-full path).
+        assert_eq!(
+            status_sampling_identity_for_compact_meter(
+                SamplingIdentityKind::ConsoleKey,
+                true,
+                100.0,
+                true,
+            ),
+            SamplingIdentityKind::ConsoleKey
+        );
+        // Included SuperGrok period limits with room win compact identity,
+        // even if tracked sampling is console.
         assert_eq!(
             status_sampling_identity_for_compact_meter(
                 SamplingIdentityKind::ConsoleKey,
@@ -3719,7 +4780,7 @@ mod tests {
                 6.0,
                 true,
             ),
-            SamplingIdentityKind::ConsoleKey
+            SamplingIdentityKind::SuperGrokSession
         );
         // No memo + headroom → SuperGrok.
         assert_eq!(
@@ -3750,6 +4811,377 @@ mod tests {
         // Team prepaid is not an input; driver ignores it by construction.
         assert_ne!(d.as_wire(), "console_key");
         assert_ne!(d.as_wire(), "supergrok_extras");
+    }
+
+    /// Named contract: compact chrome must name the workspace it is showing,
+    /// or say combined. Unlabeled `N%` can be read as the other SuperGrok
+    /// login. SuperGrok Heavy is a distinct weekly pool and is not this meter.
+    #[test]
+    fn compact_included_workspace_qualifier_personal_business_or_combined() {
+        assert_eq!(
+            compact_included_workspace_qualifier(1, Some("personal")),
+            Some("personal")
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier(1, Some("business")),
+            Some("business")
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier(2, Some("personal")),
+            Some("combined"),
+            "two distinct pools must not wear the live JWT's personal/business label"
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier(2, Some("business")),
+            Some("combined")
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier(1, None),
+            None,
+            "do not invent personal or business when the role is unknown"
+        );
+        assert_eq!(compact_included_workspace_qualifier(1, Some("team")), None);
+        assert_eq!(
+            compact_included_workspace_qualifier_for_painted(
+                1,
+                Some("business"),
+                Some(40.0),
+                Some(5.0),
+            ),
+            Some("combined"),
+            "unified-collapsed remaining must not stamp business on a percent business did not poll"
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier_for_painted(1, None, Some(40.0), Some(5.0)),
+            Some("combined"),
+            "unlabeled only when the painted percent is the live JWT's own poll"
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier_for_painted(1, None, Some(5.0), Some(5.0)),
+            None
+        );
+        assert_eq!(
+            compact_included_workspace_qualifier_for_painted(
+                1,
+                Some("personal"),
+                Some(5.0),
+                Some(5.0),
+            ),
+            Some("personal")
+        );
+    }
+
+    /// Named contract: a single-pool included SuperGrok period reading paints
+    /// the workspace (`personal` / `business`) in compact chrome. SuperGrok is
+    /// paid. This is not SuperGrok dollar credits and not SuperGrok Heavy.
+    #[test]
+    fn compact_meter_names_personal_workspace_when_that_pool_is_the_reading() {
+        let text = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            5.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            compact_included_workspace_qualifier(1, Some("personal")),
+        );
+        assert_eq!(text, "included SuperGrok period limits · personal · 5%");
+        assert!(
+            !text.to_ascii_lowercase().contains("business"),
+            "must not imply the business principal: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("heavy"),
+            "must not mash SuperGrok Heavy into included SuperGrok period limits: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text}"
+        );
+    }
+
+    #[test]
+    fn compact_meter_names_business_workspace_when_that_pool_is_the_reading() {
+        let text = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            5.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            compact_included_workspace_qualifier(1, Some("business")),
+        );
+        assert_eq!(text, "included SuperGrok period limits · business · 5%");
+        assert!(
+            !text.to_ascii_lowercase().contains("personal"),
+            "must not imply the personal principal: {text}"
+        );
+    }
+
+    /// Named contract: compact chrome must not stamp `business` or `personal`
+    /// (the live JWT role / `is_unified_billing_user` collapse) on a used
+    /// percent that workspace did not independently poll.
+    ///
+    /// If remaining collapsed two polls into one pool (max remaining),
+    /// compact must still not stamp `business` on a percent that workspace
+    /// did not independently poll. Process-cache remaining must not create
+    /// that collapse by copying the live JWT flag. SuperGrok is paid. Do
+    /// not invent remaining. Do not call any pool used up. SuperGrok Heavy
+    /// is not this meter.
+    #[test]
+    fn compact_meter_does_not_stamp_live_workspace_on_unified_collapsed_other_pool_percent() {
+        use chrono::{TimeZone, Utc};
+        use xai_grok_shell::auth::{
+            IncludedPoolReading, chrome_included_usage_from_combined, combined_included_remaining,
+        };
+
+        let reset_personal = Utc.timestamp_opt(1_000, 0).single().unwrap();
+        let reset_business = Utc.timestamp_opt(2_000, 0).single().unwrap();
+        // Guard identity chrome if remaining were already collapsed.
+        let collapsed = combined_included_remaining(&[
+            IncludedPoolReading {
+                identity_id: "personal".into(),
+                usage_pct: Some(5.0),
+                reset_at: Some(reset_personal),
+                is_unified_billing_user: Some(true),
+            },
+            IncludedPoolReading {
+                identity_id: "business".into(),
+                usage_pct: Some(40.0),
+                reset_at: Some(reset_business),
+                is_unified_billing_user: Some(true),
+            },
+        ]);
+        let live_business_included_used_pct = 40.0;
+        let (known, painted_pct) =
+            chrome_included_usage_from_combined(true, live_business_included_used_pct, &collapsed);
+        assert_eq!(
+            collapsed.distinct_pool_count, 1,
+            "precondition: unified copy collapses two independent polls to one pool"
+        );
+        assert_eq!(
+            painted_pct, 5.0,
+            "precondition: collapse paints max remaining (personal 5%), not business 40%"
+        );
+
+        // Identity count without the copied unified flag: two independent polls.
+        let independent = combined_included_remaining(&[
+            IncludedPoolReading {
+                identity_id: "personal".into(),
+                usage_pct: Some(5.0),
+                reset_at: Some(reset_personal),
+                is_unified_billing_user: None,
+            },
+            IncludedPoolReading {
+                identity_id: "business".into(),
+                usage_pct: Some(40.0),
+                reset_at: Some(reset_business),
+                is_unified_billing_user: None,
+            },
+        ]);
+        assert_eq!(independent.distinct_pool_count, 2);
+
+        let workspace = compact_included_workspace_qualifier_for_painted(
+            independent.distinct_pool_count,
+            Some("business"),
+            Some(live_business_included_used_pct),
+            Some(painted_pct),
+        );
+        let text = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            known,
+            painted_pct,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            workspace,
+        );
+        assert_ne!(
+            text, "included SuperGrok period limits · business · 5%",
+            "must not stamp business on a percent that workspace did not poll: {text}"
+        );
+        assert!(
+            text.contains("combined"),
+            "painted 5% is not the live business poll (40%); say combined: {text}"
+        );
+        assert!(
+            !text.contains("business") && !text.contains("personal"),
+            "must not wear a live JWT workspace word on the other pool's percent: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("heavy"),
+            "must not mash SuperGrok Heavy into included SuperGrok period limits: {text}"
+        );
+
+        let workspace_unknown = compact_included_workspace_qualifier_for_painted(
+            independent.distinct_pool_count,
+            None,
+            Some(live_business_included_used_pct),
+            Some(painted_pct),
+        );
+        let unlabeled = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            known,
+            painted_pct,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            workspace_unknown,
+        );
+        assert_ne!(
+            unlabeled, "included SuperGrok period limits · 5%",
+            "unlabeled only when the painted percent is the live JWT's own poll: {unlabeled}"
+        );
+        assert!(
+            unlabeled.contains("combined"),
+            "unknown role still must not imply one workspace for a collapsed foreign percent: {unlabeled}"
+        );
+
+        let live_personal_included_used_pct = 5.0;
+        let (_, painted_from_personal_live) =
+            chrome_included_usage_from_combined(true, live_personal_included_used_pct, &collapsed);
+        let workspace_personal = compact_included_workspace_qualifier_for_painted(
+            independent.distinct_pool_count,
+            Some("personal"),
+            Some(live_personal_included_used_pct),
+            Some(painted_from_personal_live),
+        );
+        let personal_text = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            painted_from_personal_live,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            workspace_personal,
+        );
+        // Live personal 5% matching painted 5% is still one collapsed view of
+        // two independent polls (business independently polled 40%). Do not
+        // stamp personal on that combined remaining either.
+        assert_ne!(
+            personal_text, "included SuperGrok period limits · personal · 5%",
+            "must not stamp personal when a distinct business poll exists: {personal_text}"
+        );
+        assert!(
+            personal_text.contains("combined"),
+            "independent pools must say combined even if live percent matches painted: {personal_text}"
+        );
+    }
+
+    /// Named contract: compact process-cache remaining must not copy a live
+    /// JWT `is_unified_billing_user` onto a sibling SuperGrok row. Wire
+    /// `is_unified_billing_user == true` on a row still counts that identity
+    /// once. Combined remaining still groups by SuperGrok identity_id.
+    /// Matching independent polls must not collapse remaining from a copied
+    /// flag. SuperGrok is paid. Do not invent remaining. Do not call any
+    /// pool used up.
+    #[test]
+    #[serial_test::serial]
+    fn process_cache_remaining_does_not_copy_live_jwt_unified_flag_onto_sibling_supergrok_row() {
+        use xai_grok_shell::auth::{
+            clear_included_billing_cache, included_remaining_from_usage_pct,
+            remember_supergrok_included_billing,
+        };
+
+        clear_included_billing_cache();
+        remember_supergrok_included_billing(
+            "personal-oidc",
+            62.0,
+            Some("2026-08-24T19:25:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+        remember_supergrok_included_billing(
+            "business-oidc",
+            62.4,
+            Some("2026-08-24T19:25:00Z"),
+            Some("USAGE_PERIOD_TYPE_WEEKLY"),
+        );
+
+        let mut live = bal(62.0);
+        live.is_unified_billing_user = Some(true);
+
+        let combined = combined_included_from_active_and_process_cache(Some(&live));
+        let personal_rem = included_remaining_from_usage_pct(62.0);
+        let business_rem = included_remaining_from_usage_pct(62.4);
+        assert_eq!(
+            combined.distinct_pool_count, 2,
+            "copied live JWT unified flag must not collapse two SuperGrok identities into one pool"
+        );
+        assert_eq!(
+            combined.remaining_units,
+            personal_rem + business_rem,
+            "remaining must sum both identities, not max of a copied unified pool"
+        );
+        assert_ne!(
+            combined.remaining_units,
+            personal_rem.max(business_rem),
+            "must not treat a copied is_unified_billing_user as one remaining number"
+        );
+
+        let independent = independent_included_from_active_and_process_cache(Some(&live));
+        assert_eq!(
+            independent.distinct_pool_count, 2,
+            "identity count without a copied flag must stay two SuperGrok identities"
+        );
+
+        clear_included_billing_cache();
+    }
+
+    /// Named contract: combined remaining across distinct personal and
+    /// business pools must not wear a single-workspace label.
+    #[test]
+    fn compact_meter_says_combined_not_one_workspace_when_distinct_pools() {
+        use chrono::{TimeZone, Utc};
+        use xai_grok_shell::auth::{
+            IncludedPoolReading, chrome_included_usage_from_combined, combined_included_remaining,
+        };
+
+        let combined = combined_included_remaining(&[
+            IncludedPoolReading {
+                identity_id: "personal".into(),
+                usage_pct: Some(5.0),
+                reset_at: Some(Utc.timestamp_opt(1_000, 0).single().unwrap()),
+                is_unified_billing_user: None,
+            },
+            IncludedPoolReading {
+                identity_id: "business".into(),
+                usage_pct: Some(40.0),
+                reset_at: Some(Utc.timestamp_opt(2_000, 0).single().unwrap()),
+                is_unified_billing_user: None,
+            },
+        ]);
+        let (known, pct) = chrome_included_usage_from_combined(true, 5.0, &combined);
+        let workspace =
+            compact_included_workspace_qualifier(combined.distinct_pool_count, Some("personal"));
+        let text = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            known,
+            pct,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            Some(10_029),
+            workspace,
+        );
+        assert!(
+            text.contains("included SuperGrok period limits"),
+            "must stay on included SuperGrok period limits: {text}"
+        );
+        assert!(
+            text.contains("combined"),
+            "must say combined, not one workspace: {text}"
+        );
+        assert!(
+            !text.contains("personal") && !text.contains("business"),
+            "combined chrome must not imply one workspace: {text}"
+        );
+        assert!(
+            !text.contains("SuperGrok dollar credits"),
+            "must not paint SuperGrok dollar credits while a sibling included pool has remaining: {text}"
+        );
     }
 
     /// Named contract: personal included SuperGrok period limits full plus

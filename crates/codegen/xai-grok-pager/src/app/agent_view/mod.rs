@@ -27,8 +27,8 @@
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
+//!         `[ui].vim_mode` off) → ArmPending CancelTurn (2× within 800ms,
+//!         "press again to cancel"; draft preserved, unlike Ctrl+C)
 //!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
 //!       turn cancelling → CancelTurn in every mode (retry lost ack;
 //!         Ctrl+C escalates to Quit)
@@ -183,6 +183,7 @@ mod prompt;
 mod queue;
 mod render;
 pub use render::AppRenderParams;
+mod live_prompt_task;
 mod rewind;
 mod selection;
 mod session;
@@ -363,6 +364,53 @@ impl HitArea {
         self.rect = None;
         self.hovered = false;
     }
+}
+
+/// 1-based index and size of the live fork family that contains `current`
+/// (the living parent plus its forks, in pager insertion order).
+///
+/// Used to paint the upper-left forked-conversation switcher. A family of
+/// one is still returned so a lone fork can show `[Dashboard]` without
+/// cycle chips.
+pub(crate) fn fork_family_position(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Option<(usize, usize)> {
+    let family = fork_family_ids(agents, current);
+    let idx = family.iter().position(|id| *id == current)?;
+    Some((idx + 1, family.len()))
+}
+
+fn fork_family_root(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> crate::app::agent::AgentId {
+    let mut id = current;
+    for _ in 0..agents.len().saturating_add(1) {
+        let Some(parent) = agents.get(&id).and_then(|a| a.session.forked_from) else {
+            break;
+        };
+        if parent == id || !agents.contains_key(&parent) {
+            break;
+        }
+        id = parent;
+    }
+    id
+}
+
+fn fork_family_ids(
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    current: crate::app::agent::AgentId,
+) -> Vec<crate::app::agent::AgentId> {
+    if !agents.contains_key(&current) {
+        return Vec::new();
+    }
+    let root = fork_family_root(agents, current);
+    agents
+        .keys()
+        .copied()
+        .filter(|id| fork_family_root(agents, *id) == root)
+        .collect()
 }
 pub use super::queue_edit::PromptMode;
 /// Which special input mode the prompt is currently in.
@@ -988,6 +1036,10 @@ pub struct AgentView {
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
     pub turn_started_at: Option<Instant>,
+    /// Live prompt-as-task rows keyed by client prompt_id (ULID in grok_oss.db).
+    pub(crate) live_prompt_tasks: HashMap<String, xai_grok_shell::grok_oss::LivePromptTask>,
+    /// Composer submit minted a prompt_task before drain assigned prompt_id.
+    pub(crate) pending_live_prompt_tasks: VecDeque<xai_grok_shell::grok_oss::LivePromptTask>,
     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
     pub first_activity_logged_for: Option<Instant>,
     /// Accumulated duration the turn timer was paused (while the user was
@@ -1163,6 +1215,13 @@ pub struct AgentView {
     pub hit_response_top_indicator: HitArea,
     /// CWD / worktree path in the status bar (click to copy).
     pub hit_cwd: HitArea,
+    /// `[Dashboard]` chip on the upper-left status header for a fork family.
+    /// Empty when the session is not in a fork family or already has overlay chrome.
+    pub hit_header_dashboard: HitArea,
+    /// `[‹]` previous-fork chip on the upper-left status header.
+    pub hit_header_prev: HitArea,
+    /// `[›]` next-fork chip on the upper-left status header.
+    pub hit_header_next: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
     /// Global pause / resume button in turn status line (`[pause]` / `[resume]`).
@@ -1396,6 +1455,12 @@ pub struct AgentView {
     /// place: the shortcuts bar builds the pane's hints once for both the bar
     /// and the cheatsheet, neither of which can see `draw`'s arguments.
     pub(crate) overlay_can_cycle: bool,
+    /// 1-based index and family size for live parent/fork siblings in this
+    /// pager. Set by `AppView` before draw. `Some((_, n))` with `n > 1` means
+    /// the upper-left status header must paint the forked-conversation
+    /// switcher. A lone fork (parent gone, no siblings) still paints
+    /// `[Dashboard]` from [`crate::app::agent::AgentSession::forked_from`].
+    pub(crate) fork_family_position: Option<(usize, usize)>,
     /// MCP server init progress. Set when the shell starts connecting
     /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
@@ -1428,6 +1493,10 @@ pub struct AgentView {
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
+    /// `/view-plan` or a status click asked to open the plan pane. Resume
+    /// restore docks only when this is set or the pane is already open.
+    /// Idle `--continue` must not auto-dock.
+    pub(crate) view_plan_requested: bool,
     pub(crate) latest_inline_plan_content: Option<String>,
     pub(crate) plan_comments: Vec<PlanComment>,
     /// Monotonic counter for casual plan comment IDs.
@@ -1488,10 +1557,10 @@ pub struct AgentView {
     /// Currently open subagent view (child_session_id). When Some, the
     /// scrollback area is replaced by the subagent's framed view.
     pub active_subagent: Option<String>,
-    /// When true, this AgentView is rendering as a subagent (read-only):
-    /// - Prompt is hidden
-    /// - Cancel turn / demote to bg shortcuts are disabled
-    /// - Shortcuts bar shows subagent-specific hints
+    /// When true, this AgentView is an observational nested overlay:
+    /// composer hidden, cancel/demote shortcuts off, subagent back hints.
+    /// L2 coordinator overlays clear this so the operator can ask that L2.
+    /// L3 specialist overlays keep it set so specialists stay unbothered.
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
@@ -1515,6 +1584,9 @@ pub struct AgentView {
     pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
     /// Console team prepaid remaining (USD cents) for this agent.
     pub console_team_prepaid_cents: Option<i64>,
+    /// True after a billing fetch for this agent finished (success or empty
+    /// config). Compact footer then uses after-fetch gaps instead of loading.
+    pub console_prepaid_billing_settled: bool,
     /// Live `/rebuild` progress bar.
     pub(crate) rebuild_progress: Option<RebuildUiProgress>,
     /// Input flight recorder — rolling buffer of recent key events.
@@ -2614,6 +2686,7 @@ pub(crate) mod test_fixtures {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2678,6 +2751,7 @@ pub(crate) mod test_fixtures {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
+                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -3500,6 +3574,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

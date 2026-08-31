@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+E` | | Expand/collapse all thinking blocks |
+| `Ctrl+T` | `-` | Expand or collapse all thinking blocks (the agent's chain of thought). Same chord on the main scrollback, a nested overlay, and while the composer is focused; it does not insert a character. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; it does not type a hyphen while the scrollback is focused. In the composer, `-` stays a typed hyphen. |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -72,7 +72,7 @@ streaming updates and finish events (for example a thinking block ending)
 leave it alone instead of resetting it, and expanding a block while
 auto-scroll is following the tail stops following so you can read; resume
 with `⇧G`, `j` at the last entry, scrolling past the bottom, or sending a new
-prompt. `⇧E` clears all pins, and `Ctrl+E` clears pins on thinking blocks.
+prompt. `⇧E` clears all pins, and `Ctrl+T` clears pins on thinking blocks.
 
 ### Block Content
 
@@ -189,7 +189,7 @@ sends it and `Esc` returns to the options.
 
 **Post-cancel grace:** for about a second after an Esc-triggered cancel, the idle rewind arm stays suppressed — mashing Esc to stop a turn cannot silently open the rewind picker. Only the rewind arm is held; every other Esc behavior is unaffected.
 
-**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt, even while a turn is running). Bare `/feedback` opens the report pane; Esc dismisses it.
+**Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, voice, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt, even while a turn is running). Nested L2/L3 overlays steal Esc to **dismiss the view** and leave that subagent running; that press is not cancel and does not start Cancelling. Bare `/feedback` opens the report pane; Esc dismisses it.
 
 **Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc cancels immediately and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; Esc requires two presses within 800ms.
 
@@ -214,7 +214,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
 | `Shift+Tab` | Prompt focused | Cycle mode (Normal → Plan → Always-approve) |
 | `Ctrl+B` | Agent screen | Send the running foreground command to the background |
-| `Ctrl+T` | Agent screen | Toggle the todos pane |
+| `Ctrl+Shift+T` | Agent screen | Toggle the todos pane. The status-row **tasks N/M** badge is the same toggle (click it). Nested L2 overlays keep that nested session's badge and Ctrl+Shift+T. `Ctrl+T` expands or collapses thinking. |
 | `X` | Todo pane focused | **Clear finished:** archive completed and cancelled rows from the live session board. Same action as clicking `[−]` in the todo header or running `/clear-completed-todos`. Tasks and catalog do not use this key. |
 | `Ctrl+G` | Agent screen (full TUI) | Toggle the tasks pane |
 | `Ctrl+G` | Ordinary composer (minimal mode) | Edit the current draft in an external editor without sending it. If the terminal reserves this chord, choose **Edit Prompt in External Editor** from the command palette. |
@@ -305,7 +305,7 @@ Three work controls exist. They are not interchangeable:
 | **Global pause** | **`Ctrl+Shift+Space`**. Status is meant to show **`[pause]`** / **`[resume]`** for the same action. | Pauses **all** sessions in this process: cancels in-flight turns, holds queues, then resumes only unfinished work. Not a freeze of a single stream. |
 | **Soft stop** | **`Ctrl+Shift+S` only** (no status-row button) | Lets the **current** turn finish, then holds the queue. |
 
-Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause is not continue interrupted turn (`canceled_turn_resume.json`). See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
+Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause that cancels a running turn writes continue interrupted turn (`canceled_turn_resume.json`) so last-session on start and `/start` can continue if this process dies. The pause gate itself stays in this process in RAM. See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
 
 > **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
 
@@ -427,7 +427,7 @@ Navigation:       j/k (up/down)  H/L (prev/next turn)  K/J (prev/next response) 
 Scrolling:        Ctrl+J/K (line)  Ctrl+U/D (half page; D=Shift+D in VSCode)  PgUp/PgDn (page)
 Folding:          h/l (collapse/expand)  e (toggle)  E (all)
 Content:          y (copy)  Y (copy cmd)  Enter (fullscreen)
-View:             r (raw markdown)  Ctrl+E (thinking)
+View:             r (raw markdown)  Ctrl+T (thinking)
 Focus prompt:     i, Tab, or Space
 ```
 

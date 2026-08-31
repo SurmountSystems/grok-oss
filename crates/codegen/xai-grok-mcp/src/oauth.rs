@@ -680,7 +680,7 @@ mod tests {
     }
 
     async fn manager_ready_for_exchange(token_endpoint: String) -> (AuthorizationManager, String) {
-        let mut mgr = AuthorizationManager::new("http://localhost/mcp")
+        let mut mgr = crate::mcp_http_client::authorization_manager("http://localhost/mcp")
             .await
             .unwrap();
         mgr.set_metadata(require_iss_metadata(token_endpoint));
@@ -757,7 +757,12 @@ mod tests {
             "http://{addr}/callback?code=c1&state=s1&iss={}",
             urlencoding_encode(TEST_ISSUER)
         );
-        let resp = reqwest::get(&url).await.unwrap();
+        let resp = crate::mcp_http_client::reqwest_client()
+            .expect("MCP HTTP client must construct")
+            .get(&url)
+            .send()
+            .await
+            .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
         assert!(body.contains("Authorization Complete"));

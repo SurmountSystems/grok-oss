@@ -24,7 +24,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits [--json]"
+        "/limits [--json | stay-supergrok | use-console | meter included|dollar-credits|console|combined | refresh]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -37,22 +37,55 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn suggest_args(&self, _ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
-        Some(vec![ArgItem {
-            display: "--json".into(),
-            match_text: "--json".into(),
-            insert_text: "--json".into(),
-            description: "Print JSON to chat (same as grok limits --json)".into(),
-        }])
+        Some(vec![
+            ArgItem {
+                display: "--json".into(),
+                match_text: "--json".into(),
+                insert_text: "--json".into(),
+                description: "Print JSON to chat (same as grok-oss limits --json)".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
+                description: "Stay on SuperGrok and clear a false exhaust memo".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
+                description: "Ask for the console key (sidecar pin)".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_METER.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
+                description: "Pin meter chrome: included | dollar-credits | console | combined"
+                    .into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
+                description: "Force-refresh live meters".into(),
+            },
+        ])
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let arg = args.trim();
-        match arg {
-            "" => CommandResult::Action(Action::ShowLimits),
-            "--json" | "json" => CommandResult::Action(Action::ShowLimitsJson),
-            _ => CommandResult::Error(format!(
-                "Unknown argument: {arg}. Use /limits or /limits --json"
-            )),
+        match crate::limits_cmd::parse_limits_named_args(args) {
+            Ok(crate::limits_cmd::LimitsNamedAction::Show)
+            | Ok(crate::limits_cmd::LimitsNamedAction::Refresh) => {
+                CommandResult::Action(Action::ShowLimits)
+            }
+            Ok(crate::limits_cmd::LimitsNamedAction::Json) => {
+                CommandResult::Action(Action::ShowLimitsJson)
+            }
+            Ok(action) => match crate::limits_cmd::apply_limits_named_action(action) {
+                Ok(msg) => CommandResult::Message(msg),
+                Err(e) => CommandResult::Error(e),
+            },
+            Err(e) => CommandResult::Error(e),
         }
     }
 }
@@ -118,9 +151,134 @@ mod tests {
         let mut ctx = make_ctx(&models);
         let result = LimitsCommand.run(&mut ctx, "extra");
         assert!(
-            matches!(result, CommandResult::Error(ref e) if e.contains("--json")),
-            "expected usage error mentioning --json, got {result:?}"
+            matches!(result, CommandResult::Error(ref e) if e.contains("--json")
+                && e.contains("stay-supergrok")
+                && e.contains("use-console")
+                && e.contains("meter")
+                && e.contains("refresh")),
+            "expected usage error listing the named words, got {result:?}"
         );
+    }
+
+    /// Pin words confirm host/key identity in plain English and must not dump JSON.
+    #[test]
+    #[serial_test::serial]
+    fn limits_pin_words_confirm_switch_not_json_dump() {
+        use tempfile::TempDir;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let store =
+            xai_grok_shell::auth::credentials_store::CredentialsStore::at_grok_home(home.path());
+        xai_grok_shell::auth::store_console_api_key(&store, "slash-pin-console-key")
+            .expect("store console key");
+
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+
+        let stay = LimitsCommand.run(&mut ctx, crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK);
+        match stay {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("SuperGrok session") && msg.contains("cli-chat-proxy"),
+                    "stay-supergrok must confirm SuperGrok session host: {msg}"
+                );
+                assert!(
+                    !msg.contains("schemaVersion") && !msg.trim_start().starts_with('{'),
+                    "pin confirmation must not dump JSON: {msg}"
+                );
+            }
+            other => panic!("stay-supergrok must be a short confirmation, not {other:?}"),
+        }
+
+        let use_console = LimitsCommand.run(&mut ctx, crate::limits_cmd::LIMITS_WORD_USE_CONSOLE);
+        match use_console {
+            CommandResult::Message(msg) => {
+                assert!(
+                    msg.contains("console API key") && msg.contains("api.x.ai"),
+                    "use-console must confirm console key host: {msg}"
+                );
+                assert!(
+                    msg.to_ascii_lowercase().contains("operator asked"),
+                    "use-console must say the operator asked, not a printout hop: {msg}"
+                );
+                assert!(
+                    !msg.contains("schemaVersion") && !msg.trim_start().starts_with('{'),
+                    "pin confirmation must not dump JSON: {msg}"
+                );
+            }
+            other => panic!("use-console must be a short confirmation, not {other:?}"),
+        }
+
+        let bare = LimitsCommand.run(&mut ctx, "");
+        assert!(
+            matches!(bare, CommandResult::Action(Action::ShowLimits)),
+            "bare /limits stays collect, got {bare:?}"
+        );
+    }
+
+    /// TUI `/limits` and CLI `grok-oss limits` share the same named words.
+    #[test]
+    #[serial_test::serial]
+    fn limits_slash_and_cli_share_stay_supergrok_words() {
+        use clap::Parser;
+        use tempfile::TempDir;
+        use xai_grok_test_support::EnvGuard;
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let store =
+            xai_grok_shell::auth::credentials_store::CredentialsStore::at_grok_home(home.path());
+        xai_grok_shell::auth::store_console_api_key(&store, "slash-share-words-console-key")
+            .expect("store console key so use-console can pin");
+
+        let stay = crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK;
+        let use_console = crate::limits_cmd::LIMITS_WORD_USE_CONSOLE;
+        let meter = crate::limits_cmd::LIMITS_WORD_METER;
+        let refresh = crate::limits_cmd::LIMITS_WORD_REFRESH;
+        assert_eq!(stay, "stay-supergrok");
+        assert_eq!(use_console, "use-console");
+        assert_eq!(meter, "meter");
+        assert_eq!(refresh, "refresh");
+
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        for (args, label) in [
+            (stay, "stay-supergrok"),
+            (use_console, "use-console"),
+            (refresh, "refresh"),
+            ("meter included", "meter included"),
+            ("meter dollar-credits", "meter dollar-credits"),
+            ("meter console", "meter console"),
+            ("meter combined", "meter combined"),
+        ] {
+            let result = LimitsCommand.run(&mut ctx, args);
+            assert!(
+                !matches!(result, CommandResult::Error(_)),
+                "slash /limits {label} must share the CLI word, got {result:?}"
+            );
+        }
+
+        for args in [
+            vec!["grok-oss", "limits", stay],
+            vec!["grok-oss", "limits", use_console],
+            vec!["grok-oss", "limits", refresh],
+            vec!["grok-oss", "limits", meter, "included"],
+            vec!["grok-oss", "limits", meter, "dollar-credits"],
+            vec!["grok-oss", "limits", meter, "console"],
+            vec!["grok-oss", "limits", meter, "combined"],
+        ] {
+            crate::app::cli::PagerArgs::try_parse_from(&args).unwrap_or_else(|e| {
+                panic!("CLI {:?} must parse the same words as slash: {e}", args)
+            });
+        }
     }
 
     #[test]

@@ -578,12 +578,14 @@ mod tests {
     fn paints_copy_icon(line: &BlockLine) -> bool {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
-        let Some(col) = line.copy_button_col else {
+        if line.copy_button_col.is_none() {
             return false;
-        };
-        let width = col.saturating_add(4).max(8);
+        }
+        let icon_w = crate::glyphs::copy_icon().width() as u16;
+        let width = icon_w.saturating_add(4).max(8);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
-        line.paint_bubble_copy_button(&mut buf, 0, 0, Style::default());
+        line.paint_bubble_copy_button(&mut buf, 0, width, 0, Style::default());
+        let col = width.saturating_sub(icon_w.max(1));
         buf.cell((col, 0))
             .is_some_and(|c| c.symbol() == crate::glyphs::copy_icon())
     }

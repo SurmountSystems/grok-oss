@@ -192,11 +192,14 @@ impl SessionActor {
         self.resolve_hosted().0
     }
     pub(crate) fn hosted_tools_for_turn(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
-        if self.backend_search_active() {
-            self.effective_hosted_tools()
-        } else {
-            Vec::new()
-        }
+        advertise_hosted_tools_for_turn(
+            if self.backend_search_active() {
+                self.effective_hosted_tools()
+            } else {
+                Vec::new()
+            },
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
     /// The applied overrides to echo, or `None` when backend search is off.
     pub(crate) fn effective_tool_overrides(
@@ -241,7 +244,11 @@ impl SessionActor {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let defs = bridge.tool_definitions_builtins_only().await;
         let plan_active = self.plan_mode.lock().is_active();
-        filter_cursor_tools_by_plan_mode(defs, plan_active)
+        advertise_tools_for_turn(
+            defs,
+            plan_active,
+            self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
         self.model_auth_state(model_id).0
@@ -575,6 +582,7 @@ impl SessionActor {
                 &mut sampling.session_identity_key,
             );
         }
+        crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
         sampling
     }
     /// Install auto-mode permission classifier with a live LLM side-query
@@ -867,7 +875,12 @@ impl SessionActor {
             message, STATUS,
         ))
     }
-    fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
+    pub(crate) fn log_terminal_failure(
+        &self,
+        error_type: &str,
+        status_code: Option<u16>,
+        message: &str,
+    ) {
         let auth = self
             .auth_manager
             .as_ref()
@@ -919,22 +932,49 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        if self.should_compact_on_error(&error).await {
-            let cw = error
+        if self.is_l3_session() {
+            if let Some(cw) = error
                 .model_metadata
                 .as_ref()
                 .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+                .filter(|cw| *cw > 0)
+            {
+                let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+                if estimated_total > cw {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        estimated_total,
+                        context_window = cw,
+                        "L3 nested window is full; ending child without compact"
+                    );
+                    return Ok(SamplerFailureRecovery::EndChildWithoutCompact);
+                }
+            }
+        }
+        if self.should_compact_on_error(&error).await {
+            // Compact against the session sampling window already in chat-state
+            // (catalog on L1, nested 200k on L2). Http/timeout errors have
+            // `model_metadata: None`; catalog 500k on a 5xx must not replace
+            // a nested 200k session window.
+            let session_cw = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.context_window.get())
+                .filter(|cw| *cw > 0);
+            let error_cw = error
+                .model_metadata
+                .as_ref()
+                .and_then(|m| m.context_window)
+                .filter(|cw| *cw > 0);
+            let Some(cw) = session_cw.or(error_cw) else {
+                let message = "Context overflow recovery has no sampling window".to_string();
+                self.log_terminal_failure("context_length", error.status_code, &message);
+                return Err(acp::Error::internal_error().data(message));
+            };
             {
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
-                if let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await
-                    && let Some(new_cw) = std::num::NonZeroU64::new(cw)
-                    && self.compaction.context_window_override.is_none()
-                {
-                    cfg.context_window = new_cw;
-                    self.chat_state_handle.update_sampling_config(cfg);
-                }
                 let trigger_info = compaction::AutoCompactTriggerInfo {
                     tokens_used: total_tokens,
                     context_window: cw,
@@ -950,6 +990,9 @@ impl SessionActor {
                 }
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
+        }
+        if self.sampling_window_is_full().await {
+            self.refuse_over_window_sample().await?;
         }
         let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
@@ -1192,6 +1235,12 @@ impl SessionActor {
             }
             _ => (error_type, detailed_message),
         };
+        let detailed_message =
+            if xai_grok_sampling_types::is_console_team_prepaid_message(&detailed_message) {
+                xai_grok_sampling_types::credit_exhausted_user_message(&detailed_message)
+            } else {
+                detailed_message
+            };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
@@ -1270,6 +1319,9 @@ impl SessionActor {
                     }
                     SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                         Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
+                    }
+                    SamplerFailureRecovery::EndChildWithoutCompact => {
+                        Ok(SamplerTurnOutcome::EndChildWithoutCompact)
                     }
                 }
             }
@@ -1724,15 +1776,17 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-business-included"),
-            "per-turn reconstruct must hop to Business included SuperGrok period limits"
+            Some("tok-personal-full-extras"),
+            "per-turn reconstruct must stay on the personal SuperGrok paying JWT; Team JWT omitted"
+        );
+        assert!(
+            !failover.iter().any(|k| k == "tok-business-included"),
+            "Team JWT omitted while a personal SuperGrok login exists: {failover:?}"
         );
         assert_eq!(
-            failover,
-            vec!["tok-personal-full-extras".to_string()],
-            "personal usagePct 100 without SuperGrok Heavy keeps included remaining; console omitted: {failover:?}"
+            session_identity.as_deref(),
+            Some("tok-personal-full-extras")
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-business-included"));
         clear_included_billing_cache();
     }
 
@@ -1807,15 +1861,14 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-team-included"),
-            "missing Heavy / false 100% must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+            Some("tok-personal-false-100"),
+            "missing Heavy / false 100% keeps personal SuperGrok paying JWT; primary={api_key:?} failover={failover:?}"
         );
-        assert_eq!(
-            failover,
-            vec!["tok-personal-false-100".to_string()],
-            "personal included remaining is next; console omitted: {failover:?}"
+        assert!(
+            !failover.iter().any(|k| k == "tok-team-included"),
+            "Team JWT omitted while personal SuperGrok can pay: {failover:?}"
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        assert_eq!(session_identity.as_deref(), Some("tok-personal-false-100"));
         clear_included_billing_cache();
     }
 
@@ -1891,19 +1944,18 @@ mod ranked_auto_turn_tests {
         );
         assert_eq!(
             api_key.as_deref(),
-            Some("tok-team-included"),
-            "100% + SuperGrok dollar credits on both + missing Heavy must not hop off Team included remaining; primary={api_key:?} failover={failover:?}"
+            Some("tok-personal-dollars"),
+            "100% + SuperGrok dollar credits on both + missing Heavy keeps personal SuperGrok paying JWT; primary={api_key:?} failover={failover:?}"
         );
-        assert_eq!(
-            failover,
-            vec!["tok-personal-dollars".to_string()],
-            "personal included remaining is next; SuperGrok dollar credits and console are not primary: {failover:?}"
+        assert!(
+            !failover.iter().any(|k| k == "tok-team-included"),
+            "Team JWT omitted while personal SuperGrok can pay: {failover:?}"
         );
         assert!(
             !failover.iter().any(|k| k == "console-must-not-win"),
             "must not hop to console while any stored SuperGrok identity has included remaining"
         );
-        assert_eq!(session_identity.as_deref(), Some("tok-team-included"));
+        assert_eq!(session_identity.as_deref(), Some("tok-personal-dollars"));
         clear_included_billing_cache();
     }
 }

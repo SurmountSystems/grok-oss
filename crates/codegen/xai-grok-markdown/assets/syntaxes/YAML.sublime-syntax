@@ -1,0 +1,29 @@
+name: YAML
+file_extensions: [yaml, yml]
+scope: source.yaml
+contexts:
+  main:
+    - match: '#'
+      push: comment
+    - match: '^[\w.-]+(?=\s*:)'
+      scope: entity.name.tag.yaml
+    - match: '"'
+      push: string_double
+    - match: "'"
+      push: string_single
+    - match: '\b(true|false|null|yes|no)\b'
+      scope: constant.language.yaml
+  comment:
+    - meta_scope: comment.line.number-sign.yaml
+    - match: '$'
+      pop: true
+  string_double:
+    - meta_scope: string.quoted.double.yaml
+    - match: '\\.'
+      scope: constant.character.escape.yaml
+    - match: '"'
+      pop: true
+  string_single:
+    - meta_scope: string.quoted.single.yaml
+    - match: "'"
+      pop: true

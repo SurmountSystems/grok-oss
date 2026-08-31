@@ -349,6 +349,15 @@ impl xai_tool_runtime::Tool for ApplyPatchTool {
                 }
             })
             .collect();
+        for lock_path in &lock_paths {
+            if let Some(message) =
+                crate::util::compiler_probe_junk::refuse_write_if_compiler_probe_junk(
+                    lock_path, &cwd,
+                )
+            {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+            }
+        }
         let _write_locks =
             crate::implementations::editor_infra::per_path_write_lock::acquire_paths_for_tool(
                 lock_paths,
@@ -787,5 +796,34 @@ mod tests {
             }
             other => panic!("Expected EmptyPatch, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_refuses_add_rmeta_at_workspace_root_and_does_not_create_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let tool = ApplyPatchTool;
+        let resources = test_resources(tmp.path());
+        let shared = resources.into_shared();
+        let patch = wrap_patch("*** Add File: libfixture.rmeta\n+probe");
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), make_input(&patch)).await;
+        match result {
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.to_ascii_lowercase().contains("refuse")
+                        || message.contains("probe junk")
+                        || message.contains("workspace root"),
+                    "apply_patch refuse for libfixture.rmeta should say why: {message}"
+                );
+            }
+            Ok(other) => panic!(
+                "apply_patch must refuse libfixture.rmeta at the workspace root, got {other:?}"
+            ),
+        }
+        assert!(
+            !tmp.path().join("libfixture.rmeta").exists(),
+            "refused apply_patch must not create libfixture.rmeta at the workspace root"
+        );
     }
 }

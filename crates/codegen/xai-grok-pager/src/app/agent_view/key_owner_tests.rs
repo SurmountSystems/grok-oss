@@ -443,11 +443,16 @@ fn plan_approval_takes_the_bar_wherever_it_takes_the_keys() {
     open_question(&mut agent);
     agent.plan_approval_view =
         Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+    agent
+        .plan_approval_view
+        .as_mut()
+        .expect("approval open")
+        .focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
 
     assert_eq!(
         agent.key_owner(),
         KeyOwner::PlanApproval,
-        "the router hands plan approval the keyboard ahead of any card"
+        "armed plan feedback takes the keyboard ahead of any card"
     );
     assert_eq!(agent.focused_card(), None, "so no card is taking keys");
     let labels = hint_labels(&agent);
@@ -456,8 +461,10 @@ fn plan_approval_takes_the_bar_wherever_it_takes_the_keys() {
         "and the bar must not advertise the question card's walk, got {labels:?}"
     );
     assert!(
-        labels.contains(&"copy plan".to_string()),
-        "it names the surface the keys actually reach, got {labels:?}"
+        labels
+            .iter()
+            .any(|l| l == "plan" || l == "copy plan" || l == "clarify"),
+        "it names the plan-feedback surface the keys actually reach, got {labels:?}"
     );
 }
 
@@ -733,6 +740,11 @@ fn esc_on_a_later_question_parks_before_it_leaves_the_overlay() {
 fn the_route_back_never_names_a_card_the_plan_approval_outranks() {
     let mut agent = make_agent();
     open_plan_over_question(&mut agent);
+    agent
+        .plan_approval_view
+        .as_mut()
+        .expect("approval open")
+        .focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
     agent.set_active_pane(AgentPane::Scrollback, true);
 
     assert_eq!(
@@ -761,9 +773,9 @@ fn the_route_back_never_names_a_card_the_plan_approval_outranks() {
     assert!(hint_labels(&agent).contains(&"question".to_string()));
 }
 
-/// With the preview closed, the plan approval's own bar is what renders, and
-/// it must name `Tab` the way the preview's bar does — the key does the same
-/// thing in both states, so it cannot answer to two names.
+/// With the plan pane closed, an idle parked waiter must not steal the
+/// keyboard. The main composer owns keys so Enter can submit a normal
+/// prompt. Open the pane with `/view-plan` or a status click.
 #[test]
 fn the_plan_preview_names_tab_the_way_its_viewer_does() {
     let mut agent = make_agent();
@@ -776,17 +788,13 @@ fn the_plan_preview_names_tab_the_way_its_viewer_does() {
 
     assert!(
         agent.line_viewer.is_none(),
-        "an open preview paints its own row instead"
+        "the pane is closed; idle present is status-only"
     );
-    assert_eq!(agent.key_owner(), KeyOwner::PlanApproval);
-
-    let labels = hint_labels(&agent);
-    assert!(
-        labels.contains(&"prompt".to_string()),
-        "Tab moves focus to the plan prompt, and the viewer's bar calls it \
-         `Tab:prompt` too, got {labels:?}"
+    assert_eq!(
+        agent.key_owner(),
+        KeyOwner::Pane,
+        "idle Preview with the pane closed leaves the main composer typeable"
     );
-    assert!(labels.contains(&"copy plan".to_string()));
 }
 
 /// Blanking a free-text answer unmarks it, however the user leaves the text

@@ -13,8 +13,10 @@ pub const SILENCE_PEAK_MAX: u16 = 3;
 /// byte ignored. `u16` because `i16::MIN.unsigned_abs()` is 32768.
 pub fn peak_abs_i16_le(pcm_le: &[u8]) -> u16 {
     pcm_le
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs())
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b).unsigned_abs())
         .max()
         .unwrap_or(0)
 }

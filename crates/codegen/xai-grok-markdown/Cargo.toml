@@ -12,14 +12,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 [dependencies]
 anstyle = { workspace = true }
 anstyle-lossy = { workspace = true }
-anstyle-syntect = { workspace = true }
 html-escape = { workspace = true }
 linkify = { workspace = true }
 pulldown-cmark = { workspace = true }
 ratatui = { workspace = true }
 supports-color = { workspace = true }
 syntect = { workspace = true }
-two-face = { workspace = true }
 textwrap = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }

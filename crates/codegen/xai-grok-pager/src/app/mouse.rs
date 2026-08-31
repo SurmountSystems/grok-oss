@@ -265,6 +265,15 @@ impl AgentView {
                         xai_grok_telemetry::events::AnnouncementCtaSurface::Header,
                     ));
                 }
+                if self.hit_header_dashboard.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::OpenDashboard);
+                }
+                if self.hit_header_prev.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::DashboardOverlayPrev);
+                }
+                if self.hit_header_next.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::DashboardOverlayNext);
+                }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
                     let path = self.session.cwd.display().to_string();
                     self.copy_to_clipboard(&path);
@@ -1056,6 +1065,11 @@ impl AgentView {
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_header_dashboard
+                    .update_hover(mouse.column, mouse.row);
+                changed |= self.hit_header_prev.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_header_next.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self
@@ -1344,6 +1358,45 @@ mod tests {
     /// Left-click the row's `[Interject]` (send-now) button.
     fn click_send_now(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.send_now_click(c, r))
+    }
+    /// Mouse Down on [Send now] of the top shared-queue row, without
+    /// focusing the pane or selecting the row first.
+    #[test]
+    fn mouse_send_now_click_submits_top_queued_server_row() {
+        let mut agent = make_running_agent();
+        agent.queue.overlay.focused = false;
+        agent.active_pane = AgentPane::Prompt;
+        let ids = agent.queue.entry_ids();
+        let top = ids[0];
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        agent
+            .queue
+            .render(area, &mut buf, false, &layout_cfg, None, true);
+        agent.pane_areas.queue = area;
+        let mut found = None;
+        'find: for row in area.y..area.y + area.height {
+            for col in area.x..area.x + area.width {
+                if agent.queue.send_now_click(col, row) == Some(top) {
+                    found = Some((col, row));
+                    break 'find;
+                }
+            }
+        }
+        let (col, row) = found.expect("top row Send now must paint without focus");
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+        match outcome {
+            InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
+                assert_eq!(id, "p1", "click must submit the top queued server prompt");
+            }
+            other => panic!("expected QueueInterjectShared from a Send now click, got {other:?}"),
+        }
     }
     /// Left-click the row's `[cancel]` (delete) button.
     fn click_delete(agent: &mut AgentView, selected_id: u64) -> InputOutcome {

@@ -3,10 +3,6 @@
 use super::*;
 use crate::util::dual_clock::DualClock;
 use xai_grok_tools::implementations::grok_build::LoopFireMode;
-/// Synthetic tool the model calls to return its schema-constrained final answer
-/// on backends that can't constrain output natively (Messages API). Intercepted
-/// in the loop, never executed as a real tool.
-const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
 const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
@@ -1358,9 +1354,7 @@ impl SessionActor {
                     incomplete,
                 )
             }
-            Err(()) => {
-                crate::extensions::notification::PromptUsage::project_from_ledger(None, true)
-            }
+            Err(_) => crate::extensions::notification::PromptUsage::project_from_ledger(None, true),
         }
     }
     /// When freeze did not attach: incomplete if billed or may under-count; else omit.
@@ -1376,7 +1370,7 @@ impl SessionActor {
                 ledger.as_ref(),
                 may_undercount,
             ),
-            Err(()) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
+            Err(_) => crate::extensions::notification::PromptUsage::for_error_path(None, true),
         }
     }
     /// Sticky incomplete for `prompt_id`, or the live pin when `None`.
@@ -1981,6 +1975,7 @@ impl SessionActor {
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
+        let mut overflow_compacted = false;
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
@@ -2130,28 +2125,47 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
+            self.refuse_over_window_sample().await?;
+            if self.l3_nested_window_is_full().await {
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    "L3 nested window is full; ending child without compact"
+                );
+                let snapshot = self
+                    .finalize_turn_bookkeeping(
+                        req_id,
+                        conv_turn_start,
+                        &turn_span_totals,
+                        model_fingerprint.clone(),
+                    )
+                    .await;
+                return Ok(TurnOutcome::Completed {
+                    snapshot: Box::new(snapshot),
+                    tools_called: turn_tools_called,
+                    structured_output: None,
+                    refusal: None,
+                });
+            }
             let backend_search_active = self.backend_search_active();
             tracing::debug!(
                 backend_search_active,
                 "backend_search: turn tool resolution"
             );
-            let mut effective_tools: Vec<ToolSpec> =
+            let base_tools: Vec<ToolSpec> =
                 if let Some(ref override_tools) = self.forked_tool_override {
                     override_tools.clone()
                 } else {
                     self.turn_base_tool_specs(&tool_definitions)
                 };
-            if structured_output_tool && let Some(schema) = json_schema.clone() {
-                effective_tools.push(ToolSpec {
-                    name: STRUCTURED_OUTPUT_TOOL.to_string(),
-                    description: Some(
-                        "Return your final answer as JSON matching the required schema. \
-                         Call this exactly once, at the end."
-                            .to_string(),
-                    ),
-                    parameters: schema,
-                });
-            }
+            let effective_tools = effective_tools_for_turn(
+                base_tools,
+                self.context_only.load(std::sync::atomic::Ordering::Relaxed),
+                if structured_output_tool {
+                    json_schema.clone()
+                } else {
+                    None
+                },
+            );
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle
@@ -2181,6 +2195,8 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            request.estimated_input_tokens =
+                Some(self.chat_state_handle.get_estimated_total_tokens().await);
             request.x_grok_session_id = Some(self.session_info.id.to_string());
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -2224,8 +2240,32 @@ impl SessionActor {
                     return Err(error);
                 }
                 Ok(SamplerTurnOutcome::CompactAndResubmit) => {
+                    if overflow_compacted {
+                        self.refuse_over_window_sample().await?;
+                    }
+                    overflow_compacted = true;
                     auth_retry_schedule.reset_on_success();
                     continue;
+                }
+                Ok(SamplerTurnOutcome::EndChildWithoutCompact) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        "L3 nested window is full after sample; ending child without compact"
+                    );
+                    let snapshot = self
+                        .finalize_turn_bookkeeping(
+                            req_id,
+                            conv_turn_start,
+                            &turn_span_totals,
+                            model_fingerprint.clone(),
+                        )
+                        .await;
+                    return Ok(TurnOutcome::Completed {
+                        snapshot: Box::new(snapshot),
+                        tools_called: turn_tools_called,
+                        structured_output: None,
+                        refusal: None,
+                    });
                 }
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
                     if auth_retry_schedule.reset_if_incident_spans_suspend() {
@@ -2744,6 +2784,26 @@ impl SessionActor {
                     }
                 }
                 continue;
+            }
+            if self.l3_nested_window_is_full().await {
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    "L3 nested window is full after tools; ending child without compact"
+                );
+                let snapshot = self
+                    .finalize_turn_bookkeeping(
+                        req_id,
+                        conv_turn_start,
+                        &turn_span_totals,
+                        model_fingerprint.clone(),
+                    )
+                    .await;
+                return Ok(TurnOutcome::Completed {
+                    snapshot: Box::new(snapshot),
+                    tools_called: turn_tools_called,
+                    structured_output: None,
+                    refusal: None,
+                });
             }
         }
     }

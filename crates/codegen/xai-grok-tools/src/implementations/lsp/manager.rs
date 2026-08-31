@@ -431,6 +431,26 @@ impl LspManager {
             }
 
             for uri in pending.take_answered(&server_name, &client.diagnostics, now) {
+                client.diagnostics.forget_fresh_push(&uri);
+                collected.append_file(&uri, client.diagnostics.items(&uri));
+            }
+        }
+
+        // Nonempty pushes that landed after an empty pull had already settled
+        // the file. Pending is gone; the push is still the report owed.
+        // Skip URIs still waiting: an unsolicited workspace report must not
+        // count as a verdict on an edit we have just sent.
+        let mut client_names: Vec<String> = self.clients.keys().cloned().collect();
+        client_names.sort_unstable();
+        for server_name in client_names {
+            let Some(client) = self.clients.get(&server_name) else {
+                continue;
+            };
+            let waiting = self.pending_diagnostics_by_server.get(&server_name);
+            for uri in client.diagnostics.take_fresh_nonempty_pushes() {
+                if waiting.is_some_and(|pending| pending.contains(&uri)) {
+                    continue;
+                }
                 collected.append_file(&uri, client.diagnostics.items(&uri));
             }
         }
@@ -608,14 +628,15 @@ pub async fn drain_lsp_diagnostics(
         // A refresh can land at any point, including during the wait below.
         lsp.reopen_refreshed_questions();
 
-        if !lsp.has_pending_diagnostics() {
-            return None;
-        }
-
-        // The answer may already be in; on the first pass that saves the wait
-        // entirely, and on later passes it is what the wait was for.
+        // Collect before the pending-empty bail-out: a nonempty push can land
+        // after an empty pull already settled the file, at which point pending
+        // is gone and the push is still the report the reader is owed.
         if let Some(summary) = lsp.take_answered_diagnostics() {
             return Some(summary);
+        }
+
+        if !lsp.has_pending_diagnostics() {
+            return None;
         }
 
         // Nothing to report, and either the budget is gone or every server

@@ -87,6 +87,7 @@ pub(super) fn prompt_style(
         prefix_override: input_mode.prefix_override(theme),
         placeholder_when_focused: false,
         placeholder_override: input_mode.placeholder_override(multiline),
+        hide_idle_placeholder: false,
         show_accent_line: false,
         show_borders: false,
         title: None,
@@ -506,7 +507,7 @@ fn minimal_advance_phase_timer(
 ///
 /// Reuses the full-TUI [`turn_status::render_turn_status`] widget so minimal
 /// surfaces the same rich activity detail (`Run …` / `Thinking…` /
-/// `Waiting on subagent…` / `Retrying (attempt N)…` / `Cancelling…`), the
+/// `Waiting on subagent…` / `Retrying the model request (attempt N)…` / `Cancelling…`), the
 /// per-phase + turn timers, and the "… still running" cue (running commands /
 /// monitors / loops / background subagents) — instead of collapsing
 /// everything to "working…". Keyboard-only, so the mouse `[stop]` / `[↓]`
@@ -656,10 +657,7 @@ fn render_prompt_info(
                 .and_then(|c| (c.total > 0).then_some(c.total))
         });
         let sampling = catalog.map(|window| {
-            xai_grok_shell::util::config::apply_economic_context_cap(
-                window,
-                xai_grok_pager::appearance::cache::load_economic_mode(),
-            )
+            xai_grok_shell::util::config::session_sampling_window(window, agent.is_subagent_view)
         });
         if let Some(used) = used
             && let Some(chip) =

@@ -344,8 +344,9 @@ pub enum Action {
     /// Minimal mode (`grok --minimal`): re-print the most-recently committed
     /// folded block (collapsed reasoning / truncated tool output) into native
     /// scrollback, fully expanded, below the conversation (design decision K10).
-    /// Bound to `Ctrl+E` and the `/expand` command. No-op outside minimal mode
-    /// or when nothing folded remains to expand.
+    /// Bound to `Ctrl+T` (Ctrl+E stays an extra chord) and the `/expand`
+    /// command. No-op outside minimal mode or when nothing folded remains to
+    /// expand.
     MinimalExpandLast,
     /// Copy selected block's metadata (e.g., command for execute blocks).
     CopyBlockMeta,
@@ -549,7 +550,7 @@ pub enum Action {
     /// Hide in-app status / welcome / dashboard headers. SHELL-owned:
     /// cache + `[ui].hide_header`.
     SetHideHeader(bool),
-    /// Keep thinking blocks expanded and hide Ctrl+E. SHELL-owned:
+    /// Keep thinking blocks expanded and hide Ctrl+T. SHELL-owned:
     /// cache + `[ui].always_expand_thinking`.
     SetAlwaysExpandThinking(bool),
     /// Plan approval park (`soft` | `modal`). SHELL-owned:
@@ -561,6 +562,10 @@ pub enum Action {
     /// ASCII-scrub assistant punctuation. SHELL-owned:
     /// cache + `[ui].scrub_ascii_punct`.
     SetScrubAsciiPunct(bool),
+    /// ULID-primary session ids in grok-oss. SHELL-owned:
+    /// cache + `[ui].ulid_session_ids`. Default on. Off keeps UUID-primary
+    /// display. The ULID map still exists either way.
+    SetUlidSessionIds(bool),
     /// Always-visible bubble copy buttons. PAGER-owned:
     /// appearance + pager.toml `[scrollback.display].bubble_copy_buttons`.
     SetBubbleCopyButtons(bool),
@@ -757,6 +762,8 @@ pub enum Action {
     ShowTasks,
     /// Commit a read-only list of live grok-oss TUI windows (`/running`).
     ShowRunningSessions,
+    /// Commit live session metadata (`/metadata`): ULID, UUID, cwd, model, started, pid.
+    ShowSessionMetadata,
     /// `/limits` — included SuperGrok period limits, extras, and console meters.
     ShowLimits,
     /// `/spend` — local vs Management spend books.
@@ -1129,6 +1136,8 @@ pub enum PermissionModeKind {
     Auto,
     /// Auto-approve all tool actions. `yolo_mode = true`.
     AlwaysApprove,
+    /// Advertise no tools; refuse any tool call that still arrives.
+    ContextOnly,
 }
 impl PermissionModeKind {
     /// Canonical persisted/wire string for the kind. Matches the
@@ -1140,6 +1149,7 @@ impl PermissionModeKind {
             Self::Ask => "ask",
             Self::Auto => "auto",
             Self::AlwaysApprove => "always-approve",
+            Self::ContextOnly => "context-only",
         }
     }
     /// Bool projection onto the YOLO runtime flag — `AlwaysApprove
@@ -1155,6 +1165,10 @@ impl PermissionModeKind {
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
     }
+    /// Diagnostic mode: no tools advertised, tool calls refused.
+    pub fn is_context_only(self) -> bool {
+        matches!(self, Self::ContextOnly)
+    }
     /// Construct from a canonical string. Returns `None` for unknown
     /// strings. Used by `apply_setting_rollback("permission_mode", _)`
     /// to recover the typed kind from the `SettingValue::Enum(canonical)`
@@ -1165,6 +1179,7 @@ impl PermissionModeKind {
             "ask" => Some(Self::Ask),
             "auto" => Some(Self::Auto),
             "always-approve" => Some(Self::AlwaysApprove),
+            "context-only" => Some(Self::ContextOnly),
             _ => None,
         }
     }
@@ -1189,12 +1204,25 @@ mod permission_mode_kind_tests {
     }
     #[test]
     fn permission_mode_choices_include_auto_in_catalog() {
-        for c in ["default", "ask", "auto", "always-approve"] {
+        for c in ["default", "ask", "auto", "always-approve", "context-only"] {
             assert!(
                 PermissionModeKind::from_canonical(c).is_some(),
                 "catalog canonical {c} must parse"
             );
         }
+    }
+
+    #[test]
+    fn context_only_is_listed_with_always_approve_plan_and_auto() {
+        let kind = PermissionModeKind::from_canonical("context-only")
+            .expect("context-only must be a permission mode");
+        assert_eq!(kind.as_canonical(), "context-only");
+        assert!(!kind.is_always_approve());
+        assert!(!kind.is_auto());
+        assert!(kind.is_context_only());
+        assert!(!PermissionModeKind::AlwaysApprove.is_context_only());
+        assert!(!PermissionModeKind::Auto.is_context_only());
+        assert!(!PermissionModeKind::Ask.is_context_only());
     }
 }
 /// Canonical on/off state for `plan_mode`. Binary today (single bit
@@ -2315,7 +2343,8 @@ impl RenameSessionRequest {
 /// pager must finalize the subagent row itself.
 #[derive(Debug)]
 pub enum SubagentKillOutcome {
-    /// Shell stopped a live subagent — a real `SubagentFinished` is coming.
+    /// Shell stopped a live subagent. Chrome finalizes the row so Subagents
+    /// **X** cannot sit on `killing...` if `SubagentFinished` is delayed.
     StoppedLive,
     /// Nothing live to stop (orphan / already finished) — no finish coming, so
     /// the pager finalizes the row. `status` = the real terminal status for an

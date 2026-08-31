@@ -103,6 +103,67 @@ is_not_found() {
     [ "$code" = "404" ]
 }
 
+# SHA-256 of a file (lowercase hex). Not SHA-1. Needs sha256sum, shasum -a 256,
+# or openssl dgst -sha256. Do not echo tokens or secret env values.
+file_sha256() {
+    local f="$1" out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$f" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        out=$(shasum -a 256 "$f" | awk '{print $1}')
+    elif command -v openssl >/dev/null 2>&1; then
+        out=$(openssl dgst -sha256 "$f" | awk '{print $NF}')
+    else
+        echo "Error: sha256sum, shasum -a 256, or openssl is required to verify the download." >&2
+        return 1
+    fi
+    printf '%s' "$out" | tr 'A-F' 'a-f'
+}
+
+# First field must be exactly 64 hex digits (GNU `hash  name` or bare hash).
+# Not SHA-1. Not `SHA256 (name) = …` tag form.
+parse_sha256_file() {
+    local f="$1" line hex
+    line=$(tr -d '\r' < "$f" | head -n1)
+    hex=$(printf '%s' "$line" | awk '{print $1}')
+    hex=$(printf '%s' "$hex" | tr 'A-F' 'a-f')
+    hex="${hex#\*}"
+    if [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+        printf '%s' "$hex"
+        return 0
+    fi
+    return 1
+}
+
+# Fail-closed: missing checksum file, unreadable digest, or mismatch refuses
+# the blob. Published file is ${artifact}.sha256 next to the binary.
+verify_downloaded_sha256() {
+    local artifact="$1" checksum_url="$2"
+    local sum_tmp expected actual
+    sum_tmp=$(mktemp 2>/dev/null) || {
+        echo "Error: could not create a temp file for the SHA-256 checksum." >&2
+        return 1
+    }
+    if ! download_file "$checksum_url" "$sum_tmp"; then
+        rm -f "$sum_tmp"
+        echo "Error: SHA-256 checksum file missing (${checksum_url}). Refusing the download." >&2
+        return 1
+    fi
+    expected=$(parse_sha256_file "$sum_tmp") || {
+        rm -f "$sum_tmp"
+        echo "Error: checksum file is not a SHA-256 hex digest (${checksum_url})." >&2
+        return 1
+    }
+    rm -f "$sum_tmp"
+    actual=$(file_sha256 "$artifact") || return 1
+    if [ "$actual" != "$expected" ]; then
+        echo "Error: SHA-256 mismatch for downloaded grok. Keeping the existing install." >&2
+        return 1
+    fi
+    echo "  SHA-256 verified." >&2
+    return 0
+}
+
 # JSON field extractor — extract a top-level string value using sed.
 json_get() {
     local json="$1" field="$2"
@@ -113,6 +174,7 @@ json_get() {
 
 # Read a token from ~/.grok/auth.json for the given scope key.
 # Format: {"scope_url": {"key": "token"}, ...}
+# Log auth *source names* only. Do not echo token, API key, or secret env values.
 read_grok_token() {
     local auth_file="$HOME/.grok/auth.json"
     local scope="$1"
@@ -219,21 +281,27 @@ if [ "$os" = "windows" ]; then
     binary_path="${binary_path}.exe"
 fi
 
+binary_tmp="${binary_path}.tmp.$$"
+rm -f "$binary_tmp" 2>/dev/null || true
+checksum_url="${artifact_base}.sha256"
+
 echo "  Downloading grok ${version}..." >&2
 if [ "$os" = "windows" ]; then
-    if ! download_file_parallel "${artifact_base}.exe" "$binary_path"; then
-        if ! download_file_parallel "$artifact_base" "$binary_path"; then
-            rm -f "$binary_path"
-            if is_not_found "${artifact_base}.exe"; then
-                echo "Error: Grok is not yet available for your system ($platform)." >&2
-            else
-                echo "Error: binary download failed (${artifact_base}.exe and ${artifact_base})" >&2
-            fi
-            exit 1
+    if download_file_parallel "${artifact_base}.exe" "$binary_tmp"; then
+        checksum_url="${artifact_base}.exe.sha256"
+    elif download_file_parallel "$artifact_base" "$binary_tmp"; then
+        checksum_url="${artifact_base}.sha256"
+    else
+        rm -f "$binary_tmp"
+        if is_not_found "${artifact_base}.exe"; then
+            echo "Error: Grok is not yet available for your system ($platform)." >&2
+        else
+            echo "Error: binary download failed (${artifact_base}.exe and ${artifact_base})" >&2
         fi
+        exit 1
     fi
-elif ! download_file_parallel "$artifact_base" "$binary_path"; then
-    rm -f "$binary_path"
+elif ! download_file_parallel "$artifact_base" "$binary_tmp"; then
+    rm -f "$binary_tmp"
     if is_not_found "$artifact_base"; then
         echo "Error: Grok is not yet available for your system ($platform)." >&2
     else
@@ -242,7 +310,13 @@ elif ! download_file_parallel "$artifact_base" "$binary_path"; then
     exit 1
 fi
 
+if ! verify_downloaded_sha256 "$binary_tmp" "$checksum_url"; then
+    rm -f "$binary_tmp"
+    exit 1
+fi
+
 if [ "$os" = "windows" ]; then
+    mv -f "$binary_tmp" "$binary_path"
     # Symlinks require Developer Mode on Windows; copy instead.
     # If the exe is locked by a running process, rename it aside then retry.
     for bin_name in grok.exe agent.exe; do
@@ -259,7 +333,9 @@ if [ "$os" = "windows" ]; then
     done
     echo "  Binary installed to $BIN_DIR/grok.exe and $BIN_DIR/agent.exe." >&2
 else
-    chmod +x "$binary_path"
+    chmod +x "$binary_tmp"
+    # SHA-256 of the bytes already matched the published checksum file. Not SHA-1.
+    mv -f "$binary_tmp" "$binary_path"
     ln -sf "$binary_path" "$BIN_DIR/grok"
     ln -sf "$binary_path" "$BIN_DIR/agent"
     echo "  Binary linked to $BIN_DIR/grok and $BIN_DIR/agent." >&2

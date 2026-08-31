@@ -372,18 +372,65 @@ fn chmod_000(path: &Path) -> Option<()> {
     std::fs::set_permissions(path, perms).ok()?;
     Some(())
 }
-/// Zero-permission placeholder (file or dir) under `grok_home` used by bwrap bind-over.
+/// Directories that may hold the zero-permission bwrap bind source.
+///
+/// Prefer `grok_home` (already in the writable set). When that tree cannot be
+/// created (Nix `HOME=/homeless-shelter`, `$GROK_HOME` under `/nonexistent`),
+/// use `/tmp`, which sandbox profiles already write-allow. Skip `$NIX_BUILD_TOP`
+/// (`/build`): the quality sandbox's build tree is not a place for mode-000
+/// bind sources.
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+fn bwrap_placeholder_parent_dirs() -> Vec<PathBuf> {
+    let mut parents = Vec::new();
+    for candidate in [
+        paths::grok_home(),
+        PathBuf::from("/tmp"),
+        std::env::temp_dir(),
+    ] {
+        if bwrap_placeholder_parent_usable(&candidate) && !parents.contains(&candidate) {
+            parents.push(candidate);
+        }
+    }
+    parents
+}
+
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+fn bwrap_placeholder_parent_usable(parent: &Path) -> bool {
+    if parent.as_os_str().is_empty() {
+        return false;
+    }
+    if parent == Path::new("/build") {
+        return false;
+    }
+    if let Ok(top) = std::env::var("NIX_BUILD_TOP")
+        && Path::new(&top) == parent
+    {
+        return false;
+    }
+    true
+}
+
+/// Zero-permission placeholder (file or dir) used by bwrap bind-over.
 ///
 /// The placeholder name is suffixed with the current PID so concurrent grok
 /// processes don't race each other's create/remove/chmod on a shared path (which
 /// could yield `None` and the silent dropped-bind fail-open this avoids).
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn bwrap_blocked_placeholder(name: &str, want_dir: bool) -> Option<PathBuf> {
-    use std::fs::OpenOptions;
-    let path = paths::grok_home().join(format!("{name}.{}", std::process::id()));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
+    let filename = format!("{name}.{}", std::process::id());
+    for parent in bwrap_placeholder_parent_dirs() {
+        if let Some(path) = try_bwrap_placeholder_in(&parent, &filename, want_dir) {
+            return Some(path);
+        }
     }
+    None
+}
+
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+fn try_bwrap_placeholder_in(parent: &Path, filename: &str, want_dir: bool) -> Option<PathBuf> {
+    use std::fs::OpenOptions;
+    std::fs::create_dir_all(parent).ok()?;
+    let path = parent.join(filename);
     if path.exists() {
         if path.is_dir() == want_dir {
             chmod_000(&path)?;
@@ -615,6 +662,32 @@ mod tests {
             }
         }
     }
+    /// Nix quality `HOME` is `/homeless-shelter` (not writable). Pin `$GROK_HOME`
+    /// under `/tmp` so hook slots and preferred placeholders can be created.
+    fn pin_writable_grok_home() -> (EnvGuard, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut dir = PathBuf::from("/tmp").join(format!(
+            "grok-home-sandbox-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        if std::fs::create_dir_all(&dir).is_err() {
+            dir = std::env::temp_dir().join(format!(
+                "grok-home-sandbox-{}-{}",
+                std::process::id(),
+                nanos
+            ));
+            std::fs::create_dir_all(&dir).expect("writable GROK_HOME");
+        }
+        let guard = EnvGuard::set(
+            "GROK_HOME",
+            dir.to_str().expect("GROK_HOME path is valid UTF-8"),
+        );
+        (guard, dir)
+    }
     #[test]
     #[serial(bwrap_env)]
     fn bwrap_reexec_returns_none_inside_bwrap() {
@@ -672,6 +745,7 @@ mod tests {
     #[cfg(all(feature = "enforce", target_os = "linux"))]
     fn bwrap_reexec_binds_nonexistent_deny_read_paths() {
         let _g = EnvGuard::remove(BWRAP_ENV_VAR);
+        let (_home, grok_dir) = pin_writable_grok_home();
         let missing = "/nonexistent-deny-read-path-xyz-12345";
         let result = bwrap_reexec_command(&[], &[missing]);
         let cmd = result.unwrap();
@@ -686,6 +760,7 @@ mod tests {
             has_bind,
             "should bind-over non-existent deny_read paths, got args: {args:?}"
         );
+        let _ = std::fs::remove_dir_all(&grok_dir);
     }
     #[test]
     #[serial(bwrap_env)]
@@ -877,6 +952,7 @@ mod tests {
     #[cfg(all(feature = "enforce", target_os = "linux"))]
     fn bwrap_reexec_uses_dir_placeholder_for_directories() {
         let _g = EnvGuard::remove(BWRAP_ENV_VAR);
+        let (_home, grok_dir) = pin_writable_grok_home();
         let dir = std::env::temp_dir().join(format!("grok-deny-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir_str = dir.to_string_lossy().to_string();
@@ -886,24 +962,27 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        let blocked_dir = paths::grok_home()
-            .join(format!("sandbox-blocked-dir.{}", std::process::id()))
-            .to_string_lossy()
-            .to_string();
-        let has_dir_bind = args
-            .windows(3)
-            .any(|w| w[0] == "--ro-bind" && w[1] == blocked_dir && w[2] == dir_str);
+        let blocked_name = format!("sandbox-blocked-dir.{}", std::process::id());
+        let has_dir_bind = args.windows(3).any(|w| {
+            w[0] == "--ro-bind"
+                && w[2] == dir_str
+                && Path::new(&w[1])
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy() == blocked_name)
+        });
         assert!(
             has_dir_bind,
             "existing directories should bind over sandbox-blocked-dir, got args: {args:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&grok_dir);
     }
     #[test]
     #[serial(bwrap_env)]
     #[cfg(all(feature = "enforce", target_os = "linux"))]
     fn bwrap_reexec_for_profile_devbox_extends_composes_data_and_read_deny() {
         let _g = EnvGuard::remove(BWRAP_ENV_VAR);
+        let (_home, grok_dir) = pin_writable_grok_home();
         let ws = temp_workspace_with_sandbox_toml(
             "devbox-compose",
             "[profiles.devcustom]\nextends = \"devbox\"\ndeny = [\"secret.pem\"]\n",
@@ -947,6 +1026,7 @@ mod tests {
             "non-devbox custom must re-exec for direct-hook write-deny"
         );
         let _ = std::fs::remove_dir_all(&ws_ws);
+        let _ = std::fs::remove_dir_all(&grok_dir);
     }
     #[test]
     #[cfg(all(feature = "enforce", target_os = "linux"))]

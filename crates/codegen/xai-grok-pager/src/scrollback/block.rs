@@ -133,7 +133,8 @@ pub trait BlockContent {
 
     /// Get the default display mode for this block type.
     ///
-    /// Default: Expanded. Blocks can override (e.g., thinking defaults to Truncated).
+    /// Default: Expanded. Blocks can override (thinking defaults to Collapsed
+    /// unless `[ui] always_expand_thinking` is on).
     fn default_display_mode(&self) -> DisplayMode {
         DisplayMode::Expanded
     }

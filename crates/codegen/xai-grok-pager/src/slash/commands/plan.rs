@@ -7,6 +7,7 @@
 
 use crate::app::actions::{Action, PlanModeKind};
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::queue_schedule::{plan_command_text, queue_later_command, split_schedule_token};
 
 /// Enter plan mode.
 pub struct PlanCommand;
@@ -31,7 +32,7 @@ impl SlashCommand for PlanCommand {
     }
 
     fn usage(&self) -> &str {
-        "/plan [description]"
+        "/plan [queue|later] [description]"
     }
 
     fn takes_args(&self) -> bool {
@@ -43,7 +44,11 @@ impl SlashCommand for PlanCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let trimmed = args.trim();
+        let (hold, rest) = split_schedule_token(args);
+        if hold {
+            return queue_later_command(plan_command_text(rest));
+        }
+        let trimmed = rest;
         if trimmed.is_empty() {
             return CommandResult::Action(Action::SetPlanMode(PlanModeKind::On));
         }

@@ -191,6 +191,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// may already be tearing down when the actor future is dropped.
     pub(super) fn resolve_queued_at_drop(&mut self) {
         for queued in std::mem::take(&mut self.queued.entries) {
+            crate::implementations::editor_infra::per_path_write_lock::release_holder(
+                &queued.request.id,
+            );
             queued.request.cancel_token.cancel();
             if let Some(result_tx) = queued.caller.into_spawn_reply() {
                 let _ = result_tx.send(cancelled_while_queued_result(&queued.request));

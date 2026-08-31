@@ -57,6 +57,15 @@ pub enum CommandResult {
     /// Command should be sent through the queued command pipeline
     /// (e.g., /compact). The String is the raw command text.
     QueueCommand(String),
+    /// Push onto the existing composer prompt queue and do not drain this turn.
+    /// Named path: `/queue <slash>` or first-arg `queue` / `later`.
+    QueueLater {
+        text: String,
+        /// `true` = [`crate::app::agent::QueueEntryKind::Command`] (compact/plan).
+        as_command: bool,
+        wire_blocks: Option<Vec<agent_client_protocol::ContentBlock>>,
+        display_as_skill: bool,
+    },
     /// Skill invocation: pager read the SKILL.md, applied substitutions,
     /// and constructed structured prompt blocks for the wire.
     /// `display_text` is what the user sees in scrollback.

@@ -307,6 +307,7 @@ pub(crate) async fn create_test_actor_with_terminal(
             disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),

@@ -29,7 +29,7 @@ use crate::metrics::InferenceLatencyStats;
 /// underlying `tokio::spawn` was cancelled).
 pub async fn collect_response(
     stream: impl Stream<Item = SamplingEvent>,
-) -> Result<(ConversationResponse, InferenceLatencyStats), SamplingErrorInfo> {
+) -> Result<(ConversationResponse, InferenceLatencyStats), Box<SamplingErrorInfo>> {
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
@@ -37,13 +37,13 @@ pub async fn collect_response(
             SamplingEvent::Completed {
                 response, metrics, ..
             } => return Ok((*response, metrics)),
-            SamplingEvent::Failed { error, .. } => return Err(error),
+            SamplingEvent::Failed { error, .. } => return Err(Box::new(error)),
             // Drop intermediate events; this is a buffered collector.
             _ => {}
         }
     }
 
-    Err(SamplingErrorInfo {
+    Err(Box::new(SamplingErrorInfo {
         kind: SamplingErrorKind::Api,
         status_code: None,
         message: "stream ended without Completed or Failed".to_string(),
@@ -56,7 +56,7 @@ pub async fn collect_response(
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
         credential: xai_grok_sampling_types::SentCredential::Unknown,
-    })
+    }))
 }
 
 #[cfg(test)]

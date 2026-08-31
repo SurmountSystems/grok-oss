@@ -21,6 +21,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
+        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -291,7 +292,7 @@ pub fn init_git_repo_on_branch(path: &Path, branch: &str) {
     let current = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(str::to_string));
+        .and_then(|h| h.shorthand().ok().map(str::to_string));
     if current.as_deref() != Some(branch) {
         repo.branch(branch, &commit, true).unwrap();
         repo.set_head(&format!("refs/heads/{branch}")).unwrap();

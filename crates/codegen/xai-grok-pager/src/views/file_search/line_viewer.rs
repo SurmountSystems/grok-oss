@@ -649,6 +649,29 @@ pub enum LineViewerKind {
     PlanPreview,
 }
 
+/// Explicit idle CTA recorded in grok_oss.db. None means no recorded row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedPlanChoice {
+    Approve,
+    Comment,
+    Revise,
+    Exit,
+}
+
+fn recorded_choice_marks_index(
+    recorded: Option<RecordedPlanChoice>,
+    index: usize,
+    comment_flow: bool,
+) -> bool {
+    match (recorded, index) {
+        (Some(RecordedPlanChoice::Approve), 0) => true,
+        (Some(RecordedPlanChoice::Comment), 1) if !comment_flow => true,
+        (Some(RecordedPlanChoice::Revise), 2) => true,
+        (Some(RecordedPlanChoice::Exit), 3) => true,
+        _ => false,
+    }
+}
+
 #[derive(Default)]
 pub struct PlanViewerExtras {
     pub send_button_area: Option<Rect>,
@@ -657,6 +680,8 @@ pub struct PlanViewerExtras {
     pub questions_hovered: bool,
     pub show_action_buttons: bool,
     pub feedback_active: bool,
+    /// Latest explicit Approve / Comment / Revise / Exit for this plan.
+    pub recorded_choice: Option<RecordedPlanChoice>,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
     /// Unused Notes hit target (CTA removed; kept so hover/mouse stay typed).
@@ -664,8 +689,8 @@ pub struct PlanViewerExtras {
     pub approve_notes_hovered: bool,
     pub comment_button_area: Option<Rect>,
     pub comment_hovered: bool,
-    /// Prompt is the comment composer (Comment CTA or focused plan box).
-    /// Idle present is false. Comment-flow footer paints Clarify.
+    /// Comment-flow footer paints Clarify. Idle present (Preview or a
+    /// focused Revise/Approve box) stays Comment, not Clarify.
     pub comment_flow_active: bool,
     pub abandon_button_area: Option<Rect>,
     pub abandon_hovered: bool,
@@ -1745,9 +1770,9 @@ pub fn render_line_viewer(
     //    `render_modal_shortcuts`, sit in a single row separated by
     //    `  |  `, centered within the modal frame.
     //
-    //    - Plan-approval idle:  approve | comment | revise | exit
-    //    - Plan-approval comment flow:  approve | clarify | revise | exit
-    //    - Casual preview: c comment | y copy plan | s send  (no Exit; close-X)
+    //    - Plan idle (live present and `/view-plan`):  approve | comment | revise | exit
+    //    - Plan comment flow:  approve | clarify | revise | exit
+    //    Copy / search / Esc stay on the main hint row, not as a fifth idle CTA.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1760,7 +1785,7 @@ pub fn render_line_viewer(
         let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
         let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
         let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
-        let is_approval = viewer.feedback_active();
+        let is_plan_preview = viewer.kind == LineViewerKind::PlanPreview;
 
         let separator = "  |  ";
         let sep_w: u16 = 5;
@@ -1774,8 +1799,12 @@ pub fn render_line_viewer(
         };
         let badge_w: u16 = badge_text.width() as u16;
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+        let recorded = viewer.plan_ref().and_then(|p| p.recorded_choice);
+        let choice_dot = format!(" {}", crate::glyphs::filled_dot());
+        let choice_dot_w: u16 = choice_dot.width() as u16;
+        let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
 
-        if is_approval {
+        if is_plan_preview {
             // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
             // prefixes. Narrow docks drop separators, then drop the badge.
             // Idle: Comment is the notes entry. After Comment / prompt
@@ -1809,6 +1838,11 @@ pub fn render_line_viewer(
                 if with_badge {
                     total_w = total_w.saturating_add(badge_w);
                 }
+                for i in 0..4 {
+                    if recorded_choice_marks_index(recorded, i, comment_flow) {
+                        total_w = total_w.saturating_add(choice_dot_w);
+                    }
+                }
                 if total_w > inner.width {
                     continue;
                 }
@@ -1827,11 +1861,15 @@ pub fn render_line_viewer(
                     };
                     buf.set_string(x, bottom_y, labels[i], style);
                     x += widths[i];
-                    if i == 0 && with_badge && badge_w > 0 {
+                    if recorded_choice_marks_index(recorded, i, comment_flow) {
+                        buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
+                        x += choice_dot_w;
+                    }
+                    if i == 1 && with_badge && badge_w > 0 {
                         buf.set_string(x, bottom_y, &badge_text, badge_style);
                         x += badge_w;
                     }
-                    areas[i] = Some(Rect::new(start, bottom_y, widths[i], 1));
+                    areas[i] = Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
                     if i < 3 {
                         buf.set_string(x, bottom_y, sep, sep_style);
                         x += sep_w_here;
@@ -2473,6 +2511,171 @@ mod tests {
             plan.comment_button_area.is_none(),
             "Comment is the entry; comment-flow replaces it with Clarify"
         );
+    }
+
+    /// `/view-plan` after Approve/Exit still paints the four idle present
+    /// actions. Casual `c comment | y copy plan` is not the view-plan footer.
+    #[test]
+    fn view_plan_after_resolved_footer_paints_four_idle_ctas() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nAlready decided\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("view-plan footer needs a painted modal");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "/view-plan after resolved must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("c comment") && !lower.contains("y copy plan"),
+            "/view-plan after resolved must not stay casual comment+copy; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "Approve must stay a clickable hit target on view-plan"
+        );
+        assert!(plan.comment_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
+        assert!(
+            plan.copy_button_area.is_none(),
+            "copy stays on the hint row, not as a fifth idle CTA"
+        );
+    }
+
+    /// No grok_oss.db recorded-choice row means no choice dot.
+    #[test]
+    fn view_plan_no_recorded_choice_paints_no_choice_dot() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nNo choice yet\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().recorded_choice = None;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer.last_modal_area.expect("footer");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let dot = crate::glyphs::filled_dot();
+        assert!(
+            !footer.contains(dot),
+            "no recorded row must not paint a choice dot; got {footer:?}"
+        );
+    }
+
+    /// Recorded Approve paints a dot next to Approve only.
+    #[test]
+    fn view_plan_recorded_approve_paints_dot_next_to_approve_only() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nApproved\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().recorded_choice = Some(RecordedPlanChoice::Approve);
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer.last_modal_area.expect("footer");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        assert!(
+            label_has_choice_dot(&footer, "approve"),
+            "recorded Approve must paint a dot next to approve; got {footer:?}"
+        );
+        for other in ["comment", "revise", "exit"] {
+            assert!(
+                !label_has_choice_dot(&footer, other),
+                "recorded Approve must not mark {other}; got {footer:?}"
+            );
+        }
+    }
+
+    /// Comment-count badge (number + dot) is not the recorded-choice marker.
+    #[test]
+    fn view_plan_comment_count_badge_is_not_recorded_choice_dot() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nComments\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().recorded_choice = None;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 2);
+
+        let modal = viewer.last_modal_area.expect("footer");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        assert!(
+            footer.contains('2'),
+            "comment-count badge must still show the count; got {footer:?}"
+        );
+        assert!(
+            !label_has_choice_dot(&footer, "approve"),
+            "comment-count badge must not look like a recorded Approve; got {footer:?}"
+        );
+        assert!(
+            !label_has_choice_dot(&footer, "revise"),
+            "comment-count badge must not look like a recorded Revise; got {footer:?}"
+        );
+        assert!(
+            !label_has_choice_dot(&footer, "exit"),
+            "comment-count badge must not look like a recorded Exit; got {footer:?}"
+        );
+    }
+
+    fn label_has_choice_dot(footer: &str, label: &str) -> bool {
+        let lower = footer.to_ascii_lowercase();
+        let Some(idx) = lower.find(label) else {
+            return false;
+        };
+        let after = &footer[idx + label.len()..];
+        let trimmed = after.trim_start();
+        let dot = crate::glyphs::filled_dot();
+        trimmed.starts_with(dot)
+            && !after
+                .chars()
+                .take_while(|c| c.is_whitespace() || c.is_ascii_digit())
+                .any(|c| c.is_ascii_digit())
     }
 
     #[test]

@@ -842,7 +842,7 @@ pub struct AppView {
     /// colors show instead of literal escapes. Plain-text transcripts (`/export`
     /// markdown) leave this false.
     pub pending_pager_ansi: bool,
-    /// Minimal mode only: the Ctrl+T **force-show** pin for the todo panel.
+    /// Minimal mode only: the Ctrl+Shift+T **force-show** pin for the todo panel.
     /// Minimal-mode-only per-session state, consolidated into a single field so
     /// the central `AppView` isn't peppered with loose minimal flags. Default-
     /// empty and inert outside `--minimal`; the `xai-grok-pager-minimal` crate
@@ -1183,6 +1183,10 @@ pub struct AppView {
     pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
+    /// Restore `x.ai/exit_plan_mode` that arrived before this pager had a
+    /// local view for that session. Flushed on SessionLoaded / SessionCreated
+    /// so `--continue` can park the waiter after bind.
+    pub(crate) pending_exit_plan_mode: Option<xai_acp_lib::AcpArgs<acp::ExtRequest>>,
     /// Structured startup warnings collected from the terminal diagnostics
     /// engine at launch. Empty when the environment is healthy.
     pub startup_warnings: Vec<crate::startup::StartupWarning>,
@@ -1650,6 +1654,7 @@ impl AppView {
             pending_gate_verification: None,
             gate_verify_gen: 0,
             reconnect_pending: false,
+            pending_exit_plan_mode: None,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
@@ -2453,6 +2458,41 @@ impl AppView {
     }
 }
 impl AppView {
+    /// Stamp Esc as the cancel gesture when the double-press arm fires.
+    /// Overlay cancel targets the nested child; otherwise the parent.
+    fn stamp_esc_cancel_trigger_hint(&mut self) {
+        let ActiveView::Agent(id) = self.active_view else {
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&id) else {
+            return;
+        };
+        if let Some(child_sid) = agent.active_subagent.clone()
+            && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+        {
+            child.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+            return;
+        }
+        agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+    }
+
+    /// Nested L2/L3 overlay Esc closes the view. It is not cancel confirm.
+    fn nested_overlay_esc_would_dismiss(&self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        let Some(agent) = self.agents.get(&id) else {
+            return false;
+        };
+        let Some(child_sid) = agent.active_subagent.as_ref() else {
+            return false;
+        };
+        agent
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|child| child.nested_overlay_esc_dismisses())
+    }
+
     /// Handle a terminal event. Routes through the input layer stack:
     ///
     /// 1. Pending action check (double-press confirmation)
@@ -2505,10 +2545,20 @@ impl AppView {
                 })
             );
             if !stale_idle_arm_while_busy && !pending.expired() && pending.shortcut.matches(key) {
-                let action = self.pending_action.take().unwrap().action;
-                return InputOutcome::Action(action);
+                if matches!(pending.action, Action::CancelTurn)
+                    && self.nested_overlay_esc_would_dismiss()
+                {
+                    self.pending_action = None;
+                } else {
+                    let action = self.pending_action.take().unwrap().action;
+                    if matches!(action, Action::CancelTurn) {
+                        self.stamp_esc_cancel_trigger_hint();
+                    }
+                    return InputOutcome::Action(action);
+                }
+            } else {
+                self.pending_action = None;
             }
-            self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
         if let Event::Mouse(mouse) = ev
@@ -4362,14 +4412,14 @@ impl AppView {
     ///
     /// These keys carry full-TUI meanings that don't apply to the
     /// scrollback-native mode, so minimal remaps them:
-    /// - `Ctrl+T` pins/unpins the todo panel (force-show). It otherwise
+    /// - `Ctrl+Shift+T` pins/unpins the todo panel (force-show). It otherwise
     ///   auto-hides once all todos are done (`minimal::live::todo_panel_visible`);
     ///   the pin keeps a finished list visible for review. The full-TUI
-    ///   Ctrl+T toggles the todo overlay pane, which minimal never renders.
-    /// - `Ctrl+E` re-prints the most-recently committed folded block fully
+    ///   todo overlay uses the same chord; Ctrl+T is thinking expand/collapse.
+    /// - `Ctrl+T` re-prints the most-recently committed folded block fully
     ///   expanded below the conversation (K10) — committed terminal text can't be
-    ///   mutated, so expansion is an honest re-print. The full-TUI Ctrl+E toggles
-    ///   the scrollback-pane fold.
+    ///   mutated, so expansion is an honest re-print. `Ctrl+E` stays as an extra
+    ///   expand chord in minimal. Full-TUI thinking expand/collapse is Ctrl+T.
     /// - `Ctrl+O` opens the whole conversation fully expanded in `$PAGER` (the
     ///   "expand everything" view, the honest equivalent of a full
     ///   transcript mode for a static native scrollback). The full-TUI Ctrl+O is
@@ -4394,15 +4444,18 @@ impl AppView {
     ///   never-rendered `/mcps` modal). Queue edits stay full-TUI-only; K13's
     ///   panes-become-committed-blocks rule applies.
     fn minimal_key_intercept(&mut self, key: &crossterm::event::KeyEvent) -> Option<InputOutcome> {
-        if key!('t', CONTROL).matches(key) {
+        if key!('t', CONTROL).matches(key) || key!('e', CONTROL).matches(key) {
+            self.minimal_expand_last();
+        } else if self
+            .registry
+            .matches_id(crate::actions::ActionId::ToggleTodos, key)
+        {
             self.minimal_state.show_todos = !self.minimal_state.show_todos;
         } else if self
             .registry
             .matches_id(crate::actions::ActionId::ToggleQueue, key)
         {
             return Some(InputOutcome::Action(crate::app::actions::Action::ShowQueue));
-        } else if key!('e', CONTROL).matches(key) {
-            self.minimal_expand_last();
         } else if key!('o', CONTROL).matches(key) {
             if crate::minimal_api::minimal_ctrl_o_opens_transcript(self) {
                 return Some(InputOutcome::Action(
@@ -4821,6 +4874,10 @@ impl AppView {
                                 None
                             };
                         let overlay_can_cycle = position.is_some_and(|(_, n)| n > 1);
+                        let family_pos = crate::app::agent_view::fork_family_position(agents, id);
+                        if let Some(agent) = agents.get_mut(&id) {
+                            agent.fork_family_position = family_pos;
+                        }
                         let (agent_area, header) = if overlay_active {
                             let theme = crate::theme::Theme::current();
                             let title = agents
@@ -5450,6 +5507,7 @@ impl AppView {
             needs_redraw |= agent.tasks.tick();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
+                needs_redraw |= child_view.tasks.tick();
                 needs_redraw |= child_view.tick_toast();
                 needs_redraw |= child_view.tick_ephemeral_tip();
                 needs_redraw |= child_view.tick_mode_banner();
@@ -5464,6 +5522,16 @@ impl AppView {
             let spinner_frame_tick =
                 agent.scrollback.animation_tick() % crate::views::turn_status::SPINNER_DIVISOR == 0;
             needs_redraw |= !agent.session.state.is_idle() && spinner_frame_tick;
+            needs_redraw |= agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running() && info.workflow_run_id.is_none())
+                && spinner_frame_tick;
+            needs_redraw |= agent
+                .subagent_views
+                .values()
+                .any(|child| child.has_live_work_animation())
+                && spinner_frame_tick;
             needs_redraw |= agent
                 .mcp_init_progress
                 .as_ref()
@@ -5771,6 +5839,10 @@ impl AppView {
                     || agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
                     || agent.tasks.needs_tick()
+                    || agent
+                        .subagent_sessions
+                        .values()
+                        .any(|info| info.is_running() && info.workflow_run_id.is_none())
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || !agent.session.state.is_idle()
                     || agent.wake_turn_active()
@@ -5823,13 +5895,14 @@ impl AppView {
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
-                        child.toast.is_some()
+                        child.has_live_work_animation()
+                            || child.toast.is_some()
                             || child.ephemeral_tip_needs_tick()
                             || child.mode_switch_banner.is_some()
                             || child.has_drag_autoscroll()
                             || child.selection_created_at.is_some()
                             || (agent.active_subagent.as_deref() == Some(sid.as_str())
-                                && child.scrollback.needs_animation())
+                                && (child.scrollback.needs_animation() || child.tasks.needs_tick()))
                             || child.any_cancel_pending()
                             || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()

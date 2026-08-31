@@ -103,6 +103,48 @@ impl SubagentInfo {
             self.elapsed()
         }
     }
+
+    /// Last operator-visible tool or progress for wait chrome.
+    ///
+    /// Prefers a real `activity_label`, then the last `tools_used` name, then
+    /// a tool-call count. Generic `Waiting on task output` labels are not
+    /// progress: nested progress often leaves that leftover while `tools_used`
+    /// still names the last tool.
+    pub(crate) fn wait_progress_label(&self) -> Option<String> {
+        if let Some(label) = meaningful_wait_progress(self.activity_label.as_deref()) {
+            return Some(label);
+        }
+        if let Some(tool) = self
+            .tools_used
+            .last()
+            .map(|s| s.as_ref())
+            .and_then(|s| meaningful_wait_progress(Some(s)))
+        {
+            return Some(tool);
+        }
+        match self.tool_call_count.or(self.tool_calls) {
+            Some(1) => Some("1 tool".to_string()),
+            Some(n) if n > 1 => Some(format!("{n} tools")),
+            _ => None,
+        }
+    }
+}
+
+fn meaningful_wait_progress(label: Option<&str>) -> Option<String> {
+    let label = label?.trim_end_matches('…').trim_end_matches("...").trim();
+    if label.is_empty() {
+        return None;
+    }
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("waiting on task output")
+        || lower.contains("waiting for the model")
+        || lower == "waiting"
+        || lower.starts_with("preparing ")
+        || lower == "preparing"
+    {
+        return None;
+    }
+    Some(label.to_string())
 }
 /// Minimal pager-side view of the shell's on-disk `SubagentMeta`.
 #[derive(Debug, Deserialize)]
@@ -350,6 +392,32 @@ pub(crate) fn finalize_finished_child_view(
             },
         ));
 }
+
+/// Nested child views never receive `PromptResponse`. ACP turn-end on the
+/// child session must idle overlay chrome so last-assistant `Responding`
+/// cannot keep a climbing clock and `[pause] [stop]`.
+pub(crate) fn finish_nested_child_session_turn(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) -> bool {
+    let Some(child_view) = parent.subagent_views.get_mut(child_sid) else {
+        return false;
+    };
+    let live =
+        child_view.session.state.is_busy() || child_view.session.tracker.activity().is_some();
+    if !live {
+        return false;
+    }
+    child_view.session.finish_turn(&mut child_view.scrollback);
+    child_view.scrollback.finish_all_running();
+    child_view.mark_turn_finished();
+    if let Some(info) = parent.subagent_sessions.get_mut(child_sid)
+        && !info.finished
+    {
+        info.activity_label = None;
+    }
+    true
+}
 fn join_meta_parts(parts: &[Option<&str>]) -> String {
     let non_empty: Vec<&str> = parts.iter().copied().flatten().collect();
     if non_empty.is_empty() {
@@ -491,6 +559,27 @@ where
         .filter(|info| is_l2_list_row(info, &child_ids))
         .collect();
     live.sort_by_key(|info| info.started_at);
+    dedupe_live_by_description(live)
+}
+
+/// Running nested specialists for an overlay that only holds L3 rows.
+///
+/// The L1 list uses [`live_subagent_list`] (L2 rows only). A nested overlay
+/// copies parented specialists into the child map; that map has no L2 row,
+/// so the L1 filter would leave the Subagents list empty while work is live.
+pub(crate) fn live_nested_specialist_list<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let mut live: Vec<_> = infos
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .collect();
+    live.sort_by_key(|info| info.started_at);
+    dedupe_live_by_description(live)
+}
+
+fn dedupe_live_by_description<'a>(live: Vec<&'a SubagentInfo>) -> Vec<&'a SubagentInfo> {
     let mut seen = std::collections::HashSet::<&str>::new();
     let mut out = Vec::new();
     for info in live {
@@ -519,6 +608,27 @@ pub(crate) fn is_l2_list_row(
         info.parent_session_id.as_deref(),
         Some(parent) if child_ids.contains(parent)
     )
+}
+
+/// True when this overlay child is an L2 coordinator the operator may ask.
+///
+/// Missing registry rows stay observational. Depth 2 or a parent that is
+/// itself a listed child is an L3 specialist and stays unbothered.
+pub(crate) fn overlay_child_is_l2_coordinator(
+    sessions: &std::collections::HashMap<String, SubagentInfo>,
+    child_sid: &str,
+) -> bool {
+    let Some(info) = sessions.get(child_sid) else {
+        return false;
+    };
+    if info.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    let child_ids: std::collections::HashSet<&str> = sessions
+        .values()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    is_l2_list_row(info, &child_ids)
 }
 
 /// How many live L3 specialists an L2 is using.
@@ -684,6 +794,7 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1291,6 +1402,18 @@ mod tests {
         );
     }
     #[test]
+    fn wait_progress_label_skips_stale_preparing_and_uses_last_tool() {
+        let mut info = make_info();
+        info.activity_label = Some("Preparing search_replace…".into());
+        info.tools_used = vec![Arc::from("read_file")];
+        assert_eq!(
+            info.wait_progress_label().as_deref(),
+            Some("read_file"),
+            "stale Preparing search_replace must not mask the last live tool"
+        );
+    }
+
+    #[test]
     fn format_activity_label_unlimited_retry_has_no_u32_max_fraction() {
         use crate::acp::tracker::TurnActivity;
         let label = format_activity_label(&TurnActivity::Retrying {
@@ -1422,6 +1545,15 @@ mod tests {
             format_live_l3_count(2).as_deref(),
             Some("2 specialists"),
             "L2 row count text is a specialist count, not a dump of L3 names"
+        );
+        let overlay_ids: Vec<&str> = live_nested_specialist_list([&l3_a, &l3_b, &l3_done, &l3_c])
+            .iter()
+            .map(|r| r.child_session_id.as_ref())
+            .collect();
+        assert_eq!(
+            overlay_ids,
+            ["l3-grep", "l3-edit", "l3-live"],
+            "nested overlay list must show live L3 specialists, got {overlay_ids:?}"
         );
     }
 

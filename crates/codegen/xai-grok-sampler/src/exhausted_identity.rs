@@ -149,15 +149,14 @@ fn clear_durable_dir() {
     }
 }
 
-/// Included SuperGrok weekly/monthly allowance floor for pre-request dual-auth
-/// switch (billing `usage_pct`).
+/// Included SuperGrok period used-percent floor used by ranking remaining
+/// units, after-burner skip, and period-reset clear (billing `usage_pct`).
 ///
 /// Chosen as **100.0** (not 99): pager `billing_poll_wanted` uses ≥99% so the
-/// balance is refreshed near the end of the pool; switch only when the included
-/// allowance reports fully used. Matches credit_bar / SpendingLimiter floor
-/// semantics (values under 100 stay under 100 until truly exhausted). Avoids
-/// switching while ~1% included remains, while still leaving SuperGrok before
-/// paid **extras** burn when weekly is 100% and requests still succeed (no 402).
+/// balance is refreshed near the end of the pool. Values under 100 stay under
+/// 100 until the printout reports fully used. Fail-open: this floor does **not**
+/// mark SuperGrok exhausted or hop to the console key. Real leave is HTTP 402
+/// `mark_exhausted`, or later `use-console` / `preferred_method = "api_key"`.
 pub const INCLUDED_ALLOWANCE_EXHAUST_PCT: f64 = 100.0;
 
 /// Outcome of syncing billing usage into the credit-exhausted memo.
@@ -174,16 +173,19 @@ pub enum AllowanceExhaustAction {
 
 /// Sync SuperGrok session allowance-exhaust memo from billing `usage_pct`.
 ///
-/// When dual-auth failover is available and included usage is at/above
-/// [`INCLUDED_ALLOWANCE_EXHAUST_PCT`], mark the session identity exhausted so
-/// [`crate::actor::request_task`] preemptive skip prefers the console key
-/// **without** waiting for a failed 402 (extras would still succeed on SuperGrok).
+/// Fail-open default: a client printout of included SuperGrok period limits at
+/// [`INCLUDED_ALLOWANCE_EXHAUST_PCT`] (remaining 0) is not proof. This function
+/// does **not** mark SuperGrok exhausted or hop to the console key from that
+/// printout. Operator Usage / Billing pages they can see win. Leave SuperGrok
+/// only after a real SuperGrok HTTP 402 (`mark_exhausted` after that request
+/// failed), or later `use-console` / `preferred_method = "api_key"`. Dual-auth
+/// callers still pass `has_console_failover`; it is not a mark trigger.
 ///
-/// When usage drops below the floor (period reset), clear the same fingerprint
-/// so SuperGrok can be primary again.
+/// When usage drops below the floor (period reset), clear a prior 402
+/// fingerprint so SuperGrok can be primary again.
 ///
 /// `session_token` is the raw SuperGrok/session JWT (fingerprinted; never stored
-/// raw in the memo). Empty tokens and missing failover are no-ops.
+/// raw in the memo). Empty tokens are no-ops.
 pub fn sync_allowance_exhaust_from_usage(
     usage_pct: f64,
     session_token: Option<&str>,
@@ -191,17 +193,16 @@ pub fn sync_allowance_exhaust_from_usage(
 ) -> AllowanceExhaustAction {
     use grok_rate_limit::fingerprint_secret;
 
+    // Callers still pass dual-auth ready; fail-open never marks from this printout.
+    let _ = has_console_failover;
+
     let Some(tok) = session_token.map(str::trim).filter(|s| !s.is_empty()) else {
         return AllowanceExhaustAction::None;
     };
     let fp = fingerprint_secret(tok);
 
     if usage_pct >= INCLUDED_ALLOWANCE_EXHAUST_PCT {
-        if !has_console_failover {
-            return AllowanceExhaustAction::None;
-        }
-        mark_exhausted(&fp);
-        return AllowanceExhaustAction::Marked;
+        return AllowanceExhaustAction::None;
     }
 
     // Period reset / recovery: only clear if this SuperGrok identity was marked out.
@@ -621,9 +622,39 @@ mod tests {
         ));
     }
 
-    /// Named contract: included SuperGrok usage ≥ 100% + dual-auth failover →
-    /// mark SuperGrok out of allowance so the next request prefers the console
-    /// key without waiting for HTTP 402.
+    /// Fail-open default: a client printout of included SuperGrok period limits
+    /// at 100% (remaining 0) is not proof. Do not mark SuperGrok exhausted or
+    /// hop to the console key from that printout. Leave SuperGrok only after a
+    /// real SuperGrok HTTP 402, or later `use-console` / `preferred_method =
+    /// "api_key"`. Fail-open is a code default, not an `[auth]` key.
+    #[test]
+    fn sync_allowance_does_not_mark_from_client_100_on_fail_open_default() {
+        use grok_rate_limit::fingerprint_secret;
+
+        with_memo_lock(|| {
+            let session = "session-jwt-client-100-printout";
+            let fp = fingerprint_secret(session);
+            assert!(!is_exhausted(&fp));
+
+            let action = sync_allowance_exhaust_from_usage(100.0, Some(session), true);
+            assert_eq!(
+                action,
+                AllowanceExhaustAction::None,
+                "client included 100% printout must not Mark under fail-open default; got {action:?}"
+            );
+            assert!(
+                !is_exhausted(&fp),
+                "must not mark SuperGrok exhausted from a lying client 100% / remaining 0 printout"
+            );
+            assert!(
+                !durable_exists_for_test(&fp),
+                "fail-open must not write a durable exhaust memo from client printout 100%"
+            );
+        });
+    }
+
+    /// Real SuperGrok HTTP 402 after that request failed still records the
+    /// session fingerprint. Client included 100% printout is not this path.
     #[test]
     fn allowance_exhaust_marks_session_at_100_pct_with_failover() {
         use grok_rate_limit::fingerprint_secret;
@@ -633,15 +664,16 @@ mod tests {
             let fp = fingerprint_secret(session);
             assert!(!is_exhausted(&fp));
 
-            let action = sync_allowance_exhaust_from_usage(100.0, Some(session), true);
-            assert_eq!(action, AllowanceExhaustAction::Marked);
+            // HTTP 402 rotate still marks. Printout 100% does not (see
+            // sync_allowance_does_not_mark_from_client_100_on_fail_open_default).
+            mark_exhausted(&fp);
             assert!(
                 is_exhausted(&fp),
-                "usage 100% + dual-auth must mark SuperGrok session out of allowance"
+                "HTTP 402 / mark_exhausted still records SuperGrok out of allowance"
             );
             assert!(
                 durable_exists_for_test(&fp),
-                "mark from billing usage must write durable memo under $GROK_HOME"
+                "402 mark must write durable memo under $GROK_HOME"
             );
         });
     }
@@ -686,10 +718,8 @@ mod tests {
         with_memo_lock(|| {
             let session = "session-jwt-reset";
             let fp = fingerprint_secret(session);
-            assert_eq!(
-                sync_allowance_exhaust_from_usage(100.0, Some(session), true),
-                AllowanceExhaustAction::Marked
-            );
+            // Seed as a real HTTP 402 mark, not a client 100% printout.
+            mark_exhausted(&fp);
             assert!(is_exhausted(&fp));
 
             let action = sync_allowance_exhaust_from_usage(0.0, Some(session), true);

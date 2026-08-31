@@ -82,6 +82,12 @@ async fn mount_gcs_with_channels(
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
         .mount(&server)
         .await;
+    let sha = xai_grok_update::artifact_sha256::sha256_hex(b"#!/bin/sh\nexit 0\n");
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-{binary_version}-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!("{sha}  grok\n")))
+        .mount(&server)
+        .await;
 
     server
 }
@@ -212,6 +218,12 @@ async fn internal_install_alpha_rollback_pointer_resolves_correctly() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
         .mount(&server)
         .await;
+    let sha = xai_grok_update::artifact_sha256::sha256_hex(b"#!/bin/sh\nexit 0\n");
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.2.8-alpha.1-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!("{sha}  grok\n")))
+        .mount(&server)
+        .await;
 
     let cfg = make_config("alpha");
     install_internal_from_base(None, &cfg, &server.uri())
@@ -250,6 +262,12 @@ async fn internal_install_alpha_user_gets_newer_stable_after_stable_passes_alpha
     Mock::given(method("GET"))
         .and(path(format!("/grok-0.2.7-{platform}")))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
+        .mount(&server)
+        .await;
+    let sha = xai_grok_update::artifact_sha256::sha256_hex(b"#!/bin/sh\nexit 0\n");
+    Mock::given(method("GET"))
+        .and(path(format!("/grok-0.2.7-{platform}.sha256")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!("{sha}  grok\n")))
         .mount(&server)
         .await;
 

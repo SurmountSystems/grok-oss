@@ -90,6 +90,48 @@ function Download-File([string]$Url, [string]$OutFile) {
     }
 }
 
+function Get-FileSha256([string]$Path) {
+    # Built-in; no Nix. Not SHA-1.
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    return $hash.ToLowerInvariant()
+}
+
+function Parse-Sha256File([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $line = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction SilentlyContinue
+    if ($null -eq $line) { return $null }
+    $hex = ([string]$line).Trim()
+    $hex = ($hex -split '\s+', 2)[0]
+    $hex = $hex.ToLowerInvariant()
+    if ($hex.StartsWith('*')) { $hex = $hex.Substring(1) }
+    if ($hex -notmatch '^[0-9a-f]{64}$') { return $null }
+    return $hex
+}
+
+# Fail-closed: missing checksum file, unreadable digest, or mismatch refuses
+# the blob. Published file is ${artifact}.sha256 next to the binary.
+function Verify-DownloadedSha256([string]$Artifact, [string]$ChecksumUrl) {
+    $sumTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("grok-" + [System.IO.Path]::GetRandomFileName() + ".sha256")
+    try {
+        try {
+            Download-File $ChecksumUrl $sumTmp
+        } catch {
+            throw "SHA-256 checksum file missing ($ChecksumUrl). Refusing the download."
+        }
+        $expected = Parse-Sha256File $sumTmp
+        if (-not $expected) {
+            throw "checksum file is not a SHA-256 hex digest ($ChecksumUrl)."
+        }
+        $actual = Get-FileSha256 $Artifact
+        if ($actual -ne $expected) {
+            throw "SHA-256 mismatch for downloaded grok. Keeping the existing install."
+        }
+        Write-Host "  SHA-256 verified." -ForegroundColor DarkGray
+    } finally {
+        if (Test-Path -LiteralPath $sumTmp) { Remove-Item -LiteralPath $sumTmp -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Read-GrokToken([string]$Scope) {
     $authFile = Join-Path $GrokDir 'auth.json'
     if (-not (Test-Path $authFile)) { return $null }
@@ -189,11 +231,19 @@ if ($AuthSource) {
 
 $binaryPath = Join-Path $DownloadDir "grok-$platform.exe"
 $artifactBase = "$BaseUrl/grok-$resolvedVersion-$platform"
+$binaryTmp = "$binaryPath.tmp.$PID"
+if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force }
 
 $downloaded = $false
+$checksumUrl = "$artifactBase.sha256"
 foreach ($url in @("$artifactBase.exe", $artifactBase)) {
     try {
-        Download-File $url $binaryPath
+        Download-File $url $binaryTmp
+        if ($url.EndsWith('.exe')) {
+            $checksumUrl = "$artifactBase.exe.sha256"
+        } else {
+            $checksumUrl = "$artifactBase.sha256"
+        }
         $downloaded = $true
         break
     } catch {
@@ -202,10 +252,19 @@ foreach ($url in @("$artifactBase.exe", $artifactBase)) {
 }
 
 if (-not $downloaded) {
-    if (Test-Path $binaryPath) { Remove-Item $binaryPath -Force }
+    if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force }
     Write-Error "Binary download failed from $artifactBase.exe and $artifactBase"
     exit 1
 }
+
+try {
+    Verify-DownloadedSha256 $binaryTmp $checksumUrl
+} catch {
+    if (Test-Path -LiteralPath $binaryTmp) { Remove-Item -LiteralPath $binaryTmp -Force -ErrorAction SilentlyContinue }
+    throw
+}
+
+Move-Item -LiteralPath $binaryTmp -Destination $binaryPath -Force
 
 # --- Install binary (locked-file safe) ---
 

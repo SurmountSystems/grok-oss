@@ -91,6 +91,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -1350,6 +1351,8 @@ static ASCII_SCRUB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// AgentMessageChunk that `send_update` builds from the same string) when
 /// ASCII scrub is on (default).
 #[tokio::test(flavor = "current_thread")]
+// ASCII_SCRUB_ENV_LOCK serializes env kill-switch across the awaited product call.
+#[allow(clippy::await_holding_lock)]
 async fn channel_token_text_scrubs_curly_punctuation_when_on() {
     use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
     use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;
@@ -1421,6 +1424,8 @@ async fn channel_token_text_scrubs_curly_punctuation_when_on() {
 /// S2: When scrub is off (env kill-switch), curly punctuation is preserved
 /// through the stream path.
 #[tokio::test(flavor = "current_thread")]
+// ASCII_SCRUB_ENV_LOCK serializes env kill-switch across the awaited product call.
+#[allow(clippy::await_holding_lock)]
 async fn channel_token_text_preserves_unicode_when_scrub_off() {
     use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
     use xai_grok_tools::util::ascii_scrub::ENV_SCRUB_ASCII_PUNCT;

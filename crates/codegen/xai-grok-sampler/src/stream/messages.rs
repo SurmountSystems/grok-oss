@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_sampling_types::messages::{self, MessageStreamEvent};
@@ -135,6 +134,9 @@ pub fn stream_messages<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut last_content_chunk_at = Instant::now();
+        let first_token_budget = super::first_token_wait(idle_timeout);
+        let first_token_deadline = Instant::now() + first_token_budget;
+        let mut saw_progress = false;
 
         // Tool-call index counter for per-tool deltas (separate from
         // the block index, which can be interleaved with text/thinking
@@ -144,10 +146,25 @@ pub fn stream_messages<'a>(
 
         let mut stream = raw_stream;
         loop {
-            let event_result = match tokio::time::timeout(idle_timeout, stream.next()).await {
-                Ok(Some(event_result)) => event_result,
-                Ok(None) => break,
-                Err(_elapsed) => {
+            let event_result = match super::next_or_timeout(
+                &mut stream,
+                saw_progress,
+                first_token_deadline,
+                idle_timeout,
+            )
+            .await
+            {
+                super::ChunkWait::Item(event_result) => event_result,
+                super::ChunkWait::Ended => break,
+                super::ChunkWait::FirstTokenTimeout => {
+                    let err = super::first_token_timeout_error(first_token_budget);
+                    yield SamplingEvent::Failed {
+                        request_id: request_id.clone(),
+                        error: SamplingErrorInfo::from(&err),
+                    };
+                    return;
+                }
+                super::ChunkWait::IdleTimeout => {
                     let err = SamplingError::IdleTimeout {
                         elapsed_secs: idle_timeout.as_secs(),
                     };
@@ -481,8 +498,8 @@ pub fn stream_messages<'a>(
                 }
 
                 MessageStreamEvent::Ping => {
-                    // Liveness only, no action; the inner timeout was
-                    // already reset above by the successful `next()`.
+                    // Liveness only. Does not count as first-token progress
+                    // and does not extend the first-token deadline.
                 }
 
                 MessageStreamEvent::Error { error } => {
@@ -505,8 +522,9 @@ pub fn stream_messages<'a>(
             }
 
             if event_has_content {
+                saw_progress = true;
                 last_content_chunk_at = Instant::now();
-            } else if last_content_chunk_at.elapsed() > idle_timeout {
+            } else if saw_progress && last_content_chunk_at.elapsed() > idle_timeout {
                 let err = SamplingError::IdleTimeout {
                     elapsed_secs: idle_timeout.as_secs(),
                 };

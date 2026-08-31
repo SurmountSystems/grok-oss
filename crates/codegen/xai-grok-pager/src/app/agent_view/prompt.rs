@@ -667,11 +667,22 @@ impl AgentView {
         //     clipboard image/file-url probe defers off the event loop. Reading
         //     once (vs the widget re-reading for text insertion) avoids the old
         //     double `pbpaste` subprocess on macOS.
-        if crate::input::key::is_paste_key(key) {
+        //
+        //     Ctrl+Shift+V is inline text paste when the clipboard has UTF-8.
+        //     Image-only screenshot clipboards have no text; the widget would
+        //     ignore that chord. Probe the same way as Ctrl+V so a Linux
+        //     screenshot paste attaches next to an existing draft.
+        if crate::input::key::is_paste_key(key) || crate::input::key::is_inline_paste_key(key) {
             let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                 crate::clipboard::system_clipboard_read_text(),
             );
-            return self.handle_paste_key_deferred(clipboard_text);
+            if crate::input::key::is_paste_key(key)
+                || clipboard_text
+                    .as_deref()
+                    .is_none_or(|text| text.trim().is_empty())
+            {
+                return self.handle_paste_key_deferred(clipboard_text);
+            }
         }
 
         // 2d. Promote agent-screen actions past the textarea.
@@ -727,6 +738,8 @@ impl AgentView {
                     == Some(crate::tips::clear_detector::UNDO_TIP_KEY);
             match self.prompt.handle_key(key) {
                 PromptEvent::Edited => {
+                    self.snapshot_or_clear_plan_feedback_draft();
+                    self.persist_unsent_composer_draft();
                     if undo_tip_accepted {
                         xai_grok_telemetry::session_ctx::log_event(
                             xai_grok_telemetry::events::ContextualTip {
@@ -746,6 +759,8 @@ impl AgentView {
                         self.open_line_viewer(&req.path, req.initial_range);
                     }
                     self.prompt.refresh_slash(&self.session.models);
+                    self.refresh_prompt_suggestion_gate();
+                    self.refresh_stored_prompt_suggestion();
                     if let Some(eff) = self.notify_suggestion_text_changed() {
                         self.pending_effects.push(eff);
                     }
@@ -827,18 +842,25 @@ impl AgentView {
         {
             return Some(InputOutcome::Changed);
         }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or
-        // scrollback, even with a draft. Also — in every mode — while already
-        // cancelling, so a lost cancel notification is re-sent (Ctrl+C
-        // escalates to Quit instead). Push the grace deadline out so an Esc
-        // mash past the cancel cannot silently arm the rewind picker below.
-        if self.session.state.is_turn_running()
-            || self.wake_turn_active()
-            || self.any_cancel_pending()
-        {
+        // Already cancelling (every mode): retry the lost-ack cancel. Ctrl+C
+        // escalates to Quit instead. Push the grace deadline so an Esc mash
+        // past the cancel cannot silently arm the rewind picker below.
+        if self.any_cancel_pending() {
             self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Action(Action::CancelTurn));
+        }
+        // Busy primary (minimal / non-vim): first Esc arms confirm. Second
+        // Esc within the double-press window fires CancelTurn via
+        // PendingAction. First Esc must not start Cancelling.
+        if self.session.state.is_turn_running() || self.wake_turn_active() {
+            self.suppress_rewind_arm(std::time::Instant::now());
+            return Some(InputOutcome::ArmPending {
+                action: Action::CancelTurn,
+                shortcut: crate::input::key::KeyShortcut::from(*key),
+                label: Some("cancel"),
+                ttl: crate::app::app_view::esc_double_press_ttl(),
+            });
         }
 
         // The two idle arms split on pane ownership. CLEAR mutates the composer
@@ -1907,5 +1929,66 @@ mod prompt_suggestion_key_tests {
             "the key event latches the impression before dismissing"
         );
         assert!(!agent.prompt.prompt_suggestion.has_suggestion());
+    }
+
+    /// Typing a few characters that prefix a stored draft shows the ghost.
+    /// Tab accepts the stored remainder. A novel prefix hides it.
+    #[test]
+    #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+    fn typing_stored_draft_prefix_shows_ghost_tab_accepts_novel_hides() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db = tmp.path().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).expect("open isolated grok_oss.db");
+        store
+            .insert_prompt_task_draft("finish the schema slice")
+            .unwrap();
+        xai_grok_shell::token_economy::set_token_economy_live(
+            xai_grok_shell::token_economy::TokenEconomyConfig {
+                grok_oss_database_path: Some(db),
+                ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+            },
+        );
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+            }
+        }
+        let _guard = Guard;
+
+        crate::appearance::cache::set_prompt_suggestions(true);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.refresh_prompt_suggestion_gate();
+
+        for ch in ['f', 'i'] {
+            let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char(ch)));
+        }
+        assert_eq!(agent.prompt.text(), "fi");
+        assert!(
+            !agent.prompt.prompt_suggestion_visible(),
+            "two characters is not yet a few"
+        );
+
+        let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char('n')));
+        assert_eq!(agent.prompt.text(), "fin");
+        assert_eq!(
+            agent.prompt.prompt_suggestion_ghost(),
+            Some("ish the schema slice")
+        );
+
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.prompt.text(), "finish the schema slice");
+        assert!(!agent.prompt.prompt_suggestion_visible());
+
+        agent.prompt.set_text("");
+        for ch in ['x', 'y', 'z'] {
+            let _ = agent.handle_prompt_key_for_test(&key(KeyCode::Char(ch)));
+        }
+        assert_eq!(agent.prompt.text(), "xyz");
+        assert!(
+            !agent.prompt.prompt_suggestion_visible(),
+            "a novel prompt hides the stored suggestion"
+        );
     }
 }

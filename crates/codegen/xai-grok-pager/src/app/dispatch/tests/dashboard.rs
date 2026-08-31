@@ -2543,9 +2543,11 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     let child_sid = "child-1".to_string();
     {
         let agent = app.agents.get_mut(&parent).unwrap();
-        agent
-            .subagent_sessions
-            .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-1"));
+        // Observational takeover: L3 specialist (depth 2), not an L2
+        // coordinator the operator may ask in the overlay.
+        let mut info = make_test_subagent(&child_sid, "sa-1");
+        info.depth = Some(2);
+        agent.subagent_sessions.insert(child_sid.clone(), info);
     }
     let child_session = make_test_agent_session(&app, AgentId(1), "child-session");
     let mut child_view = AgentView::new(child_session, ScrollbackState::new());

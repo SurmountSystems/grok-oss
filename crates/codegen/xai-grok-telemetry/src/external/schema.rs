@@ -684,6 +684,7 @@ pub(crate) fn permission_mode_label(m: crate::enums::PermissionMode) -> &'static
         crate::enums::PermissionMode::Ask => "ask",
         crate::enums::PermissionMode::AlwaysApprove => "always_approve",
         crate::enums::PermissionMode::Auto => "auto",
+        crate::enums::PermissionMode::ContextOnly => "context_only",
     }
 }
 

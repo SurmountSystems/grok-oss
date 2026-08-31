@@ -258,6 +258,9 @@ pub struct PagerLocalSnapshot {
     /// Mutually exclusive with `yolo_mode` in practice (yolo wins); read by
     /// `/auto` so it can toggle off when already on.
     pub auto_mode: bool,
+    /// Diagnostic mode: no tools advertised or executed. Mutually exclusive
+    /// with yolo and auto (those win). Read by `/context-only`.
+    pub context_only_mode: bool,
     /// Currently-selected model's display name, or `None` if no catalog
     /// has loaded yet.
     pub current_model_name: Option<String>,
@@ -329,6 +332,7 @@ impl Default for PagerLocalSnapshot {
             multiline_mode: false,
             yolo_mode: false,
             auto_mode: false,
+            context_only_mode: false,
             current_model_name: None,
             available_models: Vec::new(),
             coding_data_sharing_opt_out: true,
@@ -737,6 +741,9 @@ pub fn current_value_for(
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
         )),
+        "ulid_session_ids" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_ulid_session_ids(),
+        )),
         "plan_approval_park" => Some(SettingValue::Enum(
             if crate::appearance::cache::load_plan_approval_force_modal() {
                 "modal"
@@ -880,11 +887,15 @@ pub fn current_value_for(
             crate::appearance::cache::load_render_mermaid().as_canonical(),
         )),
         // permission_mode: live snapshot wins over on-disk value.
-        // yolo=true → "always-approve"; else honor ui ("auto" / "default" / "ask").
+        // yolo > auto > context-only > default > ask.
         "permission_mode" => Some(SettingValue::Enum(if pager.yolo_mode {
             "always-approve"
-        } else if matches!(ui.permission_mode.as_deref(), Some("auto")) {
+        } else if pager.auto_mode || matches!(ui.permission_mode.as_deref(), Some("auto")) {
             "auto"
+        } else if pager.context_only_mode
+            || matches!(ui.permission_mode.as_deref(), Some("context-only"))
+        {
+            "context-only"
         } else if matches!(ui.permission_mode.as_deref(), Some("default")) {
             "default"
         } else {
@@ -1313,6 +1324,13 @@ mod tests {
                         *default,
                         ui.scrub_ascii_punct_enabled(),
                         "scrub_ascii_punct default drifts from UiConfig::default()"
+                    );
+                }
+                ("ulid_session_ids", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.ulid_session_ids_enabled(),
+                        "ulid_session_ids default drifts from UiConfig::default()"
                     );
                 }
                 ("plan_approval_park", SettingKind::Enum { default, .. }) => {

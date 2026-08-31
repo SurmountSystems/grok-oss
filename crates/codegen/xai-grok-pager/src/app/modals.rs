@@ -468,6 +468,35 @@ impl AgentView {
             }
         }
 
+        // Limits: chrome (Esc/close) first, then q/j/k/scroll.
+        if let ActiveModal::Limits { state } = modal {
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Unhandled => {
+                    use crate::views::limits_modal::LimitsModalOutcome;
+                    return match crate::views::limits_modal::handle_limits_key(state, key) {
+                        LimitsModalOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
+                        LimitsModalOutcome::Changed => InputOutcome::Changed,
+                        LimitsModalOutcome::Unchanged => InputOutcome::Unchanged,
+                    };
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // ResetSettingsConfirm: y/n routing. Handled before generic
         // char-match so Esc/F2/Ctrl+, route to Cancel (not modal close).
         if let Some(ActiveModal::ResetSettingsConfirm { modal, .. }) = self.active_modal.as_ref() {
@@ -1669,6 +1698,20 @@ impl AgentView {
             }
         }
 
+        // Limits: chrome (close / click-outside / X).
+        if let Some(ActiveModal::Limits { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::Handled => InputOutcome::Changed,
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // ResetSettingsConfirm: route mouse events through the
         // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
@@ -2452,6 +2495,15 @@ impl AgentView {
                     self.credit_balance.as_ref(),
                     compact,
                     &theme,
+                );
+            } else if let modal::ActiveModal::Limits { state } = active_modal {
+                crate::views::limits_modal::render_limits_modal(
+                    buf,
+                    area,
+                    state,
+                    &theme,
+                    compact,
+                    chrono::Utc::now(),
                 );
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
@@ -3275,5 +3327,96 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod limits_modal_key_dispatch_tests {
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::credit_bar::SamplingIdentityKind;
+    use crate::views::limits_modal::LimitsModalState;
+    use crate::views::limits_snapshot::LimitsSnapshot;
+    use crate::views::modal::ActiveModal;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn open_limits(agent: &mut crate::app::agent_view::AgentView) {
+        agent.active_modal = Some(ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(LimitsSnapshot::from_billing(
+                None,
+                None,
+                SamplingIdentityKind::SuperGrokSession,
+            ))),
+        });
+    }
+
+    fn char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    fn is_limits(agent: &crate::app::agent_view::AgentView) -> bool {
+        matches!(agent.active_modal, Some(ActiveModal::Limits { .. }))
+    }
+
+    /// Named contract: with Limits open, a character key and Esc must not panic.
+    /// `q` / Esc close; a non-close char must not `take()` the modal into nowhere.
+    #[test]
+    fn limits_modal_char_key_must_not_panic() {
+        let mut agent = make_agent();
+        open_limits(&mut agent);
+
+        let out = agent.handle_modal_key(&char_key('x'));
+        assert!(
+            matches!(out, InputOutcome::Changed | InputOutcome::Unchanged),
+            "non-close char must be consumed without abort, got {out:?}"
+        );
+        assert!(
+            is_limits(&agent),
+            "non-close char must leave the Limits modal open"
+        );
+
+        let out = agent.handle_modal_key(&char_key('j'));
+        assert!(
+            matches!(out, InputOutcome::Changed | InputOutcome::Unchanged),
+            "scroll char must not abort, got {out:?}"
+        );
+        assert!(
+            is_limits(&agent),
+            "'j' scrolls Limits and must not take() it away"
+        );
+
+        let out = agent.handle_modal_key(&char_key('q'));
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "'q' closes Limits, got {out:?}"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "'q' must close the Limits modal"
+        );
+
+        open_limits(&mut agent);
+        let out = agent.handle_modal_key(&esc());
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "Esc closes Limits, got {out:?}"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "Esc must close the Limits modal"
+        );
+
+        let _pin = crate::theme::cache::pin_theme();
+        open_limits(&mut agent);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        agent.draw_active_modal(area, &mut buf, crate::theme::Theme::current(), false);
+        assert!(is_limits(&agent), "paint must not drop the Limits modal");
     }
 }

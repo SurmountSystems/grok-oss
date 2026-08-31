@@ -1059,40 +1059,56 @@ fn send_prompt_while_running_queues_without_drain() {
 
     let effects = dispatch(Action::SendPrompt("queued".into()), &mut app);
 
-    // A plain prompt typed while a turn is running is sent to the
-    // agent IMMEDIATELY (server-authoritative) rather than held in the
-    // local drip-feed queue. It does NOT start a concurrent turn.
-    assert_eq!(effects.len(), 1);
-    let pid = match &effects[0] {
-        Effect::SendPrompt {
-            text, prompt_id, ..
-        } => {
-            assert_eq!(text, "queued");
-            prompt_id.clone()
-        }
-        other => panic!("expected immediate SendPrompt, got {other:?}"),
-    };
-    // Not in the local queue; turn state unchanged (no new turn started).
+    // Mid-turn Enter with text is a soft interject: this turn sees it,
+    // the serial queue does not, and the running turn is not cancelled.
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "queued"),
+        other => panic!("expected SendInterject, got {other:?}"),
+    }
     assert_eq!(app.agents[&id].session.queue_len(), 0);
     assert!(app.agents[&id].session.state.is_turn_running());
-    // Optimistic echo present in the shared queue, keyed by prompt_id.
-    let q = app
-        .shared_prompt_queue("test-session")
-        .expect("optimistic echo present");
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0].id, pid);
-    assert_eq!(q[0].text, "queued");
+    assert!(
+        app.shared_prompt_queue("test-session")
+            .is_none_or(|q| q.is_empty()),
+        "interject must not optimistic-echo onto the serial shared queue"
+    );
 }
 
-/// Regression (queue reorder race): a plain prompt typed while a turn is
-/// running must NOT jump onto the server queue when an older prompt is still
-/// waiting in the local drip-feed queue — e.g. prompts queued during
-/// "Starting session…" before the turn began, where the first drains to
-/// start the turn and the rest are stranded locally. If the new prompt
-/// immediate-sent onto the server queue it would render/run AHEAD of the
-/// older local prompt (the merge is server-rows-first), so `[2, 3]` showed
-/// up as `[3, 2]`. The new prompt must instead join the local queue behind
-/// the older one, preserving FIFO.
+/// Composer Enter must not vanish a draft when interject cannot land (no
+/// session). Enqueue locally instead of leaving Ctrl-Z as the only recovery.
+#[test]
+fn send_prompt_while_running_without_session_enqueues_instead_of_vanishing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.session_id = None;
+        agent.prompt.set_text("draft that must not vanish");
+    }
+    let effects = dispatch(
+        Action::SendPrompt("draft that must not vanish".into()),
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "no session cannot interject, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.prompt.text(),
+        "",
+        "composer is consumed because the draft was enqueued"
+    );
+    assert_eq!(agent.session.pending_prompts.len(), 1);
+    assert_eq!(
+        agent.session.pending_prompts[0].text,
+        "draft that must not vanish"
+    );
+}
+
+/// Already-queued serial rows stay queued. Mid-turn Enter with new text
+/// interjects this turn instead of joining behind them as the next prompt.
 #[test]
 fn send_while_running_with_pending_local_prompt_preserves_fifo() {
     let mut app = test_app_with_agent();
@@ -1107,16 +1123,12 @@ fn send_while_running_with_pending_local_prompt_preserves_fifo() {
         assert_eq!(agent.session.pending_prompts.len(), 1);
     }
 
-    // Send "3" while the queue still holds "2": it must route LOCALLY.
     let effects = dispatch(Action::SendPrompt("three".into()), &mut app);
 
-    // No immediate server-authoritative send (no SendPrompt effect, and no
-    // drain since the turn is running).
-    assert!(
-        effects.is_empty(),
-        "must not immediate-send while a local prompt is pending, got {effects:?}"
-    );
-    // "3" joined the LOCAL queue behind "2" (FIFO preserved).
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "three"),
+        other => panic!("new Enter text must interject this turn, got {other:?}"),
+    }
     let agent = &app.agents[&id];
     let order: Vec<&str> = agent
         .session
@@ -1126,61 +1138,35 @@ fn send_while_running_with_pending_local_prompt_preserves_fifo() {
         .collect();
     assert_eq!(
         order,
-        vec!["two", "three"],
-        "new prompt must queue behind the older local prompt"
+        vec!["two"],
+        "already-queued rows stay queued; new Enter must not join them"
     );
-    // No optimistic shared-queue echo was created (nothing went server-side).
     assert!(
         app.shared_prompt_queue("test-session")
             .is_none_or(|q| q.is_empty()),
-        "no server-queue echo while routing locally"
+        "interject must not echo onto the serial shared queue"
     );
 }
 
 #[test]
 fn turn_end_drains_next_queued_prompt() {
-    // A plain prompt typed while running is sent server-authoritatively
-    // and drained by the leader, not by the local queue. The leader's
-    // `running_prompt_id` broadcast (modeled here by a stashed adoption that
-    // arrived before the previous turn's PromptResponse) is adopted by the
-    // PromptResponse handler after `finish_turn`, rendering its user block.
+    // Mid-turn Enter interjects into the running turn. It is not a serial
+    // next prompt, so turn-end must not drain or re-send it.
+    crate::appearance::cache::set_prompt_suggestions(false);
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // Submit first prompt (drains immediately → Running).
     let effects = dispatch(Action::SendPrompt("first".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(app.agents[&id].session.state.is_turn_running());
 
-    // Submit second prompt while running → immediate server-authoritative
-    // send (no local queue entry).
     let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
-    let pid_second = match &effects[0] {
-        Effect::SendPrompt {
-            text, prompt_id, ..
-        } => {
-            assert_eq!(text, "second");
-            prompt_id.clone()
-        }
-        other => panic!("expected immediate SendPrompt, got {other:?}"),
-    };
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => assert_eq!(text, "second"),
+        other => panic!("expected SendInterject, got {other:?}"),
+    }
     assert_eq!(app.agents[&id].session.queue_len(), 0);
 
-    // Model the leader's running=second broadcast arriving before first's
-    // PromptResponse: stash the adoption (FIFO handoff race).
-    app.pending_running_adoptions.insert(
-        id,
-        crate::app::acp_handler::PendingRunningAdoption {
-            prompt_id: pid_second.clone(),
-            text: Some("second".to_string()),
-            combined_texts: None,
-            kind: "prompt".to_string(),
-            turn_ended: false,
-        },
-    );
-
-    // Turn ends → PromptResponse → finish_turn clears current_prompt_id,
-    // then the stashed adoption is applied (turn-start shim).
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
@@ -1191,22 +1177,14 @@ fn turn_end_drains_next_queued_prompt() {
         &mut app,
     );
 
-    // No re-send (the prompt was already sent at enqueue time): only the
-    // billing refresh effect.
-    assert_eq!(effects.len(), 1);
-    assert!(matches!(
-        &effects[0],
-        Effect::FetchBilling { silent: true, .. }
-    ));
-    assert!(app.agents[&id].session.state.is_turn_running());
-    // current_prompt_id was handed off to the second prompt for correlation.
-    assert_eq!(
-        app.agents[&id].session.current_prompt_id.as_deref(),
-        Some(pid_second.as_str())
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "interjected text must not start a next turn, got {effects:?}"
     );
-    assert!(app.pending_running_adoptions.is_empty());
-    // Scrollback: user "first" + "Worked for" + user "second".
-    assert_eq!(app.agents[&id].scrollback.len(), 3);
+    assert!(app.agents[&id].session.state.is_idle());
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
 }
 
 /// PromptResponse FIFO handoff must forward `combined_texts` (one bubble each).
@@ -2001,9 +1979,9 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
     assert_eq!(effects.len(), 1);
     assert!(app.agents[&id].session.state.is_turn_running());
 
-    // Send a second prompt while the first is running → immediate
-    // server-authoritative send.
-    let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+    // Chip follow-up while running still immediate-sends (composer Enter
+    // interjects and would not occupy the serial queue).
+    let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
     let pid_second = match &effects[0] {
         Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
         other => panic!("expected immediate SendPrompt, got {other:?}"),
@@ -2577,6 +2555,75 @@ fn bash_before_the_session_binds_is_queued_and_recorded() {
 // ── Reconnect-pending dispatch guards ─────────────────────────────
 
 #[test]
+fn view_plan_slash_on_welcome_sticks_request() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.active_view = ActiveView::Welcome;
+
+    let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "/view-plan on welcome is a local slash, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].view_plan_requested,
+        "/view-plan typed on welcome must stick until SessionLoaded binds Approve"
+    );
+}
+
+#[test]
+fn view_plan_slash_runs_during_reconnect() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.reconnect_pending = true;
+    app.agents.get_mut(&id).unwrap().plan_mode_active = true;
+
+    let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "/view-plan is a local slash, got {effects:?}"
+    );
+    {
+        let agent = &app.agents[&id];
+        assert!(
+            agent.view_plan_requested,
+            "/view-plan during reconnect must stick the pane request until SessionLoaded"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "no plan body yet: SessionLoaded, not the slash, must dock"
+        );
+        assert!(
+            agent
+                .toast
+                .as_ref()
+                .is_none_or(|(msg, _)| !msg.contains("Reconnecting")),
+            "local /view-plan must not be dropped as Reconnecting, please wait"
+        );
+    }
+
+    app.agents.get_mut(&id).unwrap().latest_inline_plan_content =
+        Some("# After reconnect bind\n".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].line_viewer.is_some(),
+        "SessionLoaded must dock the pane /view-plan requested during reconnect"
+    );
+}
+
+#[test]
 fn send_prompt_blocked_during_reconnect() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -2815,6 +2862,61 @@ fn slash_compact_with_context_enqueues_command() {
     assert!(matches!(&effects[0], Effect::Compact { .. }));
 }
 
+/// Named queue path: `/queue /compaction` (and `/compact queue`) must sit on
+/// the composer prompt queue and must not fire compact this turn.
+#[test]
+fn queue_compaction_does_not_invoke_immediately() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_queue_cmd = dispatch(Action::SendPrompt("/queue /compaction".into()), &mut app);
+    assert!(
+        via_queue_cmd
+            .iter()
+            .all(|e| !matches!(e, Effect::Compact { .. })),
+        "queued compaction must not Compact this turn, got {via_queue_cmd:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        1,
+        "queued compaction must occupy the composer prompt queue"
+    );
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert_eq!(held.kind, crate::app::agent::QueueEntryKind::Command);
+    assert!(
+        held.text.starts_with("/compact") || held.text.starts_with("/compaction"),
+        "held row should be compact, got {}",
+        held.text
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/compact queue".into()), &mut app);
+    assert!(
+        via_token
+            .iter()
+            .all(|e| !matches!(e, Effect::Compact { .. })),
+        "/compact queue must not Compact this turn, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+/// Immediate `/compact` still fires when the operator wants it now.
+#[test]
+fn slash_compaction_alias_invokes_compact() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("/compaction".into()), &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(
+        matches!(&effects[0], Effect::Compact { .. }),
+        "bare /compaction is the immediate alias, got {effects:?}"
+    );
+}
+
 #[test]
 fn slash_unknown_command_passthrough_enqueues_prompt() {
     let mut app = test_app_with_agent();
@@ -2825,6 +2927,123 @@ fn slash_unknown_command_passthrough_enqueues_prompt() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/unknown-cmd arg1"));
     assert!(app.agents[&id].prompt.text().is_empty());
+}
+
+/// Mid-turn freeform Enter merges into the running turn. It must not sit
+/// on the serial prompt queue until idle, and it must not cancel.
+#[test]
+fn mid_turn_freeform_enter_interjects_into_running_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPrompt("also spawn an L2 for the check-remote slice".into()),
+        &mut app,
+    );
+
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => {
+            assert_eq!(text, "also spawn an L2 for the check-remote slice");
+        }
+        other => panic!("expected SendInterject this turn, got {other:?}"),
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "must not serial-queue or cancel-and-send, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].session.pending_prompts.is_empty(),
+        "must not land in pending_prompts as the next serial prompt"
+    );
+    assert!(
+        app.shared_prompt_queue("test-session")
+            .is_none_or(|q| q.is_empty()),
+        "must not optimistic-echo onto the serial shared queue"
+    );
+    assert!(
+        app.agents[&id].session.state.is_turn_running(),
+        "current turn must keep running"
+    );
+}
+
+/// `/goal` is pager PassThrough (shell builtin). Mid-turn Enter must inject
+/// this turn, not wait as a local `#1` row until idle drain.
+#[test]
+fn mid_turn_goal_passthrough_interjects_and_does_not_local_queue() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::SendPrompt("/goal just check-remote --option system-features".into()),
+        &mut app,
+    );
+
+    match effects.as_slice() {
+        [Effect::SendInterject { text, .. }] => {
+            assert_eq!(text, "/goal just check-remote --option system-features");
+        }
+        other => panic!("expected SendInterject for mid-turn /goal, got {other:?}"),
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+        "PassThrough must not serial-queue or cancel-and-send, got {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        0,
+        "must not local-queue until idle"
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+
+/// Named hold stays: `/queue /finish` while a turn runs does not inject
+/// this turn and does not drain.
+#[test]
+fn queue_finish_while_running_still_holds() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::SendPrompt("/queue /finish".into()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "named hold must skip drain and must not interject, got {effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+    let held = &app.agents[&id].session.pending_prompts[0];
+    assert!(
+        held.display_as_skill,
+        "held /finish is a skill row, not a command drain"
+    );
+    assert!(
+        held.text.contains("/finish"),
+        "held row should be /finish, got {}",
+        held.text
+    );
+    assert!(app.agents[&id].session.state.is_turn_running());
+    assert_eq!(
+        app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Queued on the prompt queue. It will not run this turn.")
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    let via_token = dispatch(Action::SendPrompt("/finish queue".into()), &mut app);
+    assert!(
+        via_token.is_empty(),
+        "/finish queue must still hold, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
 }
 
 #[test]
@@ -4615,5 +4834,762 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
             }
         )),
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
+    );
+}
+
+fn isolated_grok_oss_guard(db: std::path::PathBuf) -> impl Drop {
+    xai_grok_shell::token_economy::set_token_economy_live(
+        xai_grok_shell::token_economy::TokenEconomyConfig {
+            grok_oss_database_path: Some(db),
+            ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+        },
+    );
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        }
+    }
+    Guard
+}
+
+fn prompt_task_count(store: &xai_grok_shell::grok_oss::GrokOssStore) -> i64 {
+    store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM prompt_tasks", [], |row| row.get(0))
+        .expect("count prompt_tasks")
+}
+
+fn first_prompt_task_id(store: &xai_grok_shell::grok_oss::GrokOssStore) -> String {
+    store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks ORDER BY created_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("prompt_task id")
+}
+
+fn usage_meta(
+    prompt_id: &str,
+    tokens_in: u64,
+    tokens_out: u64,
+    cost_usd_ticks: i64,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::json!({
+        "promptId": prompt_id,
+        "usage": {
+            "inputTokens": tokens_in,
+            "outputTokens": tokens_out,
+            "costUsdTicks": cost_usd_ticks,
+        }
+    })
+    .as_object()
+    .cloned()
+}
+
+/// Live composer submit inserts a prompt_task ULID primary key and starts
+/// HonestWorkClock. On turn complete (success, error, or cancel) a
+/// prompt_exec_metrics row is written with tokens in/out, honest work ms,
+/// model, and cost_usd_ticks (tokens per dollar). Fail-open if grok_oss.db
+/// cannot be opened. Does not invent remaining SuperGrok limits.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_composer_submit_inserts_prompt_task_and_writes_exec_metrics_on_turn_complete() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    assert_eq!(
+        store.schema_version().unwrap(),
+        xai_grok_shell::grok_oss::SCHEMA_VERSION,
+        "schema stays current grok_oss version"
+    );
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("finish the live write slice".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [
+            Effect::SendPrompt {
+                prompt_id, text, ..
+            },
+        ] => {
+            assert_eq!(text, "finish the live write slice");
+            prompt_id.clone()
+        }
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    assert_eq!(
+        prompt_task_count(&store),
+        1,
+        "composer submit must insert one prompt_task row"
+    );
+    let task_id = first_prompt_task_id(&store);
+    assert!(
+        xai_grok_tools::util::ulid::is_valid(&task_id),
+        "prompt_task primary key must be a ULID, got {task_id}"
+    );
+    assert_eq!(task_id.len(), 26);
+    let task = store
+        .load_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_task row");
+    assert_eq!(task.body, "finish the live write slice");
+    assert_eq!(task.status, "running");
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    1_200,
+                    400,
+                    5_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert_eq!(metrics.tokens_in, 1_200);
+    assert_eq!(metrics.tokens_out, 400);
+    assert_eq!(metrics.model, "grok-4.6");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest work ms comes from HonestWorkClock, got {}",
+        metrics.wall_ms
+    );
+    assert_eq!(metrics.cost_usd_ticks, Some(5_000_000_000));
+    let tpd = xai_grok_shell::grok_oss::tokens_per_dollar(
+        metrics.tokens_in,
+        metrics.tokens_out,
+        metrics.cost_usd_ticks,
+    )
+    .expect("known cost ticks yield tokens per dollar");
+    assert!(tpd > 0.0);
+
+    // Error complete still writes metrics.
+    let effects = dispatch(Action::SendPrompt("error turn".into()), &mut app);
+    let err_pid = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt, got {other:?}"),
+    };
+    let err_task_id: String = store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks WHERE body = ?1",
+            ["error turn"],
+            |row| row.get(0),
+        )
+        .expect("error prompt_task");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("upstream boom".into()),
+            http_status: None,
+            prompt_id: Some(err_pid),
+        }),
+        &mut app,
+    );
+    assert!(
+        store
+            .load_latest_prompt_exec_metrics_for_prompt_task(&err_task_id)
+            .unwrap()
+            .is_some(),
+        "error turn must still write prompt_exec_metrics"
+    );
+
+    // Cancel complete still writes metrics.
+    let effects = dispatch(Action::SendPrompt("cancel turn".into()), &mut app);
+    let cancel_pid = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt, got {other:?}"),
+    };
+    let cancel_task_id: String = store
+        .connection()
+        .query_row(
+            "SELECT id FROM prompt_tasks WHERE body = ?1",
+            ["cancel turn"],
+            |row| row.get(0),
+        )
+        .expect("cancel prompt_task");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+                serde_json::json!({ "promptId": cancel_pid })
+                    .as_object()
+                    .cloned(),
+            )),
+            http_status: None,
+            prompt_id: Some(cancel_pid),
+        }),
+        &mut app,
+    );
+    assert!(
+        store
+            .load_latest_prompt_exec_metrics_for_prompt_task(&cancel_task_id)
+            .unwrap()
+            .is_some(),
+        "cancel turn must still write prompt_exec_metrics"
+    );
+}
+
+/// Reconnect reload must pause HonestWorkClock so reconnect time is not
+/// counted in wall_ms. Resume when the reload window finalizes. Fail-open
+/// if grok_oss.db is missing (no live task).
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_prompt_task_pauses_honest_clock_during_reconnect_reload() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("pause clock across reconnect".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after send");
+        assert!(
+            !task.is_reconnect_paused(),
+            "clock must run until reconnect starts"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.begin_session_reload(1);
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload start");
+        assert!(
+            task.is_reconnect_paused(),
+            "reconnect reload must pause HonestWorkClock"
+        );
+        assert!(agent.finish_session_reload(1, true));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload finish");
+        assert!(
+            !task.is_reconnect_paused(),
+            "reload finalize must resume HonestWorkClock"
+        );
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    10,
+                    4,
+                    1_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+    let task_id = first_prompt_task_id(&store);
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest wall_ms still writes after reconnect pause, got {}",
+        metrics.wall_ms
+    );
+}
+
+/// Disconnect toast must pause HonestWorkClock so the gap until reload start
+/// is not counted as work. Nested reload pause keeps the first timestamp.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_prompt_task_pauses_honest_clock_at_disconnect_toast() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db = tmp.path().join("grok_oss.db");
+    let store = xai_grok_shell::grok_oss::open_at(&db).expect("plant grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db.clone());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.models.current = Some(acp::ModelId::new("grok-4.6"));
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("pause clock at disconnect toast".into()),
+        &mut app,
+    );
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("expected SendPrompt effect, got {other:?}"),
+    };
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after send");
+        assert!(
+            !task.is_reconnect_paused(),
+            "clock must run until the disconnect toast"
+        );
+    }
+
+    app.handle_session_disconnect_toast(1);
+    let paused_ms = {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after disconnect toast");
+        assert!(
+            task.is_reconnect_paused(),
+            "disconnect toast must pause HonestWorkClock"
+        );
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .expect("disconnect toast");
+        assert!(
+            toast.contains("Disconnected. Reconnecting"),
+            "expected disconnect toast, got {toast}"
+        );
+        task.work_ms()
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    {
+        let agent = app.agents.get(&id).unwrap();
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task during toast-to-reload gap");
+        assert_eq!(
+            task.work_ms(),
+            paused_ms,
+            "toast-to-reload interval must not tick honest work_ms"
+        );
+        assert!(
+            task.is_reconnect_paused(),
+            "clock stays paused until reload resume"
+        );
+    }
+
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.begin_session_reload(1);
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload start");
+        assert!(
+            task.is_reconnect_paused(),
+            "nested reload pause must keep the toast timestamp"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task after nested reload pause");
+        assert_eq!(
+            task.work_ms(),
+            paused_ms,
+            "nested reload pause must not restart the reconnect interval"
+        );
+        assert!(agent.finish_session_reload(1, true));
+        let task = agent
+            .live_prompt_tasks
+            .get(&prompt_id)
+            .expect("live prompt_task survives reload finish");
+        assert!(
+            !task.is_reconnect_paused(),
+            "reload finalize must resume HonestWorkClock"
+        );
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(
+                acp::PromptResponse::new(acp::StopReason::EndTurn).meta(usage_meta(
+                    &prompt_id,
+                    10,
+                    4,
+                    1_000_000_000,
+                )),
+            ),
+            http_status: None,
+            prompt_id: Some(prompt_id.clone()),
+        }),
+        &mut app,
+    );
+    let task_id = first_prompt_task_id(&store);
+    let metrics = store
+        .load_latest_prompt_exec_metrics_for_prompt_task(&task_id)
+        .unwrap()
+        .expect("prompt_exec_metrics after success");
+    assert!(
+        metrics.wall_ms >= 0,
+        "honest wall_ms still writes after disconnect-toast pause, got {}",
+        metrics.wall_ms
+    );
+}
+
+/// Composer submit must not fail the send when grok_oss.db cannot be opened.
+#[test]
+#[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+fn live_composer_submit_fail_open_when_grok_oss_db_missing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("parent is a file");
+    let db = blocker.join("grok_oss.db");
+    let _guard = isolated_grok_oss_guard(db);
+
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("still send".into()), &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "still send"),
+        "missing grok_oss.db must fail-open and still send, got {effects:?}"
+    );
+}
+
+fn next_implement_was_started(
+    app: &AppView,
+    id: AgentId,
+    effects: &[Effect],
+    marker: &str,
+) -> bool {
+    let sent = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text.contains("/implement") && text.contains(marker)
+        )
+    });
+    let queued = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text.contains("/implement") && p.text.contains(marker));
+    sent || queued
+}
+
+/// Named contract: a successful agent turn auto-runs the trailing
+/// `## Next implement prompt` `/implement` block so implement looping
+/// continues. HTTP 502 retry chrome on the way to that success is not a
+/// compact-fail skip and must not stop the loop.
+#[test]
+fn successful_turn_end_auto_runs_trailing_next_implement_prompt() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-1".into());
+        agent.session.prompt_history = vec!["/implement --effort 3 first slice".into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(
+            "/implement --effort 3 first slice",
+        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
+                error: "API error (status 502 Bad Gateway): temporarily unavailable".into(),
+                error_type: None,
+            }));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Summary\nFirst slice done.\n\n\
+             ## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice\n\
+             1) keep going",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "successful turn must auto-run trailing Next implement prompt; \
+         a 502 retry that later succeeded must not skip leftover /implement; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    let toast = app.agents[&id]
+        .toast
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("next task /implement detected"),
+        "auto-run must toast, got {toast:?}"
+    );
+}
+
+fn plan_approval_implement_prompt_with_implement_comments() -> String {
+    let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+    let lead = crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD;
+    format!(
+        "{implement}\n\n{lead}\n\n\
+         /implement --effort 3 all planned tasks in priority order according to these rules:\n\
+         Implement all remaining work using nested hierarchical subagents..."
+    )
+}
+
+/// Named contract: after plan Approve with review comments that contain
+/// `/implement`, a successful implement turn that reports leftover is
+/// operator-gated only (no Next implement block) must not auto-run that
+/// `/implement` body again.
+#[test]
+fn successful_implement_turn_does_not_auto_run_plan_approval_comments_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-1".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Job: remaining work is operator-gated only.\n\
+             State: I did not spawn an implementer.\n\
+             I am not emitting a /implement block, so Auto-run does not pick this up again.",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(&app, id, &effects, "all planned tasks in priority order"),
+        "finished implement with operator-gated leftover must not auto-run \
+         approval-comment /implement; effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: quoting the original approval `/implement` body in the
+/// assistant reply is not a new Next implement prompt.
+#[test]
+fn successful_implement_turn_does_not_auto_run_echoed_approval_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-echo".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Done. Leftover is operator-gated only. I am not emitting a new Next implement prompt.\n\
+             /implement --effort 3 all planned tasks in priority order according to these rules:\n\
+             Implement all remaining work using nested hierarchical subagents...",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-echo".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(&app, id, &effects, "all planned tasks in priority order"),
+        "echo of approval-comment /implement must not auto-run; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: a new trailing Next implement prompt after plan Approve
+/// still auto-runs. Only the comments body and its echo are skipped.
+#[test]
+fn successful_plan_approval_turn_still_auto_runs_new_next_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let prior = plan_approval_implement_prompt_with_implement_comments();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-approve-next".into());
+        agent.session.prompt_history = vec![prior.clone()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(prior));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Summary\nFirst slice done.\n\n\
+             ## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice\n\
+             1) keep going",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("impl-approve-next".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "a new Next implement prompt after plan Approve must still auto-run; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: a failed HTTP 502 turn is not a successful turn end.
+/// Do not auto-run leftover `/implement` from a failed sampler response.
+#[test]
+fn http_502_failed_turn_does_not_auto_run_next_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("impl-502".into());
+        agent.session.prompt_history = vec!["/implement --effort 3 first slice".into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(
+            "/implement --effort 3 first slice",
+        ));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Next implement prompt\n\
+             /implement --effort 3 remaining residual after the first slice",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("API error (status 502 Bad Gateway): temporarily unavailable".into()),
+            http_status: Some(502),
+            prompt_id: Some("impl-502".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !next_implement_was_started(
+            &app,
+            id,
+            &effects,
+            "remaining residual after the first slice"
+        ),
+        "a failed 502 turn must not auto-run leftover /implement; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
     );
 }

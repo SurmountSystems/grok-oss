@@ -208,6 +208,8 @@ The `--json` report includes the full detail for each skill: its `name`, `descri
 
 Grok distributes platform skills separately from your personal skills. Bundled skills are cached under `~/.grok/bundled/skills/`; Grok never writes them into `~/.grok/skills/`. A same-named local, repo, or user skill overrides the bundled copy. `grok-oss inspect` labels each definition by its actual source. (A plugin skill of the same name does not override a native skill; it stays available under its qualified `plugin:name` form.)
 
+Grok OSS also ships **default product skills** in the grok-oss tree at `crates/codegen/xai-grok-bundle/skills/`. On startup (and again after network bundle extract), Grok installs those files into `~/.grok/bundled/skills/`. That live cache is not the source: a later bundle sync can overwrite network-managed files, and default product skills are not listed in the network `manifest.json`. `/polish`, `/subagent`, and `/what` are default Grok OSS skills this way. They are not project packs at `.agents/skills/polish/`, `.agents/skills/subagent/`, or `.agents/skills/what/`. When you ask to revise a skill in grok-oss, edit `crates/codegen/xai-grok-bundle/skills/`. `/finish` and `/reports` stay host overlay plus pager slash.
+
 Skills can also come from plugins. When you install a plugin that includes skills, they appear alongside your user and project skills. `grok-oss inspect` labels each plugin-provided skill with its source as `plugin: <name>`.
 
 See the [Plugins guide](09-plugins.md) for more on installing plugins that provide skills.
@@ -244,6 +246,6 @@ Do not invent a second helper or read those files by hand.
 
 4. **Keep skills focused.** Write one skill per workflow. A "deploy" skill and a "rollback" skill work better than a single "deploy-and-rollback" skill.
 
-5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared.
+5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared. `/polish`, `/subagent`, and `/what` are default Grok OSS skills (product tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Do not ship them as project `.agents/skills/polish`, `.agents/skills/subagent`, or `.agents/skills/what` unless you want a project override. When you ask to revise a skill in grok-oss, edit that product tree. The live cache is not the source.
 
 6. **Test by running it.** Invoke `/name` and confirm the skill works before you rely on automatic invocation.

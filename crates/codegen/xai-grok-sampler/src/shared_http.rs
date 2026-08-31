@@ -14,7 +14,8 @@
 //!   must not be killed mid-body.
 //! - **Headers / first-byte** for streaming `execute` is separate:
 //!   `GROK_STREAM_HEADERS_TIMEOUT_SECS` (default 120) in `client.rs`, wrapped
-//!   around the headers await only. Per-chunk idle after headers is
+//!   around the headers await. The same budget caps the L2 wait for the
+//!   first token after headers. Per-chunk idle after progress is
 //!   `idle_timeout_secs` (default 300) on the L2 stream.
 //!
 //! Wire-level behavior (connection reuse, header isolation, pool-less http1

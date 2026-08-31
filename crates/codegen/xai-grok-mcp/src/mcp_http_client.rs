@@ -155,6 +155,80 @@ impl<C> McpHttpClient<C> {
     }
 }
 
+/// Reqwest 0.13 `rustls` uses rustls-platform-verifier. `Client::build()`
+/// fails when the OS trust store is empty (Nix: "No CA certificates were
+/// loaded from the system"). Mozilla roots are extra certs so construction
+/// succeeds. `GROK_EXTRA_CA_BUNDLE` stays additive.
+pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
+    with_mcp_root_certificates(reqwest::Client::builder())
+}
+
+/// Build an MCP HTTP client. Local mock HTTP still needs a constructible
+/// `Client` even when no TLS handshake happens.
+pub fn reqwest_client() -> reqwest::Result<reqwest::Client> {
+    reqwest_client_builder().build()
+}
+
+/// rmcp `AuthorizationManager::new` builds its own reqwest client and hits
+/// the empty OS trust store. Inject ours instead.
+pub async fn authorization_manager(
+    base_url: &str,
+) -> Result<rmcp::transport::auth::AuthorizationManager, rmcp::transport::auth::AuthError> {
+    let client = reqwest_client()
+        .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
+    let mut manager = rmcp::transport::auth::AuthorizationManager::new_with_oauth_http_client(
+        base_url,
+        Arc::new(ReplacedOAuthHttp),
+    )
+    .await?;
+    manager.with_client(client)?;
+    Ok(manager)
+}
+
+fn with_mcp_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let mut certs = mozilla_root_certificates().to_vec();
+    for der in xai_grok_extra_ca::extra_root_ders() {
+        match reqwest::Certificate::from_der(der) {
+            Ok(cert) => certs.push(cert),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "GROK_EXTRA_CA_BUNDLE: validated DER rejected by reqwest 0.13; skipping cert"
+            ),
+        }
+    }
+    builder.tls_certs_merge(certs)
+}
+
+fn mozilla_root_certificates() -> &'static [reqwest::Certificate] {
+    static CERTS: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    CERTS
+        .get_or_init(|| {
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS
+                .iter()
+                .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok())
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Placeholder so `new_with_oauth_http_client` can skip rmcp's default
+/// `Client::builder()`. [`authorization_manager`] immediately replaces it
+/// via `with_client`.
+struct ReplacedOAuthHttp;
+
+impl rmcp::transport::auth::OAuthHttpClient for ReplacedOAuthHttp {
+    fn execute(
+        &self,
+        _request: rmcp::transport::auth::OAuthHttpRequest,
+    ) -> rmcp::transport::auth::OAuthHttpClientFuture<'_> {
+        Box::pin(async {
+            Err(rmcp::transport::auth::OAuthHttpClientError::new(
+                "OAuth HTTP client was not installed",
+            ))
+        })
+    }
+}
+
 /// The system clock in production; the paused clock under `start_paused`
 /// tests. Use this for all throttle timing so timing tests stay
 /// deterministic.
@@ -246,6 +320,11 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reqwest_client_builds_with_embedded_mozilla_roots() {
+        reqwest_client().expect("MCP HTTP client must construct without an OS trust store");
+    }
 
     /// Simulates rapid stream deaths starting at `start` until the throttle
     /// engages (attempt 2). Returns the throttle-entry time and its plan.

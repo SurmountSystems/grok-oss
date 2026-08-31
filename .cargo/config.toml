@@ -84,6 +84,10 @@ rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"
 # env vars below for those platforms.
 # See: https://github.com/tikv/jemallocator/issues/122
 [env]
+# Bazel `runfiles` 0.1 uses env! at compile time. `--all-features` turns on
+# xai-test-utils' bazel feature. Dummy so raw `cargo clippy --all-features`
+# works without just cargo-ci. Same default as cargo-ci / Nix quality.
+RULES_RUST_RUNFILES_WORKSPACE_NAME = "grok-oss"
 SYSTEM_DEPS_DAV1D_BUILD_INTERNAL = "auto"
 AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"

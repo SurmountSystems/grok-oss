@@ -36,6 +36,11 @@ pub async fn set_scrub_ascii_punct(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.scrub_ascii_punct = Some(value)).await
 }
 
+/// Persist `[ui].ulid_session_ids` via `update_config`.
+pub async fn set_ulid_session_ids(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.ulid_session_ids = Some(value)).await
+}
+
 /// Persist `[ui].combine_queued_prompts` via `update_config`.
 pub async fn set_combine_queued_prompts(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.combine_queued_prompts = Some(value)).await

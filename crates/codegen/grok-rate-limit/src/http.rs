@@ -103,53 +103,46 @@ mod tests {
 
     #[test]
     fn observe_status_skips_bare_403() {
-        let prev = std::env::var_os(crate::DISABLE_ENV);
-        if prev.is_some() {
-            unsafe { std::env::remove_var(crate::DISABLE_ENV) };
-        }
-        let dir = tempfile::TempDir::new().unwrap();
-        let store = SharedRateLimitStore::open(dir.path()).unwrap();
-        let key = ProviderKey::new("bare-403");
-        assert!(!observe_status(
-            &store,
-            &key,
-            403,
-            None,
-            None,
-            "invalid key",
-        ));
-        assert_eq!(store.remaining(&key), Duration::ZERO);
-        match prev {
-            Some(v) => unsafe { std::env::set_var(crate::DISABLE_ENV, v) },
-            None => {}
-        }
+        crate::store::with_shared_limits_enabled(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let store = SharedRateLimitStore::open(dir.path()).unwrap();
+            let key = ProviderKey::new("bare-403");
+            assert!(!observe_status(
+                &store,
+                &key,
+                403,
+                None,
+                None,
+                "invalid key",
+            ));
+            assert_eq!(store.remaining(&key), Duration::ZERO);
+        });
     }
 
     #[test]
     fn observe_status_writes_on_429() {
-        let prev = std::env::var_os(crate::DISABLE_ENV);
-        if prev.is_some() {
-            unsafe { std::env::remove_var(crate::DISABLE_ENV) };
-        }
-        let dir = tempfile::TempDir::new().unwrap();
-        let store = SharedRateLimitStore::open(dir.path()).unwrap();
-        let key = ProviderKey::new("rl-429");
-        assert!(observe_status(
-            &store,
-            &key,
-            429,
-            Some("2"),
-            None,
-            "rate limited",
-        ));
-        assert!(
-            store.remaining(&key) >= Duration::from_millis(500),
-            "remaining={:?}",
-            store.remaining(&key)
-        );
-        match prev {
-            Some(v) => unsafe { std::env::set_var(crate::DISABLE_ENV, v) },
-            None => {}
-        }
+        crate::store::with_shared_limits_enabled(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let store = SharedRateLimitStore::open(dir.path()).unwrap();
+            let key = ProviderKey::new("rl-429");
+            assert!(observe_status(
+                &store,
+                &key,
+                429,
+                Some("10"),
+                None,
+                "rate limited",
+            ));
+            let rem = store.remaining(&key);
+            assert!(
+                rem > Duration::ZERO,
+                "429 must write a cooldown, remaining={rem:?}"
+            );
+            // Same-millisecond observe/remaining is exactly Retry-After, not under it.
+            assert!(
+                rem <= Duration::from_secs(10),
+                "must honor Retry-After 10s, not the 60s default, remaining={rem:?}"
+            );
+        });
     }
 }

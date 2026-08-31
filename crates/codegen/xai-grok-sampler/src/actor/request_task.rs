@@ -26,9 +26,7 @@ use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
 use crate::metrics::InferenceLatencyStats;
-use crate::retry::{
-    self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
-};
+use crate::retry::{self as retry_mod, RetryDecision, clone_error, resolve_max_retries};
 use crate::stream::responses::stream_responses_tracked;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
@@ -214,12 +212,9 @@ pub(crate) async fn run_request_task(
     let mut doom_retry_count: u32 = 0;
     let output_observed = Arc::new(AtomicBool::new(false));
 
-    // If a prior turn already memoized this primary as out of allowance,
-    // switch to the next live credential before burning an HTTP attempt.
-    // Silent: already-memoized skip must not look like per-turn
-    // "Retrying · Switched SuperGrok…" chrome. Shell also prefers live identity
-    // at reconstruct_full_config so primary is often console already. Mid-request
-    // credit switches still emit Retrying via apply_retry_decision.
+    // Memoized-empty primary (real HTTP 402) skips before HTTP so the next
+    // request uses the next source. Fail-open printout does not mark. This
+    // request still hops after SuperGrok HTTP 402 in apply_retry_decision.
     if let Some(hop_reason) = try_skip_memoized_exhausted_primary(&mut config, &mut client) {
         tracing::info!(
             target: crate::sampling_log::TARGET,
@@ -291,9 +286,10 @@ pub(crate) async fn run_request_task(
                 // stream's terminal event was suppressed by
                 // `run_one_attempt`.
                 // Console-key success clears allowance memo (top-up recovery).
-                // SuperGrok session success must **not** clear: extras can
-                // still 200 while included weekly is 100%, which would put
-                // SuperGrok back as primary and re-burn paid extras next turn.
+                // SuperGrok session success must not clear: SuperGrok dollar
+                // credits can still 200 while included SuperGrok period limits
+                // look fully used, which would put SuperGrok back as primary
+                // and spend more SuperGrok dollar credits next turn.
                 // Session recovery: billing usage drop
                 // (`sync_allowance_exhaust_from_usage`) or TTL.
                 clear_exhausted_after_success(&config);
@@ -463,9 +459,10 @@ fn try_rotate_to_failover_key(
 /// After a successful sample, clear credit-exhausted memo for the **active**
 /// identity — except SuperGrok session JWT under dual-auth.
 ///
-/// Named contract: Extra Usage Credits can authorize SuperGrok session 200s
-/// while included weekly/monthly is fully used. Clearing the memo on that 200
-/// would put SuperGrok back as primary and burn more extras on the next turn.
+/// Named contract: SuperGrok dollar credits can authorize SuperGrok session
+/// 200s while included SuperGrok period limits look fully used. Clearing the
+/// memo on that 200 would put SuperGrok back as primary and spend more
+/// SuperGrok dollar credits on the next turn.
 /// Console API keys still clear on success (true top-up recovery). Session
 /// recovery is [`crate::exhausted_identity::sync_allowance_exhaust_from_usage`]
 /// when usage drops, or the 1h TTL.
@@ -479,7 +476,7 @@ fn clear_exhausted_after_success(config: &SamplerConfig) {
         return;
     };
     if is_session_identity(config, key) {
-        // Keep memo: extras-paid SuperGrok 200s are not recovery.
+        // Keep memo: a SuperGrok 200 paid with SuperGrok dollar credits is not recovery.
         return;
     }
     crate::exhausted_identity::clear_exhausted(&fingerprint_secret(key));
@@ -489,8 +486,9 @@ fn clear_exhausted_after_success(config: &SamplerConfig) {
 /// live failover remains, switch immediately so a subsequent turn does not
 /// re-hit a dead key. Returns switch reason when a preemptive rotate applied.
 ///
-/// Also treats SuperGrok session side as exhausted when `session_identity_key`
-/// is memoized (OIDC refresh may change live `api_key` fingerprint).
+/// A leftover real SuperGrok HTTP 402 mark hops the next request to the next
+/// source. Fail-open: a client remaining 0 printout does not mark and must not
+/// hop. Stay reconstruct that cleared the memo keeps SuperGrok.
 fn try_skip_memoized_exhausted_primary(
     config: &mut SamplerConfig,
     client: &mut SamplingClient,
@@ -529,25 +527,44 @@ async fn apply_retry_decision(
     // do not surface a billing failure while failover keys remain.
     // Credit-worded 429 is also is_rate_limited(); credit path runs first.
     // Console team credit/spend death: reinject SuperGrok recovery (clears
-    // preemptive included-full memo once) so free SuperGrok period can hop.
+    // a preemptive included-full memo once) so included SuperGrok period
+    // limits can hop.
     if err.is_credit_exhausted() {
-        crate::prefer_live_primary::ensure_supergrok_recovery_after_console_credit_exhaust(config);
-        if let Some(hop_reason) = try_rotate_to_failover_key(
-            config,
-            client,
-            crate::exhausted_identity::HopCause::CreditExhausted,
-        ) {
-            *retry_count += 1;
-            emit_retrying_with_reason(
-                event_tx,
-                request_id,
-                *retry_count,
-                max_retries,
-                err,
+        let active = config.api_key.as_deref().unwrap_or("").trim();
+        let active_is_supergrok =
+            is_session_identity(config, active) || config.bearer_resolver.is_some();
+        let team_prepaid = match err {
+            SamplingError::Api { message, .. }
+            | SamplingError::StreamError { message, .. }
+            | SamplingError::Auth { message, .. } => {
+                xai_grok_sampling_types::is_console_team_prepaid_message(message)
+            }
+            _ => xai_grok_sampling_types::is_console_team_prepaid_message(&err.to_string()),
+        };
+        // Console team prepaid 403 is not included SuperGrok period limits
+        // empty. Console-live still hops back. SuperGrok-live stays: do not
+        // mark SuperGrok exhausted and do not make console primary.
+        if !(team_prepaid && active_is_supergrok) {
+            crate::prefer_live_primary::ensure_supergrok_recovery_after_console_credit_exhaust(
                 config,
-                hop_reason,
             );
-            return true;
+            if let Some(hop_reason) = try_rotate_to_failover_key(
+                config,
+                client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            ) {
+                *retry_count += 1;
+                emit_retrying_with_reason(
+                    event_tx,
+                    request_id,
+                    *retry_count,
+                    max_retries,
+                    err,
+                    config,
+                    hop_reason,
+                );
+                return true;
+            }
         }
     }
 
@@ -594,7 +611,14 @@ async fn apply_retry_decision(
     } else {
         retry_policy.rate_limit_retry_threshold
     };
-    let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
+    let decision = retry_mod::classify_error_with_window(
+        err,
+        *retry_count,
+        max_retries,
+        rate_limit_threshold,
+        request.estimated_input_tokens,
+        config.context_window,
+    );
 
     // Connection-reset / broken-pipe on body upload often means nginx
     // rejected an oversized payload before responding 413. Strip
@@ -824,10 +848,11 @@ async fn run_one_attempt(
 ) -> AttemptOutcome {
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
-            let (raw, metadata) = match client.conversation_stream(request).await {
-                Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
-            };
+            let (raw, metadata) =
+                match await_stream_init(cancel_token, client.conversation_stream(request)).await {
+                    Ok(pair) => pair,
+                    Err(outcome) => return outcome,
+                };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(
@@ -842,11 +867,15 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Responses => {
-            let (raw, metadata, doom_loop) =
-                match client.conversation_stream_responses(request).await {
-                    Ok(parts) => parts,
-                    Err(e) => return AttemptOutcome::InitFailed { error: e },
-                };
+            let (raw, metadata, doom_loop) = match await_stream_init(
+                cancel_token,
+                client.conversation_stream_responses(request),
+            )
+            .await
+            {
+                Ok(parts) => parts,
+                Err(outcome) => return outcome,
+            };
             if doom_check.is_none()
                 && let Some(collector) = &doom_loop
             {
@@ -873,10 +902,13 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Messages => {
-            let (raw, metadata) = match client.conversation_stream_messages(request).await {
-                Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
-            };
+            let (raw, metadata) =
+                match await_stream_init(cancel_token, client.conversation_stream_messages(request))
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(outcome) => return outcome,
+                };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(
@@ -890,6 +922,25 @@ async fn run_one_attempt(
             )
             .await
         }
+    }
+}
+
+/// Open the HTTP stream, aborting immediately when pause/cancel fires.
+///
+/// `conversation_stream*` waits for response headers with no cancel
+/// token of its own (headers budget ~120s). Without this select, first-token
+/// chrome (`Waiting for the model…`) stays stuck after `[pause]`.
+async fn await_stream_init<T>(
+    cancel_token: &CancellationToken,
+    fut: impl std::future::Future<Output = Result<T, SamplingError>>,
+) -> Result<T, AttemptOutcome> {
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Err(AttemptOutcome::Cancelled),
+        result = fut => match result {
+            Ok(value) => Ok(value),
+            Err(error) => Err(AttemptOutcome::InitFailed { error }),
+        },
     }
 }
 
@@ -1148,6 +1199,11 @@ fn retry_footer_reason(err: &SamplingError) -> String {
             if msg.contains("timed out waiting for response headers") =>
         {
             "response headers timed out".into()
+        }
+        SamplingError::EventStreamError(msg)
+            if msg.to_ascii_lowercase().contains("first token") =>
+        {
+            "first token timed out".into()
         }
         SamplingError::EventStreamError(_) | SamplingError::StreamError { .. } => {
             "connection interrupted".into()
@@ -1471,6 +1527,21 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn await_stream_init_returns_cancelled_without_waiting_for_headers() {
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+        let outcome = await_stream_init(
+            &cancel_token,
+            std::future::pending::<Result<(), SamplingError>>(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(AttemptOutcome::Cancelled)),
+            "pause/cancel must abort the headers wait"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retry_sleep_returns_immediately_on_cancellation() {
         let cancel_token = CancellationToken::new();
@@ -1532,6 +1603,10 @@ mod tests {
             "timed out waiting for response headers after 120s".into(),
         );
         assert_eq!(retry_footer_reason(&headers), "response headers timed out");
+        let first_token = SamplingError::EventStreamError(
+            "timed out waiting for the first token after 2m0s".into(),
+        );
+        assert_eq!(retry_footer_reason(&first_token), "first token timed out");
     }
 
     /// Contract: transport retries append a plain backoff hint so the status
@@ -1572,6 +1647,44 @@ mod tests {
             "2s",
             "short backoff stays whole seconds"
         );
+        // 1766s is 29 minutes 26 seconds. Must not paint `29s 26s`.
+        assert_eq!(format_retry_wait(Duration::from_secs(1766)), "29m26s");
+        let twenty_nine_min = with_backoff_hint(
+            "xAI unavailable (HTTP 502)".into(),
+            Some(Duration::from_secs(1766)),
+        );
+        assert_eq!(
+            twenty_nine_min,
+            "xAI unavailable (HTTP 502) · next try in 29m26s"
+        );
+        assert!(
+            !twenty_nine_min.contains("29s 26s"),
+            "minute waits must not look like two second counts: {twenty_nine_min}"
+        );
+    }
+
+    /// HTTP 502 is an xAI outage, not billing empty and not a healthy wait.
+    #[test]
+    fn retry_footer_502_is_unavailable_not_billing() {
+        let err = SamplingError::Api {
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            message: "<html>502 Bad Gateway</html>".into(),
+            model_metadata: None,
+            retry_after_secs: Some(29),
+            should_retry: None,
+            error_code: None,
+        };
+        assert_eq!(retry_footer_reason(&err), "xAI unavailable (HTTP 502)");
+        assert!(!err.is_rate_limited(), "502 is not a 429");
+        assert!(
+            !err.is_credit_exhausted(),
+            "502 must not mark SuperGrok used up"
+        );
+        let hinted = with_backoff_hint(retry_footer_reason(&err), Some(Duration::from_secs(29)));
+        assert_eq!(hinted, "xAI unavailable (HTTP 502) · next try in 29s");
+        assert!(!hinted.to_ascii_lowercase().contains("allowance"));
+        assert!(!hinted.to_ascii_lowercase().contains("credit"));
+        assert!(!hinted.to_ascii_lowercase().contains("switched"));
     }
 
     /// Attempt number only advances on failure classify, not on stream start.
@@ -2040,10 +2153,10 @@ mod tests {
         });
     }
 
-    /// Billing usage 100% + dual-auth: mark SuperGrok out of allowance → switch
-    /// to console key before the next request (no HTTP 402 required).
+    /// Fail-open: client 100% printout does not skip SuperGrok. A leftover
+    /// real HTTP 402 mark hops the next request to the console key.
     #[test]
-    fn billing_allowance_exhaust_skips_session_before_request() {
+    fn billing_allowance_printout_does_not_skip_supergrok_before_request() {
         use grok_rate_limit::fingerprint_secret;
 
         crate::exhausted_identity::with_memo_lock(|| {
@@ -2055,9 +2168,9 @@ mod tests {
                     Some(session),
                     true,
                 ),
-                crate::exhausted_identity::AllowanceExhaustAction::Marked
+                crate::exhausted_identity::AllowanceExhaustAction::None
             );
-            assert!(crate::exhausted_identity::is_exhausted(
+            assert!(!crate::exhausted_identity::is_exhausted(
                 &fingerprint_secret(session)
             ));
 
@@ -2072,34 +2185,45 @@ mod tests {
                 ..Default::default()
             };
             let mut client = SamplingClient::new(config.clone()).expect("client");
+            assert!(
+                try_skip_memoized_exhausted_primary(&mut config, &mut client).is_none(),
+                "client 100% printout must not hop"
+            );
+            assert_eq!(config.api_key.as_deref(), Some(session));
+
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            assert!(crate::exhausted_identity::is_exhausted(
+                &fingerprint_secret(session)
+            ));
             let hop = try_skip_memoized_exhausted_primary(&mut config, &mut client)
-                .expect("must leave SuperGrok without a prior 402");
+                .expect("real SuperGrok HTTP 402 mark hops the next request");
             assert_eq!(config.api_key.as_deref(), Some(console));
             assert!(crate::exhausted_identity::is_credential_hop_reason(&hop));
             assert!(
                 hop.contains("out of allowance"),
-                "billing-driven switch uses allowance cause: {hop}"
+                "402-driven switch uses allowance cause: {hop}"
             );
             assert!(
                 hop.contains("console key"),
-                "prefer console key after SuperGrok weekly 100%: {hop}"
+                "prefer console key after SuperGrok HTTP 402: {hop}"
             );
         });
     }
 
-    /// Named contract: after prefer-live already made console primary
-    /// (shell reconstruct path), preemptive skip is a no-op — first attempt
-    /// is console without another SuperGrok→console switch ceremony.
+    /// Leftover SuperGrok HTTP 402 memo hops the next request to the next
+    /// source. Stay reconstruct that cleared the memo keeps SuperGrok.
     #[test]
-    fn memoized_exhaust_first_request_already_console_no_second_hop() {
+    fn leftover_supergrok_http_402_memo_hops_next_request() {
         use grok_rate_limit::fingerprint_secret;
 
         crate::exhausted_identity::with_memo_lock(|| {
-            let session = "seamless-session-jwt";
-            let console = "seamless-console-key";
+            let session = "leftover-402-session-jwt";
+            let console = "leftover-402-console-key";
             crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            assert!(crate::exhausted_identity::is_exhausted(
+                &fingerprint_secret(session)
+            ));
 
-            // Shell reconstruct_full_config prefers live identity first.
             let mut config = SamplerConfig {
                 api_key: Some(session.into()),
                 failover_api_keys: vec![console.into()],
@@ -2110,69 +2234,329 @@ mod tests {
                 session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
                 ..Default::default()
             };
-            let preferred =
-                crate::prefer_live_primary::prefer_live_identity_after_credit_exhaust(&mut config)
-                    .expect("must flip to console before first request");
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let hop = try_skip_memoized_exhausted_primary(&mut config, &mut client)
+                .expect("leftover SuperGrok HTTP 402 memo must hop next request");
             assert_eq!(config.api_key.as_deref(), Some(console));
             assert!(
                 config.base_url.contains("api.x.ai"),
-                "console host before HTTP: {}",
+                "must switch to console host: {}",
                 config.base_url
             );
-            assert!(crate::exhausted_identity::is_credential_hop_reason(
-                &preferred
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&hop));
+        });
+    }
+
+    /// OIDC refresh: leftover SuperGrok HTTP 402 memo hops the next request
+    /// even when the live api_key is a rotated jwt with a bearer resolver.
+    #[test]
+    fn leftover_supergrok_http_402_memo_bearer_only_hops_next_request() {
+        use crate::config::{BearerResolver, SharedBearerResolver};
+        use grok_rate_limit::fingerprint_secret;
+        use std::sync::Arc;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            let session = "leftover-402-session-identity";
+            let rotated = "leftover-402-rotated-jwt";
+            let console = "leftover-402-bearer-console";
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+            assert!(crate::exhausted_identity::is_exhausted(
+                &fingerprint_secret(session)
+            ));
+            assert!(!crate::exhausted_identity::is_exhausted(
+                &fingerprint_secret(rotated)
             ));
 
-            // Request task safety net: already on live console → no switch.
+            #[derive(Debug)]
+            struct RotatedBearer;
+            impl BearerResolver for RotatedBearer {
+                fn current_bearer(&self) -> Option<String> {
+                    Some("leftover-402-rotated-jwt".into())
+                }
+            }
+
+            let mut config = SamplerConfig {
+                api_key: Some(rotated.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                bearer_resolver: Some(Arc::new(RotatedBearer) as SharedBearerResolver),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let hop = try_skip_memoized_exhausted_primary(&mut config, &mut client)
+                .expect("bearer-only SuperGrok leftover HTTP 402 memo must hop next request");
+            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert!(
+                config.base_url.contains("api.x.ai"),
+                "must switch to console host: {}",
+                config.base_url
+            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&hop));
+        });
+    }
+
+    /// Next request after a real SuperGrok HTTP 402 uses the next source
+    /// (console key when that is the remaining failover). Session does not die.
+    /// A top-up is not required. Fail-open printout does not mark.
+    #[test]
+    fn try_skip_next_request_uses_next_source_after_real_supergrok_http_402() {
+        use grok_rate_limit::fingerprint_secret;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            let session = "next-request-402-session-jwt";
+            let console = "next-request-402-console-key";
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+
+            let mut config = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            let mut client = SamplingClient::new(config.clone()).expect("client");
+            let hop = try_skip_memoized_exhausted_primary(&mut config, &mut client)
+                .expect("next request after real SuperGrok HTTP 402 must hop");
+            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert!(
+                config.base_url.contains("api.x.ai"),
+                "next request must use console host: {}",
+                config.base_url
+            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&hop));
+        });
+    }
+
+    /// Console team prepaid HTTP 403 while SuperGrok is live is not included
+    /// SuperGrok period limits empty. Do not mark SuperGrok used up and do not
+    /// make console primary. Bare 403 is not empty-wallet hop.
+    #[test]
+    fn apply_retry_decision_does_not_hop_console_team_prepaid_403_while_supergrok_is_live() {
+        crate::exhausted_identity::with_memo_lock(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            rt.block_on(async {
+                let session = "team-403-stay-session-jwt";
+                let console = "team-403-stay-console-key";
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+                let (completion_tx, _completion_rx) = oneshot::channel();
+                let mut completion_tx = Some(completion_tx);
+                let mut retry_count = 0;
+                let mut request = ConversationRequest::default();
+                let mut config = SamplerConfig {
+                    api_key: Some(session.into()),
+                    failover_api_keys: vec![console.into()],
+                    base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                    model: "grok-4".into(),
+                    session_identity_key: Some(session.into()),
+                    failover_base_url: Some("https://api.x.ai/v1".into()),
+                    session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                    ..Default::default()
+                };
+                let mut client = SamplingClient::new(config.clone()).expect("client");
+                let team_body = "Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb has either \
+                    used all available credits or reached its monthly spending limit. \
+                    Please contact your team admin to purchase more credits or raise \
+                    the spending limit.";
+                let error = SamplingError::Api {
+                    status: reqwest::StatusCode::FORBIDDEN,
+                    message: team_body.into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                };
+                assert!(error.is_credit_exhausted());
+                assert!(xai_grok_sampling_types::is_console_team_prepaid_message(
+                    team_body
+                ));
+
+                let should_continue = apply_retry_decision(
+                    &error,
+                    &mut retry_count,
+                    2,
+                    &RetryPolicy::default(),
+                    &event_tx,
+                    &RequestId::from("team-403-stay"),
+                    &mut request,
+                    &mut client,
+                    &mut config,
+                    &CancellationToken::new(),
+                    &mut completion_tx,
+                )
+                .await;
+
+                assert!(
+                    !should_continue,
+                    "console team prepaid 403 on SuperGrok-live must not hop to console"
+                );
+                assert_eq!(config.api_key.as_deref(), Some(session));
+                assert!(
+                    config.base_url.contains("cli-chat-proxy"),
+                    "must stay on SuperGrok host: {}",
+                    config.base_url
+                );
+                assert!(
+                    !crate::exhausted_identity::is_credential_exhausted(session),
+                    "must not mark SuperGrok used up from console team prepaid 403"
+                );
+                let _ = event_rx.try_recv();
+            });
+        });
+    }
+
+    /// This request's SuperGrok HTTP 402 still rotates through
+    /// apply_retry_decision after the request was sent.
+    #[test]
+    fn apply_retry_decision_rotates_on_this_request_supergrok_http_402() {
+        crate::exhausted_identity::with_memo_lock(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            rt.block_on(async {
+                let session = "this-request-402-session-jwt";
+                let console = "this-request-402-console-key";
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+                let (completion_tx, _completion_rx) = oneshot::channel();
+                let mut completion_tx = Some(completion_tx);
+                let mut retry_count = 0;
+                let mut request = ConversationRequest::default();
+                let mut config = SamplerConfig {
+                    api_key: Some(session.into()),
+                    failover_api_keys: vec![console.into()],
+                    base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                    model: "grok-4".into(),
+                    session_identity_key: Some(session.into()),
+                    failover_base_url: Some("https://api.x.ai/v1".into()),
+                    session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                    ..Default::default()
+                };
+                let mut client = SamplingClient::new(config.clone()).expect("client");
+                let error = SamplingError::Api {
+                    status: reqwest::StatusCode::PAYMENT_REQUIRED,
+                    message: "Payment Required".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                };
+                assert!(error.is_credit_exhausted());
+
+                let should_continue = apply_retry_decision(
+                    &error,
+                    &mut retry_count,
+                    2,
+                    &RetryPolicy::default(),
+                    &event_tx,
+                    &RequestId::from("this-request-402"),
+                    &mut request,
+                    &mut client,
+                    &mut config,
+                    &CancellationToken::new(),
+                    &mut completion_tx,
+                )
+                .await;
+
+                assert!(
+                    should_continue,
+                    "SuperGrok HTTP 402 after send must rotate, not finish the request"
+                );
+                assert_eq!(config.api_key.as_deref(), Some(console));
+                assert!(
+                    config.base_url.contains("api.x.ai"),
+                    "this-request 402 must switch to console host: {}",
+                    config.base_url
+                );
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(SamplingEvent::Retrying { .. })
+                ));
+            });
+        });
+    }
+
+    /// Named contract: leftover SuperGrok HTTP 402 hops the next request to
+    /// console. Once already on the live console key, a second hop is a no-op.
+    #[test]
+    fn memoized_exhaust_first_request_already_console_no_second_hop() {
+        use grok_rate_limit::fingerprint_secret;
+
+        crate::exhausted_identity::with_memo_lock(|| {
+            let session = "seamless-session-jwt";
+            let console = "seamless-console-key";
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
+
+            let mut config = SamplerConfig {
+                api_key: Some(session.into()),
+                failover_api_keys: vec![console.into()],
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                model: "grok-4".into(),
+                session_identity_key: Some(session.into()),
+                failover_base_url: Some("https://api.x.ai/v1".into()),
+                session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+                ..Default::default()
+            };
+            let reason =
+                crate::prefer_live_primary::prefer_live_identity_after_credit_exhaust(&mut config)
+                    .expect("leftover SuperGrok HTTP 402 memo hops reconstruct");
+            assert_eq!(config.api_key.as_deref(), Some(console));
+            assert!(
+                config.base_url.contains("api.x.ai"),
+                "must switch to console host: {}",
+                config.base_url
+            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(&reason));
+
             let mut client = SamplingClient::new(config.clone()).expect("client");
             assert!(
                 try_skip_memoized_exhausted_primary(&mut config, &mut client).is_none(),
-                "second switch must not fire when primary is already console"
+                "already on live console; no second hop"
             );
             assert_eq!(config.api_key.as_deref(), Some(console));
 
-            // Simulate next turn: resolve re-pins SuperGrok (prepare_sampler_for_turn).
+            // Next turn: resolve re-pins SuperGrok. Leftover 402 hops again.
             config.api_key = Some(session.into());
             config.failover_api_keys = vec![console.into()];
             config.base_url = "https://cli-chat-proxy.grok.com/v1".into();
             config.extra_headers.clear();
-            // Prefer live again at reconstruct — seamless, no SuperGrok HTTP.
-            let again =
+            let reason2 =
                 crate::prefer_live_primary::prefer_live_identity_after_credit_exhaust(&mut config)
-                    .expect("each turn re-pin still leaves SuperGrok when out of allowance");
+                    .expect("each turn re-pin still hops leftover HTTP 402");
             assert_eq!(config.api_key.as_deref(), Some(console));
-            assert!(again.contains("console key"), "{again}");
-            assert!(
-                try_skip_memoized_exhausted_primary(&mut config, &mut client).is_none(),
-                "request path silent after prefer-live apply"
-            );
+            assert!(crate::exhausted_identity::is_credential_hop_reason(
+                &reason2
+            ));
         });
     }
 
-    /// Named contract: SuperGrok session 200 while weekly is 100% is often
-    /// **Extra Usage Credits**, not recovery. Clearing the allowance memo on
-    /// that 200 re-enables session next turn and burns more extras.
+    /// Named contract: SuperGrok session 200 while included SuperGrok period
+    /// limits look fully used is often SuperGrok dollar credits, not recovery.
+    /// Clearing the allowance memo on that 200 re-enables session next turn
+    /// and spends more SuperGrok dollar credits.
     /// Console-key success still clears (true top-up path).
     #[test]
     fn session_success_does_not_clear_allowance_exhaust_memo() {
         use grok_rate_limit::fingerprint_secret;
 
         crate::exhausted_identity::with_memo_lock(|| {
-            let session = "session-jwt-extras-still-pay";
+            let session = "session-jwt-dollar-credits-still-pay";
             let console = "console-after-hop";
-            assert_eq!(
-                crate::exhausted_identity::sync_allowance_exhaust_from_usage(
-                    100.0,
-                    Some(session),
-                    true,
-                ),
-                crate::exhausted_identity::AllowanceExhaustAction::Marked
-            );
+            crate::exhausted_identity::mark_exhausted(&fingerprint_secret(session));
             let session_fp = fingerprint_secret(session);
             assert!(crate::exhausted_identity::is_exhausted(&session_fp));
 
             // Slip-through: sample still used the session (pre-switch missed or
-            // mid-flight refresh) and got HTTP 200 paid by extras.
+            // mid-flight refresh) and got HTTP 200 paid by SuperGrok dollar credits.
             let config = SamplerConfig {
                 api_key: Some(session.into()),
                 failover_api_keys: vec![console.into()],
@@ -2182,7 +2566,7 @@ mod tests {
             clear_exhausted_after_success(&config);
             assert!(
                 crate::exhausted_identity::is_exhausted(&session_fp),
-                "extras-paid SuperGrok 200 must not erase allowance exhaust memo"
+                "SuperGrok dollar credits 200 must not erase allowance exhaust memo"
             );
 
             // Console success still clears its own mark (top-up recovery).

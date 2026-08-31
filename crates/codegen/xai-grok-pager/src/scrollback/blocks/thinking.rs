@@ -1,6 +1,6 @@
 //! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
 
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthStr;
 
@@ -18,11 +18,11 @@ use crate::appearance::AppearanceConfig;
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord
 /// literally instead of going through the keybinding registry. Resolve the
 /// label from the registry once it does, so a remap is advertised correctly.
-const EXPAND_HINT: &str = "ctrl+e to expand";
+const EXPAND_HINT: &str = "ctrl+t to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
-/// Append the dim `(ctrl+e to expand)` affordance to a collapsed header line.
+/// Append the dim `(ctrl+t to expand)` affordance to a collapsed header line.
 ///
 /// The `Collapsed` guard matters because `render_empty_placeholder` reuses the
 /// collapsed renderer for an empty body in other modes, where the hint would be
@@ -75,9 +75,10 @@ fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
 ///
 /// Uses [`MarkdownContent`] for incremental markdown rendering with cached
 /// word-wrapping, plus special display modes:
-/// - **Collapsed**: Shows "Thought" or "Thought for Xs" if time is set
-/// - **Truncated** (default): Shows "…" + last N lines
-/// - **Expanded**: Full content
+/// - **Collapsed** (default when `[ui] always_expand_thinking` is off):
+///   "Thought" or "Thought for Xs" if time is set
+/// - **Truncated**: Shows "…" + last N lines
+/// - **Expanded** (default when always-expand is on): Full content
 #[derive(Debug, Clone)]
 pub struct ThinkingBlock {
     content: MarkdownContent,
@@ -498,6 +499,9 @@ impl BlockContent for ThinkingBlock {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else if is_running {
+            // Match `next_fold_mode`: skip Collapsed while streaming so
+            // explicit collapse from Expanded lands on Truncated (the
+            // running min-fold), not a header-only Collapsed.
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -508,7 +512,7 @@ impl BlockContent for ThinkingBlock {
         if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else {
-            DisplayMode::Truncated
+            DisplayMode::Collapsed
         }
     }
 
@@ -650,13 +654,53 @@ mod tests {
                 Some(DisplayMode::Expanded),
                 "[ui] always_expand_thinking must keep finished thinking expanded"
             );
+            assert_eq!(
+                block.collapse_mode(true),
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep running thinking expanded"
+            );
+            assert_eq!(
+                block.collapse_mode(false),
+                DisplayMode::Expanded,
+                "[ui] always_expand_thinking must keep finished thinking expanded on collapse"
+            );
         })
         .join()
         .unwrap();
     }
 
     #[test]
-    fn always_expand_thinking_hides_ctrl_e_hint() {
+    fn always_expand_thinking_off_paints_collapsed_headers() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(false);
+            let block = ThinkingBlock::new("reason through this");
+            assert_eq!(
+                block.default_display_mode(),
+                DisplayMode::Collapsed,
+                "[ui] always_expand_thinking off must paint thinking as collapsed headers, not truncated bodies"
+            );
+            assert_eq!(
+                block.finished_display_mode(),
+                Some(DisplayMode::Collapsed),
+                "[ui] always_expand_thinking off must collapse thinking when it finishes"
+            );
+            assert_eq!(
+                block.collapse_mode(true),
+                DisplayMode::Truncated,
+                "[ui] always_expand_thinking off: running thinking min-fold is Truncated, not a Collapsed header"
+            );
+            assert_eq!(
+                block.collapse_mode(false),
+                DisplayMode::Collapsed,
+                "[ui] always_expand_thinking off: finished thinking collapses to a header"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn always_expand_thinking_hides_ctrl_t_hint() {
         std::thread::spawn(|| {
             crate::appearance::cache::set_always_expand_thinking(true);
             let mut appearance = AppearanceConfig::default();
@@ -674,8 +718,8 @@ mod tests {
                 .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
                 .collect();
             assert!(
-                !text.contains("ctrl+e"),
-                "Ctrl+E hint must be hidden when always_expand_thinking is on: {text:?}"
+                !text.contains("ctrl+t"),
+                "Ctrl+T hint must be hidden when always_expand_thinking is on: {text:?}"
             );
         })
         .join()

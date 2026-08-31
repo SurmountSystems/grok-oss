@@ -35,8 +35,9 @@ pub trait TerminalLike {
     fn writer_mut(&mut self) -> &mut Self::Writer;
 }
 
-// Implementation for our Terminal with any Backend that implements Write
-impl<B: Backend + Write> TerminalLike for Terminal<B> {
+// Scrollback helpers write CSI through `Write` and return `io::Error`, so the
+// backend error must be that same type (ratatui 0.30: `Backend::Error`).
+impl<B: Backend<Error = io::Error> + Write> TerminalLike for Terminal<B> {
     type Writer = B;
 
     fn size(&self) -> io::Result<Size> {

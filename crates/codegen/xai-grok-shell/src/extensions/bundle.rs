@@ -218,7 +218,9 @@ pub(crate) async fn sync_bundle_to_root(
         FetchedBundle::Archive(bytes) => {
             let root_owned = root.to_path_buf();
             let manifest = tokio::task::spawn_blocking(move || {
-                bundle::extract_bundle_archive(&root_owned, &bytes)
+                let manifest = bundle::extract_bundle_archive(&root_owned, &bytes)?;
+                bundle::install_default_product_skills(&root_owned)?;
+                anyhow::Ok(manifest)
             })
             .await
             .context("bundle extract task panicked")??;
@@ -243,7 +245,9 @@ pub(crate) async fn sync_bundle_to_root(
             let skills_count = legacy_bundle.skills.len();
             let root_owned = root.to_path_buf();
             tokio::task::spawn_blocking(move || {
-                bundle::write_bundle_to_cache(&root_owned, &legacy_bundle)
+                bundle::write_bundle_to_cache(&root_owned, &legacy_bundle)?;
+                bundle::install_default_product_skills(&root_owned)?;
+                anyhow::Ok(())
             })
             .await
             .context("bundle write task panicked")??;

@@ -45,6 +45,33 @@ pub(super) fn sync_subagent_activity(
     info.activity_label = activity_label;
 }
 
+/// If a nested write-argument stream has run past [`crate::acp::tracker::WRITING_STREAM_MAX`],
+/// request cancel via `x.ai/subagent/cancel`. Idempotent while `pending_kill`
+/// is already set. The 10-second silence hide does not call this.
+pub(super) fn queue_kill_if_nested_write_capped(
+    agent: &mut AgentView,
+    child_sid: &str,
+) -> Option<Effect> {
+    let capped = agent
+        .subagent_views
+        .get(child_sid)
+        .is_some_and(|cv| cv.session.tracker.has_capped_tool_call_write());
+    if !capped {
+        return None;
+    }
+    let session_id = agent.session.session_id.clone()?;
+    let info = agent.subagent_sessions.get_mut(child_sid)?;
+    if info.finished || info.pending_kill {
+        return None;
+    }
+    info.pending_kill = true;
+    info.kill_requested_at = Some(std::time::Instant::now());
+    Some(Effect::KillSubagent {
+        session_id,
+        subagent_id: info.subagent_id.to_string(),
+    })
+}
+
 /// Resolve a subagent child view's live activity into the display label the
 /// fan-out stamps ("Waiting" while the child is busy between activities).
 pub(super) fn subagent_activity_label(child_view: &AgentView) -> Option<String> {
@@ -55,9 +82,11 @@ pub(super) fn subagent_activity_label(child_view: &AgentView) -> Option<String> 
     }
 }
 
-/// Synthesize a finish for a stuck row when a kill found nothing live to stop
-/// (else `pending_kill` times out → "running"). `status` is the real terminal
-/// status for an already-finished orphan, else `"cancelled"`.
+/// Synthesize a finish for a stuck row when a kill found nothing live to
+/// stop, or when the coordinator accepted the cancel (`StoppedLive`).
+/// Nested-agent `pending_kill` that times out is cancelled in chrome, not
+/// reverted to running. `status` is the real terminal status for an
+/// already-finished orphan, else `"cancelled"`.
 pub(crate) fn finalize_killed_subagent(
     app: &mut AppView,
     session_id: &acp::SessionId,

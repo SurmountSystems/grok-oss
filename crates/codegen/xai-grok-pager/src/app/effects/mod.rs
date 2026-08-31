@@ -16,7 +16,8 @@ pub(super) use helpers::{
 };
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, is_disk_full_error,
-    persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
+    is_session_rpc_timeout_error, persist_permission_mode_and_notify, persist_setting,
+    sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]
 pub(crate) use helpers::reject_non_fs_only_advertised_tools;
@@ -557,12 +558,13 @@ pub(crate) fn execute(
                 "load_session: mcp server discovery"
             );
             let acp_session_id = acp::SessionId::new(session_id);
+            let ptx = progress_tx.clone();
             tasks
                 .spawn(async move {
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     ulog::info("session.load.start", Some(&acp_session_id.0), None);
                     let load_started = std::time::Instant::now();
-                    let result = helpers::acp_send_bounded(
+                    let result = helpers::acp_send_keep_waiting_after_timeout(
                             acp::LoadSessionRequest::new(
                                     acp_session_id.clone(),
                                     cwd.clone(),
@@ -571,6 +573,14 @@ pub(crate) fn execute(
                                 .meta(meta.clone()),
                             &tx,
                             "Session loading",
+                            |msg| {
+                                let _ = ptx.send(RestoreProgressMsg {
+                                    agent_id,
+                                    message: msg,
+                                    toast: false,
+                                    fraction: None,
+                                });
+                            },
                         )
                         .await;
                     let load_elapsed_ms = load_started.elapsed().as_millis() as u64;

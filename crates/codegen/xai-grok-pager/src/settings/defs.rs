@@ -123,6 +123,11 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
         display: "Always approve",
         description: "Auto-approve every tool action. Skips ALL permission prompts.",
     },
+    EnumChoice {
+        canonical: "context-only",
+        display: "Context-only",
+        description: "Disable all tool calls. The model works from conversation and instructions only (redteaming / harness diagnosis).",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -926,7 +931,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Default uses the agent's built-in behavior; \
                           Ask prompts for each tool action; \
                           Auto uses an LLM classifier for risky tools; \
-                          Always approve grants all permissions automatically.",
+                          Always approve grants all permissions automatically; \
+                          Context-only advertises no tools and refuses any tool call.",
             keywords: &[
                 "permission",
                 "approve",
@@ -938,6 +944,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "classifier",
                 "tool",
                 "danger",
+                "context-only",
+                "context",
+                "redteam",
             ],
             kind: SettingKind::Enum {
                 default: "ask",
@@ -1046,7 +1055,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           /implement block (from the /implement token through end of message) \
                           from a user-prompt follow-up or a trailing residual in the assistant \
                           reply. Prefer leaving \"Next implement prompt\" near the end of the \
-                          reply. Explicit --effort N on the block is honored as written.",
+                          reply. Explicit --effort N on the block is honored as written. \
+                          Plan-approval review comments that contain /implement are that \
+                          turn's work, not a second auto-run after leftover is operator-gated only.",
             keywords: &[
                 "implement",
                 "auto",
@@ -1450,13 +1461,14 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
             label: "Always expand thinking",
-            description: "Keep thinking blocks fully expanded and hide the Ctrl+E expand hint. \
+            description: "Keep thinking fully expanded (including nested overlays) and hide \
+                          the Ctrl+T hint. Off paints collapsed Thought-for headers only. \
                           Distinct from showing thinking blocks at all.",
             keywords: &[
                 "thinking",
                 "expand",
                 "always",
-                "ctrl+e",
+                "ctrl+t",
                 "reasoning",
                 "collapse",
             ],
@@ -1785,6 +1797,21 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.resume_canceled_turn_on_restart.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "ulid_session_ids",
+            category: SettingCategory::Session,
+            owner: SettingOwner::Shell,
+            label: "ULID session ids",
+            description: "Use ULIDs as the primary session id in grok-oss. Default on. \
+                          Turn off to show the Grok Build UUID as the primary id. The ULID \
+                          map still exists either way.",
+            keywords: &["ulid", "uuid", "session", "id", "display"],
+            kind: SettingKind::Bool {
+                default: ui_default.ulid_session_ids_enabled(),
             },
             restart_required: false,
             hidden_in_minimal: false,

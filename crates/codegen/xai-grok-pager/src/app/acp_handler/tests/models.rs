@@ -389,3 +389,78 @@
         );
     }
 
+    /// Same-model `ModelChanged` that omits effort used to fall back to
+    /// catalog `high` and paint the composer footer high after the operator
+    /// had already picked medium.
+    #[test]
+    fn model_changed_same_model_omitting_effort_keeps_medium() {
+        use xai_grok_shell::sampling::types::ReasoningEffort;
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+        let mut info = make_model_info("grok-4.6");
+        info.meta = serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "high",
+        })
+        .as_object()
+        .cloned();
+        agent.session.models.available.insert(id.clone(), info);
+        agent
+            .session
+            .models
+            .set_current(id, Some(ReasoningEffort::Medium));
+
+        let changed = handle_ext_notification(&model_changed_ext("sess-1", "grok-4.6", None), &mut app);
+        assert!(
+            !changed,
+            "omitting effort on the same model must not count as a model change"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.session.models.reasoning_effort,
+            Some(ReasoningEffort::Medium),
+            "parent composer must keep medium when ModelChanged omits effort"
+        );
+    }
+
+    /// Nested spawn clones parent models. A child `ModelChanged` to high must
+    /// not reset the parent composer to high.
+    #[test]
+    fn spawn_child_model_changed_high_does_not_reset_parent_medium() {
+        use xai_grok_shell::sampling::types::ReasoningEffort;
+        with_replay_disk_home(|_home| {
+            let mut app = make_app_with_agent("sess-parent");
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+            let mut info = make_model_info("grok-4.6");
+            info.meta = serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffort": "high",
+            })
+            .as_object()
+            .cloned();
+            agent.session.models.available.insert(id.clone(), info);
+            agent
+                .session
+                .models
+                .set_current(id, Some(ReasoningEffort::Medium));
+
+            spawn_subagent_with_optional_updates(&mut app, "child-effort", None);
+            let changed = handle_ext_notification(
+                &model_changed_ext("child-effort", "grok-4.6", Some("high")),
+                &mut app,
+            );
+            assert!(
+                !changed,
+                "child ModelChanged must not be applied onto the parent session"
+            );
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.session.models.reasoning_effort,
+                Some(ReasoningEffort::Medium),
+                "parent composer must stay medium after nested spawn"
+            );
+        });
+    }
+

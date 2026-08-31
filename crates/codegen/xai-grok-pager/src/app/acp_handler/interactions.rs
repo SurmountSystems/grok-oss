@@ -153,10 +153,25 @@ pub(super) fn handle_exit_plan_mode(
     // 2. Route by the request's session id (like `session/update`), so a
     // plan-approval raised by a BACKGROUND session lands on its own view even
     // when the user isn't currently focused on it — rather than failing.
-    let Some(id) = interaction_target_agent(app, &params.session_id) else {
-        // No local view for this session. Do NOT error (that fails the tool):
-        // leave the reverse-request unanswered and rely on the leader's
-        // replay-on-attach.
+    let is_restore = params.tool_call_id.starts_with("exit-plan-mode-resume-");
+    // Restore must not use the unbound race-window fallback. That agent is
+    // not a local view for this session until SessionLoaded binds it.
+    let Some(id) = (if is_restore {
+        interaction_target_bound_agent(app, &params.session_id)
+    } else {
+        interaction_target_agent(app, &params.session_id)
+    }) else {
+        // No local view yet. Restore must not drop the reverse-request: the
+        // pager binds the session on SessionLoaded after session/load returns.
+        // Live mid-turn still leaves unanswered for leader replay-on-attach.
+        if is_restore {
+            tracing::info!(
+                session_id = %params.session_id,
+                "exit_plan_mode restore for a session with no local view; held until bind"
+            );
+            app.pending_exit_plan_mode = Some(ext);
+            return false;
+        }
         tracing::info!(
             session_id = %params.session_id,
             "exit_plan_mode for a session with no local view; parked for leader replay-on-attach"
@@ -172,16 +187,50 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
 
+    if is_restore && agent.plan_decision_resolved {
+        tracing::info!(
+            "exit_plan_mode restore skipped: plan already decided; do not re-arm Plan ready"
+        );
+        drop(ext.response_tx);
+        return is_active;
+    }
+
+    // Resume must not auto-dock. `/view-plan` can race this reverse-request:
+    // the pane may already be open, the slash may have run with no pane yet,
+    // or Enter may still be in the composer as `/view-plan`. Dock only then.
+    if agent.composer_holds_view_plan_slash() {
+        agent.view_plan_requested = true;
+        agent.prompt.set_text("");
+    }
+    let restore_open_pane = is_restore
+        && (agent.is_plan_viewer() || agent.line_viewer.is_some() || agent.view_plan_requested);
+
+    let mut carried_comments = Vec::new();
+    let mut carried_next_comment_id = 0;
+    let mut carried_feedback_draft = None;
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,
             new_tool_call_id = %params.tool_call_id,
             "Replacing active plan approval — dismissing previous"
         );
+        if is_restore {
+            carried_comments = std::mem::take(&mut old.comments);
+            carried_next_comment_id = old.next_comment_id;
+            carried_feedback_draft = old.feedback_draft.take();
+        }
         old.send_stale_cancel();
-        agent.plan_next_comment_id = old.next_comment_id;
-        agent.prompt.restore(old.stashed_prompt);
-        agent.line_viewer = None;
+        agent.plan_next_comment_id = if is_restore {
+            carried_next_comment_id
+        } else {
+            old.next_comment_id
+        };
+        if agent.prompt.text().trim().is_empty() {
+            agent.prompt.restore(old.stashed_prompt);
+        }
+        if !restore_open_pane {
+            agent.line_viewer = None;
+        }
     }
 
     // Dismiss competing overlays so plan approval owns the screen.
@@ -203,10 +252,22 @@ pub(super) fn handle_exit_plan_mode(
     if let Some(stashed) = agent.casual_stashed_prompt.take() {
         agent.prompt.restore(stashed);
     }
+    if agent.composer_holds_view_plan_slash() {
+        agent.view_plan_requested = true;
+        agent.prompt.set_text("");
+    }
 
     let keep_draft = !agent.prompt.text().trim().is_empty();
     let live_cursor = agent.prompt.cursor();
-    let stashed = agent.prompt.stash();
+    // Restore must not snapshot the Revise / Comment box as keep-draft
+    // review notes. Isolated present still Approves from Preview.
+    let stashed = if is_restore {
+        crate::views::prompt_widget::StashedPrompt::default()
+    } else {
+        agent.prompt.stash()
+    };
+    // Live mid-turn present auto-opens. Resume / restore re-park keeps the
+    // waiter and does not dock the side panel.
     let state = PlanApprovalViewState::with_source(params, source, stashed, ext.response_tx);
 
     agent.plan_comments.clear();
@@ -217,17 +278,30 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.latest_inline_plan_content = None;
     }
-    // New present re-arms decision CTAs after a prior Approve/Quit and
-    // clears Revise/Clarify in-flight so CTAs arm once.
-    agent.clear_plan_loop_flags_for_new_present();
+    // Live present re-arms decision CTAs after a prior Approve/Quit and
+    // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
+    // clear sticky resolved (leftover/approved plan.md stays decided).
+    if !is_restore {
+        agent.clear_plan_loop_flags_for_new_present();
+    }
     agent.plan_approval_view = Some(state);
+    if is_restore {
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.comments = carried_comments;
+            pav.next_comment_id = carried_next_comment_id;
+            pav.feedback_draft = carried_feedback_draft;
+        }
+        agent.plan_next_comment_id = carried_next_comment_id;
+        agent.restore_plan_feedback_draft_if_composer_lost();
+        if !agent.prompt.text().trim().is_empty() && !agent.composer_holds_view_plan_slash() {
+            agent.snapshot_or_clear_plan_feedback_draft();
+        }
+    }
     // Keep a mid-compose draft visible. stash() copies text and does not
     // clear it; only wipe when the composer was already empty so empty-prompt
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
-    } else {
-        agent.prompt.set_text("");
     }
 
     agent.casual_commenting_range = None;
@@ -236,18 +310,20 @@ pub(super) fn handle_exit_plan_mode(
     crate::appearance::cache::set_plan_approval_force_modal(
         app.current_ui.plan_approval_force_modal(),
     );
-    agent.show_plan_preview_if_available();
-
-    if agent.line_viewer.is_some() {
-        if let Some(ref mut viewer) = agent.line_viewer {
-            viewer.plan_mut().feedback_active = true;
-        }
-        if keep_draft && let Some(ref mut pav) = agent.plan_approval_view {
-            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
-        }
-    } else if let Some(ref mut pav) = agent.plan_approval_view {
-        pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+    if !is_restore || restore_open_pane {
+        agent.show_plan_preview_if_available();
     }
+    if restore_open_pane {
+        agent.bind_restore_plan_preview_approve();
+    } else if agent.line_viewer.is_some()
+        && let Some(ref mut viewer) = agent.line_viewer
+    {
+        // Isolated present is visual. Leave Preview so the composer stays
+        // the agent prompt. Click Revise / Clarify / Comment to arm feedback.
+        viewer.plan_mut().feedback_active = true;
+    }
+    agent.restore_plan_feedback_draft_if_composer_lost();
+    agent.persist_unsent_composer_draft();
 
     tracing::info!(
         target_active = is_active,
@@ -257,6 +333,14 @@ pub(super) fn handle_exit_plan_mode(
     // Background-parked approval renders when the user switches to the session;
     // only the active view needs an immediate redraw.
     is_active
+}
+
+/// Apply a restore `exit_plan_mode` that arrived before the session was bound.
+pub(crate) fn flush_pending_exit_plan_mode(app: &mut AppView) -> bool {
+    let Some(ext) = app.pending_exit_plan_mode.take() else {
+        return false;
+    };
+    handle_exit_plan_mode(ext, app)
 }
 
 pub(super) fn plan_review_source_for_tool(

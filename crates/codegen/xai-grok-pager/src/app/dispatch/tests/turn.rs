@@ -49,9 +49,9 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
         Some(running_pid.as_str())
     );
 
-    // Second prompt typed while running → immediate server-authoritative
-    // send (queued at the leader). Capture its prompt_id.
-    let effects = dispatch(Action::SendPrompt("queued".into()), &mut app);
+    // Chip follow-up while running still immediate-sends onto the server
+    // queue (composer Enter interjects; this RPC is not that path).
+    let effects = dispatch(Action::SubmitFollowUp("queued".into()), &mut app);
     let queued_pid = match &effects[0] {
         Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
         other => panic!("expected immediate SendPrompt, got {other:?}"),
@@ -274,6 +274,161 @@ fn cancel_turn_in_subagent_view_kills_child_even_with_running_root() {
         "the root turn must keep running"
     );
     assert!(!app.agents[&id].session.state.is_cancelling());
+}
+
+/// List `[x]` / KillSubagent on a nested-agent row the coordinator already
+/// marked completed (idle child view, row still listed as running) must drop
+/// that row from the live list. Sending cancel alone while the row stays is
+/// the chrome no-op the operator hits.
+#[test]
+fn kill_subagent_on_idle_listed_child_drops_live_row() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = make_test_subagent("child-1", "sa-1");
+        info.activity_label = Some("Responding".into());
+        agent.subagent_sessions.insert("child-1".to_string(), info);
+        let mut child = crate::app::agent_view::test_fixtures::make_agent();
+        child.session.state = AgentState::Idle;
+        agent
+            .subagent_views
+            .insert("child-1".into(), Box::new(child));
+    }
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .any(|info| info.subagent_id.as_ref() == "sa-1"),
+        "setup: completed-but-listed child must still be on the live list"
+    );
+
+    let effects = dispatch(Action::KillSubagent("sa-1".into()), &mut app);
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-1"
+        ),
+        "chrome kill must still send a real cancel, got {effects:?}"
+    );
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .all(|info| info.subagent_id.as_ref() != "sa-1"),
+        "an idle listed nested agent must leave the live list after list [x]"
+    );
+}
+
+/// Subagents **X** that sits on `killing...` past the kill timeout must drop
+/// the live row, not revert to running.
+#[test]
+fn overdue_pending_kill_finalizes_nested_row() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut info = make_test_subagent("child-1", "sa-1");
+        info.pending_kill = true;
+        info.kill_requested_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(crate::app::agent::PENDING_KILL_TIMEOUT_SECS + 1),
+        );
+        info.activity_label = Some("Responding".into());
+        agent.subagent_sessions.insert("child-1".to_string(), info);
+        let mut child = crate::app::agent_view::test_fixtures::make_agent();
+        child.session.state = AgentState::TurnRunning;
+        agent
+            .subagent_views
+            .insert("child-1".into(), Box::new(child));
+    }
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .any(|info| info.subagent_id.as_ref() == "sa-1"),
+        "setup: killing row must still be on the live list"
+    );
+
+    let changed = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .finalize_overdue_pending_kills();
+    assert!(changed, "overdue kill must change chrome");
+    assert!(
+        crate::app::subagent::live_subagent_list(app.agents[&id].subagent_sessions.values())
+            .iter()
+            .all(|info| info.subagent_id.as_ref() != "sa-1"),
+        "overdue killing... must drop the live nested-agent row"
+    );
+    let info = &app.agents[&id].subagent_sessions["child-1"];
+    assert!(info.finished);
+    assert_eq!(info.status.as_deref(), Some("cancelled"));
+    assert!(!info.pending_kill);
+    assert_ne!(info.activity_label.as_deref(), Some("Responding"));
+    assert!(
+        !app.agents[&id].subagent_views["child-1"]
+            .session
+            .state
+            .is_busy(),
+        "overdue kill must idle the overlay child so it cannot stay Responding"
+    );
+}
+
+/// Overlay [stop] must kill the focused nested job and parented specialists.
+/// Session/cancel on the overlay view alone is the Cancelling... hang.
+#[test]
+fn overlay_stop_kills_focused_nested_job_and_parented_specialists() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::Idle;
+        let mut overlay = make_test_subagent("child-1", "sa-l2");
+        overlay.description = std::sync::Arc::from("Stop five-minute test restart");
+        agent
+            .subagent_sessions
+            .insert("child-1".to_string(), overlay);
+        let mut specialist = make_test_subagent("l3-impl", "sa-l3");
+        specialist.description = std::sync::Arc::from("Keep live remote compile");
+        specialist.is_background = true;
+        specialist.parent_session_id = Some(std::sync::Arc::from("child-1"));
+        agent
+            .subagent_sessions
+            .insert("l3-impl".to_string(), specialist);
+        let mut child = crate::app::agent_view::test_fixtures::make_agent();
+        child.session.session_id =
+            Some(agent_client_protocol::SessionId::new("child-1".to_owned()));
+        child.session.state = AgentState::TurnRunning;
+        agent
+            .subagent_views
+            .insert("child-1".into(), Box::new(child));
+        agent.active_subagent = Some("child-1".into());
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    let killed: Vec<&str> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::KillSubagent { subagent_id, .. } => Some(subagent_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        killed.contains(&"sa-l2"),
+        "overlay stop must kill the overlay nested job, got {effects:?}"
+    );
+    assert!(
+        killed.contains(&"sa-l3"),
+        "overlay stop must kill parented specialists, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].subagent_sessions["child-1"].pending_kill,
+        "overlay nested job must show killing after overlay stop"
+    );
+    assert!(
+        app.agents[&id].subagent_sessions["l3-impl"].pending_kill,
+        "parented specialist must show killing after overlay stop"
+    );
 }
 
 /// A finished focused subagent must NOT swallow the cancel into a kill: the
@@ -2494,10 +2649,13 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
 /// toast **Continuing interrupted turn** and emit SendPrompt of the marker
 /// text. This is continue interrupted turn, not `/resume` session pick.
 #[test]
+#[serial_test::serial(GROK_HOME)]
 fn session_loaded_applies_cancel_resume_marker_and_toasts() {
     use crate::app::actions::TaskResult;
     use agent_client_protocol as acp;
 
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let sid = "load-resume-sess";

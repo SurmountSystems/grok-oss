@@ -328,25 +328,111 @@ impl PtySession {
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use super::*;
 
+    const HANG_CHILD_ENV: &str = "__PTYCTL_HANG_CHILD";
+
+    const HANG_CHILD_ENV_REMOVE: &[&str] = &[
+        "TEST_SHARD_INDEX",
+        "TEST_TOTAL_SHARDS",
+        "TEST_SHARD_STATUS_FILE",
+        "TESTBRIDGE_TEST_ONLY",
+    ];
+
+    /// Hang until killed. Spawned by wait/resize tests via `current_exe` so the
+    /// Nix sandbox does not need `/bin/sleep`.
+    #[test]
+    fn hang_body() {
+        let Ok(mode) = std::env::var(HANG_CHILD_ENV) else {
+            return;
+        };
+        if mode == "ready" {
+            std::thread::sleep(Duration::from_millis(300));
+            println!("READY");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn hang_child_command(mode: &str) -> (Vec<String>, HashMap<String, String>) {
+        let exe = std::env::current_exe().expect("current_exe");
+        let filter = module_path!()
+            .split_once("::")
+            .map(|(_, rest)| rest)
+            .unwrap_or(module_path!());
+        let command = vec![
+            exe.to_string_lossy().into_owned(),
+            "--exact".into(),
+            format!("{filter}::hang_body"),
+            "--test-threads=1".into(),
+            "--quiet".into(),
+            "--nocapture".into(),
+        ];
+        let mut env = HashMap::new();
+        env.insert(HANG_CHILD_ENV.to_string(), mode.to_string());
+        (command, env)
+    }
+
     /// Start a session running `command` at 80x24.
     pub(crate) async fn start_session(command: Vec<String>) -> PtySession {
+        start_session_configured(command, HashMap::new(), Vec::new()).await
+    }
+
+    /// Silent long-lived child (`mode = "1"`) or delayed `READY` then hang (`mode = "ready"`).
+    async fn start_hang_session(mode: &str) -> PtySession {
+        let (command, env) = hang_child_command(mode);
+        start_session_configured(
+            command,
+            env,
+            HANG_CHILD_ENV_REMOVE
+                .iter()
+                .map(|key| (*key).to_string())
+                .collect(),
+        )
+        .await
+    }
+
+    async fn start_session_configured(
+        command: Vec<String>,
+        mut env: HashMap<String, String>,
+        env_remove: Vec<String>,
+    ) -> PtySession {
+        // portable-pty `cd`s into $HOME when cwd is unset. Nix sets HOME to
+        // `/homeless-shelter`, which is not a directory, and spawn then fails
+        // with ENOENT even when the command exists.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        env.entry("HOME".into())
+            .or_insert_with(|| cwd.to_string_lossy().into_owned());
         PtySession::start(SessionConfig {
             pty: PtyConfig {
                 command,
                 cols: 80,
                 rows: 24,
-                cwd: None,
-                env: HashMap::new(),
+                cwd: Some(cwd),
+                env,
+                env_remove,
             },
             timeout: None,
             linger: false,
         })
         .await
         .expect("failed to start session")
+    }
+
+    /// `/bin/sh` when the sandbox has it; otherwise the same path so spawn still
+    /// fails loud (this crate has no skip pattern for missing PTY tools).
+    pub(crate) fn sandbox_shell() -> String {
+        for candidate in ["/bin/sh", "/usr/bin/sh"] {
+            if std::path::Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+        "/bin/sh".into()
     }
 
     /// Send `keys` then wait (bounded) for the child to exit, so the shell and
@@ -383,7 +469,7 @@ pub(crate) mod tests {
     /// The child must observe a resize on its own TTY (TIOCSWINSZ), not just the emulator grid.
     #[tokio::test(flavor = "multi_thread")]
     async fn resize_reaches_child_process() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![sandbox_shell()]).await;
 
         // `stty size` prints "rows cols" as reported by the child's TTY.
         session.send_keys("stty size<CR>").await.unwrap();
@@ -404,7 +490,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resize_bumps_wait_generation() {
         // A child that never writes: the resize is the only possible generation bump.
-        let session = start_session(vec!["/bin/sleep".into(), "30".into()]).await;
+        let session = start_hang_session("1").await;
 
         let mut generation_rx = session.wait_handle().generation_rx;
         let before = *generation_rx.borrow_and_update();
@@ -423,12 +509,7 @@ pub(crate) mod tests {
     /// wait_for(Text) returns as soon as delayed output lands, not at the timeout.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_text_matches_delayed_output() {
-        let session = start_session(vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            "sleep 0.3; echo READY; sleep 30".into(),
-        ])
-        .await;
+        let session = start_hang_session("ready").await;
 
         let outcome = session
             .wait_for(WaitCondition::Text("READY".into()), Duration::from_secs(10))
@@ -443,14 +524,14 @@ pub(crate) mod tests {
             outcome.elapsed_ms
         );
 
-        // Interrupt the trailing `sleep 30` so the child exits.
+        // Interrupt the trailing hang so the child exits.
         shutdown(&session, "<C-c>").await;
     }
 
     /// A wait for absent text times out at the deadline and carries the diagnostic snapshot.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_timeout_carries_diagnostics() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![sandbox_shell()]).await;
         session
             .send_keys("echo hello-from-the-shell<CR>")
             .await
@@ -499,7 +580,7 @@ pub(crate) mod tests {
     /// wait_for(Gone) matches once the text is cleared from the screen.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_gone_matches_after_clear() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![sandbox_shell()]).await;
         session.send_keys("echo MARKER_GONE_42<CR>").await.unwrap();
         let outcome = session
             .wait_for(
@@ -530,7 +611,7 @@ pub(crate) mod tests {
     /// wait_for(StableMs) matches once output quiesces, never before the window elapses.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_stable_matches_after_quiesce() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![sandbox_shell()]).await;
         session.send_keys("echo quiesce-now<CR>").await.unwrap();
 
         let outcome = session
@@ -552,7 +633,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_stable_restarts_window_on_resize() {
         // A child that never writes: the resize is the only grid activity.
-        let session = start_session(vec!["/bin/sleep".into(), "30".into()]).await;
+        let session = start_hang_session("1").await;
 
         let wait = tokio::spawn(
             session
@@ -580,7 +661,7 @@ pub(crate) mod tests {
     /// wait_for(Regex) matches the screen text; invalid patterns error instead of waiting.
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_regex_matches() {
-        let session = start_session(vec!["/bin/sh".into()]).await;
+        let session = start_session(vec![sandbox_shell()]).await;
         session.send_keys("echo exit code 42<CR>").await.unwrap();
         let outcome = session
             .wait_for(

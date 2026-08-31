@@ -221,7 +221,7 @@ fn git_repo_facts(cwd: &Path) -> (Option<String>, Option<String>) {
     let remote_url = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(crate::session::git::strip_url_credentials));
+        .and_then(|r| r.url().ok().map(crate::session::git::strip_url_credentials));
     (repo_root, remote_url)
 }
 

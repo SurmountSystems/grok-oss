@@ -19,8 +19,8 @@ use super::setters::{
     set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
-    set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
-    set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
+    set_timestamps_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
+    set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -89,6 +89,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
+                context_only_mode: agent.session.is_context_only(),
                 current_model_name: agent.session.models.current_model_name(),
                 available_models: agent
                     .session
@@ -255,6 +256,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
+        context_only_mode: agent.session.is_context_only(),
         current_model_name: agent.session.models.current_model_name(),
         available_models: agent
             .session
@@ -698,6 +700,15 @@ fn agent_auto_mode(app: &AppView) -> bool {
     false
 }
 
+fn agent_context_only_mode(app: &AppView) -> bool {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get(&id)
+    {
+        return agent.session.is_context_only();
+    }
+    false
+}
+
 /// Effective `scheduler_background_loops` for the active agent: the value the
 /// shell pinned for that session, falling back to the startup seed while the
 /// session response is still in flight (or with no agent at all). See
@@ -765,6 +776,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
+        context_only_mode: agent_context_only_mode(app),
         current_model_name: agent_current_model_name(app),
         available_models: agent_available_models(app),
         coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
@@ -857,6 +869,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
+        ("ulid_session_ids", SettingValue::Bool(b)) => Some(Action::SetUlidSessionIds(*b)),
         ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
         ("bubble_copy_buttons", SettingValue::Bool(b)) => Some(Action::SetBubbleCopyButtons(*b)),
         ("plan_approval_park", SettingValue::Enum(s)) => {
@@ -969,12 +982,10 @@ pub(in crate::app::dispatch) fn action_for_reset(
         //
         // The drift guard
         // `pr11_permission_mode_kind_canonical_strings_match_choices_catalog`
-        // pins `len == 3` on `PERMISSION_MODE_CHOICES`, so a future
-        // 4th canonical without a matching arm here would fail the
-        // catalog drift test (the registered default would still be
-        // one of the existing arms — but a fresh test
-        // `pr11_action_for_reset_covers_every_permission_mode_canonical`
-        // pins exhaustivity directly).
+        // pins `PERMISSION_MODE_CHOICES` (default, ask, auto, always-approve,
+        // context-only). A new catalog canonical needs a matching arm here.
+        // `action_for_reset_permission_mode_dispatches_set_permission_mode_for_each_canonical`
+        // pins exhaustivity directly.
         ("permission_mode", SettingValue::Enum("always-approve")) => Some(
             Action::SetPermissionMode(crate::app::actions::PermissionModeKind::AlwaysApprove),
         ),
@@ -986,6 +997,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         )),
         ("permission_mode", SettingValue::Enum("default")) => Some(Action::SetPermissionMode(
             crate::app::actions::PermissionModeKind::Default,
+        )),
+        ("permission_mode", SettingValue::Enum("context-only")) => Some(Action::SetPermissionMode(
+            crate::app::actions::PermissionModeKind::ContextOnly,
         )),
         // default_model: empty string → ClearDefaultModel; non-empty
         // is a registry/dispatch skew guard.
@@ -1281,6 +1295,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
+        ("ulid_session_ids", SettingValue::Bool(b)) => set_ulid_session_ids_inner(app, *b),
         ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),
         ("bubble_copy_buttons", SettingValue::Bool(b)) => set_bubble_copy_buttons_inner(app, *b),
         ("plan_approval_park", SettingValue::Enum(s)) => set_plan_approval_park_inner(app, s),

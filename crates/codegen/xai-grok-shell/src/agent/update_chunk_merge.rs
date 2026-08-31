@@ -350,6 +350,15 @@ fn merge_meta(prev: Option<acp::Meta>, new: Option<acp::Meta>) -> Option<acp::Me
     match (prev, new) {
         (Some(mut prev_val), Some(new_val)) => {
             let (prev_obj, new_obj) = (&mut prev_val, &new_val);
+            if let Some(new_total) = new_obj.get("totalTokens").and_then(|v| v.as_u64()) {
+                let prev_total = prev_obj
+                    .get("totalTokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if new_total > prev_total {
+                    prev_obj.insert("totalTokens".to_string(), serde_json::json!(new_total));
+                }
+            }
             if let Some(new_chunk_id_value) = new_obj.get("chunkId")
                 && let Some(new_chunk_id) = chunk_id_as_u64(new_chunk_id_value)
             {
@@ -598,6 +607,61 @@ mod tests {
             },
             SessionNotification::Xai(_) => None,
         }
+    }
+
+    fn msg_chunk_with_tokens(
+        session: &str,
+        agent_ts_ms: u64,
+        text: &str,
+        total_tokens: u64,
+    ) -> acp::SessionNotification {
+        acp::SessionNotification::new(
+            acp::SessionId::new(session),
+            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text.to_string()),
+            ))),
+        )
+        .meta(
+            json!({
+                "agentTimestampMs": agent_ts_ms,
+                "totalTokens": total_tokens,
+            })
+            .as_object()
+            .cloned(),
+        )
+    }
+
+    fn pending_total_tokens(buf: &ReplayBuffer) -> Option<u64> {
+        let pending = buf.pending.as_ref()?;
+        match pending {
+            SessionNotification::Acp(n) => n
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("totalTokens"))
+                .and_then(|v| v.as_u64()),
+            SessionNotification::Xai(_) => None,
+        }
+    }
+
+    /// Occupancy chip reads merged `_meta.totalTokens`. Keeping the first
+    /// chunk's 474k while later thought reached 509.4k leaves compact chrome
+    /// stuck under the sampling window AUTO actually used.
+    #[test]
+    fn merged_thought_chunks_keep_highest_total_tokens() {
+        let mut buf = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        assert!(
+            buf.consume_chunk(msg_chunk_with_tokens("s", 1, "a", 474_000))
+                .is_none()
+        );
+        assert!(
+            buf.consume_chunk(msg_chunk_with_tokens("s", 1, "b", 509_400))
+                .is_none()
+        );
+        assert_eq!(
+            pending_total_tokens(&buf),
+            Some(509_400),
+            "merged thought must keep the highest totalTokens so the chip can climb with thinking"
+        );
     }
 
     #[test]

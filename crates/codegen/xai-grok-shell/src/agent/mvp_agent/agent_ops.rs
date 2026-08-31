@@ -2386,6 +2386,7 @@ impl MvpAgent {
         let storage_mode = cfg.storage_mode;
         let default_yolo_mode = cfg.default_yolo_mode;
         let default_auto_mode = cfg.default_auto_mode;
+        let default_context_only_mode = cfg.default_context_only_mode;
         let tui_mode = cfg.mode == crate::agent::config::AgentMode::Tui;
         let relay_config_enabled = crate::util::config::load_relay_sync_enabled_sync();
         let has_xai_auth = auth_manager
@@ -2470,6 +2471,7 @@ impl MvpAgent {
             otel_gate: crate::agent::otel_gate::OtelGate::default(),
             default_yolo_mode,
             default_auto_mode,
+            default_context_only_mode,
             trace_upload_live: Arc::new(
                 std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
             ),
@@ -3967,6 +3969,7 @@ impl MvpAgent {
             session_model_id,
             session_yolo_mode,
             session_auto_mode,
+            session_context_only,
             prompt_display_cwd,
             is_chat_kind,
         } = spec;
@@ -4659,6 +4662,7 @@ impl MvpAgent {
                     session_model_id,
                     session_yolo_mode,
                     session_auto_mode,
+                    session_context_only,
                     origin_client.as_ref().map(|o| o.product.clone()),
                     inference_idle_timeout_secs,
                     model_max_retries,

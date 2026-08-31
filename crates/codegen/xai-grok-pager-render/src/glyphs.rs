@@ -311,6 +311,22 @@ pub fn dot_spinner_frames() -> &'static [&'static str] {
     }
 }
 
+/// Dwell per live-work sparkler frame, matching turn-status
+/// `SPINNER_DIVISOR` at ~30 animation ticks per second (~7.5 fps).
+pub const SPARKLER_FRAME_MS: u64 = 133;
+
+/// Live-work sparkler glyph for `elapsed_ms` on a wall or job clock.
+///
+/// Frame selection does not depend on a parked animation counter. Two
+/// elapsed values a frame-dwell apart must not freeze on one glyph.
+pub fn sparkler_frame_at_ms(elapsed_ms: u64) -> &'static str {
+    let frames = dot_spinner_frames();
+    if frames.is_empty() {
+        return "\u{22c5}";
+    }
+    frames[(elapsed_ms / SPARKLER_FRAME_MS) as usize % frames.len()]
+}
+
 /// `"┃"` (U+2503 HEAVY VERTICAL) normally, `"│"` (U+2502 LIGHT VERTICAL,
 /// CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
 ///
@@ -409,8 +425,41 @@ pub fn cursor_box_hollow() -> &'static str {
 /// ~600ms keeps the blink slow and readable (not seizure-fast).
 pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
 
-/// Whether the filled (solid plate) phase is showing at `now_ms` (monotonic millis).
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CURSOR_BOX_FILLED_PHASE_PIN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Guard from [`pin_cursor_box_filled_phase`]. Drop restores the prior pin.
+#[cfg(any(test, feature = "test-support"))]
+pub struct CursorBoxFilledPhasePin {
+    prev: Option<bool>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for CursorBoxFilledPhasePin {
+    fn drop(&mut self) {
+        CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.set(self.prev));
+    }
+}
+
+/// Force the composer box caret into the filled or empty blink half for
+/// this thread. Production paint still uses wall-clock [`cursor_box_filled_phase`];
+/// tests must not sleep hoping the clock lands in the solid half.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_cursor_box_filled_phase(filled: bool) -> CursorBoxFilledPhasePin {
+    let prev = CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.replace(Some(filled)));
+    CursorBoxFilledPhasePin { prev }
+}
+
+/// Whether the filled (solid plate) phase is showing at `now_ms` (unix millis
+/// in production; tests may pin a phase via [`pin_cursor_box_filled_phase`]).
 pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = CURSOR_BOX_FILLED_PHASE_PIN.with(std::cell::Cell::get) {
+        return pinned;
+    }
     (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
 }
 
@@ -988,6 +1037,23 @@ mod tests {
         assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
     }
 
+    /// Tests drive the solid half with a pin. Wall-clock `now_ms` must not
+    /// win while the pin is held, and Drop must restore timestamp phase.
+    #[test]
+    fn pin_cursor_box_filled_phase_overrides_timestamp() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(!cursor_box_filled_phase(half));
+        {
+            let _pin = pin_cursor_box_filled_phase(true);
+            assert!(cursor_box_filled_phase(half));
+            assert_eq!(cursor_box_glyph(half), cursor_box_filled());
+        }
+        assert!(!cursor_box_filled_phase(half));
+        let _pin = pin_cursor_box_filled_phase(false);
+        assert!(!cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_hollow());
+    }
+
     /// Multi-row striped rail: as tick advances one frame, each glyph moves
     /// to the row **below** (down the screen), not above.
     ///
@@ -1091,6 +1157,29 @@ mod tests {
                     && *f != "\u{2577}"
             }),
             "sparkle frames must not include striped-marquee glyphs: {sparkle:?}"
+        );
+    }
+
+    /// The running sparkler must change glyphs from a live clock, not sit
+    /// on one frame while a turn, nested agent, or tool is still running.
+    #[test]
+    fn sparkler_frame_advances_with_elapsed_clock() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let early = sparkler_frame_at_ms(0);
+        let later = sparkler_frame_at_ms(SPARKLER_FRAME_MS);
+        assert_ne!(
+            early, later,
+            "sparkler must change glyphs after one frame dwell, got {early:?} then {later:?}"
+        );
+        let wrapped = sparkler_frame_at_ms(SPARKLER_FRAME_MS * dot_spinner_frames().len() as u64);
+        assert_eq!(
+            wrapped, early,
+            "sparkler clock must wrap the frame set rather than freeze"
+        );
+        assert!(
+            dot_spinner_frames().contains(&early),
+            "sparkler must stay on the density sparkle set, got {early:?}"
         );
     }
 

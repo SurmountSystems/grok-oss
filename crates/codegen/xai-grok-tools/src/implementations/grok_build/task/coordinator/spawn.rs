@@ -19,10 +19,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let SubagentSpawnRequest {
             mut request,
             result_tx,
+            admitted_tx,
         } = command;
         if let Err(rejection) = self.reparent_nested_spawn(&mut request) {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejection);
+            reply_rejected(admitted_tx, result_tx, rejection);
             return;
         }
         // Late Task spawn after user Stop (detached TaskTool background).
@@ -32,11 +33,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .contains(&request.parent_session_id)
         {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejected_spawn_result(
-                &request.id,
-                "parent session is stopped",
-                true,
-            ));
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(&request.id, "parent session is stopped", true),
+            );
             return;
         }
         let id = request.id.clone();
@@ -49,22 +50,26 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             || self.completed.contains_key(&id)
             || self.queued.contains_id(&id)
         {
-            let _ = result_tx.send(rejected_spawn_result(
-                &id,
-                &format!("Subagent id '{id}' already exists"),
-                false,
-            ));
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(&id, &format!("Subagent id '{id}' already exists"), false),
+            );
             return;
         }
         if let Some(existing_id) = self.live_same_description(&request) {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejected_spawn_result(
-                &id,
-                &format!(
-                    "A live subagent with the same description already exists ('{existing_id}')"
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "A live subagent with the same description already exists ('{existing_id}')"
+                    ),
+                    false,
                 ),
-                false,
-            ));
+            );
             return;
         }
         // Token Economy implement-loop effort is thoroughness. Distinct
@@ -81,19 +86,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ) == ImplementLoopReviewAdmit::Reject
         {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejected_spawn_result(
-                &id,
-                &format!(
-                    "Implement-loop effort {implement_loop_effort} admits one Review description unless the operator asked for more"
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "Implement-loop effort {implement_loop_effort} admits one Review description unless the operator asked for more"
+                    ),
+                    false,
                 ),
-                false,
-            ));
+            );
             return;
         }
         let running = self.session_running_count(&request.parent_session_id);
         match self.admission.admit(&request, running) {
             AdmissionDecision::Start => {
-                self.start_child(*request, Some(result_tx), StartOrigin::Direct)
+                self.start_child(*request, Some(result_tx), StartOrigin::Direct);
+                reply_admitted(admitted_tx);
             }
             AdmissionDecision::Enqueue => {
                 debug_assert!(
@@ -123,6 +133,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         deadline,
                     },
                 });
+                reply_admitted(admitted_tx);
             }
             AdmissionDecision::Reject(error) => {
                 self.notify_limit(
@@ -140,6 +151,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child_session_id: id,
                     ..Default::default()
                 };
+                reply_admitted_err(admitted_tx, &result);
                 self.finish_never_started(
                     *request,
                     Some(result_tx),
@@ -182,6 +194,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     /// Live Task-owned child with the same trimmed description on this parent.
+    ///
+    /// Ordinary jobs still reject a second live copy. The reserved harness
+    /// panel description `goal achievement skeptic` may have up to three live
+    /// copies so the classifier can seat three auditors.
     fn live_same_description(&self, request: &SubagentRequest) -> Option<String> {
         if request.owner.is_workflow() {
             return None;
@@ -196,22 +212,34 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && other.id != request.id
                 && other.description.trim() == desc
         };
-        self.pending
+        let mut live_ids: Vec<String> = self
+            .pending
             .values()
-            .find(|child| matches(&child.request))
+            .filter(|child| matches(&child.request))
             .map(|child| child.request.id.clone())
-            .or_else(|| {
-                self.active
-                    .values()
-                    .find(|child| matches(&child.request))
-                    .map(|child| child.request.id.clone())
-            })
-            .or_else(|| {
-                self.queued
-                    .iter()
-                    .find(|queued| matches(&queued.request))
-                    .map(|queued| queued.request.id.clone())
-            })
+            .collect();
+        live_ids.extend(
+            self.active
+                .values()
+                .filter(|child| matches(&child.request))
+                .map(|child| child.request.id.clone()),
+        );
+        live_ids.extend(
+            self.queued
+                .iter()
+                .filter(|queued| matches(&queued.request))
+                .map(|queued| queued.request.id.clone()),
+        );
+        let cap = if desc == "goal achievement skeptic" {
+            3
+        } else {
+            1
+        };
+        if live_ids.len() >= cap {
+            live_ids.into_iter().next()
+        } else {
+            None
+        }
     }
 
     /// Re-key a nested spawn (its parent is itself a subagent) to the root
@@ -221,7 +249,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         &mut self,
         request: &mut SubagentRequest,
     ) -> Result<(), SubagentResult> {
-        let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner)) = self
+        let Some((root_parent, loop_task_id, spawner_cancelled, spawner_owner, l2_depth)) = self
             .active
             .values()
             .find(|child| child.child_session_id == request.parent_session_id)
@@ -231,6 +259,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     child.request.runtime_overrides.loop_task_id.clone(),
                     child.cancellation.is_cancelled(),
                     child.request.owner.clone(),
+                    child.request.runtime_overrides.spawn_depth.unwrap_or(1),
                 )
             })
         else {
@@ -247,6 +276,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         self.spawned_by_session
             .insert(request.id.clone(), request.parent_session_id.clone());
+        request.runtime_overrides.immediate_parent_session_id =
+            Some(request.parent_session_id.clone());
+        if request.runtime_overrides.spawn_depth.is_none() {
+            request.runtime_overrides.spawn_depth = Some(l2_depth.saturating_add(1));
+        }
         request.parent_session_id = root_parent;
         request.surface_completion = false;
         // Nested children keep workflow lineage after reparent so
@@ -318,6 +352,34 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             },
         );
     }
+}
+
+fn reply_admitted(admitted_tx: Option<oneshot::Sender<Result<(), String>>>) {
+    if let Some(tx) = admitted_tx {
+        let _ = tx.send(Ok(()));
+    }
+}
+
+fn reply_admitted_err(
+    admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
+    result: &SubagentResult,
+) {
+    if let Some(tx) = admitted_tx {
+        let message = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "spawn rejected".to_owned());
+        let _ = tx.send(Err(message));
+    }
+}
+
+fn reply_rejected(
+    admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
+    result_tx: oneshot::Sender<SubagentResult>,
+    result: SubagentResult,
+) {
+    reply_admitted_err(admitted_tx, &result);
+    let _ = result_tx.send(result);
 }
 
 /// A spawn refused before it ever became a child record.

@@ -184,6 +184,40 @@
         );
     }
 
+    /// Live hang: StreamResumed after attempt 1 painted leftover
+    /// "reconnecting" plus the phase timer. After headers, the wait is
+    /// first token. Do not call that reconnecting.
+    #[test]
+    fn apply_retry_state_stream_resumed_names_first_token_wait_not_reconnecting() {
+        use crate::acp::tracker::TurnActivity;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.set_retry_activity(Some(TurnActivity::Retrying {
+            attempt: 1,
+            max_retries: u32::MAX,
+            reason: "first token timed out · next try in 2s".into(),
+        }));
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt: 1,
+                reason,
+                ..
+            }) => {
+                let lower = reason.to_ascii_lowercase();
+                assert!(
+                    lower.contains("first token"),
+                    "StreamResumed must name the first-token wait, got {reason}"
+                );
+                assert!(
+                    !lower.contains("reconnect"),
+                    "reconnecting is the wrong label for first-token wait, got {reason}"
+                );
+            }
+            other => panic!("expected Retrying first-token wait, got {other:?}"),
+        }
+    }
+
     #[test]
     fn retry_exhausted_rate_limited_sets_flag() {
         let mut session = make_session(Some("s1"));
@@ -858,6 +892,71 @@
         }
     }
 
+    /// Occupancy chip must drop to compact `tokens_after`. A later ACP
+    /// `totalTokens` that still carries the pre-compact estimate (474K while
+    /// compact reported 509.4k → 422.1k) must not raise the chip again.
+    #[test]
+    fn compact_completed_chip_ignores_stale_pre_compact_total_tokens() {
+        let mut app = make_app_with_agent("sess-compact");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.models.override_context_window(500_000);
+            agent.apply_context_used(474_000, 500_000);
+            agent.session_sampling_window = Some(500_000);
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-compact",
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before: Some(509_400),
+                    tokens_after: 422_100,
+                    elapsed_ms: Some(133_000),
+                    summary_preview: None,
+                    saved_too_little: false,
+                },
+            ),
+            &mut app,
+        );
+
+        assert_eq!(
+            app.agents[&AgentId(0)]
+                .context_state
+                .as_ref()
+                .map(|c| c.used),
+            Some(422_100),
+            "AutoCompactCompleted must drop the occupancy chip to tokens_after"
+        );
+
+        let _ = handle(
+            make_token_notification_with_event("sess-compact", 474_000, "sess-compact-99"),
+            &mut app,
+        );
+
+        assert_eq!(
+            app.agents[&AgentId(0)]
+                .context_state
+                .as_ref()
+                .map(|c| c.used),
+            Some(422_100),
+            "stale pre-compact totalTokens 474k must not raise the chip after compact to 422.1k"
+        );
+
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.finish_turn(&mut agent.scrollback);
+        }
+        match last_session_event(&app.agents[&AgentId(0)].scrollback) {
+            Some(SessionEvent::CompactionCompleted { tokens_after, .. }) => {
+                assert_eq!(
+                    tokens_after, 422_100,
+                    "transcript must keep compact tokens_after, not the stale 474k estimate"
+                );
+            }
+            other => panic!("expected CompactionCompleted, got {other:?}"),
+        }
+    }
+
     /// Token refreshes must not copy the model-card catalog into
     /// `session_sampling_window`. After that poison the chip treats windows
     /// as equal and paints unlabeled `201K / 500K`.
@@ -885,20 +984,30 @@
             "must not copy catalog 500k into session_sampling_window"
         );
 
-        let sampling = crate::views::context_bar::footer_sampling_window(
+        let nested_sampling = crate::views::context_bar::footer_sampling_window(
             window,
             Some(500_000),
             true,
         );
-        let text = crate::views::context_bar::context_chip_token_text(
+        let nested_text = crate::views::context_bar::context_chip_token_text(
             201_000,
-            sampling,
+            nested_sampling,
             Some(500_000),
         )
         .expect("token data");
         assert!(
-            !text.starts_with("201K / 500K"),
-            "economic-on chip must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {text}"
+            !nested_text.starts_with("201K / 500K"),
+            "nested chrome must not paint unlabeled catalog 500K as the AUTO gate after two refreshes: {nested_text}"
+        );
+        let l1_sampling = crate::views::context_bar::footer_sampling_window(
+            window,
+            Some(500_000),
+            false,
+        );
+        assert_eq!(
+            l1_sampling,
+            Some(500_000),
+            "L1 fallback uses catalog 500k when session sampling is empty"
         );
     }
 

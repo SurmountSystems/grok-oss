@@ -202,18 +202,21 @@ async fn sync_task(
                 metadata.title = Some(String::new());
                 metadata.title_is_manual = Some(false);
                 metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                // Session-row first. save_session_data does not clear the
+                // list/--resume title (backend upsert title=None). A
+                // reader that has already seen the metadata blob must also
+                // have seen the empty row; PUT after POST loses that race.
+                if let Err(e) = client
+                    .upsert_session(&session_id, &metadata, &agent_id())
+                    .await
+                {
+                    tracing::warn!(error = %e, "Writeback: failed to upsert cleared session title");
+                }
                 if let Err(e) = client
                     .save_session_data(&session_id, &[], Some(&metadata))
                     .await
                 {
                     tracing::warn!(?e, "Writeback: failed to clear title on backend");
-                } else if let Err(e) = client
-                    .upsert_session(&session_id, &metadata, &agent_id())
-                    .await
-                {
-                    // Same row-title gap as SetTitle: save_session_data does
-                    // not clear the session-row pin (backend title=None).
-                    tracing::warn!(error = %e, "Writeback: failed to upsert cleared session title");
                 }
             }
             SyncMsg::SetModelId(id) => {

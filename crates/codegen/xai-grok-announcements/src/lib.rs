@@ -226,7 +226,7 @@ mod bindings_export {
 
     /// Explicitly (re)generate every binding (the export-test pattern).
     /// ts-rs also emits a hidden per-type test from `#[ts(export)]`; this is
-    /// the single entry point `generate.sh` drives, failing loudly if any
+    /// the single entry point `grok-nix-helper generate-announcements` drives, failing loudly if any
     /// type can't export. Destination: `TS_RS_EXPORT_DIR`, default `bindings/`.
     #[test]
     fn export_all_bindings() {

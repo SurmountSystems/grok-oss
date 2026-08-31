@@ -223,9 +223,9 @@ impl AgentView {
     ///
     /// Also gated to an idle agent (no running, cancelling, or wake turn):
     /// while one is in flight, Esc must fall through to
-    /// [`Self::try_handle_esc_policy`] (running → cancel in minimal / non-vim
-    /// mode, swallow in vim mode; cancelling → retry CancelTurn), not detach
-    /// to the dashboard. Detach mid-turn stays on
+    /// [`Self::try_handle_esc_policy`] (running → arm cancel confirm in
+    /// minimal / non-vim mode, swallow in vim mode; cancelling → retry
+    /// CancelTurn), not detach to the dashboard. Detach mid-turn stays on
     /// Ctrl+\ / Left.
     pub(crate) fn overlay_esc_backs_out_from_prompt(&self) -> bool {
         self.is_empty_focused_prompt()
@@ -234,6 +234,30 @@ impl AgentView {
             && !self.session.state.is_turn_running()
             && !self.session.state.is_cancelling()
             && !self.wake_turn_active()
+    }
+    /// Bare Esc in a nested L2/L3 overlay leaves that overlay. Inner
+    /// surfaces still own Esc first. Overlay-dismiss is not Cancel.
+    pub(crate) fn nested_overlay_esc_dismisses(&self) -> bool {
+        if self.modal_owns_input()
+            || self.block_viewer.is_some()
+            || self.line_viewer.is_some()
+            || self.agents_modal.is_some()
+            || self.persona_detail.is_some()
+            || self.scrollback_search.is_some()
+            || self.inline_edit.is_some()
+            || !matches!(self.prompt_mode, crate::app::queue_edit::PromptMode::Normal)
+            || self.prompt.any_dropdown_open()
+            || self.prompt.prompt_suggestion_visible()
+            || self.prompt.history_search.is_active()
+            || !self.no_esc_consumer_pending()
+            || !self.no_input_overlay_pending()
+        {
+            return false;
+        }
+        if self.prompt_input_mode != PromptInputMode::Normal && self.prompt.text().is_empty() {
+            return false;
+        }
+        true
     }
     /// True when a pending plan / Q&A overlay is at its top navigation state
     /// (nothing left for `Esc` to clear), so the next `Esc` backs out of the
@@ -462,7 +486,17 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
+                let kill_idle_listed = self.subagent_sessions.get(child_sid).and_then(|info| {
+                    let idle = self
+                        .subagent_views
+                        .get(child_sid)
+                        .is_some_and(|child| !child.session.state.is_busy());
+                    (info.is_running() && idle).then(|| info.subagent_id.to_string())
+                });
                 self.active_subagent = None;
+                if let Some(subagent_id) = kill_idle_listed {
+                    return InputOutcome::Action(Action::KillSubagent(subagent_id));
+                }
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
@@ -477,16 +511,33 @@ impl AgentView {
                 .subagent_views
                 .get(child_sid)
                 .is_some_and(|c| c.is_bare_scrollback());
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && key.code == KeyCode::Esc
+                && key.modifiers.is_empty()
+                && self
+                    .subagent_views
+                    .get(child_sid)
+                    .is_some_and(|c| c.nested_overlay_esc_dismisses())
+            {
+                self.active_subagent = None;
+                return InputOutcome::Changed;
+            }
             if child_in_scrollback
                 && let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
-                && (key!('q').matches(key) || key.code == KeyCode::Esc)
+                && key!('q').matches(key)
             {
                 self.active_subagent = None;
                 return InputOutcome::Changed;
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
-                child_view.mark_as_subagent_view();
+                if !crate::app::subagent::overlay_child_is_l2_coordinator(
+                    &self.subagent_sessions,
+                    child_sid,
+                ) {
+                    child_view.mark_as_subagent_view();
+                }
                 return child_view.handle_input_inner(ev, registry, prompt_paging);
             }
             return InputOutcome::Unchanged;
@@ -730,7 +781,22 @@ impl AgentView {
                                 }
                             })
                     }
-                    Event::Mouse(mouse) => self.handle_line_viewer_mouse(mouse),
+                    Event::Mouse(mouse) => {
+                        let in_prompt = self
+                            .pane_areas
+                            .prompt
+                            .contains((mouse.column, mouse.row).into());
+                        if self.plan_approval_view.is_some()
+                            && self.route_plan_prompt_mouse_drag(mouse, in_prompt)
+                        {
+                            self.prompt.handle_mouse(mouse);
+                            return InputOutcome::Changed;
+                        }
+                        if self.route_plan_scrollback_mouse(mouse) {
+                            return self.handle_mouse(mouse);
+                        }
+                        self.handle_line_viewer_mouse(mouse)
+                    }
                     _ => InputOutcome::Changed,
                 };
             }
@@ -754,6 +820,8 @@ impl AgentView {
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
                         self.prompt.handle_mouse(mouse);
                         InputOutcome::Changed
+                    } else if self.route_plan_scrollback_mouse(mouse) {
+                        self.handle_mouse(mouse)
                     } else {
                         self.handle_line_viewer_mouse(mouse)
                     }
@@ -1153,7 +1221,7 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('t', CONTROL).matches(key)
+            && registry.matches_id(ActionId::ToggleTodos, key)
         {
             self.todo.overlay.toggle();
             self.todo.on_state_change();
@@ -1354,6 +1422,12 @@ impl AgentView {
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
                 }
+                if self.plan_approval_view.is_some()
+                    && self.prompt.text().trim().is_empty()
+                    && self.prompt.images.is_empty()
+                {
+                    return self.abandon_plan();
+                }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()
                     && self.prompt.text().is_empty()
@@ -1534,9 +1608,13 @@ mod background_and_tasks_shortcut_tests {
     use crate::actions::ActionRegistry;
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     fn ctrl(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
@@ -1756,6 +1834,289 @@ mod background_and_tasks_shortcut_tests {
         );
         assert!(child.hit_bg_button.rect.is_none());
     }
+
+    fn overlay_info(
+        child_sid: &str,
+        parent_sid: &str,
+        depth: u32,
+    ) -> crate::app::subagent::SubagentInfo {
+        crate::app::subagent::SubagentInfo {
+            subagent_id: child_sid.into(),
+            child_session_id: child_sid.into(),
+            description: "coordinate the slice".into(),
+            subagent_type: "general-purpose".into(),
+            persona: None,
+            role: None,
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: Some(parent_sid.into()),
+            depth: Some(depth),
+            started_at: std::time::Instant::now(),
+            last_progress_at: std::time::Instant::now(),
+            finished: false,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
+    }
+
+    fn parent_with_overlay_child(child_sid: &str, depth: u32) -> (super::AgentView, String) {
+        let mut parent = make_agent();
+        parent.session.session_id = Some(agent_client_protocol::SessionId::new("l1-sess"));
+        parent.session.state = crate::app::agent::AgentState::TurnRunning;
+        let mut child = make_agent();
+        child.session.session_id = Some(agent_client_protocol::SessionId::new(child_sid));
+        child.session.state = crate::app::agent::AgentState::TurnRunning;
+        child.prompt.set_text("clarify the coordinator");
+        child.prompt.set_cursor(child.prompt.text().len());
+        let parent_sid = if depth >= 2 { "l2-coord" } else { "l1-sess" };
+        if depth >= 2 {
+            parent
+                .subagent_sessions
+                .insert("l2-coord".into(), overlay_info("l2-coord", "l1-sess", 1));
+        }
+        parent.subagent_sessions.insert(
+            child_sid.to_string(),
+            overlay_info(child_sid, parent_sid, depth),
+        );
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        parent.open_subagent_fullscreen(child_sid.to_string());
+        (parent, child_sid.to_string())
+    }
+
+    #[test]
+    fn l2_overlay_enter_sends_clarify_action_and_shows_composer() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        let child = parent.subagent_views.get(&child_sid).expect("l2 child");
+        assert!(
+            !child.is_subagent_view,
+            "L2 overlay must show the operator composer"
+        );
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "clarify the coordinator");
+            }
+            other => panic!("L2 overlay Enter must send a clarify action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn l3_overlay_enter_does_not_send_and_hides_composer() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l3-specialist", 2);
+        let child = parent.subagent_views.get(&child_sid).expect("l3 child");
+        assert!(child.is_subagent_view, "L3 overlay stays observational");
+        assert_ne!(
+            child.active_pane,
+            AgentPane::Prompt,
+            "L3 overlay must not focus a composer"
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::Interject { .. })
+            ),
+            "L3 overlay must not emit a send action, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn l2_overlay_draw_keeps_composer_visible() {
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        assert!(!parent.subagent_views[&child_sid].is_subagent_view);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            !child.is_subagent_view,
+            "L2 overlay must keep the composer after the first frame"
+        );
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn l2_overlay_key_forward_does_not_mark_observational() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        let _ = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            &registry,
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(!child.is_subagent_view);
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn l2_overlay_esc_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        parent.subagent_views.get_mut(&child_sid).unwrap().vim_mode = false;
+        assert_eq!(
+            parent.subagent_views[&child_sid].active_pane,
+            AgentPane::Prompt
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "nested L2 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "overlay-dismiss is not Cancel"
+        );
+        assert!(
+            parent.active_subagent.is_none(),
+            "Esc must return to the parent transcript"
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            child.session.state.is_turn_running(),
+            "nested L2 must keep running"
+        );
+        assert!(
+            !child.session.state.is_cancelling(),
+            "overlay Esc must not start Cancelling chrome"
+        );
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l2_overlay_esc_empty_prompt_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        {
+            let child = parent.subagent_views.get_mut(&child_sid).unwrap();
+            child.vim_mode = false;
+            child.prompt.set_text("");
+            child.prompt.set_cursor(0);
+        }
+        assert_eq!(
+            parent.subagent_views[&child_sid].active_pane,
+            AgentPane::Prompt
+        );
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty-prompt L2 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "overlay-dismiss is not Cancel"
+        );
+        assert!(
+            parent.active_subagent.is_none(),
+            "Esc must return to the parent transcript"
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(child.session.state.is_turn_running());
+        assert!(!child.session.state.is_cancelling());
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l3_overlay_esc_leaves_overlay_without_cancelling() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l3-specialist", 2);
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "nested L3 overlay Esc must leave the overlay, got {outcome:?}"
+        );
+        assert!(!matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        assert!(parent.active_subagent.is_none());
+        let child = parent.subagent_views.get(&child_sid).expect("l3");
+        assert!(child.session.state.is_turn_running());
+        assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    #[test]
+    fn l2_overlay_esc_with_inner_goal_detail_does_not_dismiss() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        {
+            let child = parent.subagent_views.get_mut(&child_sid).unwrap();
+            child.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+            child.show_goal_detail = true;
+        }
+        let outcome = parent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            parent.active_subagent.as_deref() == Some(child_sid.as_str()),
+            "inner Esc consumer must keep the overlay open"
+        );
+        assert!(!matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(
+            !child.show_goal_detail,
+            "first Esc must close the inner surface"
+        );
+        assert!(child.session.state.is_turn_running());
+    }
+
     #[test]
     fn ctrl_g_toggles_tasks_and_never_demotes() {
         let registry = ActionRegistry::defaults();
@@ -1779,6 +2140,60 @@ mod background_and_tasks_shortcut_tests {
         ));
         assert!(!agent.tasks.overlay.visible);
         assert!(!agent.tasks.overlay.focused);
+    }
+
+    #[test]
+    fn ctrl_t_from_focused_prompt_toggles_thinking_not_todos_or_draft() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("Also,");
+        let draft_len = agent.prompt.text().len();
+        agent.prompt.set_cursor(draft_len);
+        agent.set_active_pane(AgentPane::Prompt, true);
+        assert!(!agent.todo.overlay.visible, "todo overlay starts hidden");
+        let first = agent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(first, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T from the focused composer must expand or collapse thinking, got {first:?}"
+        );
+        assert!(
+            !agent.todo.overlay.visible,
+            "Ctrl+T must not open the todo overlay"
+        );
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "Also,");
+        assert_eq!(agent.prompt.cursor(), draft_len);
+    }
+
+    #[test]
+    fn ctrl_t_in_nested_overlay_toggles_thinking_not_parent_todos() {
+        let registry = ActionRegistry::defaults();
+        let mut parent = make_agent();
+        let mut child = make_agent();
+        child.set_active_pane(AgentPane::Prompt, true);
+        child.prompt.set_text("Also,");
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(child));
+        parent.active_subagent = Some("l2-coord".into());
+        let outcome = parent.handle_input(&ctrl('t'), &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ExpandAllThinking)),
+            "Ctrl+T in a nested overlay must expand or collapse that overlay's thinking, got {outcome:?}"
+        );
+        let child = parent
+            .subagent_views
+            .get("l2-coord")
+            .expect("nested overlay");
+        assert!(
+            !child.todo.overlay.visible,
+            "Ctrl+T must not open the nested todo board"
+        );
+        assert!(
+            !parent.todo.overlay.visible,
+            "Ctrl+T in nested overlay must not toggle the parent todo board"
+        );
+        assert_eq!(child.prompt.text(), "Also,");
     }
 }
 #[cfg(test)]

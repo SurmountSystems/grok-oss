@@ -122,7 +122,11 @@ pub(super) fn resolve_target_view<'a>(
 /// All ACP-notification handlers must route through this function rather than
 /// gating on `app.active_view` directly; see the `handle_scheduled_task_*`
 /// family for the legacy active-view pattern still pending migration.
-pub(super) fn find_session_match(
+/// Exact root or child match only. No unbound race-window fallback.
+///
+/// Restore `exit_plan_mode` must use this: an unbound active agent is not
+/// a local view for that session yet. SessionLoaded binds, then flush.
+pub(super) fn find_bound_session_match(
     app: &AppView,
     session_id: &acp::SessionId,
 ) -> Option<SessionMatch> {
@@ -146,8 +150,15 @@ pub(super) fn find_session_match(
             child_match = Some(*id);
         }
     }
-    if let Some(id) = child_match {
-        return Some(SessionMatch::Child(id));
+    child_match.map(SessionMatch::Child)
+}
+
+pub(super) fn find_session_match(
+    app: &AppView,
+    session_id: &acp::SessionId,
+) -> Option<SessionMatch> {
+    if let Some(matched) = find_bound_session_match(app, session_id) {
+        return Some(matched);
     }
     // Pass 3: race-window fallback for notifications that arrive before the
     // root session_id has been assigned. Only the active agent is eligible,
@@ -183,6 +194,16 @@ pub(super) fn is_matched_agent_active(app: &AppView, matched_agent: AgentId) -> 
 pub(super) fn interaction_target_agent(app: &AppView, session_id: &str) -> Option<AgentId> {
     let sid = acp::SessionId::new(session_id.to_owned());
     match find_session_match(app, &sid) {
+        Some(SessionMatch::Root(id) | SessionMatch::Child(id)) => Some(id),
+        None => None,
+    }
+}
+
+/// Same as [`interaction_target_agent`] but only a bound session id.
+/// Restore must not treat an unbound active agent as the local view.
+pub(super) fn interaction_target_bound_agent(app: &AppView, session_id: &str) -> Option<AgentId> {
+    let sid = acp::SessionId::new(session_id.to_owned());
+    match find_bound_session_match(app, &sid) {
         Some(SessionMatch::Root(id) | SessionMatch::Child(id)) => Some(id),
         None => None,
     }

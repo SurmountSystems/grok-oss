@@ -572,6 +572,20 @@ mod tests {
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
+    /// Isolate process env that `should_advertise_xai_api_key*` probes.
+    ///
+    /// `just check-local` inherits the operator shell. First-party
+    /// `XAI_API_KEY` / `GROK_CODE_XAI_API_KEY` and the default catalog
+    /// OpenRouter `env_key` (`OPENROUTER_API_KEY`) would otherwise make
+    /// "no BYOK / no first-party key" assertions fail without a login.
+    fn isolate_process_auth_env() -> [EnvGuard; 3] {
+        [
+            EnvGuard::unset(XAI_API_KEY_ENV_VAR),
+            EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR),
+            EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV),
+        ]
+    }
+
     /// Default inputs to `build_auth_methods` representing a session-only user
     /// with no API key anywhere. Tests override only the fields they care
     /// about.
@@ -783,9 +797,10 @@ mod tests {
     fn enterprise_byok_config_does_not_require_login() {
         const TEST_ENV_VAR: &str = "TEST_ENTERPRISE_REGRESSION_AUTH_TOKEN";
 
-        // Make sure no global key is masking the per-model path we're trying
-        // to exercise. Held until end-of-scope so we restore on panic too.
-        let _global = EnvGuard::unset(XAI_API_KEY_ENV_VAR);
+        // Make sure no global or OpenRouter key is masking the per-model path
+        // we're trying to exercise. Held until end-of-scope so we restore on
+        // panic too.
+        let _isolated = isolate_process_auth_env();
 
         let dm = crate::models::default_model();
         let toml: toml::Value = toml::from_str(&format!(
@@ -912,8 +927,8 @@ mod tests {
     #[test]
     #[serial]
     fn env_key_probe_unusable_suppresses_advertise_without_byok() {
+        let _isolated = isolate_process_auth_env();
         let _set = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-dead-key");
-        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
         let cfg = Config::default();
         let models = resolve_model_list(&cfg, None);
         assert!(

@@ -1405,6 +1405,9 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 yolo_mode: app.default_yolo,
                 auto_mode: app.current_ui.permission_mode.as_deref() == Some("auto")
                     && !app.default_yolo,
+                context_only_mode: app.current_ui.permission_mode.as_deref()
+                    == Some("context-only")
+                    && !app.default_yolo,
                 current_model_name: app.models.current_model_name(),
                 available_models: app
                     .models
@@ -1543,6 +1546,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
                 d.set_error_toast("Open a session to run /doctor.");
+            }
+            vec![]
+        }
+        CommandResult::QueueLater { .. } => {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.set_error_toast("Open a session to queue that command.");
             }
             vec![]
         }

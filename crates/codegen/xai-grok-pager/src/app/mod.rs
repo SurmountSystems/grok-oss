@@ -800,6 +800,11 @@ pub async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
+    let launch_context_only = xai_grok_shell::util::config::effective_context_only_for_launch(
+        args.yolo,
+        args.permission_mode_flag.as_deref(),
+        remote_permission_mode,
+    );
     let connect_flags = crate::acp::ConnectFlags {
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
@@ -827,6 +832,7 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        default_context_only_mode: launch_context_only && !launch_yolo.yolo && !launch_auto,
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;

@@ -1,6 +1,467 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
+    /// Mid-turn `exit_plan_mode` (not restore) still auto-opens the pane.
+    #[test]
+    fn live_exit_plan_mode_present_still_docks_side_panel() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Live present"));
+
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.plan_approval_view.is_some());
+        assert!(
+            agent.line_viewer.is_some(),
+            "live mid-turn present must still auto-open the plan side panel"
+        );
+        assert_eq!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+        );
+    }
+
+    /// Restore that arrives before the session is bound must not drop the
+    /// reverse-request. SessionLoaded flush parks the waiter. `/view-plan`
+    /// during reconnect must dock on that SessionLoaded, not a later manual open.
+    #[test]
+    fn resume_restore_held_until_session_binds() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::dispatch::dispatch;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.unbind_session_id();
+        }
+        app.reconnect_pending = true;
+        let slash = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+        assert!(
+            slash.is_empty(),
+            "/view-plan is a local slash during reconnect, got {slash:?}"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().view_plan_requested,
+            "/view-plan during reconnect must stick until SessionLoaded"
+        );
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Held until bind"),
+        );
+        assert!(!handle_exit_plan_mode(ext, &mut app));
+        assert!(
+            app.pending_exit_plan_mode.is_some(),
+            "restore with no local view must hold the reverse-request"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().plan_approval_view.is_none(),
+            "must not park until the session is bound"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().line_viewer.is_none(),
+            "held restore must not dock before SessionLoaded"
+        );
+
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new("sess-1"),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "SessionLoaded flush after bind must park the live waiter"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "SessionLoaded must dock Approve for /view-plan requested during reconnect"
+            );
+            agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the held waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Restore / resume re-park must keep the live waiter and must not dock.
+    #[test]
+    fn resume_restore_parks_waiter_without_docking_side_panel() {
+        use crate::app::actions::Action;
+        use crate::app::dispatch::dispatch;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "restore must park a live waiter"
+            );
+            assert!(
+                agent.line_viewer.is_none(),
+                "restore must not auto-dock the plan side panel"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some(PLAN_READY_STATUS),
+                "restore must not paint Plan ready while the pane is shut"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some(PLAN_IDLE_REVIEW_STATUS),
+                "restore must not idle as Plan written. Click or /view-plan"
+            );
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "restore must not claim the side panel is open"
+            );
+        }
+
+        let _ = dispatch(Action::ShowPlan, &mut app);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("/view-plan must reopen the restored waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "/view-plan must bind Approve to the restored waiter"
+            );
+            agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `/view-plan` can open the pane before the resume reverse-request
+    /// lands. Restore must keep that pane and bind Approve to the live waiter.
+    #[test]
+    fn resume_restore_keeps_already_open_plan_pane_and_binds_approve() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.latest_inline_plan_content = Some("# Already open\n\nBind the waiter\n".into());
+            agent.show_plan_preview();
+            assert!(
+                agent.line_viewer.is_some(),
+                "fixture: /view-plan opened the pane before restore"
+            );
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| p.is_local_idle_decision),
+                "fixture: open pane is a local idle park until restore"
+            );
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must keep the already-open plan pane"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve on the open pane"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert_eq!(
+                pav.focus,
+                PlanApprovalFocus::Preview,
+                "restore must leave Preview so the composer stays the agent prompt"
+            );
+            agent.approve_plan();
+            assert_eq!(
+                agent.prompt.text(),
+                "",
+                "empty-composer Approve must not invent review notes"
+            );
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `/view-plan` can run before the restore waiter and fail to leave a pane
+    /// (no body yet, or a later stale dismiss). Restore must still dock and
+    /// bind Approve. Idle `--continue` without that slash must not auto-dock.
+    #[test]
+    fn resume_restore_docks_when_view_plan_already_requested() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.open_plan_from_view_plan_or_status();
+            agent.line_viewer = None;
+            assert!(
+                agent.view_plan_requested,
+                "fixture: /view-plan ran and still wants the pane"
+            );
+            assert!(agent.plan_approval_view.is_none() || agent.line_viewer.is_none());
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter after slash"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must open the pane the slash already asked for"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve after a racing /view-plan"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert!(pav.response_tx.is_some());
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            agent.approve_plan();
+            assert_eq!(agent.prompt.text(), "");
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Restore can land while `/view-plan` is still in the composer (Enter
+    /// not processed). That slash is a command, not keep-draft review notes.
+    #[test]
+    fn resume_restore_docks_when_composer_holds_view_plan_slash() {
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("/view-plan");
+        }
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter from in-flight slash"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "restore must dock for an in-flight /view-plan slash"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "restore must bind Approve for an in-flight /view-plan slash"
+            );
+            assert_eq!(
+                agent.prompt.text(),
+                "",
+                "/view-plan in the composer is the slash, not a draft"
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert!(!pav.is_local_idle_decision);
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            assert_ne!(
+                pav.stashed_prompt.text.trim(),
+                "/view-plan",
+                "Approve must not treat the slash as keep-draft review notes"
+            );
+            agent.approve_plan();
+            assert_eq!(agent.prompt.text(), "");
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// `--continue` restore must keep typed Revise-box text and must not
+    /// wrap it as Approve review notes (isolated present stays Preview).
+    #[test]
+    fn resume_restore_keeps_revise_box_draft() {
+        use crate::app::app_view::InputOutcome;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# First park"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            if let Some(ref mut pav) = agent.plan_approval_view {
+                pav.focus = PlanApprovalFocus::Prompt;
+                pav.prompt_intent = crate::views::plan_approval_view::PlanPromptIntent::Revise;
+            }
+            agent.prompt.set_text("please add auth middleware");
+            agent.snapshot_or_clear_plan_feedback_draft();
+            agent.cancel_line_viewer();
+            assert_eq!(agent.prompt.text(), "please add auth middleware");
+        }
+
+        seed_pending_tool(
+            app.agents.get_mut(&AgentId(0)).unwrap(),
+            "exit-plan-mode-resume-sess-1",
+            "CreatePlan",
+        );
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.prompt.text(),
+                "please add auth middleware",
+                "--continue restore must keep the Revise box text, got {:?}",
+                agent.prompt.text()
+            );
+            let pav = agent
+                .plan_approval_view
+                .as_ref()
+                .expect("restore must park the live waiter");
+            assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+            assert_eq!(
+                pav.feedback_draft.as_deref(),
+                Some("please add auth middleware")
+            );
+            let outcome = agent.approve_plan();
+            assert_eq!(
+                agent.prompt.text(),
+                "please add auth middleware",
+                "Approve must not consume a later composer draft as review notes"
+            );
+            assert!(
+                !matches!(
+                    &outcome,
+                    InputOutcome::Action(crate::app::actions::Action::Interject { text, .. })
+                        if text.contains("review comments")
+                ),
+                "isolated present Approve must not wrap the restored draft; got {outcome:?}"
+            );
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the live waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Restore after Approve/Quit must not re-arm Plan ready chrome.
+    #[test]
+    fn resume_restore_skips_when_plan_decision_resolved() {
+        use crate::views::plan_approval_view::PLAN_READY_STATUS;
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.plan_decision_resolved = true;
+            agent.prompt.set_text("btcdragonlord.com is not mine either btw");
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Leftover after Approve"),
+        );
+        let _ = handle_exit_plan_mode(ext, &mut app);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "restore must not re-park after Approve/Quit"
+        );
+        assert!(agent.plan_decision_resolved);
+        assert!(agent.line_viewer.is_none());
+        assert_ne!(agent.plan_loop_status_label(), Some(PLAN_READY_STATUS));
+        assert_eq!(
+            agent.prompt.text(),
+            "btcdragonlord.com is not mine either btw",
+            "restore skip must keep the mid-type draft"
+        );
+    }
+
     #[test]
     fn exit_plan_mode_auto_opens_inline_cursor_plan_preview() {
         let mut app = make_app_with_agent("sess-1");
@@ -788,4 +1249,601 @@
         agent.approve_plan();
         assert_exit_plan_approved(rx);
     }
+
+    /// Resume / rebuild with a live waiter and a mid-type draft must not
+    /// paint Plan ready while the pane is shut and Enter is send.
+    #[test]
+    fn resume_restore_does_not_paint_plan_ready_while_composer_is_send_armed() {
+        use crate::app::agent::AgentState;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
+
+        const DRAFT: &str = "btcdragonlord.com is not mine either btw";
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.session.state = AgentState::Idle;
+            agent.prompt.set_text(DRAFT);
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(agent.prompt.text(), DRAFT, "restore must keep the mid-type draft");
+        assert!(
+            agent.line_viewer.is_none(),
+            "restore must not auto-dock the plan side panel"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "shut pane + Enter:send must not paint Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "restore must not idle as Plan written. Click or /view-plan"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+        );
+    }
+
+    /// Resume / rebuild re-park must not dock the pane when they were typing.
+    #[test]
+    fn resume_restore_does_not_open_pane_when_composer_has_draft() {
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("still typing after the reboot");
+        }
+        let (ext, _rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.prompt.text(),
+            "still typing after the reboot",
+            "resume present must keep the mid-compose draft"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "resume must not auto-open the plan pane while they are typing"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(crate::views::plan_approval_view::PLAN_READY_STATUS),
+            "resume must not paint Plan ready while the pane is shut"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(crate::views::plan_approval_view::PLAN_IDLE_REVIEW_STATUS),
+        );
+    }
+
+    /// Idle resume waiter must not steal Enter. A non-empty composer submits
+    /// a normal prompt. Empty Enter still never Approves.
+    #[test]
+    fn resume_restore_mid_compose_enter_sends_normal_prompt() {
+        use crate::actions::ActionRegistry;
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("send this as a normal prompt");
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains("send this as a normal prompt"),
+                    "Enter must submit the composer as a normal prompt, got {text:?}"
+                );
+            }
+            other => panic!("Enter must SendPrompt, got {other:?}"),
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "submitting a normal prompt must not Approve or Revise the parked plan"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent."),
+            "Enter must not steal the draft as Revise notes"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Enter must not complete the exit_plan_mode waiter"
+        );
+    }
+
+    /// Live mid-turn present must not steal Enter either. Draft stays a
+    /// normal prompt, not Revise notes.
+    #[test]
+    fn live_present_mid_compose_enter_sends_normal_prompt() {
+        use crate::actions::ActionRegistry;
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("oh you interrupted my typing");
+        }
+        let (ext, mut rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Isolated plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().contains("oh you interrupted my typing"),
+            "present must keep the live composer draft"
+        );
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains("oh you interrupted my typing"),
+                    "Enter must submit the draft as a normal prompt, got {text:?}"
+                );
+            }
+            other => panic!("Enter must SendPrompt after live present, got {other:?}"),
+        }
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "normal submit must leave the plan waiter parked"
+        );
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+        assert!(rx.try_recv().is_err(), "Enter must not Approve or Revise");
+    }
+
+    /// Empty Enter on the idle resume waiter never Approves.
+    #[test]
+    fn resume_restore_empty_enter_never_approves() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.plan_mode_active = true;
+            agent.prompt.set_text("");
+        }
+        let (ext, mut rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some("# Restored waiter"),
+        );
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty Enter must not Approve"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "empty Enter must not complete the waiter"
+        );
+    }
+
+    /// Esc still dismisses the open plan pane and keeps the draft.
+    #[test]
+    fn live_present_esc_dismisses_pane_and_keeps_draft() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("keep this draft");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Isolated plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "live present docks the pane");
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Esc must dismiss the plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc dismisses the pane, it does not Exit the waiter"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "keep this draft",
+            "Esc must not wipe the composer draft"
+        );
+    }
+
+    fn draw_plan_present_frame(agent: &mut crate::app::agent_view::AgentView) {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.last_terminal_size = (120, 40);
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &crate::actions::ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+    }
+
+    /// Iso 2026-08-19: plan present with a draft and the side panel shut
+    /// must still accept printable keys into the composer.
+    #[test]
+    fn plan_present_closed_panel_nonempty_composer_accepts_printable_keys() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::KeyOwner;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "fixture: panel is shut after Esc"
+        );
+        // Click-composer-then-close left Prompt focus on a hidden park.
+        // A shut panel must not keep exclusive plan key ownership.
+        agent
+            .plan_approval_view
+            .as_mut()
+            .expect("waiter stays")
+            .focus = PlanApprovalFocus::Prompt;
+        assert_eq!(
+            agent.key_owner(),
+            KeyOwner::Pane,
+            "shut plan panel must not steal the composer keyboard"
+        );
+
+        let x = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let _ = agent.handle_input(&x, &ActionRegistry::defaults());
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "present must keep the mid-compose draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains('x'),
+            "printable keys must land in the composer with the panel shut, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "typing must not Approve or Exit the parked plan"
+        );
+    }
+
+    /// Iso 2026-08-19: mouse drag on the composer is not eaten by the plan
+    /// key owner, including while the present pane is still docked.
+    #[test]
+    fn plan_present_composer_mouse_drag_is_not_eaten() {
+        use crate::actions::ActionRegistry;
+        use crossterm::event::{
+            Event, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "fixture: live present docks");
+        draw_plan_present_frame(agent);
+        let ta = agent.prompt.textarea_area();
+        assert!(
+            ta.area() > 0,
+            "composer textarea must paint so a drag can hit it"
+        );
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.area() > 0,
+            "composer pane must paint so a drag can hit it"
+        );
+
+        let mouse = |kind: MouseEventKind, column: u16, row: u16| Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let row = ta.y;
+        let start = ta.x.saturating_add(1);
+        let end = ta.x.saturating_add(8).min(ta.x.saturating_add(ta.width.saturating_sub(1)));
+        let registry = ActionRegistry::defaults();
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Up(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.prompt.textarea.selection_range().is_some(),
+            "composer mouse drag must select text; plan present must not eat it"
+        );
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "a composer drag must not wipe the draft, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Iso 2026-08-19 follow-up: a drag on the transcript while the plan
+    /// side panel is still docked must select scrollback text, not get eaten
+    /// by the parked line-viewer waiter.
+    #[test]
+    fn plan_present_transcript_mouse_drag_is_not_eaten() {
+        use crate::actions::ActionRegistry;
+        use crate::scrollback::text_selection::{
+            ResolvedSelectableLine, ResolvedSelectionModel,
+        };
+        use crossterm::event::{
+            Event, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text(
+                "Need you to spawn a subagent to comply with our new process rules",
+            );
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some(), "fixture: live present docks");
+        draw_plan_present_frame(agent);
+
+        let sb = agent.pane_areas.scrollback;
+        let prompt = agent.pane_areas.prompt;
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area);
+        assert!(
+            sb.area() > 0,
+            "scrollback must paint so a drag can hit it; sb={sb:?}"
+        );
+        let row = sb.y.saturating_add(sb.height / 2).max(sb.y.saturating_add(1));
+        let start = sb.x.saturating_add(1);
+        let end = sb
+            .x
+            .saturating_add(8)
+            .min(sb.x.saturating_add(sb.width.saturating_sub(1)));
+        let hit = |col: u16| (col, row).into();
+        assert!(
+            sb.contains(hit(start)) && sb.contains(hit(end)),
+            "drag must stay inside the transcript; sb={sb:?} start={start} end={end} row={row}"
+        );
+        if let Some(m) = modal {
+            assert!(
+                !m.contains(hit(start)) && !m.contains(hit(end)),
+                "drag must miss the plan popup; modal={m:?} start={start} end={end} row={row}"
+            );
+        }
+        assert!(
+            !prompt.contains(hit(start)) && !prompt.contains(hit(end)),
+            "drag must miss the composer; prompt={prompt:?} start={start} end={end} row={row}"
+        );
+
+        let mut model = ResolvedSelectionModel::default();
+        model.push_line(ResolvedSelectableLine {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 0,
+            screen_y: row,
+            screen_x: sb.x,
+            selectable_cols: 0..40,
+            text: "selectable scrollback line for plan-present drag".into(),
+            joiner_to_previous: None,
+        });
+        agent.update_scrollback_selection_state(model, Default::default());
+
+        let mouse = |kind: MouseEventKind, column: u16, row: u16| Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let registry = ActionRegistry::defaults();
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Down(MouseButton::Left), start, row),
+            &registry,
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.drag_selection.is_some(),
+            "transcript mouse drag must select scrollback text; docked plan present must not eat it"
+        );
+        let _ = agent.handle_input(
+            &mouse(MouseEventKind::Up(MouseButton::Left), end, row),
+            &registry,
+        );
+        assert!(
+            agent.prompt.text().contains(
+                "Need you to spawn a subagent to comply with our new process rules"
+            ),
+            "a transcript drag must not wipe the draft, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "transcript drag must not dismiss the docked plan pane"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "transcript drag must not Approve or Exit the parked plan"
+        );
+    }
+
+    /// Iso 2026-08-19: idle cue must not be Plan written. Click or /view-plan
+    /// while the side panel is shut. Shut panel + Enter:send must not paint
+    /// Plan ready either.
+    #[test]
+    fn plan_present_closed_panel_idle_cue_is_not_plan_written_click() {
+        use crate::actions::ActionRegistry;
+        use crate::views::plan_approval_view::{PLAN_IDLE_REVIEW_STATUS, PLAN_READY_STATUS};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = make_app_with_agent("sess-1");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.prompt.set_text("draft stays");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Iso plan.md"));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(agent.line_viewer.is_none(), "fixture: panel is shut");
+        assert_eq!(
+            agent.prompt.text(),
+            "draft stays",
+            "Esc dismiss must keep the composer draft"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_READY_STATUS),
+            "shut panel + send-armed composer must not paint Plan ready"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some(PLAN_IDLE_REVIEW_STATUS),
+            "shut panel must not idle as Plan written. Click or /view-plan"
+        );
+        let label = agent.plan_loop_status_label().unwrap_or("");
+        assert!(
+            !label.contains("Click or /view-plan"),
+            "shut-panel status must not be the exclusive click cue, got {label:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc dismisses the viewer, not the waiter"
+        );
+    }
+
+    /// Rebuild / session rebind restores an unsent draft into an empty composer.
+    #[test]
+    fn session_rebind_restores_unsent_composer_draft() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("unsent_prompt_draft");
+        xai_grok_shell::session::unsent_prompt_draft::write_draft_at(
+            &path,
+            "still typing a plan note",
+        )
+        .unwrap();
+        let mut agent = make_agent(Some("sess-1"));
+        agent.prompt.set_text("");
+        let draft = xai_grok_shell::session::unsent_prompt_draft::load_draft_at(&path)
+            .unwrap()
+            .expect("draft file");
+        agent.apply_unsent_draft_if_empty(&draft);
+        assert_eq!(
+            agent.prompt.text(),
+            "still typing a plan note",
+            "empty composer after rebuild must restore the unsent draft"
+        );
+    }
+
 

@@ -45,6 +45,51 @@ fn skip_if_enforcement_unavailable() -> bool {
     false
 }
 
+/// Fixture root that workspace/temp grants do not cover, so the trailing-glob
+/// `read_write` entry is the only reason the cache tree is writable.
+///
+/// Prefer `$HOME/.cache` when that tree is writable. Nix quality sets
+/// `HOME=/homeless-shelter` (not a directory) and cannot write the real home
+/// either; `/dev/shm` is writable and is not in `temp_writable_paths`.
+fn isolation_root_outside_temp_grants() -> PathBuf {
+    let stamp = format!(
+        "run-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_millis()
+    );
+    let mut bases = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        bases.push(home.join(".cache").join("grok-starstar-e2e"));
+    }
+    bases.push(PathBuf::from("/dev/shm").join("grok-starstar-e2e"));
+    for base in bases {
+        if under_temp_grant(&base) {
+            continue;
+        }
+        let root = base.join(&stamp);
+        if fs::create_dir_all(&root).is_ok() {
+            return root;
+        }
+    }
+    panic!("create fixture dir: need a writable tree that workspace/temp grants do not cover");
+}
+
+fn under_temp_grant(path: &std::path::Path) -> bool {
+    let mut roots = vec![
+        std::env::temp_dir(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/build"),
+    ];
+    if let Some(top) = std::env::var_os("NIX_BUILD_TOP") {
+        roots.push(PathBuf::from(top));
+    }
+    roots.iter().any(|r| path == r || path.starts_with(r))
+}
+
 #[test]
 fn trailing_glob_read_write_grants_parent_directory() {
     if skip_if_enforcement_unavailable() {
@@ -53,18 +98,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
 
     // Not under TMPDIR or the test workspace: base profiles already
     // write-allow those trees, which would hide allow-path isolation.
-    let root = dirs::home_dir()
-        .expect("home dir required: the control probe relies on HOME-relative paths")
-        .join(".cache")
-        .join("grok-starstar-e2e")
-        .join(format!(
-            "run-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before epoch")
-                .as_millis()
-        ));
+    let root = isolation_root_outside_temp_grants();
     let _cleanup = CleanupGuard(root.clone());
     let workspace = root.join("ws");
     let home = root.join("home");

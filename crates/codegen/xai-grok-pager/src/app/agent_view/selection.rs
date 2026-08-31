@@ -365,6 +365,42 @@ impl AgentView {
         in_prompt || continue_drag
     }
 
+    /// Left-button events on the transcript while a plan waiter is parked
+    /// belong to scrollback selection, not the line-viewer swallow.
+    /// Continues an in-flight scrollback drag even after the pointer leaves
+    /// the transcript rect. Clicks inside the plan pane stay with the viewer.
+    pub(super) fn route_plan_scrollback_mouse(&self, mouse: &crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        if self.plan_approval_view.is_none() {
+            return false;
+        }
+        let in_flight = self.pending_text_drag.is_some()
+            || self.drag_selection.is_some()
+            || self.deferred_text_press.is_some()
+            || self.pending_block_drag.is_some()
+            || self.block_drag_selection.is_some();
+        if in_flight
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            return true;
+        }
+        let in_modal = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+        if in_modal {
+            return false;
+        }
+        self.pane_areas
+            .scrollback
+            .contains((mouse.column, mouse.row).into())
+    }
+
     pub(in crate::app) fn begin_pending_text_drag(&mut self, mouse: &MouseEvent) -> bool {
         self.begin_pending_text_drag_on(mouse, false)
     }

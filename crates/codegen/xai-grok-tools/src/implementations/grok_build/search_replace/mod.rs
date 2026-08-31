@@ -187,6 +187,11 @@ pub(crate) async fn run_search_replace(
     if let Some(err) = validate_path_length(&input.file_path) {
         return Ok(err);
     }
+    if let Some(message) =
+        crate::util::compiler_probe_junk::refuse_write_if_compiler_probe_junk(&path, &cwd)
+    {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+    }
     if path.is_dir() {
         return Ok(SearchReplaceOutput::InvalidInput(
             "File path is a directory".to_owned(),
@@ -1688,6 +1693,8 @@ mod tests {
     /// Legal but unformatted Rust must be rustfmt'd before the tool returns.
     /// FileWritten.content must be the formatted bytes on disk.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_formats_rust_file_after_write() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
@@ -1744,6 +1751,8 @@ mod tests {
     /// Clippy findings after a structured write stay in the verify report.
     /// The write is not rolled back.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_clippy_findings_do_not_rollback_write() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
@@ -1797,6 +1806,8 @@ mod tests {
 
     /// Session plan.md is not Rust. rustfmt / clippy must not run.
     #[tokio::test]
+    // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
+    #[allow(clippy::await_holding_lock)]
     async fn search_replace_skips_verify_on_session_plan_file() {
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_pending_verify_paths();
@@ -1814,6 +1825,42 @@ mod tests {
         assert!(
             report.is_empty(),
             "plan.md must not queue clippy or tests: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_replace_refuses_a_out_at_workspace_root_and_does_not_create_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let tool = SearchReplaceTool;
+        let resources = test_resources(tmp.path());
+        let input = make_input("a.out", "", "probe\n");
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input).await;
+        match result {
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.to_ascii_lowercase().contains("refuse")
+                        || message.contains("probe junk")
+                        || message.contains("workspace root"),
+                    "search_replace refuse for a.out should say why: {message}"
+                );
+            }
+            Ok(SearchReplaceOutput::InvalidInput(message)) => {
+                assert!(
+                    message.to_ascii_lowercase().contains("refuse")
+                        || message.contains("probe junk")
+                        || message.contains("workspace root"),
+                    "search_replace refuse for a.out should say why: {message}"
+                );
+            }
+            Ok(other) => {
+                panic!("search_replace must refuse a.out at the workspace root, got {other:?}")
+            }
+        }
+        assert!(
+            !tmp.path().join("a.out").exists(),
+            "refused search_replace must not create a.out at the workspace root"
         );
     }
 

@@ -529,22 +529,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 respond_to,
             } => {
-                let source_is_active = self.pending
+                let spawned_by = self.spawned_by_session.get(&source_id).map(String::as_str);
+                let visible = |request: &SubagentRequest| {
+                    belongs_to_session(request, Some(parent_session_id.as_str()), spawned_by)
+                };
+                let source_is_active = self
+                    .pending
+                    .get(&source_id)
+                    .is_some_and(|child| visible(&child.request))
+                    || self
+                        .active
                         .get(&source_id)
-                        .is_some_and(|child| child.request.parent_session_id == parent_session_id)
-                        || self.active.get(&source_id).is_some_and(|child| {
-                            child.request.parent_session_id == parent_session_id
-                        })
-                        // Queued spawns resolve as "still running", matching
-                        // the query path's Initializing, not as missing.
-                        || self.queued.iter().any(|queued| {
-                            queued.request.id == source_id
-                                && queued.request.parent_session_id == parent_session_id
-                        });
+                        .is_some_and(|child| visible(&child.request))
+                    // Queued spawns resolve as "still running", matching
+                    // the query path's Initializing, not as missing.
+                    || self.queued.iter().any(|queued| {
+                        queued.request.id == source_id && visible(&queued.request)
+                    });
                 let lookup = if source_is_active {
                     SubagentResumeLookup::Active
-                } else if let Some(child) = self.completed.get(&source_id)
-                    && child.request.parent_session_id == parent_session_id
+                } else if let Some(child) = self
+                    .completed
+                    .get(&source_id)
+                    .filter(|child| visible(&child.request))
                 {
                     SubagentResumeLookup::Completed(SubagentResumeSource {
                         subagent_id: child.request.id.clone(),
@@ -633,9 +640,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn finish_child(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
+        crate::implementations::editor_infra::per_path_write_lock::release_holder(id);
         let record = if let Some(child) = self.active.remove(id) {
+            // Completing the runner does not cancel this token. Leftover
+            // progress publish / sampling keeps going until it is cancelled.
+            child.cancellation.cancel();
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
+            child.cancellation.cancel();
             ChildRecord::Pending(child)
         } else {
             return;
@@ -1171,7 +1183,15 @@ fn belongs_to_session(
     parent_session_id: Option<&str>,
     spawned_by: Option<&str>,
 ) -> bool {
-    parent_session_id.is_none_or(|id| request.parent_session_id == id || spawned_by == Some(id))
+    parent_session_id.is_none_or(|id| {
+        request.parent_session_id == id
+            || spawned_by == Some(id)
+            || request
+                .runtime_overrides
+                .immediate_parent_session_id
+                .as_deref()
+                == Some(id)
+    })
 }
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {

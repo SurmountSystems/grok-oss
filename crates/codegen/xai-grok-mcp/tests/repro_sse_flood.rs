@@ -18,7 +18,7 @@ use axum::routing::get;
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-use xai_grok_mcp::mcp_http_client::{McpHttpClient, WarnBudget};
+use xai_grok_mcp::mcp_http_client::{McpHttpClient, WarnBudget, reqwest_client};
 use xai_grok_mcp::rmcp::ServiceExt;
 use xai_grok_mcp::rmcp::transport::StreamableHttpClientTransport;
 use xai_grok_mcp::rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -112,7 +112,10 @@ async fn spawn_fake_server(behavior: GetBehavior) -> (String, Arc<AtomicUsize>) 
 #[tokio::test(flavor = "multi_thread")]
 async fn repro_zero_backoff_reconnect_flood() {
     let (url, gets) = spawn_fake_server(GetBehavior::AbnormalBodyDeath).await;
-    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+    let transport = StreamableHttpClientTransport::with_client(
+        reqwest_client().expect("MCP HTTP client must construct"),
+        StreamableHttpClientTransportConfig::with_uri(url.as_str()),
+    );
     let client = ().serve(transport).await.expect("handshake against fake server should succeed");
 
     const OBSERVE: Duration = Duration::from_secs(3);
@@ -140,7 +143,7 @@ async fn repro_zero_backoff_reconnect_flood() {
 async fn throttled_client_bounds_the_flood() {
     let (url, gets) = spawn_fake_server(GetBehavior::AbnormalBodyDeath).await;
     let throttled = McpHttpClient::new(
-        reqwest::Client::default(),
+        reqwest_client().expect("MCP HTTP client must construct"),
         "fake-server",
         WarnBudget::default(),
     );
@@ -177,7 +180,7 @@ async fn throttled_client_bounds_the_flood() {
 async fn throttled_client_does_not_affect_healthy_server() {
     let (url, gets) = spawn_fake_server(GetBehavior::Healthy).await;
     let throttled = McpHttpClient::new(
-        reqwest::Client::default(),
+        reqwest_client().expect("MCP HTTP client must construct"),
         "fake-server",
         WarnBudget::default(),
     );

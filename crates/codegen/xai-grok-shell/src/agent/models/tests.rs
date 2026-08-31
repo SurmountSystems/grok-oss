@@ -2331,11 +2331,15 @@ fn sampling_config_auto_use_omits_console_while_supergrok_included_headroom() {
     )
     .unwrap();
 
-    let mut grok_com = GrokComConfig::default();
-    grok_com.auto_use_included_limits = true;
+    let grok_com = GrokComConfig {
+        auto_use_included_limits: true,
+        ..Default::default()
+    };
     let auth_manager = Arc::new(AuthManager::new(home.path(), grok_com.clone()));
-    let mut cfg = config::Config::default();
-    cfg.grok_com_config = grok_com;
+    let cfg = config::Config {
+        grok_com_config: grok_com,
+        ..Default::default()
+    };
 
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     let mut entry = make_model_entry("grok-4");
@@ -2407,12 +2411,16 @@ fn sampling_config_api_key_pin_keeps_console_primary() {
     )
     .unwrap();
 
-    let mut grok_com = GrokComConfig::default();
-    grok_com.preferred_method = Some(PreferredAuthMethod::ApiKey);
-    grok_com.auto_use_included_limits = true;
+    let grok_com = GrokComConfig {
+        preferred_method: Some(PreferredAuthMethod::ApiKey),
+        auto_use_included_limits: true,
+        ..Default::default()
+    };
     let auth_manager = Arc::new(AuthManager::new(home.path(), grok_com.clone()));
-    let mut cfg = config::Config::default();
-    cfg.grok_com_config = grok_com;
+    let cfg = config::Config {
+        grok_com_config: grok_com,
+        ..Default::default()
+    };
 
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     let mut entry = make_model_entry("grok-4");

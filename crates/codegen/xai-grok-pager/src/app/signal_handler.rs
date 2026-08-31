@@ -73,6 +73,39 @@ pub(crate) fn mark_peer_rebuild_relaunch_from_sigusr1() {
     PEER_REBUILD_RELAUNCH.store(true, Ordering::Release);
 }
 
+/// Unix lifecycle signals the TUI maps to quit or rebuild re-exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnixLifecycleSignal {
+    /// Ctrl-C / SIGINT: quit. Must not arm peer rebuild re-exec.
+    Interrupt,
+    Terminate,
+    Hangup,
+    /// Cooperative `/rebuild` re-exec.
+    User1,
+}
+
+/// SIGUSR1 arms peer rebuild. SIGINT / SIGTERM / SIGHUP do not.
+pub(crate) fn unix_lifecycle_signal_arms_peer_rebuild(signal: UnixLifecycleSignal) -> bool {
+    matches!(signal, UnixLifecycleSignal::User1)
+}
+
+/// First-signal exit code for the graceful quit path.
+pub(crate) fn unix_lifecycle_signal_exit_code(signal: UnixLifecycleSignal) -> i32 {
+    match signal {
+        UnixLifecycleSignal::Interrupt => 130,
+        UnixLifecycleSignal::Terminate => 143,
+        UnixLifecycleSignal::Hangup => 129,
+        UnixLifecycleSignal::User1 => 0,
+    }
+}
+
+fn apply_unix_lifecycle_signal(signal: UnixLifecycleSignal) {
+    if unix_lifecycle_signal_arms_peer_rebuild(signal) {
+        mark_peer_rebuild_relaunch_from_sigusr1();
+    }
+    request_graceful_or_exit(unix_lifecycle_signal_exit_code(signal));
+}
+
 /// Install signal handlers for the TUI lifecycle. Call after `init_terminal`.
 pub(crate) fn install(mode: ScreenMode) {
     SCREEN_MODE_FULLSCREEN.store(mode.is_fullscreen(), Ordering::Release);
@@ -111,13 +144,18 @@ fn spawn_async_signal_task() {
             // SIGTERM/HUP/INT: first requests graceful quit; a second forces exit.
             tokio::select! {
                 code = next_signal_code(&mut sigterm, &mut sighup) => {
-                    request_graceful_or_exit(code);
+                    let kind = match code {
+                        130 => UnixLifecycleSignal::Interrupt,
+                        143 => UnixLifecycleSignal::Terminate,
+                        129 => UnixLifecycleSignal::Hangup,
+                        _ => UnixLifecycleSignal::Terminate,
+                    };
+                    apply_unix_lifecycle_signal(kind);
                     let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
                     shutdown_with_terminal_restore(code2);
                 }
                 _ = recv_optional_unix_signal(&mut sigusr1) => {
-                    mark_peer_rebuild_relaunch_from_sigusr1();
-                    request_graceful_or_exit(0);
+                    apply_unix_lifecycle_signal(UnixLifecycleSignal::User1);
                     let code2 = next_signal_code(&mut sigterm, &mut sighup).await;
                     shutdown_with_terminal_restore(code2);
                 }
@@ -337,6 +375,49 @@ mod tests {
         assert!(
             !take_peer_rebuild_relaunch(),
             "flag is one-shot so a later /exit does not re-exec"
+        );
+    }
+
+    /// Contract: Ctrl-C / SIGINT quits and does not arm peer re-exec.
+    /// SIGUSR1 still rebuilds grok-oss.
+    #[test]
+    fn sigint_does_not_arm_peer_rebuild_sigusr1_does() {
+        let _ = take_peer_rebuild_relaunch();
+        assert!(
+            !unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::Interrupt),
+            "SIGINT / Ctrl-C must quit without arming peer re-exec"
+        );
+        assert!(!unix_lifecycle_signal_arms_peer_rebuild(
+            UnixLifecycleSignal::Terminate
+        ));
+        assert!(!unix_lifecycle_signal_arms_peer_rebuild(
+            UnixLifecycleSignal::Hangup
+        ));
+        assert!(unix_lifecycle_signal_arms_peer_rebuild(
+            UnixLifecycleSignal::User1
+        ));
+        assert_eq!(
+            unix_lifecycle_signal_exit_code(UnixLifecycleSignal::Interrupt),
+            130
+        );
+        assert_eq!(
+            unix_lifecycle_signal_exit_code(UnixLifecycleSignal::User1),
+            0
+        );
+        let _ = take_peer_rebuild_relaunch();
+        if unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::Interrupt) {
+            mark_peer_rebuild_relaunch_from_sigusr1();
+        }
+        assert!(
+            !take_peer_rebuild_relaunch(),
+            "SIGINT must not set the peer-rebuild flag"
+        );
+        if unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::User1) {
+            mark_peer_rebuild_relaunch_from_sigusr1();
+        }
+        assert!(
+            take_peer_rebuild_relaunch(),
+            "SIGUSR1 must set the peer-rebuild flag"
         );
     }
 }

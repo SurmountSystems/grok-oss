@@ -3685,3 +3685,54 @@ mod welcome_workspace_mode {
         set_active_local_workspace(None).unwrap();
     }
 }
+
+/// SessionCreated replaces ModelState from catalog meta. Catalog `high` must
+/// not clobber the operator's already-chosen medium on the same model.
+#[test]
+fn session_created_same_model_catalog_high_does_not_clobber_medium() {
+    use xai_grok_shell::sampling::types::ReasoningEffort;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+    let info = acp::ModelInfo::new(model_id.clone(), "Grok 4.6".to_string()).meta(
+        serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "high",
+        })
+        .as_object()
+        .cloned(),
+    );
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .session
+            .models
+            .available
+            .insert(model_id.clone(), info.clone());
+        agent
+            .session
+            .models
+            .set_current(model_id.clone(), Some(ReasoningEffort::Medium));
+        agent.session.session_id = None;
+    }
+    let created = acp::SessionModelState::new(model_id, vec![info]);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: id,
+            session_id: "new-session-123".into(),
+            models: Some(created),
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id].session.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "SessionCreated catalog high must not paint the composer high after medium"
+    );
+    assert_eq!(
+        app.models.reasoning_effort,
+        Some(ReasoningEffort::Medium),
+        "app.models must keep medium when the created catalog is the same model"
+    );
+}

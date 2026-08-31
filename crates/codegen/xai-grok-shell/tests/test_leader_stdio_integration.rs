@@ -2967,6 +2967,11 @@ async fn setup_persistent_test_server(
 ) {
     use xai_grok_shell::leader::run_leader_server;
 
+    // Nix quality has no writable `~/.grok`; the sever tests count
+    // `leader.client.disconnected` / `leader.response.orphaned` via
+    // `snapshot_log()`. Redirect before the server emits.
+    xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
+
     let sock_path = temp.path().join("leader.sock");
     let (acp_tx, acp_rx) = tokio::sync::mpsc::unbounded_channel();
     let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel();

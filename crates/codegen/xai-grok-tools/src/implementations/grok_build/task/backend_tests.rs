@@ -74,6 +74,56 @@ async fn channel_backend_spawn_success() {
 }
 
 #[tokio::test]
+async fn spawn_registered_returns_on_admit_before_the_child_finishes() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let backend = ChannelBackend::new(tx);
+
+    let request = SubagentRequest {
+        id: "l3".to_string(),
+        prompt: "do something".to_string(),
+        description: "test".to_string(),
+        subagent_type: "explore".to_string(),
+        parent_session_id: "l2".to_string(),
+        parent_prompt_id: None,
+        resume_from: None,
+        cwd: None,
+        runtime_overrides: Default::default(),
+        run_in_background: true,
+        surface_completion: true,
+        await_to_completion: false,
+        fork_context: false,
+        owner: super::super::types::SubagentOwner::Task,
+        implement_loop_effort: None,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+    };
+
+    let handle = tokio::spawn(async move { backend.spawn_registered(request).await });
+    let req = recv_event!(rx, Spawn);
+    let admitted_tx = req
+        .admitted_tx
+        .expect("background spawn must wait on admit");
+    admitted_tx.send(Ok(())).unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect(
+            "spawn_registered must return once admitted, without waiting for the child to finish",
+        )
+        .expect("spawn_registered task must not panic")
+        .expect("admit Ok is not a tool error");
+
+    req.result_tx
+        .send(SubagentResult {
+            success: true,
+            output: Arc::from("done"),
+            subagent_id: "l3".to_string(),
+            child_session_id: "l3".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+#[tokio::test]
 async fn channel_backend_spawn_closed_channel() {
     let (tx, rx) = mpsc::unbounded_channel::<SubagentEvent>();
     drop(rx);

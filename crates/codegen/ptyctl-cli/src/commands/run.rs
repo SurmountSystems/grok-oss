@@ -60,6 +60,7 @@ pub async fn run(
             rows: height,
             cwd,
             env,
+            env_remove: Vec::new(),
         },
         timeout,
         linger,

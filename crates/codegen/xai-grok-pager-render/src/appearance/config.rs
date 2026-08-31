@@ -431,8 +431,8 @@ pub enum TodoBadgeFormat {
     Colon,
     /// Comma format: `[1 ▶, 4 □, 3 ✓, 2 ✗]` — count icon, comma-separated.
     Comma,
-    /// Default format: `2/5` — a `done/total` progress fraction (done =
-    /// completed, total = all tasks except cancelled).
+    /// Default format: `tasks 2/5` — the word tasks plus a `done/total`
+    /// progress fraction (done = completed, total = all tasks except cancelled).
     #[default]
     Default,
 }
@@ -580,7 +580,7 @@ pub struct ThinkingConfig {
     /// reasoning from the answer. **Not a TOML key** — minimal mode sets it;
     /// see the minimal-mode design doc §6.16.
     pub body_dim_italic: bool,
-    /// Append a dim "(ctrl+e to expand)" affordance to the *collapsed* header
+    /// Append a dim "(ctrl+t to expand)" affordance to the *collapsed* header
     /// when it fits on the same row (never adds a row). **Not a TOML key** —
     /// minimal mode sets it, being the only surface where a folded block cannot
     /// be unfolded in place.
@@ -800,7 +800,7 @@ pub struct RawTerminalConfig {
     /// its one-line header instead of in full. Default false — minimal
     /// deliberately keeps the whole reasoning body in the transcript (K9); this
     /// is the opt-out for a terser scrollback. The body stays reachable with
-    /// `Ctrl+E` / `/expand` and `/transcript`.
+    /// `Ctrl+T` / `/expand` and `/transcript`. Ctrl+E stays an extra chord.
     pub minimal_collapse_thinking: bool,
 }
 

@@ -183,7 +183,7 @@ impl ScrollbackEntry {
     /// Create a new entry with a specific ID.
     ///
     /// The display mode is set to the block's default (Expanded for most,
-    /// Truncated for thinking blocks).
+    /// Collapsed for thinking blocks unless always-expand is on).
     pub fn with_id(id: EntryId, block: RenderBlock) -> Self {
         let display_mode = block.default_display_mode();
         Self {
@@ -215,7 +215,7 @@ impl ScrollbackEntry {
     /// Create a new running entry with a specific ID.
     ///
     /// The display mode is set to the block's default (Expanded for most,
-    /// Truncated for thinking blocks).
+    /// Collapsed for thinking blocks unless always-expand is on).
     pub fn running_with_id(id: EntryId, block: RenderBlock) -> Self {
         let display_mode = block.default_display_mode();
         Self {

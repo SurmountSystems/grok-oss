@@ -28,8 +28,9 @@ pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_F
 
 /// [`CLI_BASE_URLS`] with a test seam: `GROK_CLI_BASE_URL` points fetches
 /// and downloads at one base (env-seam family of `GROK_INSTALLER`).
-/// Loopback-only: downloads are verified by a smoke test, not a checksum,
-/// so an arbitrary redirect base would be an install-hijack vector.
+/// Loopback-only: this Rust path still smoke-tests `--version`. POSIX
+/// `install.sh` pins SHA-256 of a published checksum file. An arbitrary
+/// redirect base would be an install-hijack vector. Not SHA-1.
 pub(crate) fn cli_base_urls() -> Vec<String> {
     if let Ok(base) = std::env::var("GROK_CLI_BASE_URL") {
         let base = base.trim();
@@ -65,7 +66,10 @@ fn is_loopback_base(base: &str) -> bool {
 /// Constructed once from `GrokBuildEnvironment` at startup and threaded through the
 /// update call chain so that `auto_update` and `version` never need to know
 /// about the `GrokBuildEnvironment` enum directly.
-#[derive(Debug, Clone)]
+///
+/// `Debug` omits `deployment_key` and `alpha_test_key` values so helper
+/// logs cannot print those secrets.
+#[derive(Clone)]
 pub struct UpdateConfig {
     /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
     pub proxy_base_url: String,
@@ -79,6 +83,25 @@ pub struct UpdateConfig {
     pub channel: String,
     /// Custom npm registry URL. When set, passed as `--registry=` to npm CLI.
     pub npm_registry: Option<String>,
+}
+
+impl std::fmt::Debug for UpdateConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateConfig")
+            .field("proxy_base_url", &self.proxy_base_url)
+            .field("auth_scope", &self.auth_scope)
+            .field(
+                "deployment_key",
+                &self.deployment_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "alpha_test_key",
+                &self.alpha_test_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field("channel", &self.channel)
+            .field("npm_registry", &self.npm_registry)
+            .finish()
+    }
 }
 
 impl UpdateConfig {
@@ -829,5 +852,30 @@ mod tests {
         use xai_grok_shell::env::GrokBuildEnvironment;
         let cfg = UpdateConfig::from_environment(&GrokBuildEnvironment::Production);
         assert_eq!(cfg.channel, "stable");
+    }
+
+    #[test]
+    fn update_config_debug_omits_secret_values() {
+        let cfg = UpdateConfig {
+            proxy_base_url: "https://example.test".into(),
+            auth_scope: "scope".into(),
+            deployment_key: Some("secret-deployment-value".into()),
+            alpha_test_key: Some("secret-alpha-value".into()),
+            channel: "stable".into(),
+            npm_registry: None,
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("secret-deployment-value"),
+            "deployment_key value must not appear in Debug: {debug}"
+        );
+        assert!(
+            !debug.contains("secret-alpha-value"),
+            "alpha_test_key value must not appear in Debug: {debug}"
+        );
+        assert!(
+            debug.contains("deployment_key"),
+            "Debug should still name the field: {debug}"
+        );
     }
 }

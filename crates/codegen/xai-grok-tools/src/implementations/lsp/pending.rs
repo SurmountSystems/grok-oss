@@ -146,7 +146,6 @@ impl PendingEdits {
         self.by_uri.len()
     }
 
-    #[cfg(test)]
     pub fn contains(&self, uri: &str) -> bool {
         self.by_uri.contains_key(uri)
     }

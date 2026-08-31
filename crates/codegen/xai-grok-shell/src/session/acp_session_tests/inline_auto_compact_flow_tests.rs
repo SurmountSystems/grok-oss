@@ -86,6 +86,7 @@ async fn create_test_actor(
             disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -482,20 +483,60 @@ async fn test_context_window_override_to_smaller_triggers_compact() {
         })
         .await;
 }
-/// Economic mode soft-caps effective context at 200K even when the catalog
-/// (or a response header) advertises a larger window.
+/// L1 header upgrades follow the catalog, not the nested 200k cap.
 #[tokio::test(flavor = "current_thread")]
-async fn test_economic_mode_caps_header_upgrade_at_200k() {
+async fn test_main_session_header_upgrade_uses_catalog_not_200k_knee() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (gateway_tx, _gateway_rx) =
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(200_000, 500_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor =
+                create_test_actor(200_000, 500_000, 85, gateway_tx, persistence_tx).await;
             actor.compaction.economic_mode.set(true);
+            actor.startup_hints.is_subagent = false;
             actor.compaction.model_context_window.set(500_000);
-            // Start at the economic effective window.
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.context_window = std::num::NonZeroU64::new(200_000).unwrap();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+            actor
+                .handle_model_metadata_update(crate::sampling::ResponseModelMetadata {
+                    context_window: Some(1_000_000),
+                    max_completion_tokens: None,
+                    models_etag: None,
+                })
+                .await;
+            let cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            assert_eq!(
+                cfg.context_window.get(),
+                1_000_000,
+                "L1 sampling follows the header/catalog window, not the nested 200k cap"
+            );
+            assert_eq!(
+                actor.compaction.model_context_window.get(),
+                1_000_000,
+                "catalog window should still track the larger header value"
+            );
+        })
+        .await;
+}
+
+/// Nested L2/L3 stay at 200k even when a header advertises a larger catalog.
+#[tokio::test(flavor = "current_thread")]
+async fn test_nested_session_header_upgrade_stays_at_200k() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor =
+                create_test_actor(200_000, 500_000, 85, gateway_tx, persistence_tx).await;
+            actor.compaction.economic_mode.set(false);
+            actor.startup_hints.is_subagent = true;
+            actor.compaction.model_context_window.set(500_000);
             if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
                 cfg.context_window = std::num::NonZeroU64::new(200_000).unwrap();
                 actor.chat_state_handle.update_sampling_config(cfg);
@@ -511,7 +552,7 @@ async fn test_economic_mode_caps_header_upgrade_at_200k() {
             assert_eq!(
                 cfg.context_window.get(),
                 200_000,
-                "economic mode must keep effective window at pricing cap"
+                "nested sampling stays 200k even if the header/catalog is larger"
             );
             assert_eq!(
                 actor.compaction.model_context_window.get(),
@@ -700,6 +741,7 @@ async fn create_test_actor_with_memory(
             disk_full: crate::session::notifications::idle_disk_full_rx(),
         },
         permissions: PermissionHandle::allow_all(),
+        context_only: std::sync::atomic::AtomicBool::new(false),
         tool_context,
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -1500,6 +1542,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     disk_full: crate::session::notifications::idle_disk_full_rx(),
                 },
                 permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -1729,10 +1772,11 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
         })
         .await;
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Used tokens over the session sampling window compact even when error
+/// metadata is missing. Catalog/proxy metadata must not be required to
+/// stop an over-window retry storm.
 #[tokio::test(flavor = "current_thread")]
-async fn test_compact_on_error_noop_without_model_metadata() {
+async fn test_compact_on_error_uses_session_window_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1753,7 +1797,10 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 doom_loop_aborted_at_chunk: None,
                 credential: xai_grok_sampling_types::SentCredential::Unknown,
             };
-            assert!(!actor.should_compact_on_error(&err).await);
+            assert!(
+                actor.should_compact_on_error(&err).await,
+                "500k used over a 200k session sampling window must compact without error metadata"
+            );
         })
         .await;
 }

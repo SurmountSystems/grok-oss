@@ -23,8 +23,12 @@ Mark older *(pending)* rows resolved or superseded in the Notes column when you 
 ## Detect / import
 
 ```bash
-./scripts/detect-upstream-export.sh    # exit 2 = new export vs last completed row
-./scripts/import-upstream-export.sh
+grok-nix-helper detect-upstream-export    # exit 2 = new export vs last completed row
+# or: just upstream-detect
+grok-nix-helper import-upstream-export
+# or: just upstream-import
+# Default stages the import tree and stays on import/*. On a real TTY:
+#   git commit -S
 ```
 
 Process: [`upstream-history.md`](upstream-history.md). Signed commits only.

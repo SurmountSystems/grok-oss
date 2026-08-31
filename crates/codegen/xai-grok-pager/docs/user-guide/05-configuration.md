@@ -50,7 +50,8 @@ default_selected_permission = "always_allow_all_sessions" # preselected row on t
 remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: false); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
-always_expand_thinking = false         # keep thinking fully expanded; when true, hides Ctrl+E hint
+always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
+                                       # true keeps the body open and hides the Ctrl+T hint
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -62,6 +63,9 @@ page_flip_on_send = true               # pin a just-sent prompt at the top of th
                                        # so sending never moves the scroll position
 scrub_ascii_punct = true               # scrub fancy punctuation in assistant text to ASCII-safe
                                        # forms (default: true); env GROK_SCRUB_ASCII_PUNCT=0 also off
+ulid_session_ids = true                # use ULIDs as the primary session id in grok-oss
+                                       # (default: true); set false to show the Grok Build UUID
+                                       # as the primary id. The ULID map still exists either way.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 auto_run_implement = true              # after a successful turn, auto-queue a trailing /implement
@@ -111,17 +115,18 @@ respect_gitignore = false              # default: false; set true to make every 
 
 Token Economy is the Grok OSS surface for **spend brakes and books**. SuperGrok is paid. Period pacing talks about **included SuperGrok period limits** (how much of that included quota is already used), not SuperGrok dollar credits.
 
-Desired spend order (chrome and rank): spend included SuperGrok period limits on stored Business / Team SuperGrok logins first, then personal included SuperGrok period limits, then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover. Operator CLI: `grok-oss limits` and `grok-oss limits --json`.
+Desired spend order (chrome and rank): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover. Operator CLI: `grok-oss limits` and `grok-oss limits --json`.
 
 | Knob | Default | Where | Role |
 |------|---------|-------|------|
 | `[ui] economic_mode` | true | Settings → Agent | Soft-cap effective context at 200k (price cliff). Also gates implement-effort ceiling and desired inject when the cap master is true. `/economic-mode` overrides one conversation. |
-| `[ui] auto_run_implement` | true | Settings → Agent | After a successful turn, auto-queue a trailing `/implement` block. |
+| `[ui] auto_run_implement` | true | Settings → Agent | After a successful turn, auto-queue a trailing `/implement` block. Plan-approval review comments that contain `/implement` are that turn, not a second auto-run when leftover work is operator-gated only. |
 | `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
 | `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
-| `[ui] always_expand_thinking` | false | Settings | Keep thinking blocks expanded. |
+| `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
+| `[ui] always_expand_thinking` | false | Settings | Keep thinking fully expanded. Off paints collapsed Thought-for headers, including nested overlays. Distinct from `show_thinking_blocks`. |
 | `[ui] plan_approval_park` | `soft` | Settings → Agent | Soft side panel (default) or `modal` fullscreen. |
 | `cap_implement_effort_when_economic` | true | Settings → Agent | Master for economic ceiling plus desired inject. |
 | `max_implement_effort` | 3 | Settings → Agent | Hard ceiling 1–5 when economic caps are active. |
@@ -728,7 +733,7 @@ highlight_overlays_border = false     # highlight extends over selection box bor
 dim_accent = 0.5                      # dimming factor for collapsed accents (0.0-1.0)
 ```
 
-`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+E` clears pins on thinking blocks.
+`respect_manual_folds` is off by default. Turn it on and a block you fold by hand is pinned: streaming updates and finish events (a thinking block ending, say) leave its fold state alone, and expanding a block while follow-mode is tailing new content stops the auto-scroll so the view stays put. Follow resumes via `Shift+G`, `j` at the last entry, scrolling past the bottom, or sending a new prompt. `Shift+E` clears all pins; `Ctrl+T` clears pins on thinking blocks.
 
 ### Block configuration
 
