@@ -2407,6 +2407,24 @@ fn cursor_pos_with_state_basic_and_scroll_behaviors() {
 }
 
 #[test]
+fn cursor_pos_on_empty_buffer_is_first_cell() {
+    let t = ta_with("");
+    assert_eq!(t.cursor(), 0);
+    let area = Rect::new(3, 7, 20, 2);
+    assert_eq!(
+        t.cursor_pos(area),
+        Some((3, 7)),
+        "empty buffer still has an insertion point at the textarea origin"
+    );
+    let zero_height = Rect::new(3, 7, 20, 0);
+    assert_eq!(
+        t.cursor_pos(zero_height),
+        None,
+        "a zero-height area has no visible caret"
+    );
+}
+
+#[test]
 fn screen_spans_of_range_single_row() {
     let t = ta_with("xy /model tail");
     let area = Rect::new(2, 1, 40, 3);

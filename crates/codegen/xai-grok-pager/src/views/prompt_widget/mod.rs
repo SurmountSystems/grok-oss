@@ -2888,13 +2888,15 @@ impl PromptWidget {
 ///
 /// - **Silhouette** for both phases is the terminal cell. Solid half fills it
 ///   with an accent **background plate** (cell bg always paints full height).
-///   Empty half is a true empty cell (canvas bg, no accent plate).
 /// - **Solid (full):** [`cursor_box_filled`] (`█`) with `fg=accent`,
 ///   `bg=accent` — solid Human green block filling the cell (DOGE).
-/// - **Empty (off):** [`cursor_box_hollow`] (space) with `fg=canvas`,
-///   `bg=canvas` — pure empty cell, **no** accent plate. **No**
-///   [`Modifier::DIM`]. Rejected: `■`/`fg=canvas bg=accent` hole-punch
-///   (reads as a mini-badge with a void).
+/// - **Empty (off):** the same [`cursor_box_filled`] glyph with `fg=accent`,
+///   `bg=canvas` — Human-green block ink, no accent plate. A true empty
+///   cell (`space` + canvas plate) vanished on an empty Human box and at
+///   end-of-buffer after a key. Rejected: `■`/`fg=canvas bg=accent`
+///   hole-punch (reads as a mini-badge with a void). **No**
+///   [`Modifier::DIM`]. Production still uses wall-clock phase; do not pin
+///   the live TUI filled forever.
 ///
 /// On a cell that already has a visible grapheme (typed text including a
 /// mid-buffer space, ghost body, slash inline suffix) the grapheme is kept
@@ -2932,8 +2934,10 @@ fn paint_composer_box_cursor_phase(
     allow_block_glyph: bool,
 ) {
     // Human input surface → `accent_user` (green under DOGE). Never agent
-    // `accent_running` magenta.
-    let accent = match theme.accent_user {
+    // `accent_running` magenta. Named ANSI Green/LightGreen become
+    // `Color::Rgb(0, 255, 0)` so the filled plate is 0001_DOGE `#00FF00`,
+    // not the terminal's dark/lime palette slot.
+    let accent = match crate::theme::doge::as_doge_human_green(theme.accent_user) {
         // Reset→Cyan so NO_COLOR still shows a visible caret.
         ratatui::style::Color::Reset => ratatui::style::Color::Cyan,
         c => c,
@@ -2960,10 +2964,11 @@ fn paint_composer_box_cursor_phase(
             cell.set_symbol(crate::glyphs::cursor_box_filled());
             cell.set_style(Style::default().fg(accent).bg(accent));
         } else {
-            // Classic block off: true empty cell (space on canvas). No accent
-            // plate, no hole-punch square. Silhouette is the cell itself.
-            cell.set_symbol(crate::glyphs::cursor_box_hollow());
-            cell.set_style(Style::default().fg(bg).bg(bg));
+            // Visible off-half: Human-green `█` on canvas. True empty cell
+            // (space on canvas) vanished until the next key. Not hole-punch
+            // (`■` / space on an accent plate).
+            cell.set_symbol(crate::glyphs::cursor_box_filled());
+            cell.set_style(Style::default().fg(accent).bg(bg));
         }
     } else if filled_phase {
         // Classic block: invert, Human accent plate, canvas-coloured ink

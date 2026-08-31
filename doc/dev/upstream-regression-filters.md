@@ -152,7 +152,7 @@ check after these `fn`s exist.
 | path::test | Contract |
 |------------|----------|
 | `user_prompt_block_accent_*` + `user_prompt_entry_renderer_paints_green_rail` | Human green left rail actually paints |
-| `paint_composer_box_cursor_uses_human_green_not_agent_magenta` + `focused_composer_paints_human_green_box_caret_*` | Box caret is Human green, never agent magenta |
+| `paint_composer_box_cursor_uses_human_green_not_agent_magenta` + `focused_composer_paints_human_green_box_caret_*` + `doge_human_box_caret_plate_is_rgb_0_255_0` | Box caret is Human green, never agent magenta; DOGE plate is `Rgb(0,255,0)` not named ANSI Green |
 | `agent_message_block_accent_is_magenta_rail_under_doge_while_running` | Running agent rail is magenta |
 | `info_line_model_name_uses_accent_model_not_gray` | Model label uses `accent_model` (magenta under DOGE) |
 | `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `included SuperGrok period limits · N%` |
@@ -172,9 +172,11 @@ paint `fn`; do not catalog the missing names `doge_idle_subagent_still_running`
 
 ```bash
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config \
-  doge_accent_user_is_pure_green
+  doge_accent_user_is_pure_green as_doge_human_green_named_ansi_is_rgb_0_255_0 \
+  osc12_named_ansi_green_is_doge_rgb_0_255_0
 cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry_renderer_paints_green_rail \
   paint_composer_box_cursor_uses_human focused_composer_paints_human_green_box_caret \
+  doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
   hit_credits_click_dispatches_show_limits \
@@ -1078,6 +1080,7 @@ cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_
   doge_accent_user_is_pure_green
 cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry_renderer_paints_green_rail \
   paint_composer_box_cursor_uses_human focused_composer_paints_human_green_box_caret \
+  doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
   hit_credits_click_dispatches_show_limits \

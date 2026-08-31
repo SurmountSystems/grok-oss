@@ -4995,6 +4995,121 @@ mod voice_recording_overlay_tests {
         );
     }
 
+    /// Isolated Preview with an **empty** Human box (cursor 0). Sibling
+    /// [`plan_approval_preview_paints_composer_box_caret`] types comment
+    /// text first, so it cannot catch a missing insertion cell on empty
+    /// wrap. Filled pin must show the Human-green plate. Hollow pin must
+    /// still be a visible box caret (not canvas-on-canvas vanish).
+    #[test]
+    fn plan_approval_preview_empty_composer_paints_box_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        let area = Rect::new(0, 0, 100, 40);
+
+        let mut agent = plan_approval_agent();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().expect("plan view").focus,
+            PlanApprovalFocus::Preview
+        );
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        assert!(
+            agent.prompt.text().is_empty(),
+            "fixture: Isolated Preview composer starts empty"
+        );
+
+        let draw = |agent: &mut AgentView| {
+            let reg = ActionRegistry::defaults();
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                &BundleState::default(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            buf
+        };
+        let dump = |buf: &Buffer| -> String {
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect()
+        };
+
+        let find_filled_plate = |buf: &Buffer| -> bool {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                        && cell.bg == theme.accent_user
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        let find_visible_caret = |buf: &Buffer| -> bool {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                        && cell.fg == theme.accent_user
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        {
+            let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                agent.prompt.text().is_empty(),
+                "empty Preview must not invent draft text:\n{text}"
+            );
+            assert!(
+                find_filled_plate(&buf),
+                "empty Preview (cursor 0) must paint the filled Human-green box caret:\n{text}"
+            );
+        }
+        {
+            let _hollow_phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                find_visible_caret(&buf),
+                "empty Preview hollow blink half must stay a visible Human-green box caret, \
+                 not a vanished empty cell:\n{text}"
+            );
+        }
+    }
+
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
     /// Same 1.0.3 leftover the live screenshot still shows until rebuild:
     /// `request changes` / `c comment` / `copy plan` / `quit plan` plus

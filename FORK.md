@@ -415,6 +415,19 @@ identifier that has no matching `fn`.
   `rebuild_signals_each_pid_after_composite_key`,
   `peer_pids_to_signal_excludes_self_dead_and_non_grok`. User-guide
   `04-slash-commands`, `17-sessions`, `23-dashboard` (cite only).
+- [x] **L0 roster library (Surmount GPUI, not this pager):** crate
+  `xai-grok-l0-roster`. Parses `/running`-shaped JSON. Drops prompt text,
+  tool arguments, tokens, and JWTs. Each row has a local or remote host
+  field. The enqueue drop-file path is per session id
+  (`$GROK_HOME/l0-enqueue/<session_id>/enqueue.json`). L0 is a Surmount
+  GPUI window, not a grok-oss TUI dashboard. `/dashboard` stays this
+  pager. `/running` stays this machine's grok-oss windows. They must not
+  merge. Task tracking chrome for L0 reads `$GROK_HOME/grok_oss.db`
+  `prompt_tasks`. Session todos stay in this TUI (`Ctrl+Shift+T` and the
+  **tasks N/M** badge). Do not replace that board. Tests:
+  `roster_omits_prompt_text`, `roster_keeps_pid_session_cwd`,
+  `enqueue_drop_path_is_per_session_id`. User-guide `04-slash-commands`,
+  `23-dashboard`.
 - [x] **`/start` starts paused or interrupted work**: pager builtin, not
   an alias of `/resume` (picker). Unpause if globally paused; else if a
   valid `canceled_turn_resume.json` exists, toast **Continuing interrupted
@@ -590,7 +603,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 - [x] **Composer box caret is Human green, never agent magenta**:
   `views/prompt_widget/tests.rs`. Tests:
   `paint_composer_box_cursor_uses_human_green_not_agent_magenta`,
-  `focused_composer_paints_human_green_box_caret_hides_terminal_cursor`.
+  `focused_composer_paints_human_green_box_caret_hides_terminal_cursor`,
+  `doge_human_box_caret_plate_is_rgb_0_255_0`,
+  `paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb`.
+  DOGE plate/ink and OSC 12 are `Color::Rgb(0, 255, 0)`, not named ANSI
+  `Color::Green` (terminal lime / `#00cd00`).
 - [x] **Model label uses `accent_model`**:
   `info_line_model_name_uses_accent_model_not_gray`.
 - [x] **Titled composer frame is `prompt_border_active` (white); title only
@@ -814,6 +831,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 - [x] **AUR** sources under `packaging/aur/`
 - [x] **Nix flake**: `nix build .#grok-oss`, dev shells (human packaging, not
   GHA release artifacts). `flake.nix` and `flake/` are in `FORK_PATHS`.
+- [x] **NixOS grok-oss workers fragment**: grok-oss workers on surmount-1 stay
+  under existing MemoryMax and below scram. Host imports
+  [`packaging/nixos/grok-oss-workers.nix`](packaging/nixos/grok-oss-workers.nix)
+  (no second Nix daemon, no boot TUI, optional instance cwd list at sshd class).
+  Named tests in grok-nix-helper `nixos_workers`:
+  `grok_oss_workers_nix_requires_memory_max`,
+  `grok_oss_workers_nix_does_not_start_nix_daemon`,
+  `grok_oss_workers_nix_does_not_disable_surmount_scram`,
+  `grok_oss_workers_nix_has_no_docker`,
+  `grok_oss_workers_nix_no_boot_tui_and_sshd_class_nice`.
 - [x] **Rust 1.98.0 (file pin only; not cargo-proven)**: project
   `rust-toolchain.toml` channel `stable` (current rust-stable 1.98.0) plus
   matching fenix FOD in `flake/rust-toolchain.nix` (`channel-rust-stable.toml`). After an
@@ -1269,7 +1296,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. Fail-open: a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up. Named `/limits` words and `limits_pins.json`. grok-oss limits is not xAI billing truth. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`, `user_guide_limits_names_fail_open_and_named_commands`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. Nested L2/L3 overlay Esc dismisses the view and does not cancel. | Plan honesty `fn`s under Chrome. Overlay Esc: `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (What we are doing, What is true right now, What you need to do, What I will do next) when chat is unclear. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. L0 is Surmount GPUI and must not merge with `/dashboard` or `/running`. `/start` starts paused or interrupted work in this process; not `/resume`. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (What we are doing, What is true right now, What you need to do, What I will do next) when chat is unclear. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. | `running_slash_lists_sibling_fixture_row`; L0 roster `roster_omits_prompt_text`, `roster_keeps_pid_session_cwd`, `enqueue_drop_path_is_per_session_id`; `/start` cite `start_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, and `/what` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
@@ -1277,7 +1304,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
-| [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. | Cite only. No dedicated user-guide `fn`. |
+| [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. L0 is Surmount GPUI, not this pager, and must not merge with either. Session todos stay in this TUI. | Cite `roster_omits_prompt_text`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
 
 Also: `user_guide_operator_cli_examples_use_grok_oss` (leftover `grok login` /
@@ -1663,9 +1690,11 @@ cargo test -p xai-grok-pager --lib -- show_spend_ingests_usage_jsonl_and_is_not_
 
 # 4. DOGE / Surmount chrome (theme file existing is not paint)
 cargo test -p xai-grok-pager-render --lib -- default_theme_is_doge resolve_from_config_no_config \
-  doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan
+  doge_accent_user_is_pure_green doge_accent_system_is_pure_cyan \
+  as_doge_human_green_named_ansi_is_rgb_0_255_0 osc12_named_ansi_green_is_doge_rgb_0_255_0
 cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry_renderer_paints_green_rail \
   paint_composer_box_cursor_uses_human focused_composer_paints_human_green_box_caret \
+  doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
   hit_credits_click_dispatches_show_limits \

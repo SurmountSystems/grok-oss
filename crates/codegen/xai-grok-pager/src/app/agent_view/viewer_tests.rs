@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 use crate::actions::ActionRegistry;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 
 const POPUP: Rect = Rect {
     x: 0,
@@ -699,6 +699,203 @@ fn plan_md_preview_ctrl_backspace_deletes_word_in_composer() {
         agent.plan_approval_view.is_some(),
         "Ctrl+Backspace must not dismiss plan.md"
     );
+}
+
+fn plan_pane_nav(agent: &AgentView) -> (Option<usize>, usize) {
+    let viewer = agent
+        .line_viewer
+        .as_ref()
+        .expect("isolated present keeps plan.md open");
+    (
+        viewer.list_state.selected_index(),
+        viewer.list_state.scroll_offset(),
+    )
+}
+
+fn press_plan_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers) {
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(code, modifiers)),
+        &ActionRegistry::defaults(),
+    );
+}
+
+fn assert_plan_prompt_cursor_keys_stay_in_composer(
+    agent: &AgentView,
+    draft: &str,
+    pane_before: (Option<usize>, usize),
+    intent_before: PlanPromptIntent,
+) {
+    assert_eq!(
+        agent.prompt.text(),
+        draft,
+        "cursor keys must not rewrite the Human box, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "cursor keys must not Approve or Exit the parked plan"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "cursor keys must not decide the plan"
+    );
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("plan review stays parked");
+    assert_eq!(
+        pav.prompt_intent, intent_before,
+        "cursor keys must not arm Clarify or switch the box intent"
+    );
+    assert!(
+        agent.active_modal.is_none(),
+        "cursor keys must not open help or the command palette"
+    );
+    assert_eq!(
+        plan_pane_nav(agent),
+        pane_before,
+        "cursor keys must not scroll or retarget the plan pane"
+    );
+}
+
+/// Isolated plan.md Preview with a live Human-box draft: Left/Right move
+/// the composer cursor, not the plan pane.
+#[test]
+fn plan_prompt_cursor_keys_preview_arrows() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end.saturating_sub(1),
+        "Left must move the Human box caret, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end,
+        "Right must move the Human box caret back, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Same isolated Preview Human box: Ctrl-Left / Ctrl-Right move by word,
+/// matching Ctrl+Backspace staying on that composer.
+#[test]
+fn plan_prompt_cursor_keys_preview_ctrl_arrows() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
+    let after_word_left = agent.prompt.cursor();
+    assert!(
+        after_word_left < end,
+        "Ctrl-Left must jump left by a word, cursor stayed at {after_word_left}"
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end,
+        "Ctrl-Right must jump right by a word, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Same isolated Preview Human box: Ctrl-A / Ctrl-E are line start / end
+/// in the composer, not help, Clarify, or plan-pane nav.
+#[test]
+fn plan_prompt_cursor_keys_preview_ctrl_a_e() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+
+    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        0,
+        "Ctrl-A must go to the start of the Human box line, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        DRAFT.len(),
+        "Ctrl-E must go to the end of the Human box line, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Tab has focused the plan prompt: the same cursor keys edit the box,
+/// including when the isolated present Preview path is not the owner.
+#[test]
+fn plan_prompt_cursor_keys_tab_focus() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Comment;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(agent.prompt.cursor(), end.saturating_sub(1));
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Prompt,
+        "arrows must not steal Tab focus back to the plan pane"
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
+    assert!(agent.prompt.cursor() < end.saturating_sub(1));
+    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), 0);
+    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), DRAFT.len());
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), DRAFT.len());
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
 }
 
 fn type_plan_chars(agent: &mut AgentView, text: &str) {

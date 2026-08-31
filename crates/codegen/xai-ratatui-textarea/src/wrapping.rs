@@ -33,6 +33,11 @@ where
             std::borrow::Cow::Owned(_) => panic!("wrap_ranges: unexpected owned string"),
         }
     }
+    // One empty visual line so a focused caret can sit at column 0.
+    // textwrap often yields a static `""` slice we skip above.
+    if text.is_empty() && lines.is_empty() {
+        lines.push(0..0);
+    }
     lines
 }
 
@@ -575,6 +580,19 @@ mod tests {
     fn wrap_ranges_trim_empty_text_does_not_panic() {
         let ranges = wrap_ranges_trim("", 1);
         assert!(ranges.is_empty() || ranges == vec![0..0]);
+    }
+
+    #[test]
+    fn wrap_ranges_empty_text_has_one_insertion_line() {
+        let ranges = wrap_ranges(
+            "",
+            Options::new(20).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+        );
+        assert_eq!(
+            ranges,
+            vec![0..0],
+            "empty buffer keeps one visual line so a caret can sit at column 0"
+        );
     }
 
     #[test]

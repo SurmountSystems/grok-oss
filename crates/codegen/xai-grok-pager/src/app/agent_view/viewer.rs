@@ -18,20 +18,36 @@ use ratatui::style::Style;
 
 /// Bare typing while plan.md is open: letters and delete keys go to the
 /// composer. Ctrl+Backspace / Alt+Backspace / Ctrl+Delete are word-edit
-/// on that composer. Other Ctrl/Alt/Super chords stay with the viewer
+/// on that composer. Left/Right, Ctrl/Alt word-move, and Ctrl-A/E stay
+/// on that composer too. Other Ctrl/Alt/Super chords stay with the viewer
 /// (fullscreen, quit, worktree).
 fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        return false;
+    }
     let word_edit = matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
         && key
             .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && !key.modifiers.contains(KeyModifiers::SUPER);
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     if word_edit {
+        return true;
+    }
+    let composer_cursor = match key.code {
+        KeyCode::Left | KeyCode::Right => {
+            key.modifiers.is_empty()
+                || key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        }
+        KeyCode::Char('a' | 'e') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    };
+    if composer_cursor {
         return true;
     }
     if key
         .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
         return false;
     }
@@ -125,9 +141,10 @@ impl AgentView {
 
         // Isolated plan.md / side panel is visual. Printable keys and
         // Backspace stay on the composer so present never steals typing.
-        // Letter CTA keys type. `?` still arms Clarify. Empty-prompt `c`
-        // is the line-comment gesture (clicking a row is not). A live
-        // draft types `c` so Preview does not stash-and-wipe the Human box.
+        // Letter CTA keys type. Empty Preview `?` still arms Clarify. A
+        // live draft or Prompt focus inserts `?`. Empty-prompt `c` is the
+        // line-comment gesture (clicking a row is not). A live draft types
+        // `c` so Preview does not stash-and-wipe the Human box.
         if in_plan_approval && key!('c').matches(key) {
             let already_commenting = self
                 .plan_approval_view
@@ -186,6 +203,7 @@ impl AgentView {
         if in_plan_approval
             && key.code == KeyCode::Char('?')
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            && self.prompt.text().trim().is_empty()
         {
             return self
                 .focus_plan_prompt(crate::views::plan_approval_view::PlanPromptIntent::Questions);

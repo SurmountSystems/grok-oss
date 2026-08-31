@@ -1402,6 +1402,18 @@ impl AgentView {
                 {
                     return None;
                 }
+                // Isolated present: `?` is not the command palette. Empty
+                // Preview still arms Clarify in the plan key path. A live
+                // Human-box draft inserts `?`. Palette stays Ctrl+P.
+                if action_id == ActionId::CommandPalette
+                    && self.plan_approval_view.is_some()
+                    && matches!(key.code, KeyCode::Char('?'))
+                    && !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT,
+                    )
+                {
+                    return None;
+                }
                 Some(self.handle_agent_action_with_registry(action_id, registry))
             }
             _ => None,

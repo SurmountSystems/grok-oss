@@ -16,6 +16,15 @@ windows on this machine. It is not the Agent Dashboard and must not merge
 into `/dashboard`. See [Slash Commands](04-slash-commands.md#running) and
 [Session Management](17-sessions.md#running-grok-oss-sessions).
 
+**L0** is a Surmount GPUI window, not this pager. It is not `/dashboard`
+and not `/running`. Those three must not merge. Do not add an L0 dashboard
+inside grok-oss. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db`
+(`prompt_tasks`). Session todos stay in this TUI (`Ctrl+Shift+T` and the
+**tasks N/M** badge). Do not replace that board. The library crate
+`xai-grok-l0-roster` is what that GPUI app uses to parse `/running`-shaped
+JSON (safe fields only; local or remote host; per-session enqueue drop
+path).
+
 ---
 
 ## Opening the dashboard

@@ -82,7 +82,7 @@ Scroll the plan with the arrow keys or `j`/`k`. Clicking a plan row focuses or s
 | ------- | ------ |
 | **Approve** | Approve the plan and start building. An empty click still implements. Typed comments and pending line comments ride with the approval. |
 | **Comment** | Focus the prompt as the comment composer. After you type (or with an empty box), click **Approve** to implement with notes, **Clarify** for a read-only question, or **Revise** to rewrite the plan. |
-| **Clarify** | Shown after **Comment** (or after focusing the prompt). Sends the current comment as a read-only question. Does not rewrite the plan. `?` still arms this path. |
+| **Clarify** | Shown after **Comment** (or after focusing the prompt). Sends the current comment as a read-only question. Does not rewrite the plan. Empty Preview `?` still arms this path. While you are typing in the Human box, `?` inserts. |
 | **Revise** | Idle click focuses the box and waits. After a comment is typed, Revise rewrites the plan with that text. An empty Revise click does not submit. |
 | **Exit** | Abandon the plan without approving and turn plan mode off. Empty `Ctrl+C` also exits. |
 | `y` | Copy the full plan to the clipboard. |

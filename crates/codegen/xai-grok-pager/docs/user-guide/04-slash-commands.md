@@ -28,13 +28,15 @@ Start paused or interrupted work in the current session. If every session in thi
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
 
-Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Not `/running` (alias `/windows`), which lists live grok-oss TUI windows on this machine. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Not `/running` (alias `/windows`), which lists live grok-oss TUI windows on this machine. Not L0: L0 is a Surmount GPUI window, not this pager, and must not merge into `/dashboard`. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
 
 ### `/running`
 
 List live grok-oss TUI windows on this machine. Alias: `/windows`.
 
 This is **Running grok-oss sessions**. It is not the [Agent Dashboard](23-dashboard.md), not `/sessions`, not `/tasks`, not `/resume`, and not `/start`. `/dashboard` still owns the roster inside this pager process. Do not treat `/running` as a second dashboard.
+
+**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+Shift+T` and the **tasks N/M** badge). Do not replace that board. The crate `xai-grok-l0-roster` parses `/running --json` for that GPUI app: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and names a per-session enqueue drop file.
 
 The list comes from `$GROK_HOME/active_sessions.json`. When `GROK_HOME` is unset, that file is `~/.grok/active_sessions.json`. Two grok homes do not see each other. Only live grok-oss processes appear. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
 

@@ -982,10 +982,15 @@ impl AgentView {
             return self.abandon_plan();
         }
         // Letter CTA keys (`a` Approve, `A` Notes, `s` Revise, `q` Exit) must
-        // type. Approve is the clickable button. `?` is not a letter.
+        // type. Approve is the clickable button. Empty Preview `?` arms
+        // Clarify. Prompt focus or a live draft inserts `?`.
         let empty_prompt =
             self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
-        if !is_commenting && empty_prompt && matches_shifted_char(key, '?') {
+        let preview_focused = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
+        if !is_commenting && empty_prompt && preview_focused && matches_shifted_char(key, '?') {
             return self.focus_plan_prompt(PlanPromptIntent::Questions);
         }
         match self.prompt.route_enter(key) {
@@ -1689,7 +1694,7 @@ mod plan_approval_enter_tests {
     }
 
     #[test]
-    fn question_mark_on_empty_prompt_focuses_clarify() {
+    fn question_mark_on_empty_prompt_inserts() {
         let mut agent = agent_with_revise_prompt();
         let q = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&q);
@@ -1697,9 +1702,10 @@ mod plan_approval_enter_tests {
         let pav = agent
             .plan_approval_view
             .as_ref()
-            .expect("clarify stays parked for typed input");
+            .expect("prompt-focused ? must stay parked and type");
         assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
-        assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert_ne!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert_eq!(agent.prompt.text(), "?");
     }
 
     #[test]
@@ -2274,6 +2280,115 @@ mod plan_pane_letter_a_contract_tests {
             "also",
             "the operator must be able to type also into the plan pane box, got {:?}",
             box_agent.prompt.text()
+        );
+    }
+
+    /// Preview or prompt-focused: a live Human-box draft treats `?` as text.
+    /// It must not arm Clarify and must not open the command palette.
+    #[test]
+    fn plan_preview_question_mark_inserts_when_composer_has_text() {
+        let draft = "please add auth middleware";
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise sentence");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text(draft);
+        assert!(
+            !agent.prompt.text().contains('?'),
+            "fixture must start without a question mark"
+        );
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "question mark must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "question mark must not submit or abandon the parked plan"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{draft}?"),
+            "Preview with a live draft must insert ?, got {:?}",
+            agent.prompt.text()
+        );
+        assert_ne!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions,
+            "question mark must not arm Clarify while composing"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "question mark must not open the command palette"
+        );
+
+        let mut box_agent = make_agent();
+        install_parked_plan(&mut box_agent, "# Plan\n\nRevise sentence");
+        box_agent.show_plan_preview();
+        if let Some(ref mut pav) = box_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        box_agent.prompt.set_text(draft);
+        let _ = type_key(
+            &mut box_agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            box_agent.prompt.text(),
+            format!("{draft}?"),
+            "prompt-focused composing must insert ?, got {:?}",
+            box_agent.prompt.text()
+        );
+        assert_ne!(
+            box_agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions,
+            "prompt-focused question mark must not arm Clarify while composing"
+        );
+        assert!(
+            box_agent.active_modal.is_none(),
+            "prompt-focused question mark must not open the command palette"
+        );
+    }
+
+    /// Empty Preview `?` still arms Clarify. It must not open the palette.
+    #[test]
+    fn plan_preview_empty_question_mark_arms_clarify() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEmpty question");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.prompt.text().trim().is_empty());
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Preview question mark must be handled; got {outcome:?}"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("empty Preview ? must keep the parked plan");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert!(
+            agent.prompt.text().is_empty(),
+            "empty Preview ? arms Clarify; it must not insert ?"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "empty Preview ? must not open the command palette"
         );
     }
 
