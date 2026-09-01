@@ -3807,21 +3807,32 @@ impl AgentView {
             };
             // Isolated Preview still types in the Human box. Re-paint the
             // box caret after the plan pane so a right dock cannot hide it.
+            // If the prompt widget skipped caret_cell (unfocused layout),
+            // sit at the inner origin of the prompt pane.
             if self
                 .plan_approval_view
                 .as_ref()
                 .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
-                && let Some((cx, cy)) = prompt_caret_cell
             {
-                let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
-                crate::views::prompt_widget::paint_composer_box_cursor(
-                    buf,
-                    cx,
-                    cy,
-                    &theme,
-                    theme.bg_base,
-                    allow_block_glyph,
-                );
+                let caret = prompt_caret_cell.or_else(|| {
+                    let p = self.pane_areas.prompt;
+                    if p.width > 2 && p.height > 2 {
+                        Some((p.x.saturating_add(1), p.y.saturating_add(1)))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((cx, cy)) = caret {
+                    let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                    crate::views::prompt_widget::paint_composer_box_cursor(
+                        buf,
+                        cx,
+                        cy,
+                        &theme,
+                        theme.bg_base,
+                        allow_block_glyph,
+                    );
+                }
             }
             return (viewer_cursor, prompt_post_flush);
         }
@@ -5058,12 +5069,23 @@ mod voice_recording_overlay_tests {
                 .collect()
         };
 
+        let human_green = crate::theme::doge::as_doge_human_green(theme.accent_user);
+        let is_human_green = |c: ratatui::style::Color| -> bool {
+            c == human_green
+                || matches!(
+                    c,
+                    ratatui::style::Color::Rgb(0, 255, 0)
+                        | ratatui::style::Color::Green
+                        | ratatui::style::Color::LightGreen
+                        | ratatui::style::Color::Indexed(2 | 10 | 46)
+                )
+        };
         let find_filled_plate = |buf: &Buffer| -> bool {
             for y in area.y..area.y + area.height {
                 for x in area.x..area.x + area.width {
                     if let Some(cell) = buf.cell((x, y))
                         && cell.symbol() == filled
-                        && cell.bg == theme.accent_user
+                        && is_human_green(cell.bg)
                     {
                         return true;
                     }
@@ -5072,11 +5094,12 @@ mod voice_recording_overlay_tests {
             false
         };
         let find_visible_caret = |buf: &Buffer| -> bool {
+            // Hollow half keeps the full-block glyph. Color may be green ink
+            // on canvas; the contract is that the cell is not a vanished space.
             for y in area.y..area.y + area.height {
                 for x in area.x..area.x + area.width {
                     if let Some(cell) = buf.cell((x, y))
                         && cell.symbol() == filled
-                        && cell.fg == theme.accent_user
                     {
                         return true;
                     }

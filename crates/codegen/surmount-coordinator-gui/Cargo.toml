@@ -1,9 +1,14 @@
 [package]
 license = "Apache-2.0"
-name = "xai-grok-l0-roster"
+name = "surmount-coordinator-gui"
 version = "0.1.0"
 edition.workspace = true
-description = "Safe L0 roster rows from grok-oss /running JSON for the Surmount GPUI window"
+description = "Application state and safe /running JSON for the Surmount GPUI L0 window"
+publish = false
+
+[[bin]]
+name = "surmount-coordinator-gui"
+path = "src/main.rs"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

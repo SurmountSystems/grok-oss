@@ -10372,6 +10372,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "surmount-coordinator-gui"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "svgtypes"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13558,14 +13566,6 @@ dependencies = [
  "xai-grok-telemetry",
  "xai-grok-version",
  "xai-grok-workspace",
-]
-
-[[package]]
-name = "xai-grok-l0-roster"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

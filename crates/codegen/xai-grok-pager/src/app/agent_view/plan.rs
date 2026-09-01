@@ -990,8 +990,17 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
-        if !is_commenting && empty_prompt && preview_focused && matches_shifted_char(key, '?') {
-            return self.focus_plan_prompt(PlanPromptIntent::Questions);
+        if !is_commenting && matches_shifted_char(key, '?') {
+            if empty_prompt && preview_focused {
+                return self.focus_plan_prompt(PlanPromptIntent::Questions);
+            }
+            // Live draft / Prompt focus: insert `?`. Do not arm Clarify and
+            // do not wait for textarea.input — Preview overlay used to steal
+            // this key before it reached the composer.
+            self.prompt.textarea.insert_str("?");
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.persist_unsent_composer_draft();
+            return InputOutcome::Changed;
         }
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
@@ -2295,6 +2304,7 @@ mod plan_pane_letter_a_contract_tests {
             pav.focus = PlanApprovalFocus::Preview;
         }
         agent.prompt.set_text(draft);
+        agent.prompt.set_cursor(agent.prompt.text().len());
         assert!(
             !agent.prompt.text().contains('?'),
             "fixture must start without a question mark"
@@ -2336,6 +2346,7 @@ mod plan_pane_letter_a_contract_tests {
             pav.prompt_intent = PlanPromptIntent::Revise;
         }
         box_agent.prompt.set_text(draft);
+        box_agent.prompt.set_cursor(box_agent.prompt.text().len());
         let _ = type_key(
             &mut box_agent,
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),

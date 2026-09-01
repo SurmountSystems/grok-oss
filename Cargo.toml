@@ -16,6 +16,7 @@ members = [
     "crates/codegen/ptyctl",
     "crates/codegen/ptyctl-cli",
     "crates/codegen/grok-rate-limit",
+    "crates/codegen/surmount-coordinator-gui",
     "crates/codegen/xai-acp-lib",
     "crates/codegen/xai-agent-lifecycle",
     "crates/codegen/xai-chat-state",
@@ -40,7 +41,6 @@ members = [
     "crates/codegen/xai-grok-foreign-sessions",
     "crates/codegen/xai-grok-hooks",
     "crates/codegen/xai-grok-http",
-    "crates/codegen/xai-grok-l0-roster",
     "crates/codegen/xai-grok-markdown",
     "crates/codegen/xai-grok-markdown-core",
     "crates/codegen/xai-grok-mcp",
@@ -333,7 +333,6 @@ xai-grok-env = { path = "crates/codegen/xai-grok-env" }
 xai-grok-extra-ca = { path = "crates/codegen/xai-grok-extra-ca" }
 xai-grok-foreign-sessions = { path = "crates/codegen/xai-grok-foreign-sessions" }
 xai-grok-http = { path = "crates/codegen/xai-grok-http" }
-xai-grok-l0-roster = { path = "crates/codegen/xai-grok-l0-roster" }
 xai-grok-markdown = { path = "crates/codegen/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "crates/codegen/xai-grok-markdown-core" }
 xai-grok-mcp = { path = "crates/codegen/xai-grok-mcp" }
@@ -341,6 +340,7 @@ xai-grok-memory = { path = "crates/codegen/xai-grok-memory" }
 xai-grok-mermaid = { path = "crates/codegen/xai-grok-mermaid" }
 xai-grok-models = { path = "crates/codegen/xai-grok-models" }
 grok-rate-limit = { path = "crates/codegen/grok-rate-limit" }
+surmount-coordinator-gui = { path = "crates/codegen/surmount-coordinator-gui" }
 xai-grok-sampler = { path = "crates/codegen/xai-grok-sampler" }
 xai-grok-secrets = { path = "crates/codegen/xai-grok-secrets" }
 xai-grok-session-events = { path = "crates/codegen/xai-grok-session-events" }

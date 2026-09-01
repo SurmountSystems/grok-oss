@@ -19,11 +19,13 @@ into `/dashboard`. See [Slash Commands](04-slash-commands.md#running) and
 **L0** is a Surmount GPUI window, not this pager. It is not `/dashboard`
 and not `/running`. Those three must not merge. Do not add an L0 dashboard
 inside grok-oss. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db`
-(`prompt_tasks`). Session todos stay in this TUI (`Ctrl+Shift+T` and the
-**tasks N/M** badge). Do not replace that board. The library crate
-`xai-grok-l0-roster` is what that GPUI app uses to parse `/running`-shaped
-JSON (safe fields only; local or remote host; per-session enqueue drop
-path).
+(`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the
+**tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that
+GPUI window will call: parse `/running`-shaped JSON (safe fields only;
+local or remote host), hold the selected session, and write a
+per-session enqueue drop file. Binary `surmount-coordinator-gui` reads
+that JSON from stdin or a file and prints safe JSON (no prompt). It is
+not this TUI.
 
 ---
 

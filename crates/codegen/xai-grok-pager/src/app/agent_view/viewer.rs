@@ -21,7 +21,7 @@ use ratatui::style::Style;
 /// on that composer. Left/Right, Ctrl/Alt word-move, and Ctrl-A/E stay
 /// on that composer too. Other Ctrl/Alt/Super chords stay with the viewer
 /// (fullscreen, quit, worktree).
-fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+pub(super) fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::SUPER) {
         return false;
     }

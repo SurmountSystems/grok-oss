@@ -752,8 +752,12 @@ impl AgentView {
             if !plan_prompt_focused && !casual_commenting {
                 return match ev {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        // Isolated Preview types in the Human box. Treat
+                        // composer keys (including `?`) as typing so the
+                        // command palette cannot steal them.
+                        let composing = super::viewer::plan_preview_key_is_composer_text(key);
                         if let Some(outcome) =
-                            self.try_plan_overlay_agent_action(key, registry, false)
+                            self.try_plan_overlay_agent_action(key, registry, composing)
                         {
                             return outcome;
                         }
@@ -1408,9 +1412,9 @@ impl AgentView {
                 if action_id == ActionId::CommandPalette
                     && self.plan_approval_view.is_some()
                     && matches!(key.code, KeyCode::Char('?'))
-                    && !key.modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT,
-                    )
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
                 {
                     return None;
                 }
