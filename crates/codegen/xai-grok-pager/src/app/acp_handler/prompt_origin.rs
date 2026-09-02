@@ -25,7 +25,9 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 /// `subagent-completed-…`, `workflow-completed-…`, `notifications-…`). These run non-adopted — no
 /// `PromptResponse`, no viewer finalize — so their durable `TurnCompleted` is
 /// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
-/// a chatty wake closes with a marker, a silent one stays markerless).
+/// a chatty wake closes with a marker, a silent task-completed wake stays
+/// markerless; a silent `subagent-completed-*` wake still surfaces
+/// `TurnCompleted` so L2 finish is visible on L1 without opening the overlay).
 /// Deliberately narrower than "non-adopted
 /// synthetic": goal turns render through the goal chip/loop chrome and
 /// `plan-resume-…` keeps its own markerless shape.
@@ -163,6 +165,14 @@ pub(super) fn finish_wake_turn(
         "cancelled" => Some(SessionEvent::TurnCancelled {
             elapsed: elapsed.unwrap_or_default(),
         }),
+        _ if !had_output
+            && matches!(
+                xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
+                xai_grok_shell::session::PromptOrigin::SubagentCompleted { .. }
+            ) =>
+        {
+            Some(SessionEvent::TurnCompleted { elapsed })
+        }
         _ if !had_output => None,
         _ => Some(SessionEvent::TurnCompleted { elapsed }),
     };

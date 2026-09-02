@@ -1559,6 +1559,10 @@ pub struct AgentView {
     /// `SubagentSpawned` notifications, used for permission routing
     /// (which agent owns a session) and provenance display.
     pub subagent_sessions: HashMap<String, SubagentInfo>,
+    /// Nested ids that already got `SubagentFinished` (`child_session_id`
+    /// and `subagent_id`). Wait chrome must not treat a completed id as
+    /// still running if the row was dropped from [`Self::subagent_sessions`].
+    pub(crate) finished_nested_wait_ids: HashSet<String>,
     /// Child subagent views. Keyed by child_session_id.
     /// Created eagerly on SubagentSpawned so updates are tracked from the start.
     pub subagent_views: HashMap<String, Box<AgentView>>,

@@ -3002,6 +3002,8 @@ pub(crate) async fn run(
                 };
                 reconnect_abort_handle = None;
                 app.reconnect_pending = false;
+                app.clear_session_reconnect_sticky();
+                app.show_toast("Reconnected");
 
                 let outcome = match result {
                     Ok(outcome) => outcome,

@@ -715,7 +715,7 @@ Open the settings modal to view and change configuration interactively. Aliases:
 
 ### `/timestamps`
 
-Toggle message timestamps on or off.
+Toggle message timestamps on or off. When on, each message keeps its clock on the first visible row even if the original timestamp line has scrolled above the fold.
 
 ---
 

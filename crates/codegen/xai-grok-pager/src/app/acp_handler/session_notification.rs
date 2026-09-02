@@ -670,6 +670,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             true
         }
         XaiSessionUpdate::SubagentFinished {
+            subagent_id,
             child_session_id,
             status,
             error,
@@ -759,6 +760,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
             }
+            agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
+            agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
@@ -1267,6 +1270,14 @@ pub(super) fn handle_child_session_notification(
         | XaiSessionUpdate::AutoCompactCancelled { .. }
         | XaiSessionUpdate::AutoCompactSkippedTinySavings
         | XaiSessionUpdate::RetryState(_) => {
+            if matches!(&update, XaiSessionUpdate::AutoCompactStarted { .. })
+                && agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .is_some_and(|info| info.finished)
+            {
+                return false;
+            }
             let compact_tokens = match &update {
                 XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } => Some(*tokens_after),
                 _ => None,
@@ -1456,6 +1467,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             true
         }
         XaiSessionUpdate::SubagentFinished {
+            subagent_id,
             child_session_id,
             status,
             error,
@@ -1487,6 +1499,8 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed);
                 }
             }
+            agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
+            agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
             true
         }

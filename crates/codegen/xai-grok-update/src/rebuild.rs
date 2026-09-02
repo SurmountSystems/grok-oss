@@ -1184,6 +1184,27 @@ impl RebuildFleetPlan {
     }
 }
 
+/// After a successful install, which fleet signal runs first.
+///
+/// Surmount / grok-oss fork: peer TUIs (`SIGUSR1` + request file) before
+/// leaders (`RelaunchForUpdate`). Leader drain cancels client IPC first in
+/// the TUI event loop. If that happens before SIGUSR1, other live sessions
+/// print a resume hint and never come back. Last-session-on-start is not
+/// the only survivor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildFleetSignalStep {
+    PeerTuis,
+    Leaders,
+}
+
+/// Order `/rebuild` signals the fleet after a successful install.
+pub fn rebuild_fleet_signal_steps() -> [RebuildFleetSignalStep; 2] {
+    [
+        RebuildFleetSignalStep::PeerTuis,
+        RebuildFleetSignalStep::Leaders,
+    ]
+}
+
 /// Pure helper for tests: build-fail path must not signal leaders or peers.
 ///
 /// Returns `Err` without marking signals when install fails.
@@ -1535,24 +1556,29 @@ where
     // Optional hygiene: drop dead PIDs from the registry before inventory.
     let _ = active_sessions::collect_crashed();
 
-    let leader_outcomes = if plan.signal_leaders {
-        leader::signal_leaders_to_relaunch(&installed_identity).await
-    } else {
-        Vec::new()
-    };
-
-    // Cooperative peer TUI relaunch: every other live product window, not only
-    // the invoker. Writes request + SIGUSR1; peers re-exec with the same session.
-    // Only after a successful install + verify.
-    let peer_outcomes = if plan.write_request_and_signal_peers {
-        signal_active_sessions_to_relaunch(
-            &installed_path,
-            &installed_identity,
-            Some(std::process::id()),
-        )
-    } else {
-        Vec::new()
-    };
+    // Peer TUIs before leaders. Leader `RelaunchForUpdate` cancels client
+    // IPC; if that happens first, peers quit without SIGUSR1 and never
+    // come back. Named contract: `rebuild_fleet_signals_peer_tuis_before_leaders`.
+    let mut leader_outcomes = Vec::new();
+    let mut peer_outcomes = Vec::new();
+    for step in rebuild_fleet_signal_steps() {
+        match step {
+            RebuildFleetSignalStep::PeerTuis => {
+                if plan.write_request_and_signal_peers {
+                    peer_outcomes = signal_active_sessions_to_relaunch(
+                        &installed_path,
+                        &installed_identity,
+                        Some(std::process::id()),
+                    );
+                }
+            }
+            RebuildFleetSignalStep::Leaders => {
+                if plan.signal_leaders {
+                    leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
+                }
+            }
+        }
+    }
 
     let live_sessions = active_sessions::list()
         .unwrap_or_default()
@@ -1996,6 +2022,50 @@ mod tests {
         assert!(a > 0.0 && a < 1.0);
         assert!(b > a);
         assert!(b < 1.0);
+    }
+
+    /// Surmount / grok-oss fork: `/rebuild` SIGUSR1s peer TUIs before it
+    /// asks leaders to drain. Otherwise the grok-build invoker comes back
+    /// and other live sessions (Surmount Server) print a resume hint and die.
+    #[test]
+    fn rebuild_fleet_signals_peer_tuis_before_leaders() {
+        assert_eq!(
+            rebuild_fleet_signal_steps(),
+            [
+                RebuildFleetSignalStep::PeerTuis,
+                RebuildFleetSignalStep::Leaders,
+            ]
+        );
+        assert_ne!(
+            rebuild_fleet_signal_steps()[0],
+            RebuildFleetSignalStep::Leaders,
+            "leaders first disconnects peers before SIGUSR1"
+        );
+    }
+
+    /// Surmount / grok-oss fork: a live session that is not the `/rebuild`
+    /// invoker is still a SIGUSR1 target. Last-session-on-start is not the
+    /// only survivor.
+    #[test]
+    fn rebuild_signals_other_live_session_not_only_the_invoker() {
+        let invoker = 100;
+        let peer = 200;
+        let sessions = vec![
+            (invoker, "sess-grok-build".into(), true, true),
+            (
+                peer,
+                "01a027e0-20ad-7a62-ab05-5d65b99e34b1".into(),
+                true,
+                true,
+            ),
+        ];
+        let targets = collect_rebuild_signal_pids(&sessions, Some(invoker));
+        assert!(
+            targets.contains(&peer),
+            "the other live grok-oss TUI must be signaled, not only the invoker"
+        );
+        assert!(!targets.contains(&invoker));
+        assert_eq!(targets.len(), 1);
     }
 
     /// Contract: after register identity is `(pid, session_id)`, two windows

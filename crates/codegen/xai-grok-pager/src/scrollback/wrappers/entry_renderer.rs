@@ -992,17 +992,22 @@ impl Renderable for EntryRenderer<'_> {
             row += 1;
         }
 
-        // Overlay timestamp on the first content line for message blocks.
+        // Overlay timestamp on the first *visible* content line for message
+        // blocks. When skip_rows clips the original timestamp row, pin the
+        // clock on the top visible row so it cannot roll away above the fold.
         // Short format (h:mm AM/PM) by default; expands to full format
         // (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area.
         // Gated on appearance.show_timestamps (toggled via /timestamps).
         if self.appearance().show_timestamps
-            && content_skip == 0
             && !output.is_empty()
             && self.should_show_timestamp()
             && let Some(ts) = self.entry.created_at
         {
-            let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
+            let first_content_y = if content_skip == 0 {
+                content_area.y + if vpad_top_visible { 1 } else { 0 }
+            } else {
+                content_area.y
+            };
             let copy_inset =
                 bubble_copy_trailing_inset(self.appearance(), self.should_show_timestamp());
             let short_str = ts.format("  %-I:%M %p").to_string();
@@ -1503,6 +1508,43 @@ mod tests {
         assert_eq!(timestamp_overlay_x(0, 100, 10, 2), Some(88));
         assert_eq!(timestamp_overlay_x(5, 100, 10, 2), Some(93));
         assert_eq!(timestamp_overlay_x(0, 12, 10, 2), None);
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// When the first line of a message (where the clock is painted) has
+    /// scrolled above the fold, the timestamp must still appear on the
+    /// first visible row of that same entry.
+    #[test]
+    fn timestamp_stays_visible_when_first_line_scrolls_above_fold() {
+        let theme = Theme::current();
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(
+            "line one of a tall message\nline two still in view\nline three\nline four\nline five",
+        ));
+        let width: u16 = 80;
+        let renderer = EntryRenderer::new(&entry, &theme);
+        let height = renderer.desired_height(width);
+        assert!(
+            height > 2,
+            "fixture must be taller than one content row so skip_rows can clip the clock line, height={height}"
+        );
+        let full_area = Rect::new(0, 0, width, height);
+        let mut full_buf = Buffer::empty(full_area);
+        renderer.render(full_area, &mut full_buf);
+        let short = entry.created_at.unwrap().format("%-I:%M %p").to_string();
+        let ts_row = (0..height)
+            .find(|&y| collect_row_symbols(&full_buf, y, 0, width).contains(&short))
+            .expect("unclipped message must paint a clock");
+        let clip = ts_row.saturating_add(1);
+        let vis_h = height.saturating_sub(clip);
+        let vis_area = Rect::new(0, 0, width, vis_h);
+        let clipped = EntryRenderer::new(&entry, &theme).with_skip_rows(clip);
+        let mut clipped_buf = Buffer::empty(vis_area);
+        clipped.render(vis_area, &mut clipped_buf);
+        let clipped_row0 = collect_row_symbols(&clipped_buf, 0, 0, width);
+        assert!(
+            clipped_row0.contains(&short),
+            "clipped message must keep the clock on the first visible row, got {clipped_row0:?}"
+        );
     }
 
     #[test]

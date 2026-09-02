@@ -1461,7 +1461,15 @@ impl ScrollbackState {
             // so Ctrl+T is respected across the session, except an
             // already-Expanded thinking block keeps its mode. Entries the
             // user manually folded (pinned) keep their mode.
-            if respect_manual_folds && entry.display_mode_pinned {
+            let thinking_aborted =
+                matches!(&entry.block, RenderBlock::Thinking(t) if t.is_aborted());
+            if thinking_aborted {
+                // Contracts A and C: a paused or truncated thought collapses.
+                // Do not keep an expanded aborted draft, even with always-expand
+                // or a manual fold pin.
+                entry.display_mode = DisplayMode::Collapsed;
+                entry.display_mode_pinned = false;
+            } else if respect_manual_folds && entry.display_mode_pinned {
                 let would_be_mode = if matches!(entry.block, RenderBlock::Thinking(_)) {
                     (entry.display_mode != DisplayMode::Expanded).then_some(thinking_mode)
                 } else {

@@ -5235,8 +5235,21 @@ fn live_prompt_task_pauses_honest_clock_at_disconnect_toast() {
             toast.contains("Disconnected. Reconnecting"),
             "expected disconnect toast, got {toast}"
         );
+        let sticky = agent.sticky_toast.as_deref().unwrap_or("");
+        assert!(
+            sticky.contains("Disconnected. Reconnecting"),
+            "reconnect must stay on a sticky banner, got {sticky:?}"
+        );
         task.work_ms()
     };
+    app.clear_session_reconnect_sticky();
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.sticky_toast.is_none(),
+            "reconnect sticky must clear after reconnect"
+        );
+    }
 
     std::thread::sleep(std::time::Duration::from_millis(50));
     {

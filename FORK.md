@@ -149,17 +149,31 @@ identifier that has no matching `fn`.
   with a climbing timer. Duplicate Human `[Image #1]` after send is FAIL.
   Overlay L3 status click must open that specialist view (`/dashboard` is
   not `/running`). Frozen overlay elapsed after child ACP turn-end.
-  `Waiting for the model` is also the live sampler wait. Chrome must
-  distinguish live nested wait, live sampler / `TurnRunning` with no
-  completed-wait fallthrough, queued `pending_prompts` (1 queued while
-  nested still running), and false wait after nested ids already
+  Overlay title after `SubagentFinished` equals host `duration_ms`
+  (54m34s), not a later spawn-wall clock (1h14m). Reopening a finished
+  overlay must not start a climbing title clock. Live list must drop
+  Responding. L2 finish must surface on L1 without opening the overlay
+  (wait tool completes; silent `subagent-completed-*` wake still paints
+  TurnCompleted). After `info.finished`, `AutoCompactStarted` must not
+  set live compact. A completed nested id missing from the map is not
+  still running. `Waiting for the model` is also the live sampler wait.
+  Chrome must distinguish live nested wait, live sampler / `TurnRunning`
+  with no completed-wait fallthrough, queued `pending_prompts` (1 queued
+  while nested still running), and false wait after nested ids already
   completed. Do not call that string a hang without evidence. `/unstick`
   stays operator-invoked; do not auto-fire it on a long live wait.
-  Surmount / grok-oss fork contracts:
+  Named tests are Surmount / grok-oss fork contracts:
   `parent_must_not_wait_for_the_model_after_waited_nested_already_completed`,
   `waiting_for_the_model_is_not_idle_when_nested_subagent_still_running`,
   `waiting_for_the_model_is_not_idle_when_prompt_is_queued`,
   `nested_overlay_drops_responding_after_child_acp_turn_completes`,
+  `nested_overlay_title_elapsed_matches_host_subagent_finished_duration`,
+  `reopening_finished_nested_overlay_does_not_start_climbing_title_clock`,
+  `subagents_live_list_drops_responding_after_subagent_finished`,
+  `l2_finish_surfaces_to_l1_without_opening_nested_overlay`,
+  `wait_on_completed_nested_id_missing_from_map_does_not_stay_running`,
+  `silent_subagent_completed_wake_surfaces_turn_completed`,
+  `auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity`,
   `overlay_nested_status_click_opens_l3_session_view`,
   `interjection_echo_does_not_duplicate_last_human_prompt`,
   `image_interject_leaves_one_prompt_and_empty_queue`.
@@ -706,13 +720,20 @@ identifier that has no matching `fn`.
   text (`pending_prompts.json`), plan Human-box `feedback_draft`, and
   session `plan.md` survive. Nested subagent ids are not cancelled and
   `/rebuild` is not blocked until nested work finishes. Compile source is
-  the git index (staged files), not unstaged working-tree WIP. Tests:
+  the git index (staged files), not unstaged working-tree WIP. After
+  `--resume` / last-session restore, that preserved work appears once:
+  not composer plus queue #1 with the same body, not Enter:interject
+  unless a live sampler turn is running, not Waiting leftover. Tests:
   `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it`,
   `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them`,
+  `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue`,
+  `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn`,
+  `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
+  `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`,
   `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md`,
   `handle_rebuild_done_keeps_nested_subagents_for_resume`,
   `rebuild_and_relaunch_starts_while_nested_subagents_are_running`
-  (`xai-grok-pager` `app/dispatch/rebuild.rs`);
+  (`xai-grok-pager` `app/dispatch/rebuild.rs` and `agent_view/session.rs`);
   `export_git_index_omits_unstaged_dirty_file`,
   `stash_keep_index_hides_unstaged_wip_from_compile_worktree`
   (`xai-grok-update` `rebuild.rs`). Keep these stronger than an upstream
@@ -731,12 +752,22 @@ identifier that has no matching `fn`.
   model is asked, before compact, and before re-exec. The WAL is not
   rewritten, not compacted as conversation, and not counted as model
   tokens. If chat history, prompt history, and the queue lack a WAL send,
-  session load restores it as a pending Human turn. Tests:
+  session load restores it as a pending Human turn. RebuildFlush is not
+  a pending Human turn. After `--resume` / last-session restore, the
+  operator prompt appears once: unsent draft restore and queue restore
+  must not both rehydrate the same string, and a WAL Send must not
+  enqueue a body already in the composer. Resume must not arm
+  Enter:interject unless a live sampler turn is actually running, and
+  Waiting must be a real sampler wait, not occupancy leftover. Tests:
   `prompt_wal_appends_on_enter_before_model_wait`,
   `prompt_wal_appends_on_mid_turn_interject`,
   `prompt_wal_appends_on_queue_enqueue`,
   `prompt_wal_appends_on_approve_notes`,
-  `session_load_restores_wal_send_missing_from_prompt_history`
+  `session_load_restores_wal_send_missing_from_prompt_history`,
+  `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue`,
+  `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn`,
+  `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
+  `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`
   (`xai-grok-pager`); rebuild persist tests also require a rebuild-flush
   WAL line. User-guide `04-slash-commands`, `17-sessions`.
 - [x] **Leader `RelaunchForUpdate` nested work and parent-turn busy survive like a TUI
@@ -1008,6 +1039,21 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   no named test that spawn isolation actually changes). Session recap and
   cancel-subagents Settings rows are **FORK claims, not re-proven** as
   `/settings` e2e filters on 2026-08-15.
+- [x] **Aborted thinking is not the live turn (2026-09-02)**: pause or
+  cancel must not leave a truncated user-facing draft inside an expanded
+  thought, and must not paint empty leftovers as `Thought for 0.0s`.
+  Internal "the user is asking me..." stays reasoning, not the answer.
+  Tests: `abort_turn_does_not_present_aborted_user_facing_draft_as_the_live_turn`,
+  `abort_turn_omits_instant_empty_thinking_so_thought_for_zero_does_not_paint`,
+  `abort_turn_collapses_truncated_draft_out_of_expanded_thinking`,
+  `abort_turn_keeps_internal_reasoning_out_of_the_assistant_answer`,
+  `thought_chunk_peels_trailing_user_facing_draft_while_streaming`,
+  `collapsed_header_never_paints_thought_for_zero_point_zero_seconds`,
+  `aborted_thinking_finished_display_mode_is_collapsed_even_when_always_expand_is_on`,
+  `peel_trailing_user_facing_draft_keeps_internal_reasoning`,
+  `aborted_mixed_thought_expanded_body_omits_user_facing_draft`. Do not
+  revert resume occupancy, hang-chrome, image-token, Approve-with-comment,
+  Ctrl-Z debounce, WAL, or Operator labels.
 - [x] **Stuck Retrying / StreamResumed (honesty)**: pager maps
   `RetryState::StreamResumed` in `session_notification.rs`. Shell emit
   exists: `stream_started_emits_retry_state_stream_resumed`. Sampler
@@ -1807,6 +1853,13 @@ that drops them while keeping the seven is still a seam loss):
   `prompt_wal_appends_on_queue_enqueue`,
   `prompt_wal_appends_on_approve_notes`,
   `session_load_restores_wal_send_missing_from_prompt_history`.
+  After `--resume` / last-session restore, the operator prompt appears
+  once (not composer plus queue #1), Enter is send unless a live sampler
+  turn is running, and Waiting is a real sampler wait. Named tests:
+  `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue`,
+  `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn`,
+  `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
+  `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`.
   Leader `RelaunchForUpdate` keeps nested ids on that leader the same way
   a TUI disconnect does, and keeps this process up while the parent turn
   is still busy (no five-second cap). Named tests:

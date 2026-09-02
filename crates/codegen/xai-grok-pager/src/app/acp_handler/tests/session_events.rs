@@ -1129,6 +1129,49 @@
         );
     }
 
+    /// Surmount / grok-oss fork: after `SubagentFinished`, `AutoCompactStarted`
+    /// on that child must not set AutoCompacting / live compact activity.
+    #[test]
+    fn auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity() {
+        use crate::acp::tracker::TurnActivity;
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-finished-compact";
+        let mut info = make_subagent_info(child_sid);
+        info.finished = true;
+        info.status = Some(std::sync::Arc::from("completed"));
+        info.duration_ms = Some(3_274_000);
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        let mut child_view = make_agent(Some(child_sid));
+        child_view.session.state = crate::app::agent::AgentState::Idle;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child_view));
+
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 203_300,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        assert!(
+            !changed,
+            "finished nested session must not apply a new AutoCompactStarted"
+        );
+        let child_view = agent.subagent_views.get(child_sid).unwrap();
+        assert_ne!(
+            child_view.session.tracker.activity(),
+            Some(TurnActivity::AutoCompacting),
+            "AutoCompactStarted after SubagentFinished must not set live compact activity"
+        );
+        assert!(
+            !child_view.session.state.is_busy(),
+            "finished nested child must not go busy for a late compact"
+        );
+    }
+
     #[test]
     fn child_compact_started_does_not_reset_context_used() {
         // Sibling variants in the same outer arm must not touch the numerator;

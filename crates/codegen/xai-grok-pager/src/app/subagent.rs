@@ -393,6 +393,34 @@ pub(crate) fn finalize_finished_child_view(
         ));
 }
 
+/// Reopening a finished nested overlay must idle leftover `TurnRunning`
+/// instead of starting a climbing title clock. Does not push a second
+/// `TurnCompleted` footer when the child is already idle.
+pub(crate) fn idle_finished_nested_overlay(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) {
+    let Some(info) = parent.subagent_sessions.get(child_sid) else {
+        return;
+    };
+    if !info.finished {
+        return;
+    }
+    let elapsed = info
+        .duration_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_else(|| info.display_elapsed());
+    let Some(child_view) = parent.subagent_views.get_mut(child_sid) else {
+        return;
+    };
+    if !child_view.session.state.is_busy() && child_view.session.tracker.activity().is_none() {
+        return;
+    }
+    child_view.session.state = crate::app::agent::AgentState::Idle;
+    finalize_finished_child_view(child_view, elapsed);
+    child_view.mark_turn_finished();
+}
+
 /// Nested child views never receive `PromptResponse`. ACP turn-end on the
 /// child session must idle overlay chrome so last-assistant `Responding`
 /// cannot keep a climbing clock and `[pause] [stop]`.

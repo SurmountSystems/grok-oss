@@ -546,6 +546,36 @@ cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_
   distinct_roots_each_keep_one_search get_results_does_not_keep_a_stale_search_alive
 ```
 
+#### Aborted thinking is not the live turn
+
+Pause with no `[stop]` must not freeze a truncated user-facing draft inside
+an expanded thought. Empty instant leftovers must not paint `Thought for 0.0s`.
+Internal "the user is asking me..." is reasoning, not the answer.
+
+| path::test | Contract |
+|------------|----------|
+| `abort_turn_does_not_present_aborted_user_facing_draft_as_the_live_turn` | Thinking chrome must not present an aborted user-facing draft as the live turn |
+| `abort_turn_omits_instant_empty_thinking_so_thought_for_zero_does_not_paint` | Thought for 0.0s must not paint as a real thought block (omit or merge) |
+| `abort_turn_collapses_truncated_draft_out_of_expanded_thinking` | After pause, do not leave a truncated assistant draft in expanded thinking |
+| `abort_turn_keeps_internal_reasoning_out_of_the_assistant_answer` | Internal reasoning must not leak as the assistant answer |
+| `thought_chunk_peels_trailing_user_facing_draft_while_streaming` | A reply that leaked into thought chunks is peeled while streaming |
+| `collapsed_header_never_paints_thought_for_zero_point_zero_seconds` | Collapsed header never paints `0.0s` |
+| `aborted_thinking_finished_display_mode_is_collapsed_even_when_always_expand_is_on` | Aborted thinking collapses even when always-expand is on |
+| `peel_trailing_user_facing_draft_keeps_internal_reasoning` | Peel keeps "the user is asking me..." and drops "Hey, sorry..." |
+| `aborted_mixed_thought_expanded_body_omits_user_facing_draft` | Expanded aborted body does not include the half-apology |
+
+```bash
+cargo test -p xai-grok-pager --lib -- abort_turn_does_not_present_aborted_user_facing_draft_as_the_live_turn \
+  abort_turn_omits_instant_empty_thinking_so_thought_for_zero_does_not_paint \
+  abort_turn_collapses_truncated_draft_out_of_expanded_thinking \
+  abort_turn_keeps_internal_reasoning_out_of_the_assistant_answer \
+  thought_chunk_peels_trailing_user_facing_draft_while_streaming \
+  collapsed_header_never_paints_thought_for_zero_point_zero_seconds \
+  aborted_thinking_finished_display_mode_is_collapsed_even_when_always_expand_is_on \
+  peel_trailing_user_facing_draft_keeps_internal_reasoning \
+  aborted_mixed_thought_expanded_body_omits_user_facing_draft
+```
+
 #### Pause / Clear finished chrome
 
 | path::test | Contract |
@@ -738,7 +768,11 @@ completed. Do not call that string a hang without evidence. `/unstick`
 stays operator-invoked. The same Human prompt, including `[Image #1]`,
 must paint once after send. Overlay chrome that names a live L3 must
 open that session view on click. `/dashboard` must not merge with
-`/running`. Finished overlay elapsed must freeze.
+`/running`. Finished overlay elapsed must freeze at host
+`SubagentFinished.duration_ms` (54m34s), not a later spawn-wall clock
+(1h14m). L2 finish must surface on L1 without opening the overlay.
+After `info.finished`, `AutoCompactStarted` must not set live compact.
+Named tests are Surmount / grok-oss fork contracts.
 
 | path::test | Contract |
 |------------|----------|
@@ -748,6 +782,13 @@ open that session view on click. `/dashboard` must not merge with
 | `task_output_wait_clears_after_waited_nested_agent_completes` | Satisfied nested wait must not fall through to Waiting for the model |
 | `named_task_output_wait_clears_after_waited_nested_agent_completes` | Named finished nested wait must not paint Waiting for the model |
 | `nested_overlay_drops_responding_after_child_acp_turn_completes` | Finished nested overlay freezes elapsed and drops live Responding / pause-stop |
+| `nested_overlay_title_elapsed_matches_host_subagent_finished_duration` | Overlay title elapsed equals host `duration_ms` (54m34s), not spawn-wall 1h14m |
+| `reopening_finished_nested_overlay_does_not_start_climbing_title_clock` | Reopening a finished overlay must idle the child and keep host duration |
+| `subagents_live_list_drops_responding_after_subagent_finished` | Live Subagents list must not keep Responding after `SubagentFinished` |
+| `l2_finish_surfaces_to_l1_without_opening_nested_overlay` | L2 finish surfaces on the parent session; wait tool completes |
+| `wait_on_completed_nested_id_missing_from_map_does_not_stay_running` | Completed nested id missing from the map is not treated as still running |
+| `silent_subagent_completed_wake_surfaces_turn_completed` | Silent `subagent-completed-*` wake still paints TurnCompleted |
+| `auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity` | Finished nested session must not apply a new AutoCompactStarted |
 | `overlay_nested_status_click_opens_l3_session_view` | Overlay L3 status click opens that specialist view |
 | `interjection_echo_does_not_duplicate_last_human_prompt` | Optimistic Human line plus echo must not duplicate `[Image #1]` |
 | `image_interject_leaves_one_prompt_and_empty_queue` | After image interject the prompt appears once and is not leftover in the queue |
@@ -760,6 +801,13 @@ cargo test -p xai-grok-pager --lib -- \
   task_output_wait_clears_after_waited_nested_agent_completes \
   named_task_output_wait_clears_after_waited_nested_agent_completes \
   nested_overlay_drops_responding_after_child_acp_turn_completes \
+  nested_overlay_title_elapsed_matches_host_subagent_finished_duration \
+  reopening_finished_nested_overlay_does_not_start_climbing_title_clock \
+  subagents_live_list_drops_responding_after_subagent_finished \
+  l2_finish_surfaces_to_l1_without_opening_nested_overlay \
+  wait_on_completed_nested_id_missing_from_map_does_not_stay_running \
+  silent_subagent_completed_wake_surfaces_turn_completed \
+  auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity \
   overlay_nested_status_click_opens_l3_session_view \
   interjection_echo_does_not_duplicate_last_human_prompt \
   image_interject_leaves_one_prompt_and_empty_queue
@@ -884,7 +932,12 @@ the model is asked, before compact, and before re-exec. The WAL is not
 rewritten, not compacted as conversation, and not counted as model tokens.
 If chat history, prompt history, and the queue lack a WAL send, session
 load restores it as a pending Human turn. Nested work on the leader
-survives `/rebuild` the same way a TUI disconnect does.
+survives `/rebuild` the same way a TUI disconnect does. After `--resume`
+/ last-session restore, the operator prompt appears once. Unsent draft
+restore and queue restore must not both rehydrate the same string. A WAL
+Send must not enqueue a body already in the composer. Resume must not
+arm Enter:interject unless a live sampler turn is actually running.
+Waiting after resume must be a real sampler wait, not occupancy leftover.
 
 | path::test | Contract |
 |------------|----------|
@@ -895,6 +948,10 @@ survives `/rebuild` the same way a TUI disconnect does.
 | `session_load_restores_wal_send_missing_from_prompt_history` | Missing WAL send restores as a pending Human turn |
 | `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Rebuild flush also writes a WAL line (existing persist test, not weakened) |
 | `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Rebuild flush WAL line for queued bodies (existing persist test, not weakened) |
+| `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue` | Resume restore: operator prompt appears once, not composer plus queue #1 |
+| `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn` | Resume must not arm Enter:interject unless a live sampler turn is running |
+| `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` | Waiting after resume is a real sampler wait, not occupancy leftover |
+| `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string` | Unsent draft and queue restore must not both rehydrate the same string |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -904,7 +961,11 @@ cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_approve_notes \
   session_load_restores_wal_send_missing_from_prompt_history \
   handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it \
-  handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them
+  handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
+  resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
+  resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
+  resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone \
+  resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string
 cargo test -p xai-grok-shell --lib -- \
   append_fsyncs_a_line_and_does_not_rewrite_prior_lines \
   skips_prompt_wal_jsonl_because_it_is_not_conversation
@@ -1163,7 +1224,7 @@ skills order
 soft-park filters. Extra restack-droppable neighbors live under *Required land
 inventory* (plan present is not Approve, three-layer product prompt,
 `from_config` cold catalog, SHA-aware `/rebuild`, all-PID `/rebuild` SIGUSR1, nucleo, Pause / Clear
-finished, user-guide hop and spend-order pins, seeded custom model on
+finished, aborted thinking is not the live turn, user-guide hop and spend-order pins, seeded custom model on
 `session/load` stays Chat Completions). Full residual-aligned blocks
 below.
 
@@ -1454,6 +1515,13 @@ cargo test -p xai-grok-pager --lib -- \
   task_output_wait_clears_after_waited_nested_agent_completes \
   named_task_output_wait_clears_after_waited_nested_agent_completes \
   nested_overlay_drops_responding_after_child_acp_turn_completes \
+  nested_overlay_title_elapsed_matches_host_subagent_finished_duration \
+  reopening_finished_nested_overlay_does_not_start_climbing_title_clock \
+  subagents_live_list_drops_responding_after_subagent_finished \
+  l2_finish_surfaces_to_l1_without_opening_nested_overlay \
+  wait_on_completed_nested_id_missing_from_map_does_not_stay_running \
+  silent_subagent_completed_wake_surfaces_turn_completed \
+  auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity \
   overlay_nested_status_click_opens_l3_session_view \
   interjection_echo_does_not_duplicate_last_human_prompt \
   image_interject_leaves_one_prompt_and_empty_queue \
@@ -1471,6 +1539,10 @@ cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
   session_load_restores_wal_send_missing_from_prompt_history \
+  resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
+  resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
+  resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone \
+  resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string \
   context_chip_names_sampling_window_when_catalog_differs \
   context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
   footer_chip_uses_session_sampling_window_when_economic_cache_is_off \

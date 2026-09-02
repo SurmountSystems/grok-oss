@@ -120,6 +120,7 @@ impl AgentView {
             return;
         }
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
         let l2 = crate::app::subagent::overlay_child_is_l2_coordinator(
             &self.subagent_sessions,
             &child_sid,
@@ -650,7 +651,12 @@ impl AgentView {
                 .as_deref()
                 .is_some_and(|p| p == child_sid)
         });
-        let is_running = if has_child_view {
+        // Host `SubagentFinished` owns the title clock. A leftover child
+        // view or nested specialist must not keep spawn-wall elapsed after
+        // the nested session already finished.
+        let is_running = if info.is_some_and(|s| s.finished) {
+            false
+        } else if has_child_view {
             (info_running && child_busy) || nested_live
         } else {
             info_running
