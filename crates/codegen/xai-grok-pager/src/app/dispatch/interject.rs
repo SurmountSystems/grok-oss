@@ -117,6 +117,11 @@ fn paint_and_send_interject(
         paint_target.abort_cancellable_cancel();
     }
     record_interject_prompt_history(paint_target, &text);
+    paint_target.append_prompt_wal(
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+        &text,
+        &images,
+    );
 
     // Push a standard user prompt block locally for instant feedback, and
     // record its id so the broadcast echo (`x.ai/session/interjection`) is
@@ -446,6 +451,93 @@ mod tests {
             effects.as_slice(),
             [Effect::SendInterject { blocks: None, .. }]
         ));
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// Mid-turn `x.ai/interject` appends the operator text to the WAL before
+    /// the interject effect is returned.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn prompt_wal_appends_on_mid_turn_interject() {
+        use crate::app::agent::AgentState;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-mid-turn-interject";
+        let body = "mid-turn interject that must hit the WAL";
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::TurnRunning;
+        }
+
+        let effects = dispatch(
+            Action::Interject {
+                text: body.into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendInterject { text, .. } if text == body)),
+            "interject must still fire; WAL is extra durability, got {effects:?}"
+        );
+        let rows =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            rows.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::Interject
+                    && r.text == body
+            }),
+            "prompt_wal.jsonl must contain the mid-turn interject, got {rows:?}"
+        );
+    }
+
+    /// After a successful image interject, the sent prompt is in scrollback
+    /// once and is not leftover in pending_prompts.
+    #[test]
+    fn image_interject_leaves_one_prompt_and_empty_queue() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let mut img = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![1, 2, 3],
+            mime_type: "image/png".into(),
+        });
+        img.display_number = 1;
+        let _ = dispatch(
+            Action::Interject {
+                text: "Also why am I waiting here? [Image #1]".into(),
+                images: vec![img],
+            },
+            &mut app,
+        );
+        let agent = app.agents.get(&id).unwrap();
+        let count = (0..agent.scrollback.len())
+            .filter(|i| {
+                matches!(
+                    agent.scrollback.get(*i).map(|e| &e.block),
+                    Some(crate::scrollback::block::RenderBlock::UserPrompt(b))
+                        if b.text.contains("[Image #1]")
+                )
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "Surmount / grok-oss fork: after send the image prompt must appear once, got {count}"
+        );
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "successful interject must not leave a leftover queued prompt remaining"
+        );
     }
 
     fn overlay_info(

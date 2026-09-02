@@ -163,6 +163,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
@@ -1187,6 +1188,13 @@ pub struct AgentView {
     /// rapid clicks so we don't spawn a redundant `session/info` request
     /// per double-click.
     pub last_context_click_at: Option<Instant>,
+    /// Last time the unsent composer draft was written. Keystroke persist
+    /// coalesces inside [`xai_grok_shell::session::unsent_prompt_draft::UNSENT_DRAFT_PERSIST_DEBOUNCE`].
+    pub(crate) last_unsent_draft_persist: Cell<Option<Instant>>,
+    /// Test counter: durable writes that actually ran (disk still skipped in tests).
+    pub(crate) unsent_draft_persist_flush_count: Cell<u32>,
+    /// Test counter: keystroke persists skipped by the debounce.
+    pub(crate) unsent_draft_persist_skip_count: Cell<u32>,
     /// Whether the mouse is hovering over the prompt widget.
     pub hovered_prompt: bool,
     pub hit_badge: HitArea,
@@ -1564,6 +1572,11 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
+    /// Overlay title wait chrome that names a live L3. Click opens that
+    /// specialist session view. Empty when the overlay is not showing one.
+    pub hit_overlay_nested_status: HitArea,
+    /// Child session id the overlay nested-status hit opens.
+    pub overlay_nested_status_child_sid: Option<String>,
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,

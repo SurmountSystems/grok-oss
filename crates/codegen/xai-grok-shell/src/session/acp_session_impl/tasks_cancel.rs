@@ -82,6 +82,7 @@ impl AgentTask {
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+        unstick_retry: bool,
     ) -> Self {
         let pid = prompt_id.clone();
         Self {
@@ -102,6 +103,7 @@ impl AgentTask {
                     completion_tx,
                     persist_ack,
                     parsed_prompt_tx,
+                    unstick_retry,
                 )
                 .await
             })
@@ -109,7 +111,7 @@ impl AgentTask {
         }
     }
 
-    fn abort(&self) {
+    pub(super) fn abort(&self) {
         if !self.handle.is_finished() {
             self.handle.abort();
         }
@@ -167,6 +169,7 @@ async fn run_task(
     completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     persist_ack: Option<oneshot::Sender<()>>,
     parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+    unstick_retry: bool,
 ) {
     let result = session
         .handle_prompt(
@@ -182,12 +185,48 @@ async fn run_task(
             json_schema,
             persist_ack,
             parsed_prompt_tx,
+            unstick_retry,
         )
         .await;
     let _ = completion_tx.send((prompt_id, result));
 }
 
 impl SessionActor {
+    /// Drop a hung in-flight turn so `/unstick` can sample again.
+    ///
+    /// Analog of `leader.ipc.reconnecting`: a disconnected client's in-flight
+    /// RPC is orphaned (response dropped / `RemovedFromQueue`) without
+    /// `cancel_running_task`. Nested subagents, transcript, and usage meters
+    /// stay. Not `/resume`. Not send-now cancel.
+    pub(super) async fn orphan_stuck_running_task_for_unstick(&self) {
+        let mut state = self.state.lock().await;
+        let Some(task) = state.running_task.take() else {
+            return;
+        };
+        let pid = task.prompt_id.clone();
+        task.abort();
+        xai_grok_telemetry::unified_log::warn(
+            "shell.unstick.orphaned_running_task",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({ "prompt_id": pid })),
+        );
+        let mut dropped = Vec::new();
+        let mut kept = std::collections::VecDeque::new();
+        for item in std::mem::take(&mut state.pending_inputs) {
+            if item.prompt_id == pid {
+                dropped.push(item);
+            } else {
+                kept.push_back(item);
+            }
+        }
+        state.pending_inputs = kept;
+        self.broadcast_queue_changed(&state);
+        drop(state);
+        for item in dropped {
+            Self::respond_removed_prompt(item.respond_to);
+        }
+    }
+
     /// Turn-scoped: soft cancel / max-turns only (not user Stop).
     /// `parent_prompt_id` is the authoritative turn id from the turn runner.
     pub(super) fn cancel_running_turn_subagents(&self, parent_prompt_id: &str) {

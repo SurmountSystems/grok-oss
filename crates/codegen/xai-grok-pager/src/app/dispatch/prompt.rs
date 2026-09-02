@@ -196,6 +196,11 @@ fn enqueue_if_interject_dropped(
         return effects;
     };
     if effects.is_empty() {
+        agent.append_prompt_wal(
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+            &text,
+            &images,
+        );
         agent.start_pending_live_prompt_task(&text);
         let qid = agent.session.next_queue_id;
         agent.session.next_queue_id += 1;
@@ -213,7 +218,7 @@ fn enqueue_if_interject_dropped(
         agent.persist_pending_prompts();
     }
     agent.prompt.set_text("");
-    agent.persist_unsent_composer_draft();
+    agent.persist_unsent_composer_draft_now();
     effects
 }
 
@@ -488,11 +493,28 @@ pub(super) fn dispatch_send_prompt_inner(
         // `/view-plan` after `--continue` can land while welcome still owns
         // the view. Stick the request so SessionLoaded / restore docks
         // Approve. Other prompts stay a no-op off the agent view.
-        if matches!(text.trim(), "/view-plan" | "/show-plan" | "/plan-view") {
+        if matches!(
+            text.trim().trim_end_matches('/'),
+            "/view-plan" | "/show-plan" | "/plan-view"
+        ) {
             super::modes::stick_view_plan_request(app);
         }
         return vec![];
     };
+    // Never send `/view-plan` to the model. Resume `--continue` can land
+    // the slash before the registry is ready; PassThrough would consume the
+    // next mock/scripted implement turn (plan_approval_restored_after_resume).
+    if matches!(
+        text.trim().trim_end_matches('/'),
+        "/view-plan" | "/show-plan" | "/plan-view"
+    ) {
+        if consume_input {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.prompt.set_text("");
+            }
+        }
+        return dispatch(Action::ShowPlan, app);
+    }
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
@@ -513,17 +535,22 @@ pub(super) fn dispatch_send_prompt_inner(
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    match interject::overlay_operator_clarify(agent) {
-        interject::OverlayOperatorClarify::L3Unbothered => {
-            agent.show_toast(
-                "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
-            );
-            return vec![];
+    // `/unstick` is an L1 hammer. Nested overlay must not swallow it as an
+    // interject or L3-unbothered toast.
+    let unstick_slash = text.trim() == "/unstick" || text.trim().starts_with("/unstick ");
+    if !unstick_slash {
+        match interject::overlay_operator_clarify(agent) {
+            interject::OverlayOperatorClarify::L3Unbothered => {
+                agent.show_toast(
+                    "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
+                );
+                return vec![];
+            }
+            interject::OverlayOperatorClarify::L2(_) => {
+                return interject::dispatch_interject(app, text, Vec::new());
+            }
+            interject::OverlayOperatorClarify::None => {}
         }
-        interject::OverlayOperatorClarify::L2(_) => {
-            return interject::dispatch_interject(app, text, Vec::new());
-        }
-        interject::OverlayOperatorClarify::None => {}
     }
     if let Some(toast) = implement_rewrite.toast {
         agent.show_toast(&toast);
@@ -766,6 +793,11 @@ pub(super) fn dispatch_send_prompt_inner(
                 if as_command {
                     agent.session.enqueue_command(held);
                 } else {
+                    agent.append_prompt_wal(
+                        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+                        &held,
+                        &agent.prompt.images,
+                    );
                     let qid = agent.session.next_queue_id;
                     agent.session.next_queue_id += 1;
                     agent.start_pending_live_prompt_task(&held);
@@ -843,6 +875,11 @@ pub(super) fn dispatch_send_prompt_inner(
                     .prompt
                     .slash_controller
                     .recognized_token_ranges(&pass_text, &agent.session.models);
+                agent.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+                    &pass_text,
+                    &agent.prompt.images,
+                );
                 agent.start_pending_live_prompt_task(&pass_text);
                 agent
                     .session
@@ -1018,6 +1055,11 @@ pub(super) fn dispatch_send_prompt_inner(
                 agent.maybe_toast_plan_feedback_queue();
             }
             if let Some(agent) = app.agents.get_mut(&id) {
+                agent.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+                    &text,
+                    &[],
+                );
                 agent.persist_pending_prompts();
             }
             return vec![Effect::SendPrompt {
@@ -1029,6 +1071,11 @@ pub(super) fn dispatch_send_prompt_inner(
             }];
         }
 
+        agent.append_prompt_wal(
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            &text,
+            &agent.prompt.images,
+        );
         agent.start_pending_live_prompt_task(&text);
         agent
             .session
@@ -1836,6 +1883,9 @@ pub(super) fn handle_compact_complete(
         if app.reconnect_pending {
             return vec![];
         }
+        // Compact is not a successful operator turn. Do not auto-run
+        // `/implement` and do not copy compact-held occupancy onto
+        // `pending_prompts`. Drain only work that was already queued.
         let drain = maybe_drain_queue(agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         return drain.effects;
@@ -1880,4 +1930,53 @@ pub(super) fn handle_suggestion_debounce_expired(
         // The as-you-type (ghost) surface keeps history/AI providers.
         token_only: false,
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::actions::{Action, Effect};
+    use crate::app::agent::AgentId;
+    use crate::app::dispatch::router::dispatch;
+    use crate::app::dispatch::tests::test_app_with_agent;
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// Operator Enter send appends `prompt_wal.jsonl` before the model wait
+    /// (`Effect::SendPrompt`) is returned.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn prompt_wal_appends_on_enter_before_model_wait() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-enter-send";
+        let body = "operator enter send that must hit the WAL first";
+
+        let mut app = test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+        }
+
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == body)),
+            "Enter send must still ask the model; WAL is extra durability, got {effects:?}"
+        );
+        let rows =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            rows.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+                    && r.text == body
+                    && r.session_id == sid
+            }),
+            "prompt_wal.jsonl must contain the Enter send before model wait, got {rows:?}"
+        );
+    }
 }

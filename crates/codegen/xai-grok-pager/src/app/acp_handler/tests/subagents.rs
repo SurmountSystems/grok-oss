@@ -1831,5 +1831,16 @@
             child.session.tracker.activity(),
             Some(crate::acp::tracker::TurnActivity::Responding)
         );
+        let first = draw_nested_overlay_text(&mut app);
+        let second = draw_nested_overlay_text(&mut app);
+        assert_eq!(
+            first, second,
+            "Surmount / grok-oss fork: finished nested overlay must freeze elapsed; climbing 1h14m after exit is FAIL"
+        );
+        let lower = second.to_ascii_lowercase();
+        assert!(
+            !lower.contains("waiting for the model"),
+            "finished nested overlay must not keep Waiting for the model:\n{second}"
+        );
     }
 

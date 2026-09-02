@@ -1240,14 +1240,7 @@ impl AgentView {
                     }
                 }
                 TaskEntryId::Agent(sid) => {
-                    if let Some(child_sid) = self
-                        .subagent_sessions
-                        .iter()
-                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                        .map(|(k, _)| k.clone())
-                        && self.subagent_views.contains_key(&child_sid)
-                    {
-                        self.open_subagent_fullscreen(child_sid);
+                    if self.open_listed_subagent(&sid) {
                         return Some(InputOutcome::Changed);
                     }
                 }

@@ -246,7 +246,14 @@ fn wait_for_restored_approve_footer(harness: &mut PtyHarness) -> Result<()> {
         let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
             || screen.contains(NARROW_FOOTER_STRIP)
             || screen.contains(LABELED_APPROVE_CTA);
-        if screen.contains(BOUND_APPROVE_STATUS) && footer_painted {
+        // Do not treat leftover first-session "Plan ready. Side panel open"
+        // in scrollback as a bound waiter after `--continue`.
+        let recent_status = screen
+            .lines()
+            .rev()
+            .take(16)
+            .any(|line| line.contains(BOUND_APPROVE_STATUS));
+        if recent_status && footer_painted {
             return Ok(());
         }
         if Instant::now() >= deadline {

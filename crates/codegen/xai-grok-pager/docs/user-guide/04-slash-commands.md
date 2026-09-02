@@ -24,6 +24,20 @@ Start paused or interrupted work in the current session. If every session in thi
 
 `/start` is not `/resume`. `/resume` only opens the session picker.
 
+### `/unstick`
+
+Resend the last parent (L1) prompt as if the network had dropped it. Use this when graceful resume did not unstick chrome: L1 hung on Waiting for the model, nested wait already done, sampler stuck, or the last operator prompt was sent but not properly received.
+
+`/unstick` is not a duplicate send. It does not paint a second Human line and it does not append a second `<user_query>` the operator has to see twice. It does not cancel nested agents, rewind tool results, drop the transcript, reset sampler usage meters, or compact the turn away.
+
+If a turn is hung in flight, `/unstick` orphans that hung prompt the way a dropped IPC client loses its in-flight RPC, then resends. The leader drops the hung `session/prompt` RPC with the same routing as a disconnected client (`leader.response.orphaned`). The pager stays connected. Nested work keeps running. It is not `/resume` and it is not send-now cancel.
+
+It prefers the last L1 operator text from `prompt_wal.jsonl` when that file exists. Otherwise it uses the last Human send on this session, not a nested overlay. Image tokens stay `[Image #N]`. WAL image file ids resend as resource links (`file://` under the session `images/` directory). It never re-inlines data URLs.
+
+If there is no last parent prompt, it fails with a short toast and does not invent text.
+
+`/unstick` is not `/resume`. `/resume` still opens the session picker. Continue interrupted turn (`canceled_turn_resume.json`) still belongs to last-session on start and `/start`.
+
 ### `/dashboard`
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
@@ -104,7 +118,7 @@ Aliases: `/economic`, `/econ`
 
 ### `/context`
 
-Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost.
+Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost. Pasted screenshots count as image tokens on the model path (hundreds to low thousands each, not the length of a `data:image/...;base64` crate divided by four). They ride as content parts, not through the `view_image` tool. The context chip, AUTO compact, and `/context` share that counter.
 
 ### `/recap`
 
@@ -176,7 +190,7 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **What we are doing**, **What is true right now**, **What you need to do** (or `nothing`), **What I will do next**. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
 
 This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 
@@ -185,6 +199,17 @@ This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-m
 ```
 /what
 /what the last status
+```
+
+### `/pull-remote-tree`
+
+Pull a remote project tree onto a local directory. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/pull-remote-tree/`) into `~/.grok/bundled/skills/pull-remote-tree/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/pull-remote-tree/`.
+
+The named tool is `pull_remote_tree`. Direction is `HOST:SRC` (or a local source directory) onto a local dest only. Dest that looks like `HOST:PATH` is refused. Copy is a Rust walk plus `std::fs`. OpenSSH may fetch a remote tree. This is not a rsync tool id. Never git commit.
+
+```
+/pull-remote-tree
+/pull-remote-tree host:/var/src /tmp/dest
 ```
 
 ### `/metadata`
@@ -550,11 +575,13 @@ Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
 3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
 4. Verifies package version plus git SHA.
 5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. Nested agents resume the same way a network disconnect does, and the Subagents list must not go empty. Ctrl-C quits and does not re-exec peers.
+6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
+
+Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
 
 To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 
-CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
+CLI: `grok-oss rebuild` (optional `--source DIR`) compiles and signals live grok-oss instances the same way `/rebuild` does, without re-execing this process (there is no TUI here). Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 
 ### `/release-notes`
 

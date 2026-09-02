@@ -394,6 +394,9 @@ impl ChatStateActor {
     ///
     /// Used for before/after measurement logging when pruning runs.
     /// Sums the byte lengths of all string fields; does not allocate.
+    /// Image URL length here is RAM/JSON size, not vision tokens. Token
+    /// gates use [`super::state::estimate_item_tokens`], which never does
+    /// `url.len() / 4`.
     fn conversation_content_bytes(&self) -> usize {
         self.state
             .conversation

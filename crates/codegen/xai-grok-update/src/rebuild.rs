@@ -2134,6 +2134,50 @@ mod tests {
         );
     }
 
+    /// Contract: `just install` during `/rebuild` stashes unstaged WIP so
+    /// the compile work tree matches the git index, then restores that WIP.
+    #[test]
+    fn stash_keep_index_hides_unstaged_wip_from_compile_worktree() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        init_git_repo(root);
+        fs::write(root.join("src.txt"), b"staged\n").unwrap();
+        let add = Command::new("git")
+            .args(["add", "src.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        // Temp fixture only: host commit.gpgsign must not block this unit test.
+        let cfg = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        let commit = Command::new("git")
+            .env("ALLOW_UNSIGNED_COMMIT", "1")
+            .args(["commit", "-m", "index"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        fs::write(root.join("src.txt"), b"unstaged-wip\n").unwrap();
+        let stashed = stash_unstaged_keep_index(root).expect("stash");
+        assert!(stashed, "dirty unstaged file must produce a stash");
+        let during = fs::read_to_string(root.join("src.txt")).expect("during compile");
+        assert_eq!(
+            during, "staged\n",
+            "compile work tree must match the git index, not unstaged WIP"
+        );
+        stash_pop_rebuild_unstaged(root).expect("pop");
+        let after = fs::read_to_string(root.join("src.txt")).unwrap();
+        assert_eq!(
+            after, "unstaged-wip\n",
+            "stash pop must restore unstaged WIP"
+        );
+    }
+
     /// Contract: rebuild must schedule restart of **all** other live product
     /// sessions, not only the invoker. Pure PID filter excludes self / dead /
     /// non-grok.

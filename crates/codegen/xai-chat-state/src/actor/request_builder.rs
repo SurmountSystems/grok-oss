@@ -87,6 +87,11 @@ impl ChatStateActor {
             inject_memory_reminder(&mut items, &reminder);
         }
 
+        // Inflate session file handles on this request clone only. Stored
+        // conversation keeps the handle so chat_history.jsonl does not grow
+        // by the data URL crate.
+        crate::image_handles::inflate_conversation_images_for_inference(&mut items);
+
         // Step 4: Assemble request
         ConversationRequest {
             items,

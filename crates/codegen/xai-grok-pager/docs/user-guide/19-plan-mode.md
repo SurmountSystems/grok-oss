@@ -108,7 +108,7 @@ The approval view has three focus states:
 - **Commenting**: Add an inline comment to the selected line range. Press `c` for that explicit line-comment gesture. Do not use a row click for this.
 - **Prompt**: Type a comment. Then click **Approve** (implement with notes), **Clarify** (read-only answers), or **Revise** (rewrite). You can also type `also` or `Also` here.
 
-Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate.
+Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). You can type those comments in the Human box while Preview is focused; you do not have to Tab to Prompt first. Empty Approve still implements without inventing notes. **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate. `Ctrl+Z` undoes the last Human-box edit, including a wipe (first `Ctrl+C`), while Preview or Prompt is focused.
 
 ### Leaving the Approval View
 

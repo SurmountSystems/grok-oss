@@ -41,6 +41,7 @@ mod status;
 mod task_result;
 mod transcript;
 mod turn;
+pub(crate) mod unstick;
 mod voice;
 
 pub(crate) use auth::scrollback_has_recent_disk_full;
@@ -53,9 +54,9 @@ pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
+pub(crate) use queue::maybe_drain_queue_and_note_peek;
 pub(super) use queue::{
-    apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
-    note_peek_page_flip, shim_renders_own_user_block,
+    apply_turn_start_shim, arm_send_now_and_paint, note_peek_page_flip, shim_renders_own_user_block,
 };
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;

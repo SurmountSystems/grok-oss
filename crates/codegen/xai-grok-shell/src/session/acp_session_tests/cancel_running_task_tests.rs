@@ -192,6 +192,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -580,6 +581,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         parsed_prompt_tx: None,
                         queue_meta: None,
                         send_now: false,
+                        unstick_retry: false,
                     });
             }
             let actor = Arc::new(actor);
@@ -913,6 +915,7 @@ fn handle_prompt_frames_interrupt_on_user_message() {
                                     None,
                                     Some(ack_tx),
                                     None,
+                                    false,
                                 )
                                 .await
                         });
@@ -967,6 +970,7 @@ fn handle_prompt_verbatim_skips_interrupt_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1014,6 +1018,7 @@ fn handle_prompt_send_now_frames_interjection_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1068,6 +1073,7 @@ fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1121,6 +1127,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 combined_texts: None,
             }),
             send_now: false,
+            unstick_retry: false,
         };
         (item, rx)
     }
@@ -1329,6 +1336,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
                 combined_texts: None,
             }),
             send_now: false,
+            unstick_retry: false,
         };
         (item, rx)
     }
@@ -1658,6 +1666,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 combined_texts: None,
             }),
             send_now: false,
+            unstick_retry: false,
         }
     }
     let local = tokio::task::LocalSet::new();

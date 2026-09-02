@@ -136,9 +136,27 @@ async fn drain_interjection_with_images_attaches_image_parts() {
                 .collect();
             assert_eq!(image_urls.len(), 1, "image part must be attached");
             assert!(
-                image_urls[0].starts_with("data:image/"),
-                "inline base64 data URL expected, got {}",
+                image_urls[0].starts_with("file://"),
+                "conversation must persist a session file handle, not the data URL crate, got {}",
                 &image_urls[0][..image_urls[0].len().min(32)]
+            );
+            let mut clone = conversation.clone();
+            xai_chat_state::inflate_conversation_images_for_inference(&mut clone);
+            let inflated = match clone.last() {
+                Some(ConversationItem::User(u)) => u
+                    .content
+                    .iter()
+                    .find_map(|p| match p {
+                        xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+                        _ => None,
+                    })
+                    .expect("inflated image part"),
+                _ => panic!("clone tail must stay a user item"),
+            };
+            assert!(
+                inflated.starts_with("data:image/"),
+                "inference inflate must restore a data URL, got {}",
+                &inflated[..inflated.len().min(32)]
             );
             let text = conversation.last().unwrap().text_content();
             assert!(
@@ -292,8 +310,26 @@ async fn drain_interjection_truncation_never_touches_image_data() {
                 })
                 .expect("image part must survive truncation");
             assert!(
-                image_url.ends_with(&original_image.data),
-                "image payload must be byte-identical (never truncated)"
+                image_url.starts_with("file://"),
+                "conversation must persist a session file handle through truncation, got {}",
+                &image_url[..image_url.len().min(32)]
+            );
+            let mut clone = conversation.clone();
+            xai_chat_state::inflate_conversation_images_for_inference(&mut clone);
+            let inflated = match clone.last() {
+                Some(ConversationItem::User(u)) => u
+                    .content
+                    .iter()
+                    .find_map(|p| match p {
+                        xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+                        _ => None,
+                    })
+                    .expect("inflated image part"),
+                _ => panic!("clone tail must stay a user item"),
+            };
+            assert!(
+                inflated.ends_with(&original_image.data),
+                "inference inflate must keep image bytes identical (never truncated)"
             );
         })
         .await;

@@ -708,6 +708,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::JsonToToonTool>();
         b.register::<grok_build::ImplementMemoryTool>();
         b.register::<grok_build::PlanValidateTool>();
+        grok_build::register_all(&mut b);
         b.register_with_params::<
                 grok_build::AskUserQuestionTool,
                 grok_build::ask_user_question::AskUserQuestionParams,

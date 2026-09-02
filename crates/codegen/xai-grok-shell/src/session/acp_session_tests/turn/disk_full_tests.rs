@@ -143,6 +143,7 @@ async fn run_prompt(
             None,
             None,
             None,
+            false,
         ),
     )
     .await

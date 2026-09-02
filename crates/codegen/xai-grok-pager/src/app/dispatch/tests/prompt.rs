@@ -2,6 +2,44 @@
 
 use super::*;
 
+/// Surmount / grok-oss fork; tests are contracts.
+/// `/view-plan` must never become a model prompt. Resume can submit it
+/// before slash dispatch is ready; PassThrough would steal the next
+/// scripted implement turn.
+#[test]
+fn send_prompt_view_plan_never_sends_to_model() {
+    for slash in ["/view-plan", "/view-plan/", "/show-plan"] {
+        let mut app = test_app_with_agent();
+        let effects = dispatch(Action::SendPrompt(slash.into()), &mut app);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendInterject { .. })),
+            "{slash} must be local ShowPlan, got {effects:?}"
+        );
+    }
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendInterject { .. })),
+        "/view-plan must be local ShowPlan, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].prompt.text().is_empty()
+            || app.agents[&id].view_plan_requested
+            || app.agents[&id].line_viewer.is_some()
+            || app.agents[&id].plan_approval_view.is_some(),
+        "/view-plan must stick or open plan chrome, composer={:?} requested={} viewer={} pav={}",
+        app.agents[&id].prompt.text(),
+        app.agents[&id].view_plan_requested,
+        app.agents[&id].line_viewer.is_some(),
+        app.agents[&id].plan_approval_view.is_some()
+    );
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {
@@ -5314,6 +5352,82 @@ fn next_implement_was_started(
         .iter()
         .any(|p| p.text.contains("/implement") && p.text.contains(marker));
     sent || queued
+}
+
+/// Named contract: compact must not re-enqueue the occupancy operator
+/// prompt, or any operator prompt. An iso leftover looked like compact
+/// then the same `/implement` waiting. That is not the compact-fail
+/// pause unstick path. Compact complete drains already-queued work
+/// only. It is not a successful agent turn, so auto-run `/implement`
+/// must not fire.
+#[test]
+fn compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    use crate::app::agent::{AgentCommand, InFlightPrompt};
+    use crate::scrollback::entry::EntryId;
+
+    let occupancy = "/implement --effort 3 occupancy leftover that compact must not re-queue";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.start_command(AgentCommand::Compact);
+        agent.session.pending_prompts.clear();
+        agent.session.in_flight_prompt = None;
+        agent.session.compact_held_prompt = Some(InFlightPrompt {
+            text: occupancy.into(),
+            images: vec![],
+            scrollback_entry: EntryId::new(0),
+            combined_scrollback_entries: vec![],
+            chip_elements: vec![],
+        });
+        agent.session.prompt_history = vec![occupancy.into()];
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt(occupancy));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "## Next implement prompt\n\
+             /implement leftover from assistant residual after compact\n\
+             1) this is not a new operator turn",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::CompactComplete {
+            agent_id: id,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+
+    let queue: Vec<&str> = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect();
+    assert!(
+        queue.is_empty(),
+        "compact must not enqueue occupancy or any operator prompt; queue={queue:?}"
+    );
+    assert!(
+        !next_implement_was_started(&app, id, &effects, occupancy),
+        "compact must not re-enqueue the occupancy /implement; \
+         effects={effects:?} queue={queue:?}"
+    );
+    assert!(
+        !next_implement_was_started(&app, id, &effects, "assistant residual after compact"),
+        "compact is not a successful operator turn and must not auto-run \
+         leftover /implement; effects={effects:?} queue={queue:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendPrompt { .. })),
+        "compact complete must not send an operator prompt; effects={effects:?}"
+    );
 }
 
 /// Named contract: a successful agent turn auto-runs the trailing

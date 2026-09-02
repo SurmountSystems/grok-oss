@@ -2008,6 +2008,12 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
             let Some(name) = rel_path.to_str() else {
                 continue;
             };
+            // Session-local prompt WAL is not conversation and is not model tokens.
+            if rel_path.file_name().is_some_and(|n| {
+                n == crate::session::unsent_prompt_draft::prompt_wal::PROMPT_WAL_FILE
+            }) {
+                continue;
+            }
             let data = match std::fs::read(&path) {
                 Ok(c) => c,
                 Err(e) => {

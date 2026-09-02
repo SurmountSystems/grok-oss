@@ -19,9 +19,18 @@ use ratatui::style::Style;
 /// Bare typing while plan.md is open: letters and delete keys go to the
 /// composer. Ctrl+Backspace / Alt+Backspace / Ctrl+Delete are word-edit
 /// on that composer. Left/Right, Ctrl/Alt word-move, and Ctrl-A/E stay
-/// on that composer too. Other Ctrl/Alt/Super chords stay with the viewer
+/// on that composer too. Ctrl/Cmd+Z (undo) and Shift+Z (redo) stay on
+/// that composer so a wiped Human box can come back while Preview is
+/// focused. Other Ctrl/Alt/Super chords stay with the viewer
 /// (fullscreen, quit, worktree).
 pub(super) fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::Char('z' | 'Z'))
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    {
+        return true;
+    }
     if key.modifiers.contains(KeyModifiers::SUPER) {
         return false;
     }

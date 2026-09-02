@@ -1010,6 +1010,134 @@ fn plan_preview_typed_text_survives_c_reopen_without_wipe_undo() {
     assert_eq!(agent.prompt.text(), "because");
 }
 
+/// Isolated Preview (footer `Tab:prompt`): Ctrl+Z must restore a wiped Human
+/// box. The chord used to stay with the plan list, so undo never ran.
+#[test]
+fn plan_preview_ctrl_z_restores_wiped_human_box() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.prompt.clear_history();
+    type_plan_chars(&mut agent, "please keep this prompt");
+    assert_eq!(agent.prompt.text(), "please keep this prompt");
+
+    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(
+        agent.prompt.text().is_empty(),
+        "Ctrl+C must wipe the Human box first, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "first Ctrl+C is wipe, not Exit"
+    );
+
+    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.text(),
+        "please keep this prompt",
+        "Ctrl+Z while Preview is focused must restore the wiped Human box, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Tab-focused Prompt box: same Ctrl+Z restore after a wipe.
+#[test]
+fn plan_prompt_ctrl_z_restores_wiped_human_box() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Comment;
+    }
+    agent.prompt.set_text("");
+    agent.prompt.clear_history();
+    type_plan_chars(&mut agent, "revise notes that vanished");
+    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(agent.prompt.text().is_empty());
+    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.text(),
+        "revise notes that vanished",
+        "Ctrl+Z on the Prompt-focused Human box must restore the wipe, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Ctrl/Cmd+Z is composer undo even while the plan list owns Preview.
+#[test]
+fn plan_preview_key_treats_ctrl_z_as_composer_text() {
+    let undo = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert!(
+        super::plan_preview_key_is_composer_text(&undo),
+        "Ctrl+Z must reach the Human box, not the plan list"
+    );
+    let redo = KeyEvent::new(
+        KeyCode::Char('Z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    assert!(
+        super::plan_preview_key_is_composer_text(&redo),
+        "Ctrl+Shift+Z redo must reach the Human box"
+    );
+    let fullscreen = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+    assert!(
+        !super::plan_preview_key_is_composer_text(&fullscreen),
+        "Ctrl+F stays with the plan viewer"
+    );
+}
+
+/// A burst of Human-box keystrokes must not flush the unsent draft on every
+/// character (that path used to `sync_all` per key).
+#[test]
+fn plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.unsent_draft_persist_flush_count.set(0);
+    agent.unsent_draft_persist_skip_count.set(0);
+    agent.last_unsent_draft_persist.set(None);
+
+    type_plan_chars(&mut agent, "twelve chars!");
+    let flushes = agent.unsent_draft_persist_flush_count.get();
+    let skips = agent.unsent_draft_persist_skip_count.get();
+    assert_eq!(
+        flushes, 1,
+        "a burst must write the unsent draft once, got {flushes} flushes and {skips} skips"
+    );
+    assert!(
+        skips >= 12,
+        "remaining keystrokes must coalesce, got {skips} skips and {flushes} flushes"
+    );
+}
+
+/// Main composer (no plan pane) shares the coalesced persist path.
+#[test]
+fn main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char() {
+    let mut agent = make_agent();
+    agent.prompt.set_text("");
+    agent.unsent_draft_persist_flush_count.set(0);
+    agent.unsent_draft_persist_skip_count.set(0);
+    agent.last_unsent_draft_persist.set(None);
+    type_plan_chars(&mut agent, "hello world");
+    let flushes = agent.unsent_draft_persist_flush_count.get();
+    let skips = agent.unsent_draft_persist_skip_count.get();
+    assert_eq!(
+        flushes, 1,
+        "main prompt typing must not persist every character, got {flushes} flushes and {skips} skips"
+    );
+    assert!(
+        skips >= 10,
+        "burst after the first key must skip, got {skips} skips"
+    );
+}
+
 /// Tab leaving Commenting must restore the pre-comment Human-box draft, not
 /// leave an empty wipe that takes several Ctrl-Z to undo.
 #[test]

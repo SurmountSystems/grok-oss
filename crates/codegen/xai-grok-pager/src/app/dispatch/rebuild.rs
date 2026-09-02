@@ -109,6 +109,15 @@ fn last_user_prompt_full_text(
     None
 }
 
+/// Flush unsent composer text, plan Human-box notes, and the pager queue
+/// before re-exec. Keystroke persist is debounced and skipped in tests;
+/// rebuild must write the same files a disconnect restore reads.
+fn persist_session_work_for_rebuild(app: &AppView) {
+    for agent in app.agents.values() {
+        agent.persist_session_work_to_disk_for_rebuild();
+    }
+}
+
 /// Write `canceled_turn_resume.json` for every mid-turn agent before re-exec.
 ///
 /// Session load already applies that marker. Rebuild must persist it: cancel
@@ -203,6 +212,7 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
     {
         agent.show_toast("Rebuild on another window: relaunching on the new binary…");
     }
+    persist_session_work_for_rebuild(app);
     persist_running_turns_for_rebuild(app);
     app.rebuild_relaunch = Some(relaunch);
     true
@@ -288,14 +298,19 @@ pub(super) fn handle_rebuild_done(
 
             let mut effects = Vec::new();
 
+            // Flush drafts and the pager queue before cancel. Cancel can
+            // rewind the in-flight prompt into the composer; that must not
+            // replace the operator's unsent text on disk.
+            persist_session_work_for_rebuild(app);
             // Persist continue-interrupted-turn before cancel. Cancel does not
             // write the marker; first-activity also clears the in-flight stash.
             persist_running_turns_for_rebuild(app);
 
             // Mid-turn: cancel the parent turn so this process does not keep
-            // driving it. Do not cancel nested subagents: after re-exec they
-            // resume like a network disconnect, and the Subagents list must
-            // not go empty.
+            // driving it. Do not cancel nested subagent ids in this TUI persist
+            // path. Nested work is not a reason to block `/rebuild`. Leader
+            // `RelaunchForUpdate` also keeps nested ids on that leader (same
+            // as a TUI disconnect); it does not exec-replace while they are live.
             if let Some(agent) = app.agents.get(&agent_id)
                 && agent.session.state.is_turn_running()
             {
@@ -1324,9 +1339,10 @@ mod tests {
         }
     }
 
-    /// Contract: after rebuild re-exec, nested agents resume like a network
-    /// disconnect. The Subagents list must not go empty. Mid-turn cancel must
-    /// not cancel nested subagents.
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// This TUI persist path does not cancel nested subagent ids. The
+    /// Subagents list must not go empty here. Leader `RelaunchForUpdate`
+    /// keeps nested ids on that leader the same way a TUI disconnect does.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_keeps_nested_subagents_for_resume() {
@@ -1396,8 +1412,8 @@ mod tests {
         );
         assert!(!after[0].finished);
 
-        // Re-exec equivalent: nested rows still present the way a disconnect
-        // reconnect restores them (not cancelled orphans).
+        // Re-exec equivalent: this persist path still holds nested rows
+        // (not cancelled orphans). Leader drain keeps nested ids too.
         let mut reopened = crate::app::app_view::tests::test_app_with_agent();
         {
             let agent = reopened.agents.get_mut(&agent_id).unwrap();
@@ -1419,6 +1435,388 @@ mod tests {
             !restored.is_empty(),
             "after re-exec the Subagents list must still show nested work"
         );
+        assert_eq!(restored[0].subagent_id.as_ref(), "sa-rebuild-nested");
+        assert_eq!(restored[0].child_session_id.as_ref(), "cs-rebuild-nested");
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            !toast.to_lowercase().contains("blocked")
+                && !toast.to_lowercase().contains("until")
+                && !toast.to_lowercase().contains("nested"),
+            "rebuild must not tell the operator they are blocked until nested work finishes; got {toast:?}"
+        );
+    }
+
+    /// Named contract: `/rebuild` starts while nested agents are running.
+    /// Nested work is not a gate.
+    #[test]
+    fn rebuild_and_relaunch_starts_while_nested_subagents_are_running() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::agent::{AgentId, AgentState};
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some("sess-parent".into());
+            agent.session.state = AgentState::TurnRunning;
+            agent.subagent_sessions.insert(
+                "cs-rebuild-nested".into(),
+                running_l2_subagent("Rebuild nested resume"),
+            );
+        }
+        let effects = super::super::dispatch(Action::RebuildAndRelaunch, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RunRebuild { .. })),
+            "/rebuild must start while nested agents are running, got {effects:?}"
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        assert!(
+            !agent.subagent_sessions.is_empty(),
+            "starting /rebuild must not drop nested session ids"
+        );
+    }
+
+    fn restore_session_work_after_rebuild_load(agent: &mut crate::app::agent_view::AgentView) {
+        agent.restore_unsent_composer_draft_from_disk();
+        agent.restore_pending_prompts_from_disk();
+        agent.restore_prompt_wal_from_disk();
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// A WAL send that never made it into prompt_history or the queue is
+    /// restored as a pending Human turn on session load.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn session_load_restores_wal_send_missing_from_prompt_history() {
+        use crate::app::agent::AgentId;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-restore-missing-send";
+        let body = "operator send that never reached prompt_history";
+        let record = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+            sid,
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            body,
+            Vec::new(),
+        );
+        xai_grok_shell::session::prompt_wal::append_prompt_wal(&cwd_str, sid, &record)
+            .expect("write WAL");
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.prompt_history.clear();
+            agent.session.pending_prompts.clear();
+            agent.restore_prompt_wal_from_disk();
+            assert!(
+                agent.session.pending_prompts.iter().any(|p| p.text == body),
+                "session load must restore a WAL send missing from prompt_history as a pending Human turn; history={:?} queue={:?}",
+                agent.session.prompt_history,
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Named contract: an unsent composer draft survives `/rebuild` the same
+    /// way it survives a disconnect. Reopen must not leave an empty composer
+    /// when the draft was non-empty.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::AgentId;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-unsent-draft";
+        let draft = "still typing this rebuild-preserve note";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.prompt.set_text(draft);
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let on_disk = xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+            &cwd_str, sid,
+        )
+        .expect("load draft")
+        .expect(
+            "successful /rebuild must write unsent_prompt_draft when the composer was non-empty",
+        );
+        assert_eq!(on_disk, draft);
+        let wal =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            wal.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                    && r.text == draft
+            }),
+            "successful /rebuild must append a rebuild-flush WAL line for the unsent draft, got {wal:?}"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text("");
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert_eq!(
+                agent.prompt.text(),
+                draft,
+                "session load after /rebuild must restore a non-empty unsent composer draft"
+            );
+        }
+    }
+
+    /// Named contract: queued operator prompts, including mid-turn interject
+    /// text, survive `/rebuild`. The operator must not retype them.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them()
+     {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-pending-queue";
+        let queued = "also do this mid-turn interject after rebuild";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-running".into());
+            agent.session.enqueue_prompt(queued.into());
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let rows = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd_str, sid)
+            .expect("load queue");
+        assert!(
+            rows.iter().any(|r| r.text == queued),
+            "successful /rebuild must write pending_prompts.json with the queued body, got {rows:?}"
+        );
+        let wal =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            wal.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                    && r.text == queued
+            }),
+            "successful /rebuild must append a rebuild-flush WAL line for the queued body, got {wal:?}"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.pending_prompts.clear();
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert!(
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .any(|p| p.text == queued),
+                "session load after /rebuild must restore queued prompts; got {:?}",
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Named contract: plan Human-box `feedback_draft` and session `plan.md`
+    /// operator notes survive `/rebuild`.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_plan_feedback_draft_and_plan_md() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::AgentId;
+        use crate::views::plan_approval_view::PlanApprovalViewState;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-plan-notes";
+        let notes = "operator plan notes that must survive rebuild";
+        let plan_body = "# Plan\n\nKeep these operator notes on disk\n";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.plan_mode_active = true;
+            let mut pav = PlanApprovalViewState::for_idle_decision(Some(plan_body.into()));
+            pav.feedback_draft = Some(notes.into());
+            agent.plan_approval_view = Some(pav);
+            agent.prompt.set_text("/view-plan");
+            agent.latest_inline_plan_content = Some(plan_body.into());
+        }
+        let plan_path =
+            xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(&cwd_str, sid)
+                .expect("draft path")
+                .parent()
+                .expect("session dir")
+                .join("plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, plan_body).unwrap();
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let on_disk =
+            xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(&cwd_str, sid)
+                .expect("load draft")
+                .expect("plan Human-box notes must land in unsent_prompt_draft across /rebuild");
+        assert_eq!(on_disk, notes);
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).expect("plan.md"),
+            plan_body,
+            "/rebuild must not wipe session plan.md"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text("");
+            agent.plan_mode_active = true;
+            agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
+                plan_body.into(),
+            )));
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert_eq!(
+                agent.prompt.text(),
+                notes,
+                "session load after /rebuild must restore plan Human-box notes into the composer"
+            );
+            assert_eq!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .and_then(|p| p.feedback_draft.as_deref()),
+                Some(notes),
+                "session load after /rebuild must restore feedback_draft"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&plan_path).expect("plan.md after load"),
+                plan_body
+            );
+        }
     }
 
     /// Named contract: a leftover `canceled_turn_resume.json` from an earlier

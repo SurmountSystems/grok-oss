@@ -957,6 +957,78 @@
         }
     }
 
+    /// Named contract: AUTO compact must not re-enqueue the occupancy
+    /// operator prompt, or any operator prompt. Compact-held occupancy
+    /// is for re-auth resubmit, not a second waiting `/implement`.
+    #[test]
+    fn auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt() {
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_auto_run_implement(true);
+        crate::appearance::cache::set_economic_mode(false);
+
+        let occupancy =
+            "/implement --effort 3 occupancy leftover that compact must not re-queue";
+        let mut app = make_app_with_agent("sess-compact-no-requeue");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("occ-1".into());
+            agent.session.in_flight_prompt = None;
+            agent.session.pending_prompts.clear();
+            agent.session.compact_held_prompt = Some(InFlightPrompt {
+                text: occupancy.into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            agent.session.prompt_history = vec![occupancy.into()];
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(occupancy));
+            agent.scrollback.push_block(RenderBlock::agent_message(
+                "## Next implement prompt\n\
+                 /implement leftover from assistant residual after compact\n\
+                 1) this is not a new operator turn",
+            ));
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-compact-no-requeue",
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before: Some(509_400),
+                    tokens_after: 422_100,
+                    elapsed_ms: Some(133_000),
+                    summary_preview: None,
+                    saved_too_little: false,
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = &app.agents[&AgentId(0)];
+        let queue: Vec<&str> = agent
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert!(
+            queue.is_empty(),
+            "AUTO compact must not enqueue occupancy or any operator prompt; queue={queue:?}"
+        );
+        assert!(
+            agent.session.compact_held_prompt.is_none(),
+            "successful AUTO compact must drop the hold, not queue it"
+        );
+        assert!(
+            !agent.has_held_user_queue(),
+            "occupancy must not become held queue after compact"
+        );
+    }
+
     /// Token refreshes must not copy the model-card catalog into
     /// `session_sampling_window`. After that poison the chip treats windows
     /// as equal and paints unlabeled `201K / 500K`.

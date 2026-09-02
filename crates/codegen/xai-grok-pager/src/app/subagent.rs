@@ -415,6 +415,9 @@ pub(crate) fn finish_nested_child_session_turn(
         && !info.finished
     {
         info.activity_label = None;
+        if info.duration_ms.is_none() {
+            info.duration_ms = Some(info.elapsed().as_millis() as u64);
+        }
     }
     true
 }

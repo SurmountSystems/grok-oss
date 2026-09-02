@@ -635,49 +635,76 @@ impl AgentView {
         let _title_row = frame.title_row;
         let inner = frame.content;
         let _border_style = Style::default().fg(border_color);
+        let child_busy = self
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|c| c.session.state.is_busy());
+        let has_child_view = self.subagent_views.contains_key(child_sid);
         let info = self.subagent_sessions.get(child_sid);
         let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
-        let is_running = info.is_some_and(|s| s.is_running());
-        let elapsed = info
-            .map(|s| crate::util::format_duration(s.display_elapsed()))
+        // SubagentFinished may lag ACP turn-end. A child view that already
+        // left TurnRunning must not keep a live overlay timer.
+        let info_running = info.is_some_and(|s| s.is_running());
+        let nested_live = self.running_live_specialists().any(|s| {
+            s.parent_session_id
+                .as_deref()
+                .is_some_and(|p| p == child_sid)
+        });
+        let is_running = if has_child_view {
+            (info_running && child_busy) || nested_live
+        } else {
+            info_running
+        };
+        let elapsed_ms = info.map(|s| {
+            if is_running {
+                s.display_elapsed()
+            } else {
+                s.duration_ms
+                    .map(std::time::Duration::from_millis)
+                    .unwrap_or_else(|| s.display_elapsed())
+            }
+        });
+        let elapsed = elapsed_ms
+            .map(crate::util::format_duration)
             .unwrap_or_default();
         let (type_label, description): (String, String) = match info {
             Some(s) => format_subagent_label(s),
             None => (String::new(), raw_description.to_string()),
         };
-        let icon = if is_running {
-            crate::glyphs::sparkler_frame_at_ms(
-                info.map(|s| s.display_elapsed().as_millis() as u64)
-                    .unwrap_or(0),
-            )
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            crate::glyphs::check_mark()
-        } else {
-            crate::glyphs::ballot_x()
-        };
-        let icon_color = if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let label_color = if info.is_some_and(|s| s.pending_kill) {
-            theme.accent_error
-        } else if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
+        let status_completed = info.and_then(|s| s.status.as_deref()) == Some("completed");
+        let pending_kill = info.is_some_and(|s| s.pending_kill);
         let meta = info
             .and_then(|s| s.model.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("")
             .to_string();
-        let badge = info.map(format_context_badge).unwrap_or("");
+        let badge = info.map(format_context_badge).unwrap_or("").to_string();
+        let icon = if is_running {
+            crate::glyphs::sparkler_frame_at_ms(
+                elapsed_ms.map(|d| d.as_millis() as u64).unwrap_or(0),
+            )
+        } else if status_completed {
+            crate::glyphs::check_mark()
+        } else {
+            crate::glyphs::ballot_x()
+        };
+        let icon_color = if is_running {
+            theme.accent_running
+        } else if status_completed {
+            theme.accent_success
+        } else {
+            theme.accent_error
+        };
+        let label_color = if pending_kill {
+            theme.accent_error
+        } else if is_running {
+            theme.accent_running
+        } else if status_completed {
+            theme.accent_success
+        } else {
+            theme.accent_error
+        };
         let activity_label: Option<String> = if is_running {
             self.overlay_wait_activity_label(child_sid)
         } else {
@@ -777,23 +804,41 @@ impl AgentView {
             &Span::styled(&elapsed_text, Style::default().fg(theme.gray)),
             elapsed_text.width() as u16,
         );
+        self.hit_overlay_nested_status.clear();
+        self.overlay_nested_status_child_sid = None;
         if let Some(activity) = activity_label.as_deref() {
             let segment = format!("{activity} \u{00b7} ");
             let w = segment.width() as u16;
             rx = rx.saturating_sub(w);
-            buf.set_span_safe(
-                rx,
-                title_y,
-                &Span::styled(segment, Style::default().fg(theme.gray)),
-                w,
-            );
+            let activity_style = if self.hit_overlay_nested_status.hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span_safe(rx, title_y, &Span::styled(segment, activity_style), w);
+            let nested_sid = self
+                .subagent_sessions
+                .values()
+                .filter(|info| {
+                    info.is_running()
+                        && info.workflow_run_id.is_none()
+                        && info.parent_session_id.as_deref() == Some(child_sid)
+                })
+                .min_by_key(|info| info.started_at)
+                .map(|info| info.child_session_id.to_string());
+            if let Some(sid) = nested_sid {
+                self.hit_overlay_nested_status.rect = Some(Rect::new(rx, title_y, w, 1));
+                self.overlay_nested_status_child_sid = Some(sid);
+            }
         }
         if !badge.is_empty() {
             rx = rx.saturating_sub(badge.width() as u16 + 1);
             buf.set_span_safe(
                 rx,
                 title_y,
-                &Span::styled(badge, Style::default().fg(theme.gray_dim)),
+                &Span::styled(&badge, Style::default().fg(theme.gray_dim)),
                 badge.width() as u16,
             );
         }

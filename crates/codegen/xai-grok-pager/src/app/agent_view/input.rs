@@ -501,11 +501,45 @@ impl AgentView {
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Moved)
-                && self
-                    .hit_subagent_frame_close
-                    .update_hover(mouse.column, mouse.row)
             {
-                return InputOutcome::Changed;
+                let close = self
+                    .hit_subagent_frame_close
+                    .update_hover(mouse.column, mouse.row);
+                let nested = self
+                    .hit_overlay_nested_status
+                    .update_hover(mouse.column, mouse.row);
+                if close || nested {
+                    return InputOutcome::Changed;
+                }
+            }
+            if let Event::Mouse(mouse) = ev
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self
+                    .hit_overlay_nested_status
+                    .contains(mouse.column, mouse.row)
+            {
+                if let Some(sid) = self.overlay_nested_status_child_sid.clone()
+                    && self.open_listed_subagent(&sid)
+                {
+                    return InputOutcome::Changed;
+                }
+            }
+            if let Event::Mouse(mouse) = ev
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            {
+                if let Some(child) = self.subagent_views.get(child_sid) {
+                    let rects = child.tasks.view_button_rects.clone();
+                    for (entry_id, rect) in rects {
+                        if !rect.contains((mouse.column, mouse.row).into()) {
+                            continue;
+                        }
+                        if let crate::views::tasks_pane::TaskEntryId::Agent(sid) = entry_id
+                            && self.open_listed_subagent(&sid)
+                        {
+                            return InputOutcome::Changed;
+                        }
+                    }
+                }
             }
             let child_in_scrollback = self
                 .subagent_views
@@ -1628,7 +1662,9 @@ mod background_and_tasks_shortcut_tests {
     use crate::scrollback::render::ScratchBuffer;
     use crate::views::history_search::HistoryEntry;
     use crate::views::list_pane::InputBarMode;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     fn ctrl(c: char) -> Event {
@@ -2086,6 +2122,74 @@ mod background_and_tasks_shortcut_tests {
         assert!(child.session.state.is_turn_running());
         assert!(!child.session.state.is_cancelling());
         assert!(child.cancel_trigger_hint.is_none());
+    }
+
+    /// Overlay title wait chrome that names the live L3 must open that
+    /// specialist on click. Nested spawn used to skip `subagent_views`, so
+    /// the control was painted and did nothing.
+    #[test]
+    fn overlay_nested_status_click_opens_l3_session_view() {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use std::sync::Arc;
+
+        let registry = ActionRegistry::defaults();
+        let (mut parent, l2_sid) = parent_with_overlay_child("l2-coord", 1);
+        let mut l3 = overlay_info("l3-gate", "l2-coord", 2);
+        l3.description = Arc::from("Land check-remote full gate");
+        l3.is_background = true;
+        l3.tools_used = vec![Arc::from("read_file")];
+        parent.subagent_sessions.insert("l3-gate".into(), l3);
+        {
+            let l2 = parent.subagent_views.get_mut(&l2_sid).unwrap();
+            l2.session.state = crate::app::agent::AgentState::TurnRunning;
+            l2.tasks.overlay.visible = true;
+        }
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let hit = parent
+            .hit_overlay_nested_status
+            .rect
+            .expect("Surmount / grok-oss fork: overlay must arm a hit on the L3 status chrome");
+        let outcome = parent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "L3 status click must open that nested view, got {outcome:?}"
+        );
+        assert_eq!(
+            parent.active_subagent.as_deref(),
+            Some("l3-gate"),
+            "click must open the L3 session view, not stay on L2 or merge /dashboard"
+        );
+        assert!(
+            parent.subagent_views.contains_key("l3-gate"),
+            "missing L3 view must be created so the click is not a dead control"
+        );
     }
 
     #[test]

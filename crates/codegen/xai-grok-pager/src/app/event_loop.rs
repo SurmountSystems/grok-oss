@@ -1738,6 +1738,12 @@ pub(crate) async fn run(
     const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut billing_poll_at: Option<Instant> = None;
 
+    // L0 drop files arrive while this window may be idle (`TickDemand::None`
+    // parks animation ticks). Poll even when idle so a coordinator enqueue
+    // becomes one human prompt without waiting for the next bind.
+    const L0_ENQUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    let mut l0_enqueue_poll_at: Option<Instant> = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
+
     const GATE_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut gate_poll_at: Option<Instant> = None;
 
@@ -2258,6 +2264,13 @@ pub(crate) async fn run(
             }
         };
 
+        let l0_enqueue_poll = async {
+            match l0_enqueue_poll_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
         let gate_poll = async {
             match gate_poll_at {
                 Some(at) => sleep_until(at).await,
@@ -2622,6 +2635,17 @@ pub(crate) async fn run(
                 if app.billing_poll_wanted {
                     billing_poll_at = Some(Instant::now() + BILLING_POLL_INTERVAL);
                 }
+            }
+
+            _ = l0_enqueue_poll => {
+                if let Some(effs) = crate::app::l0_enqueue::drain_into_app(&mut app) {
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                }
+                l0_enqueue_poll_at = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
             }
 
             _ = gate_poll => {

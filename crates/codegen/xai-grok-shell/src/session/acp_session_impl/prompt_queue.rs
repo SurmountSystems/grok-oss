@@ -21,6 +21,7 @@ pub(crate) struct QueueInputRequest {
     pub(crate) verbatim: bool,
     pub(crate) json_schema: Option<serde_json::Value>,
     pub(crate) send_now: bool,
+    pub(crate) unstick_retry: bool,
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
     pub(crate) tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
@@ -47,6 +48,7 @@ impl QueueInputRequest {
             verbatim: false,
             json_schema: None,
             send_now: false,
+            unstick_retry: false,
             task_wake_fallback: None,
             tool_overrides_update: None,
             respond_to,
@@ -75,12 +77,16 @@ impl SessionActor {
             verbatim,
             json_schema,
             send_now,
+            unstick_retry,
             task_wake_fallback,
             tool_overrides_update,
             respond_to,
             persist_ack,
             parsed_prompt_tx,
         } = request;
+        if unstick_retry {
+            self.orphan_stuck_running_task_for_unstick().await;
+        }
         tracing::info!("queueing prompt: {prompt_id}");
         let queue_depth = { self.state.lock().await.pending_inputs.len() };
         xai_grok_telemetry::unified_log::info(
@@ -256,6 +262,7 @@ impl SessionActor {
             parsed_prompt_tx,
             queue_meta,
             send_now: false,
+            unstick_retry,
         };
 
         // Use `running_prompt_id()` not `current_prompt_id` (cleared while front
@@ -288,6 +295,8 @@ impl SessionActor {
             item.send_now = true;
             let insert_at = Self::send_now_insert_index(&state, running_front_id.as_deref());
             state.pending_inputs.insert(insert_at, item);
+        } else if item.unstick_retry {
+            state.pending_inputs.push_front(item);
         } else {
             state.pending_inputs.push_back(item);
         }

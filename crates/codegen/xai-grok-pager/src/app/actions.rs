@@ -789,6 +789,10 @@ pub enum Action {
     ///
     /// `/start` only. Not `/resume` (session picker) and not a pause toggle.
     StartPausedOrInterruptedWork,
+    /// `/unstick`: resend the last L1 prompt as if the network dropped it.
+    ///
+    /// Not `/resume` (session picker) and not continue interrupted turn.
+    UnstickLastL1Prompt,
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
@@ -1637,6 +1641,20 @@ pub enum Effect {
         /// offsets index the block's `text` displayed verbatim — never
         /// combined with a `displayText` override.
         skill_token_ranges: Vec<std::ops::Range<usize>>,
+    },
+    /// Resend the last L1 prompt as if the network dropped it.
+    ///
+    /// Same `session/prompt` wire as [`Self::SendPrompt`], with `_meta.unstickRetry`
+    /// so the shell must not append a second `<user_query>` when the last user
+    /// turn already matches. Not a duplicate Human line.
+    UnstickResendPrompt {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        text: String,
+        prompt_id: String,
+        /// WAL `images/` file ids. Sent as resource links, never data URLs.
+        images: Vec<xai_grok_shell::session::prompt_wal::PromptWalImage>,
+        images_dir: Option<std::path::PathBuf>,
     },
     /// Send a direct bash command to the agent (with typed PromptBlockMeta).
     SendBashCommand {

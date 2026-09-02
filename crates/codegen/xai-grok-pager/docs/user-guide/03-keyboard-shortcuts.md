@@ -246,6 +246,8 @@ Actions that affect the agent session, available from the agent screen.
 
 Non-image files insert their absolute path as text instead of a chip.
 
+Pasted screenshots are stored under the session `images/` directory and sent as vision content parts. They do not charge the context window as if the base64 data URL were ordinary text. Compact summaries keep a short `[image]` placeholder instead of copying those bytes. `view_image` is only for images found during web or X search.
+
 > **`Alt+V` on Windows** is grok-specific. Windows Terminal's default `Ctrl+V` only pastes plain text and silently drops image clipboards; `Alt+V` bypasses the interceptor. To use `Ctrl+V` for images too, add `{ "command": null, "keys": "ctrl+v" }` to `actions` in your Windows Terminal `settings.json`.
 
 ### Linux PRIMARY and CLIPBOARD

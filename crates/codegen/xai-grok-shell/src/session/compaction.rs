@@ -2274,7 +2274,8 @@ impl SessionActor {
     /// Persist a compaction request artifact for offline prompt iteration.
     ///
     /// Writes `{session_dir}/compaction_requests/{request_id}.json` containing
-    /// the exact ConversationItem list sent to the compaction model plus the
+    /// the ConversationItem list sent to the compaction model (images already
+    /// stripped to `[image]`; never re-inline the data URL crate) plus the
     /// summary (or final error) it produced. The file rides on
     /// the post-turn session archive to cloud storage via the existing per-turn upload
     /// pipeline — no separate upload path is needed.
@@ -2327,7 +2328,7 @@ impl SessionActor {
             prompt_variant: prompt_variant.to_owned(),
             model: model.to_owned(),
             user_context: user_context.map(str::to_owned),
-            chat_history,
+            chat_history: xai_chat_state::compaction_utils::strip_images(chat_history),
             tools,
             summary: summary.map(str::to_owned),
             error: error_str,

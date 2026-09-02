@@ -1147,6 +1147,72 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::UnstickResendPrompt {
+            agent_id,
+            session_id,
+            text,
+            prompt_id,
+            images,
+            images_dir,
+        } => {
+            let tx = acp_tx.clone();
+            let screen_mode = session_flags.screen_mode_label;
+            let is_api_key_auth = session_flags.is_api_key_auth;
+            tasks
+                .spawn(async move {
+                    ulog::info(
+                        "prompt.acp_send.start",
+                        Some(&session_id.0),
+                        Some(
+                            serde_json::json!({
+                        "kind": "unstick",
+                        "len": text.len(),
+                        "prompt_id": prompt_id,
+                        "image_count": images.len(),
+                    }),
+                        ),
+                    );
+                    let send_start = std::time::Instant::now();
+                    let mut prompt = vec![plain_prompt_content_block(text, &[])];
+                    if let Some(dir) = images_dir {
+                        prompt.extend(super::dispatch::unstick::wal_image_resource_blocks(
+                            &dir, &images,
+                        ));
+                    }
+                    let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    if let Some(map) = meta.as_object_mut() {
+                        map.insert("unstickRetry".into(), serde_json::Value::Bool(true));
+                    }
+                    let req = acp::PromptRequest::new(session_id.clone(), prompt)
+                        .meta(meta.as_object().cloned());
+                    let result = acp_send(req, &tx).await;
+                    let send_elapsed_ms = send_start.elapsed().as_millis() as u64;
+                    ulog::info(
+                        "prompt.acp_send.done",
+                        Some(&session_id.0),
+                        Some(
+                            serde_json::json!({
+                        "kind": "unstick",
+                        "elapsed_ms": send_elapsed_ms,
+                        "ok": result.is_ok(),
+                        "prompt_id": prompt_id,
+                    }),
+                        ),
+                    );
+                    log_prompt_result(&session_id, &result);
+                    let http_status = result
+                        .as_ref()
+                        .err()
+                        .and_then(http_status_from_error);
+                    TaskResult::PromptResponse {
+                        agent_id,
+                        result: result
+                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                        http_status,
+                        prompt_id: Some(prompt_id),
+                    }
+                });
+        }
         Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id }
         | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id } => {
             let send_now = effect_is_send_now;

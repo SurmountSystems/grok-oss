@@ -78,6 +78,7 @@ pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
+pub mod unstick;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -141,6 +142,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(resume::ResumeCommand),
+        Arc::new(unstick::UnstickCommand),
         Arc::new(start::StartCommand),
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),

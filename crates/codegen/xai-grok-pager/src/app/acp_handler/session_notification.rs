@@ -1383,7 +1383,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 child_session_id.clone(),
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
-                    child_session_id: Arc::from(child_session_id),
+                    child_session_id: Arc::from(child_session_id.clone()),
                     description: Arc::from(description),
                     subagent_type: Arc::from(subagent_type),
                     persona: persona.map(Arc::from),
@@ -1423,6 +1423,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     child_updates_replayed: false,
                 },
             );
+            agent.ensure_subagent_child_view(&child_session_id);
             true
         }
         XaiSessionUpdate::SubagentProgress {

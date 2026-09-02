@@ -1065,6 +1065,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::StartPausedOrInterruptedWork => {
             super::start::dispatch_start_paused_or_interrupted(app)
         }
+        Action::UnstickLastL1Prompt => super::unstick::dispatch_unstick_last_l1_prompt(app),
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),

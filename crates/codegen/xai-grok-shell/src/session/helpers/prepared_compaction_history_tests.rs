@@ -1,37 +1,30 @@
 use super::*;
 use xai_grok_sampling_types::ContentPart;
 
-fn data_image(bytes: usize) -> ContentPart {
-    let prefix = "data:image/png;base64,";
-    ContentPart::Image {
-        url: format!("{prefix}{}", "A".repeat(bytes - prefix.len())).into(),
-    }
-}
-
 #[test]
-fn reserved_tool_headroom_triggers_small_history_once() {
-    let source = vec![ConversationItem::user_with_parts(vec![data_image(500)])];
-    let unreserved = build_compaction_chat_history(source.clone(), None, true, 0);
-    let effective_trigger = unreserved.image_budget.body_bytes.saturating_sub(1);
-    let reserved_bytes = IMAGE_COMPACT_TRIGGER_BYTES.saturating_sub(effective_trigger);
-    let reserved_tokens = u64::try_from(reserved_bytes.div_ceil(4)).unwrap();
-    let prepared = build_compaction_chat_history(source, None, true, reserved_tokens);
-
-    assert!(!unreserved.image_budget.needs_image_compaction);
-    assert!(prepared.image_budget.needs_image_compaction);
-    assert_eq!(prepared.image_budget.evicted, 1);
-    assert_eq!(
-        prepared.image_budget.body_bytes_after,
-        serde_json::to_vec(&prepared.items).unwrap().len()
+fn compact_history_does_not_copy_the_data_url_crate() {
+    let crate_url = format!("data:image/jpeg;base64,{}", "C".repeat(200_000));
+    let source = vec![ConversationItem::user_with_parts(vec![
+        ContentPart::Text { text: "see".into() },
+        ContentPart::Image {
+            url: crate_url.clone().into(),
+        },
+    ])];
+    let prepared = build_compaction_chat_history(source, None, true, 0);
+    let json = serde_json::to_string(&prepared.items).expect("serialize");
+    assert!(
+        !json.contains(&crate_url),
+        "compact HTTP must not re-inline the data URL crate"
     );
-
-    let expected_items = serde_json::to_value(&prepared.items).unwrap();
-    let expected_budget = prepared.image_budget;
-    let final_boundary = CompactionHistoryInput::from(prepared).prepare(u64::MAX);
-    assert_eq!(final_boundary.image_budget, expected_budget);
+    assert!(json.contains("[image]"));
+    assert!(
+        json.len() < 20_000,
+        "compact history JSON must stay small, got {}",
+        json.len()
+    );
     assert_eq!(
-        serde_json::to_value(final_boundary.items).unwrap(),
-        expected_items
+        prepared.image_budget.inline_images, 0,
+        "stripped compact history has no inline images for the 47MB budget"
     );
 }
 

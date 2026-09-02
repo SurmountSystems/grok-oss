@@ -52,8 +52,12 @@ pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<Conver
         .collect()
 }
 /// Replace `ContentPart::Image` entries with `"[image]"` so downstream
-/// consumers (summary model, segment store) don't carry megabytes of base64.
-pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
+/// consumers (summary model, compact request artifacts, segment store) do
+/// not re-inline megabytes of base64. User images become a text placeholder.
+/// Tool-result images are dropped (same as the server-reject strip). File
+/// ids and `data:` URLs are both dropped; this is not a second eviction
+/// system.
+pub fn strip_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
         .map(|item| match item {
@@ -66,6 +70,10 @@ pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<Conversat
                     }
                 }
                 ConversationItem::User(u)
+            }
+            ConversationItem::ToolResult(mut t) => {
+                t.images.clear();
+                ConversationItem::ToolResult(t)
             }
             other => other,
         })
@@ -108,7 +116,11 @@ pub fn truncate_trailing_incomplete_tool_call(
     }
     conversation
 }
-/// Cache-aligned summarizer prep: keep tool I/O + images so the prefix matches the engine cache; set `strip_reasoning` when the provider rejects mutated thinking blocks.
+/// Cache-aligned summarizer prep: keep tool I/O. Drop image bytes (placeholder
+/// `[image]`) so compact/recap HTTP and compaction_requests do not re-inline
+/// the data URL crate. The compact model does not tokenize `data:image/...`
+/// as vision; walking that JSON as text is the harness leak. Set
+/// `strip_reasoning` when the provider rejects mutated thinking blocks.
 pub fn prepare_conversation_for_verbatim_summarization(
     conversation: Vec<ConversationItem>,
     strip_reasoning: bool,
@@ -118,7 +130,7 @@ pub fn prepare_conversation_for_verbatim_summarization(
     } else {
         conversation
     };
-    truncate_trailing_incomplete_tool_call(conversation)
+    strip_images(truncate_trailing_incomplete_tool_call(conversation))
 }
 /// Per-item token estimate via the trigger-side estimator, so `fit`'s budget matches what fired the compaction (counts images + encrypted reasoning).
 fn estimate_item_tokens(item: &ConversationItem) -> u64 {

@@ -618,8 +618,9 @@ mod tests {
                 .contains("crates/codegen/xai-grok-bundle/skills/")
                 && skills.content.contains("/polish")
                 && skills.content.contains("/subagent")
-                && skills.content.contains("/what"),
-            "08-skills.md must name the in-tree default skill source and /polish /subagent /what"
+                && skills.content.contains("/what")
+                && skills.content.contains("/pull-remote-tree"),
+            "08-skills.md must name the in-tree default skill source and /polish /subagent /what /pull-remote-tree"
         );
         assert!(
             skills
@@ -644,8 +645,11 @@ mod tests {
                     .contains("crates/codegen/xai-grok-bundle/skills/subagent/")
                 && slash
                     .content
-                    .contains("crates/codegen/xai-grok-bundle/skills/what"),
-            "04-slash-commands.md must describe /polish /subagent /what as default Grok OSS skills"
+                    .contains("crates/codegen/xai-grok-bundle/skills/what")
+                && slash
+                    .content
+                    .contains("crates/codegen/xai-grok-bundle/skills/pull-remote-tree/"),
+            "04-slash-commands.md must describe /polish /subagent /what /pull-remote-tree as default Grok OSS skills"
         );
         assert!(
             !slash
@@ -678,6 +682,11 @@ mod tests {
         assert!(
             slash.content.contains("Stock `grok` is not signaled"),
             "04-slash-commands.md must say stock grok is not SIGUSR1'd"
+        );
+        assert!(
+            slash.content.contains("unsent composer draft")
+                && slash.content.contains("queued prompts"),
+            "04-slash-commands.md must say /rebuild keeps the unsent draft and queued prompts"
         );
     }
 
@@ -725,6 +734,41 @@ mod tests {
         }
     }
 
+    /// `/unstick` is documented as a new slash and is not `/resume`.
+    #[test]
+    fn user_guide_unstick_is_not_resume() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("### `/unstick`"),
+            "04-slash-commands must document /unstick"
+        );
+        assert!(
+            slash.content.contains("`/unstick` is not `/resume`"),
+            "04-slash-commands must keep /unstick distinct from /resume"
+        );
+        assert!(
+            slash.content.contains("second Human line"),
+            "04-slash-commands must say /unstick does not paint a second Human line"
+        );
+        assert!(
+            slash.content.contains("orphans that hung prompt"),
+            "04-slash-commands must say /unstick orphans a hung in-flight prompt"
+        );
+        assert!(
+            slash.content.contains("leader.response.orphaned")
+                && slash.content.contains("pager stays connected"),
+            "04-slash-commands must say the leader drops a hung session/prompt like a disconnected client while the pager stays connected"
+        );
+        assert!(
+            slash.content.contains("resource links")
+                && slash.content.contains("never re-inlines data URLs"),
+            "04-slash-commands must say WAL images resend as resource links, never data URLs"
+        );
+    }
+
     /// Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
     /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
     /// Notes (`A`) is gone. Empty `a` does not Approve.
@@ -766,6 +810,10 @@ mod tests {
         assert!(
             content.contains("Empty `Enter`") || content.contains("Empty Enter"),
             "19-plan-mode.md must still say empty Enter never Approves"
+        );
+        assert!(
+            content.contains("Ctrl+Z") || content.contains("ctrl+z"),
+            "19-plan-mode.md must say Ctrl+Z restores the Human box"
         );
     }
 
