@@ -782,6 +782,13 @@ Named tests are Surmount / grok-oss fork contracts.
 | `task_output_wait_clears_after_waited_nested_agent_completes` | Satisfied nested wait must not fall through to Waiting for the model |
 | `named_task_output_wait_clears_after_waited_nested_agent_completes` | Named finished nested wait must not paint Waiting for the model |
 | `nested_overlay_drops_responding_after_child_acp_turn_completes` | Finished nested overlay freezes elapsed and drops live Responding / pause-stop |
+| `nested_overlay_write_clears_running_after_completed_handle_update` | Overlay Write of remaining-work markdown must not keep Running after completed handle_update |
+| `write_tool_call_completed_clears_pending_running_activity` | Write ToolCall Completed (not only ToolCallUpdate) finishes pending Running |
+| `stale_write_tool_running_drops_activity_after_bound` | Lost Write completion drops Running chrome after the short bound |
+| `cancel_resend_cap_finishes_cancelling_overlay_turn` | Cancel of a plan-mode or overlay turn finishes in a bounded way after the resend cap |
+| `cancel_plan_mode_turn_with_queue_row_does_not_leave_cancelling_after_cancel_returns` | Plan-mode cancel with a live queue row must not leave Cancelling after the cancel path returns |
+| `stop_during_cancelling_finishes_cancel` | `[stop]` during Cancelling finishes cancel; Human box takes typing; queue #1 does not pin Cancelling |
+| `plan_present_xejk_type_in_human_box_even_while_cancelling` | Idle or cancelling plan present types x/e/j/k in the Human box; empty Enter never Approves; stop still stops |
 | `nested_overlay_title_elapsed_matches_host_subagent_finished_duration` | Overlay title elapsed equals host `duration_ms` (54m34s), not spawn-wall 1h14m |
 | `reopening_finished_nested_overlay_does_not_start_climbing_title_clock` | Reopening a finished overlay must idle the child and keep host duration |
 | `subagents_live_list_drops_responding_after_subagent_finished` | Live Subagents list must not keep Responding after `SubagentFinished` |
@@ -801,6 +808,13 @@ cargo test -p xai-grok-pager --lib -- \
   task_output_wait_clears_after_waited_nested_agent_completes \
   named_task_output_wait_clears_after_waited_nested_agent_completes \
   nested_overlay_drops_responding_after_child_acp_turn_completes \
+  nested_overlay_write_clears_running_after_completed_handle_update \
+  write_tool_call_completed_clears_pending_running_activity \
+  stale_write_tool_running_drops_activity_after_bound \
+  cancel_resend_cap_finishes_cancelling_overlay_turn \
+  cancel_plan_mode_turn_with_queue_row_does_not_leave_cancelling_after_cancel_returns \
+  stop_during_cancelling_finishes_cancel \
+  plan_present_xejk_type_in_human_box_even_while_cancelling \
   nested_overlay_title_elapsed_matches_host_subagent_finished_duration \
   reopening_finished_nested_overlay_does_not_start_climbing_title_clock \
   subagents_live_list_drops_responding_after_subagent_finished \
@@ -925,33 +939,66 @@ cargo test -p xai-grok-update --lib -- export_git_index_omits_unstaged_dirty_fil
 
 #### Prompt write-ahead log (`prompt_wal.jsonl`)
 
-Fork-owned. Session-local append-only file next to `unsent_prompt_draft`.
-Enter send, mid-turn interject, queue enqueue, plan Human-box notes that
-ride Approve, and `/rebuild` persist each append (fsync that line) before
-the model is asked, before compact, and before re-exec. The WAL is not
-rewritten, not compacted as conversation, and not counted as model tokens.
-If chat history, prompt history, and the queue lack a WAL send, session
-load restores it as a pending Human turn. Nested work on the leader
-survives `/rebuild` the same way a TUI disconnect does. After `--resume`
-/ last-session restore, the operator prompt appears once. Unsent draft
-restore and queue restore must not both rehydrate the same string. A WAL
-Send must not enqueue a body already in the composer. Resume must not
+Fork-owned Surmount/grok-oss contract. Session-local append-only file next to
+`unsent_prompt_draft`. Enter send, mid-turn interject, queue enqueue (L0
+drain and mid-turn `pending_prompts` enqueue both append `kind=queue` before
+the model is asked; a later drain may still append `kind=send`), plan
+Human-box notes that ride Approve, and `/rebuild` persist each append (fsync
+that line) before the model is asked, before compact, and before re-exec.
+The WAL is not rewritten, not compacted as conversation, and not counted as
+model tokens. If chat history, prompt history, and the queue lack a WAL
+send, session load restores it as a pending Human turn. Nested work on the
+leader survives `/rebuild` the same way a TUI disconnect does. After
+`--resume` / last-session restore, the operator prompt appears once. Unsent
+draft restore and queue restore must not both rehydrate the same string. A
+WAL Send must not enqueue a body already in the composer. Resume must not
 arm Enter:interject unless a live sampler turn is actually running.
 Waiting after resume must be a real sampler wait, not occupancy leftover.
 
+Land: [`FORK.md`](../../FORK.md) Land checklist **Named tests are contracts**,
+§ *Wasted human time*, lost-prompt, and the Prompt write-ahead log inventory.
+Do not delete or weaken these tests in recon, onto, import, or join.
+Attention dilution and compaction during upstream merge must keep this
+subsection and those FORK bullets.
+
+**Operator-verified known good (2026-09-02).** These named tests encode live
+`prompt_wal.jsonl` kinds the operator confirmed on this machine. They are
+operator-verified known good because live session files contained those
+kinds, not because of a nickname for the set. Do not delete or weaken them
+in recon:
+
+- `prompt_wal_appends_on_enter_before_model_wait` (`send`)
+- `prompt_wal_appends_on_mid_turn_interject` (`interject`)
+- `prompt_wal_appends_on_approve_notes` (`plan-notes`)
+- rebuild persist tests that require a `rebuild-flush` WAL line:
+  `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it`,
+  `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them`
+
+`prompt_wal_appends_on_queue_enqueue` stays in this catalog as a named
+contract. Do **not** mark it operator-verified known good. A live session
+on 2026-09-02 wrote `pending_prompts.json` and had no `prompt_wal.jsonl`.
+
+Restore and skip tests stay contracts, not operator-verified known good from
+this date: `session_load_restores_wal_send_missing_from_prompt_history`,
+`append_fsyncs_a_line_and_does_not_rewrite_prior_lines`,
+`skips_prompt_wal_jsonl_because_it_is_not_conversation`, and the resume
+occupancy tests in the table below.
+
 | path::test | Contract |
 |------------|----------|
-| `prompt_wal_appends_on_enter_before_model_wait` | Enter send appends WAL before `Effect::SendPrompt` |
-| `prompt_wal_appends_on_mid_turn_interject` | Mid-turn interject appends WAL before `SendInterject` |
-| `prompt_wal_appends_on_queue_enqueue` | Queue enqueue (including L0 drain) appends WAL |
-| `prompt_wal_appends_on_approve_notes` | Plan Human-box notes that ride Approve append a `PlanNotes` WAL line |
-| `session_load_restores_wal_send_missing_from_prompt_history` | Missing WAL send restores as a pending Human turn |
-| `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Rebuild flush also writes a WAL line (existing persist test, not weakened) |
-| `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Rebuild flush WAL line for queued bodies (existing persist test, not weakened) |
-| `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue` | Resume restore: operator prompt appears once, not composer plus queue #1 |
-| `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn` | Resume must not arm Enter:interject unless a live sampler turn is running |
-| `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` | Waiting after resume is a real sampler wait, not occupancy leftover |
-| `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string` | Unsent draft and queue restore must not both rehydrate the same string |
+| `prompt_wal_appends_on_enter_before_model_wait` | Enter send appends WAL before `Effect::SendPrompt`. Operator-verified known good (2026-09-02): live `send` records. |
+| `prompt_wal_appends_on_mid_turn_interject` | Mid-turn interject appends WAL before `SendInterject`. Operator-verified known good (2026-09-02): live `interject` records. |
+| `prompt_wal_appends_on_queue_enqueue` | Queue enqueue (L0 drain and mid-turn `pending_prompts` enqueue) appends `kind=queue`. Catalog contract. Not operator-verified known good (2026-09-02): a live session wrote `pending_prompts.json` without `prompt_wal.jsonl`. |
+| `prompt_wal_appends_on_approve_notes` | Plan Human-box notes that ride Approve append a `PlanNotes` WAL line. Operator-verified known good (2026-09-02): live `plan-notes` records. |
+| `session_load_restores_wal_send_missing_from_prompt_history` | Missing WAL send restores as a pending Human turn. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Rebuild flush also writes a WAL line (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
+| `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Rebuild flush WAL line for queued bodies (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
+| `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue` | Resume restore: operator prompt appears once, not composer plus queue #1. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn` | Resume must not arm Enter:interject unless a live sampler turn is running. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` | Waiting after resume is a real sampler wait, not occupancy leftover. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string` | Unsent draft and queue restore must not both rehydrate the same string. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `append_fsyncs_a_line_and_does_not_rewrite_prior_lines` | WAL append fsyncs a line and does not rewrite prior lines. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `skips_prompt_wal_jsonl_because_it_is_not_conversation` | Persistence collect skips `prompt_wal.jsonl` because it is not conversation. Catalog contract, not operator-verified known good from 2026-09-02. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -969,6 +1016,33 @@ cargo test -p xai-grok-pager --lib -- \
 cargo test -p xai-grok-shell --lib -- \
   append_fsyncs_a_line_and_does_not_rewrite_prior_lines \
   skips_prompt_wal_jsonl_because_it_is_not_conversation
+```
+
+#### Interject Ctrl+Enter and Send now
+
+Fork-owned. Mid-turn Ctrl+Enter and the clickable queue `[Send now]`
+control dispatch `SendInterject` (`x.ai/interject`). They must not drop
+the text, queue-only, no-op, or cancel-and-send. Enter with text while a
+turn runs is the separate soft-interject path. Empty composer does not
+send. A successful interject still appends WAL `kind=interject`
+(`prompt_wal_appends_on_mid_turn_interject`). Grok OSS 1.0.3 is **not**
+last-known-good. Operator-verified WAL send / rebuild-flush / interject /
+plan-notes appends do **not** mean live Interject UI works. Do not delete
+or weaken these tests in recon.
+
+| path::test | Contract |
+|------------|----------|
+| `ctrl_enter_mid_turn_dispatches_send_interject` | Mid-turn Ctrl+Enter dispatches `SendInterject`, not `SendPromptNow`. Not last-known-good. |
+| `queue_send_now_click_dispatches_send_interject` | Mouse Down on queue `[Send now]` for a local row dispatches `SendInterject`. Key and click must not diverge. Not last-known-good. |
+| `empty_ctrl_enter_mid_turn_does_not_send` | Empty composer does not send. Not last-known-good. |
+| `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  ctrl_enter_mid_turn_dispatches_send_interject \
+  queue_send_now_click_dispatches_send_interject \
+  empty_ctrl_enter_mid_turn_does_not_send \
+  prompt_wal_appends_on_mid_turn_interject
 ```
 
 #### Compact must not re-enqueue occupancy
@@ -1531,6 +1605,13 @@ cargo test -p xai-grok-pager --lib -- \
   task_output_wait_clears_after_waited_nested_agent_completes \
   named_task_output_wait_clears_after_waited_nested_agent_completes \
   nested_overlay_drops_responding_after_child_acp_turn_completes \
+  nested_overlay_write_clears_running_after_completed_handle_update \
+  write_tool_call_completed_clears_pending_running_activity \
+  stale_write_tool_running_drops_activity_after_bound \
+  cancel_resend_cap_finishes_cancelling_overlay_turn \
+  cancel_plan_mode_turn_with_queue_row_does_not_leave_cancelling_after_cancel_returns \
+  stop_during_cancelling_finishes_cancel \
+  plan_present_xejk_type_in_human_box_even_while_cancelling \
   nested_overlay_title_elapsed_matches_host_subagent_finished_duration \
   reopening_finished_nested_overlay_does_not_start_climbing_title_clock \
   subagents_live_list_drops_responding_after_subagent_finished \
@@ -1554,6 +1635,9 @@ cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_mid_turn_interject \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
+  ctrl_enter_mid_turn_dispatches_send_interject \
+  queue_send_now_click_dispatches_send_interject \
+  empty_ctrl_enter_mid_turn_does_not_send \
   session_load_restores_wal_send_missing_from_prompt_history \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
   resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \

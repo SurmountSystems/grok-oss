@@ -252,6 +252,68 @@ fn tool_call_lifecycle() {
     assert_eq!(sb.len(), 1);
     assert_eq!(tracker.pending_tools.len(), 0);
 }
+/// A completed Write can arrive as a full `ToolCall` (not `ToolCallUpdate`).
+/// The pending start must finish so overlay chrome cannot sit on
+/// `Running: Write …` after the file exists.
+#[test]
+fn write_tool_call_completed_clears_pending_running_activity() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+    tracker.handle_update(
+        tool_call("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    assert!(
+        matches!(
+            tracker.activity(),
+            Some(TurnActivity::ToolRunning { ref title, .. }) if title.starts_with("Write")
+        ),
+        "pending Write must paint Running, got {:?}",
+        tracker.activity()
+    );
+    tracker.handle_update(
+        tool_call_completed("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(tracker.pending_tools.len(), 0);
+    assert_ne!(
+        tracker.activity().map(|a| matches!(
+            a,
+            TurnActivity::ToolRunning { title, .. } if title.starts_with("Write")
+        )),
+        Some(true),
+        "completed Write must not keep ToolRunning, got {:?}",
+        tracker.activity()
+    );
+}
+/// Lost Write completion must drop `Running: Write …` after the short bound.
+#[test]
+fn stale_write_tool_running_drops_activity_after_bound() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+    tracker.handle_update(
+        tool_call("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    tracker.backdate_pending_tool_started_at(
+        "tc-write",
+        WRITING_DELTA_STALE_AFTER + std::time::Duration::from_secs(1),
+    );
+    assert_ne!(
+        tracker.activity().map(|a| matches!(
+            a,
+            TurnActivity::ToolRunning { title, .. } if title.starts_with("Write")
+        )),
+        Some(true),
+        "stale Write must not keep Running chrome, got {:?}",
+        tracker.activity()
+    );
+}
 #[test]
 fn tool_call_already_completed() {
     let mut sb = ScrollbackState::new();

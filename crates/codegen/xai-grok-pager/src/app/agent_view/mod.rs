@@ -1705,8 +1705,9 @@ pub struct AgentView {
     /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
     pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
     /// Send-now cancel expectation: the client-minted id of an explicit
-    /// cancel-and-send this client dispatched into a running turn (send-now
-    /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
+    /// cancel-and-send this client dispatched into a running turn (parked
+    /// sendable-wait `SendPromptNow`, not the InterjectPrompt chord or queue
+    /// `[Send now]`, which are `x.ai/interject`). The running turn's
     /// imminent cancel is the silent half of cancel-and-send, so the turn-end
     /// rails suppress the "Turn cancelled by user …" marker.
     ///

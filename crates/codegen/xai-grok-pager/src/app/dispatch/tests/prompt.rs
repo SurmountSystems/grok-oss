@@ -3397,13 +3397,13 @@ fn interject_before_paste_probe_keeps_image() {
     let sent_image = effects.iter().any(|e| {
         matches!(
             e,
-            Effect::SendPromptNow { blocks, .. }
+            Effect::SendInterject { blocks: Some(blocks), .. }
                 if blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
         sent_image,
-        "the re-issued send-now must carry the pasted image; effects = {effects:?}"
+        "the re-issued interject must carry the pasted image; effects = {effects:?}"
     );
     assert_eq!(
         app.agents[&id].prompt.text(),

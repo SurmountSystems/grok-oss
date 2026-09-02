@@ -603,7 +603,11 @@ less than product code and tests. Do not invent long essays or git nags.
     an engineering miss. The durability path is the prompt write-ahead
     log (`prompt_wal.jsonl`). Tests that encode this are Surmount
     contracts: keep the stronger assert, enroll them in the catalog, do
-    not fit them to a wipe. Adjacent to constraint 23; it does not
+    not fit them to a wipe. **Operator-verified known good (2026-09-02)**
+    for send, rebuild-flush, interject, and plan-notes append tests:
+    [`FORK.md`](FORK.md) Land checklist **Named tests are contracts** and
+    [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+    § Prompt write-ahead log. Adjacent to constraint 23; it does not
     replace Hunter's razor, image-token, lost-prompt, Operator/Agent, or
     `/rebuild` persist bullets. Full law: this file § *Wasted human
     time*. Dual-pin: [`FORK.md`](FORK.md) same heading. Host pointer:
@@ -655,11 +659,18 @@ This is adjacent to § *The operator's words are the spec* (hard
 constraint 23). It does not replace it. Named tests are Surmount
 contracts: quote the owed outcome, keep the stronger assert, enroll
 them in the catalog, do not fit them to a wipe. Meritocratic with
-Hunter's razor. Do not clobber the image-token, lost-prompt
-integration, Operator/Agent speaker-label, or `/rebuild` persist
-bullets when editing those files. Dual-pin: [`FORK.md`](FORK.md) §
-*Wasted human time*. Host pointer: `~/.grok/AGENTS.md` § *The
-operator's words are the spec*.
+Hunter's razor. **Operator-verified known good (2026-09-02)** for named
+tests that encode live `send`, `rebuild-flush`, `interject`, and
+`plan-notes` appends, because live session files contained those kinds.
+Queue enqueue is still a catalog contract and is not that known-good
+mark. Restore and skip tests stay contracts. Land and catalog:
+[`FORK.md`](FORK.md) Land checklist **Named tests are contracts** and
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+§ Prompt write-ahead log. Do not delete or weaken those tests in recon.
+Do not clobber the image-token, lost-prompt integration, Operator/Agent
+speaker-label, or `/rebuild` persist bullets when editing those files.
+Dual-pin: [`FORK.md`](FORK.md) § *Wasted human time*. Host pointer:
+`~/.grok/AGENTS.md` § *The operator's words are the spec*.
 
 ## Subagents — parent is HITL UX only (hard)
 

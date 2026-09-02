@@ -1424,10 +1424,19 @@ impl AgentView {
         ) {
             return Some(InputOutcome::Unchanged);
         }
-        // Preview line-viewer swallows Ctrl+C as a no-op. Route CancelTurn
-        // into the plan feedback path so empty-composer Ctrl+C can abandon
-        // (same as `q`) and a non-empty draft can still clear first.
+        // Preview line-viewer swallows Ctrl+C as a no-op. A running or
+        // cancelling turn must still CancelTurn (plan present plus queue
+        // edit must not freeze stop). Idle empty-composer Ctrl+C abandons.
         if registry.matches_id(ActionId::CancelTurn, key) {
+            let overlay_busy = self.active_subagent.as_ref().is_some_and(|sid| {
+                self.subagent_views.get(sid.as_str()).is_some_and(|child| {
+                    child.stoppable_activity_running() || child.any_cancel_pending()
+                })
+            });
+            if self.stoppable_activity_running() || self.any_cancel_pending() || overlay_busy {
+                self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                return Some(InputOutcome::Action(Action::CancelTurn));
+            }
             return Some(self.handle_plan_feedback_key(key));
         }
         let action_id = registry.lookup(key, When::AgentScreen)?;

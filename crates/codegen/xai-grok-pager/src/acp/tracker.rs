@@ -432,6 +432,19 @@ struct PendingTool {
     /// whatever variant the refined block becomes.
     started_at: Option<std::time::Instant>,
 }
+/// A landed Write tool whose completion was lost: do not keep overlay
+/// `Running: Write …` after a short bound. Execute and search_replace stay.
+fn is_stale_short_write(pending: &PendingTool) -> bool {
+    if pending.base.kind != acp::ToolKind::Edit {
+        return false;
+    }
+    if !pending.base.title.trim_start().starts_with("Write") {
+        return false;
+    }
+    pending
+        .started_at
+        .is_some_and(|at| at.elapsed() >= WRITING_DELTA_STALE_AFTER)
+}
 /// Streaming UTF-8 decoder for incremental byte deltas.
 ///
 /// When output is split at arbitrary byte offsets, a multi-byte UTF-8
@@ -543,7 +556,11 @@ impl AcpUpdateTracker {
         if self.current_thinking.is_some() {
             return Some(TurnActivity::Thinking);
         }
-        if let Some(tool) = self.pending_tools.values().next() {
+        if let Some(tool) = self
+            .pending_tools
+            .values()
+            .find(|tool| !is_stale_short_write(tool))
+        {
             let description = tool
                 .base
                 .raw_input
@@ -781,6 +798,17 @@ impl AcpUpdateTracker {
     pub(crate) fn backdate_writing_stream_start(&mut self, age: std::time::Duration) {
         if let Some(at) = &mut self.writing_stream_started_at {
             *at = std::time::Instant::now() - age;
+        }
+    }
+    /// Backdate a pending tool's start (stale Write chrome tests).
+    #[cfg(test)]
+    pub(crate) fn backdate_pending_tool_started_at(
+        &mut self,
+        tool_call_id: &str,
+        age: std::time::Duration,
+    ) {
+        if let Some(pending) = self.pending_tools.get_mut(tool_call_id) {
+            pending.started_at = Some(std::time::Instant::now() - age);
         }
     }
     fn clear_writing_tool_call(&mut self) {
@@ -1362,6 +1390,26 @@ impl AcpUpdateTracker {
             tc.status,
             acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
         );
+        if let Some(pending) = self.pending_tools.remove(&tc_id) {
+            if is_completed {
+                if let Some(entry_id) = pending.entry_id {
+                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    if scrollback.replace_tool_block(entry_id, block, pending.started_at)
+                        && let Some(entry) = scrollback.get_by_id(entry_id)
+                    {
+                        self.queue_edit_hl_if_needed(entry_id, &entry.block, is_replay);
+                    }
+                    scrollback.finish_running(entry_id);
+                    self.try_coalesce_edit(entry_id, scrollback, is_replay);
+                } else {
+                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    self.finish_completed_tool(block, scrollback, is_replay);
+                }
+                return true;
+            }
+            self.pending_tools.insert(tc_id, pending);
+            return true;
+        }
         if is_completed {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
             self.finish_completed_tool(block, scrollback, is_replay);

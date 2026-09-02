@@ -424,6 +424,69 @@ fn plan_row_click_does_not_enter_commenting() {
     );
 }
 
+/// Idle or cancelling plan present must not steal `x`/`e`/`j`/`k` into list
+/// capture. Empty Enter never Approves. Clickable CTAs stay.
+#[test]
+fn plan_present_xejk_type_in_human_box_even_while_cancelling() {
+    use crate::app::agent::AgentState;
+    use crate::app::app_view::InputOutcome;
+    use crate::app::queue_edit::PromptMode;
+
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    agent.session.state = AgentState::TurnCancelling;
+    agent.prompt_mode = PromptMode::EditingQueued {
+        id: 1,
+        original: "queued #1".into(),
+        server_id: None,
+        kind: crate::app::agent::QueueEntryKind::Prompt,
+    };
+    let registry = ActionRegistry::defaults();
+    let pane_before = plan_pane_nav(&agent);
+
+    for ch in ['x', 'e', 'j', 'k'] {
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+            &registry,
+        );
+    }
+    assert_eq!(
+        agent.prompt.text(),
+        "xejk",
+        "idle/cancelling plan present must type x/e/j/k in the Human box, got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        plan_pane_nav(&agent),
+        pane_before,
+        "those letters must not walk the plan list"
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "clickable plan CTAs must stay"
+    );
+
+    agent.prompt.set_text("");
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &registry,
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "empty Enter must never Approve"
+    );
+
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let outcome = agent.handle_input(&ctrl_c, &registry);
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Action(crate::app::actions::Action::CancelTurn)
+        ),
+        "queue #1 plus plan row editor plus Cancelling must still stop, got {outcome:?}"
+    );
+}
+
 /// Empty Enter on the default parked Preview stays on Preview.
 /// Commenting is explicit `c` only.
 #[test]

@@ -5814,6 +5814,62 @@ mod nested_l2_overlay_wait_chrome_tests {
         );
     }
 
+    /// Overlay Write of a remaining-work markdown must not keep `Running`
+    /// after `handle_update` completes the tool (file exists).
+    #[test]
+    fn nested_overlay_write_clears_running_after_completed_handle_update() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Completed)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix plan cancel hang");
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            !text.contains("Running: Write"),
+            "completed Write must not keep overlay Running chrome:\n{text}"
+        );
+        let l2 = parent.subagent_views.get("l2-coord").unwrap();
+        assert!(
+            !matches!(
+                l2.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::ToolRunning { title, .. })
+                    if title.starts_with("Write")
+            ),
+            "handle_update Completed must finish the Write, got {:?}",
+            l2.resolve_turn_activity()
+        );
+    }
+
     /// Overlay Preparing search_replace with no nested specialist must still
     /// name the live tool, not sit on Preparing for minutes.
     #[test]

@@ -2058,9 +2058,9 @@ fn minimal_ctrl_o_opens_transcript_pager() {
 /// Apple Terminal (interject = Ctrl+O), minimal mode: at idle the interject
 /// path would silently no-op, so Ctrl+O must open the transcript — this was
 /// the "Ctrl+O appears dead on Mac" report. With a running turn and text in
-/// the composer the same key must send-now (cancel-and-send). With a running
+/// the composer the same key must interject (`SendInterject`). With a running
 /// turn, empty composer, and a queued follow-up it must force-send that row
-/// (send-now).
+/// the same way.
 #[test]
 fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
     let mut app = test_app_with_agent();
@@ -2079,8 +2079,8 @@ fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() 
     }
     let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(
-        matches!(out, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "steer it"),
-        "running Apple-Terminal Ctrl+O with payload must send-now, got {out:?}"
+        matches!(out, InputOutcome::Action(Action::Interject { ref text, .. }) if text == "steer it"),
+        "running Apple-Terminal Ctrl+O with payload must interject, got {out:?}"
     );
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -2091,10 +2091,10 @@ fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() 
     assert!(
         matches!(
             out,
-            InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+            InputOutcome::Action(Action::Interject { ref text, .. })
                 if text == "queued follow-up"
         ),
-        "running + empty + queue: Apple-Terminal Ctrl+O must send-now, got {out:?}"
+        "running + empty + queue: Apple-Terminal Ctrl+O must interject, got {out:?}"
     );
     assert!(
         app.agents[&id].session.pending_prompts.is_empty(),

@@ -120,6 +120,16 @@ impl AgentView {
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let in_plan_approval = self.plan_approval_view.is_some();
+        let plan_present = in_plan_approval || self.is_plan_viewer();
+
+        // Idle or cancelling plan present: `x`/`e`/`j`/`k` type in the Human
+        // box. They must not become list capture (delete / edit / row walk).
+        if plan_present
+            && matches!(key.code, KeyCode::Char('x' | 'e' | 'j' | 'k'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return self.handle_plan_feedback_key(key);
+        }
 
         let input_bar_active = self
             .line_viewer

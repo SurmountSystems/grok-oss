@@ -186,7 +186,11 @@ mod tests {
     }
 
     /// Surmount / grok-oss fork; tests are contracts.
-    /// L0 drain enqueue writes a `queue` WAL line before the model is asked.
+    /// Queue enqueue writes a `queue` WAL line when the body lands on
+    /// `pending_prompts`, before the model is asked. L0 drain and mid-turn
+    /// local enqueue (follow-up while a turn is running and the local queue
+    /// is already non-empty) both append `kind=queue`. A later drain may
+    /// still append `kind=send`; the queue line must exist first.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn prompt_wal_appends_on_queue_enqueue() {
@@ -209,6 +213,56 @@ mod tests {
                     && r.text == body
             }),
             "prompt_wal.jsonl must contain the queued body, got {rows:?}"
+        );
+
+        let proj2 = tempfile::tempdir().expect("cwd2");
+        let cwd2 = proj2.path().to_path_buf();
+        let cwd2_str = cwd2.to_string_lossy().into_owned();
+        let sid2 = "wal-queue-mid-turn";
+        let body2 = "mid-turn queued prompt that must hit the WAL as queue";
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let id = crate::app::agent::AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.session_id = Some(sid2.into());
+            agent.session.cwd = cwd2;
+            agent.session.state = crate::app::agent::AgentState::TurnRunning;
+            agent.session.enqueue_prompt("already waiting".into());
+        }
+        let effects = crate::app::dispatch::dispatch(
+            crate::app::actions::Action::SubmitFollowUp(body2.into()),
+            &mut app,
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::SendPrompt { text, .. } if text == body2
+            )),
+            "mid-turn pending_prompts enqueue must not ask the model yet, got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text == body2),
+            "mid-turn body must land on pending_prompts, queue={:?}",
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        let rows2 = xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd2_str, sid2)
+            .expect("load mid-turn WAL");
+        assert!(
+            rows2.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::Queue
+                    && r.text == body2
+            }),
+            "mid-turn pending_prompts enqueue must append kind=queue, not only send later, got {rows2:?}"
         );
     }
 

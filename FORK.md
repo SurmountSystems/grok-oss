@@ -94,13 +94,19 @@ preservation as shipped while the file is absent.
 
 Named tests are Surmount contracts: quote the owed outcome, keep the
 stronger assert, enroll them in
-[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md),
-do not fit them to a wipe. Meritocratic with § *Hunter's razor*. This
-pin does not replace Hunter's razor, pasted-image tokens, lost-prompt
-integration tests, Operator/Agent speaker labels, or the `/rebuild`
-persist named-test list. Dual-pin: [`AGENTS.md`](AGENTS.md) § *Wasted
-human time* (hard constraint 24). Host pointer: `~/.grok/AGENTS.md` §
-*The operator's words are the spec*.
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+§ Prompt write-ahead log, do not fit them to a wipe. Meritocratic with
+§ *Hunter's razor*. **Operator-verified known good (2026-09-02)** for
+named tests that encode live `send`, `rebuild-flush`, `interject`, and
+`plan-notes` appends, because live session files contained those kinds.
+Queue enqueue stays a catalog contract and is not that known-good mark.
+Restore and skip tests stay contracts. Do not delete or weaken those
+tests in recon, onto, import, or join. This pin does not replace
+Hunter's razor, pasted-image tokens, lost-prompt integration tests,
+Operator/Agent speaker labels, or the `/rebuild` persist named-test
+list. Dual-pin: [`AGENTS.md`](AGENTS.md) § *Wasted human time* (hard
+constraint 24). Host pointer: `~/.grok/AGENTS.md` § *The operator's
+words are the spec*.
 
 ## What Grok OSS adds (divergence inventory)
 
@@ -747,7 +753,9 @@ identifier that has no matching `fn`.
   Not a land class. User-guide `04-slash-commands`.
 - [x] **Prompt write-ahead log (`prompt_wal.jsonl`)**: session-local
   append-only file next to `unsent_prompt_draft`. Enter send, mid-turn
-  interject, queue enqueue, plan Human-box notes that ride Approve, and
+  interject, queue enqueue (including mid-turn `pending_prompts` enqueue,
+  which appends `kind=queue` before any later `kind=send`), plan Human-box
+  notes that ride Approve, and
   `/rebuild` persist each append (and fsync) one JSONL object before the
   model is asked, before compact, and before re-exec. The WAL is not
   rewritten, not compacted as conversation, and not counted as model
@@ -769,7 +777,38 @@ identifier that has no matching `fn`.
   `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
   `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`
   (`xai-grok-pager`); rebuild persist tests also require a rebuild-flush
-  WAL line. User-guide `04-slash-commands`, `17-sessions`.
+  WAL line. User-guide `04-slash-commands`, `17-sessions`. Catalog:
+  [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+  § Prompt write-ahead log. **Operator-verified known good (2026-09-02)**
+  because live session files contained those kinds:
+  `prompt_wal_appends_on_enter_before_model_wait` (`send`),
+  `prompt_wal_appends_on_mid_turn_interject` (`interject`),
+  `prompt_wal_appends_on_approve_notes` (`plan-notes`), and rebuild
+  persist tests that require a `rebuild-flush` WAL line. Queue enqueue
+  (`prompt_wal_appends_on_queue_enqueue`) stays a named contract. Do not
+  mark it operator-verified known good: a live session wrote
+  `pending_prompts.json` and had no `prompt_wal.jsonl`. Restore tests
+  (`session_load_restores_wal_send_missing_from_prompt_history`, resume
+  occupancy) and skip (`skips_prompt_wal_jsonl_because_it_is_not_conversation`)
+  stay contracts. Do not delete or weaken those tests in recon, onto,
+  import, or join.
+- [x] **Interject Ctrl+Enter and Send now are fork-owned.** Mid-turn
+  Ctrl+Enter and the clickable queue `[Send now]` control dispatch
+  `SendInterject` (`x.ai/interject`). They must not drop the text, queue-only,
+  no-op, or cancel-and-send. Enter with text while a turn runs is the
+  separate soft-interject path. Empty composer does not send. A successful
+  interject still appends WAL `kind=interject`. Product: InterjectPrompt
+  (`agent_view/prompt.rs`) and local-row `force_interject_queue_row`
+  (`agent_view/queue.rs`; mouse Down on `[Send now]` in `app/mouse.rs`)
+  emit `Action::Interject`, not `SendPromptNow`. Grok OSS 1.0.3 is **not**
+  last-known-good for this UI. Operator-verified WAL send / rebuild-flush /
+  interject / plan-notes appends do **not** mean live Interject UI works.
+  Named tests: `ctrl_enter_mid_turn_dispatches_send_interject`,
+  `queue_send_now_click_dispatches_send_interject`,
+  `empty_ctrl_enter_mid_turn_does_not_send`. Do not delete or weaken
+  `prompt_wal_appends_on_mid_turn_interject`. Catalog:
+  [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+  § Interject Ctrl+Enter and Send now.
 - [x] **Leader `RelaunchForUpdate` nested work and parent-turn busy survive like a TUI
   disconnect**: this leader process stays up while nested ids are live
   (spawned leaders already pass `--no-exit-on-disconnect`). After nested
@@ -1054,6 +1093,25 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `aborted_mixed_thought_expanded_body_omits_user_facing_draft`. Do not
   revert resume occupancy, hang-chrome, image-token, Approve-with-comment,
   Ctrl-Z debounce, WAL, or Operator labels.
+- [x] **Plan cancel and overlay Write finish in a bounded way (2026-09-02)**:
+  cancel of a plan-mode or overlay turn must leave `Cancelling…` after the
+  resend cap (overlay children are on the turn-end reconcile). A plan-mode
+  turn with a live queue row must not stay Cancelling after the cancel path
+  returns. `[stop]` during Cancelling must finish cancel, not sit. Queue
+  promotion that changes `current_prompt_id` must not skip turn-end
+  reconcile. Idle or cancelling plan present types `x`/`e`/`j`/`k` in the
+  Human box; empty Enter never Approves; queue edit plus plan plus
+  Cancelling still CancelTurn. A completed Write `ToolCall` (not only
+  `ToolCallUpdate`) finishes pending Running chrome; a lost Write completion
+  drops that chrome after the short bound. Do not call grok-oss 1.0.3
+  last-known-good. Tests:
+  `cancel_resend_cap_finishes_cancelling_overlay_turn`,
+  `cancel_plan_mode_turn_with_queue_row_does_not_leave_cancelling_after_cancel_returns`,
+  `stop_during_cancelling_finishes_cancel`,
+  `plan_present_xejk_type_in_human_box_even_while_cancelling`,
+  `nested_overlay_write_clears_running_after_completed_handle_update`,
+  `write_tool_call_completed_clears_pending_running_activity`,
+  `stale_write_tool_running_drops_activity_after_bound`.
 - [x] **Stuck Retrying / StreamResumed (honesty)**: pager maps
   `RetryState::StreamResumed` in `session_notification.rs`. Shell emit
   exists: `stream_started_emits_retry_state_stream_resumed`. Sampler
@@ -1728,9 +1786,16 @@ a product defect. Repeating because the harness lost the text is an
 engineering miss. The durability path is `prompt_wal.jsonl`. Enroll
 named WAL tests in the catalog when they exist. Do not document
 `/rebuild` WAL preservation as shipped while that file is absent.
-Adjacent to this paragraph and § *Hunter's razor*; it does not replace
-them. Dual-pin: [`AGENTS.md`](AGENTS.md) § *Wasted human time* (hard
-constraint 24).
+**Operator-verified known good (2026-09-02)** for named tests that encode
+live `send`, `rebuild-flush`, `interject`, and `plan-notes` appends,
+because live session files contained those kinds. Catalog:
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+§ Prompt write-ahead log. Queue enqueue is still a named contract; do
+not mark it known good from that date. Restore and skip tests stay
+contracts. Do not delete or weaken those tests in recon, onto, import,
+or join. Adjacent to this paragraph, **Named tests are contracts**,
+lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
+[`AGENTS.md`](AGENTS.md) § *Wasted human time* (hard constraint 24).
 
 **Rules (not product class numbers):**
 
@@ -1869,6 +1934,21 @@ that drops them while keeping the seven is still a seam loss):
   The prompt write-ahead log (`prompt_wal.jsonl`) is the durability path
   for a dropped operator prompt. Enroll named WAL tests in this extra
   class when they exist. Do not list a WAL `fn` that is not in the tree.
+  **Operator-verified known good (2026-09-02)** for send, rebuild-flush,
+  interject, and plan-notes append tests named in
+  [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+  § Prompt write-ahead log. Queue enqueue is not that mark. Restore tests
+  stay contracts. Do not delete or weaken those tests in recon.
+- Interject Ctrl+Enter and Send now are fork-owned. Mid-turn Ctrl+Enter
+  and queue `[Send now]` dispatch `SendInterject` via `Action::Interject`
+  (not `SendPromptNow`). Grok OSS 1.0.3 is
+  **not** last-known-good. WAL known-good for send / rebuild-flush /
+  interject / plan-notes appends is a separate contract and does not
+  prove live Interject UI. Named tests:
+  `ctrl_enter_mid_turn_dispatches_send_interject`,
+  `queue_send_now_click_dispatches_send_interject`,
+  `empty_ctrl_enter_mid_turn_does_not_send`. Keep
+  `prompt_wal_appends_on_mid_turn_interject`.
 - Nucleo reuse-per-root.
 - Baked default is Grok 4.6 at medium reasoning effort
   (`baked_default_is_grok_46_medium_fork_contract`). Fork contract change.
@@ -2121,6 +2201,9 @@ cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_mid_turn_interject \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
+  ctrl_enter_mid_turn_dispatches_send_interject \
+  queue_send_now_click_dispatches_send_interject \
+  empty_ctrl_enter_mid_turn_does_not_send \
   session_load_restores_wal_send_missing_from_prompt_history
 cargo test -p xai-grok-update --lib -- export_git_index_omits_unstaged_dirty_file \
   stash_keep_index_hides_unstaged_wip_from_compile_worktree

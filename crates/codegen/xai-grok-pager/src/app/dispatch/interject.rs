@@ -277,7 +277,11 @@ mod tests {
     use crate::app::dispatch::tests::test_app_with_agent;
     use crate::input::key::KeyShortcut;
     use agent_client_protocol as acp;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     /// Composer-clear ownership: dispatch NEVER touches the composer. The
     /// only composer-text producer (the InterjectPrompt registry arm) clears
@@ -499,6 +503,176 @@ mod tests {
                     && r.text == body
             }),
             "prompt_wal.jsonl must contain the mid-turn interject, got {rows:?}"
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Mid-turn Ctrl+Enter must dispatch `SendInterject` (`x.ai/interject`).
+    /// It must not drop the composer text, queue-only, no-op, or cancel-and-send
+    /// (`SendPromptNow`). This is the explicit send-now chord; Enter is the
+    /// separate soft-interject path. Grok OSS 1.0.3 is not last-known-good.
+    ///
+    /// Red before product (code reading): `agent_view/prompt.rs` InterjectPrompt
+    /// arm returned `Action::SendPromptNow`, so dispatch emitted
+    /// `Effect::SendPromptNow` instead of `Effect::SendInterject`.
+    #[test]
+    fn ctrl_enter_mid_turn_dispatches_send_interject() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "steer this running turn";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "Ctrl+Enter mid-turn must emit Interject, not drop or queue-only, got {other:?}"
+                ),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "Ctrl+Enter must be Action::Interject, not SendPromptNow, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "must not serial-queue or cancel-and-send, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "composer must clear at the InterjectPrompt call site"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "must not land in pending_prompts as the next serial prompt"
+        );
+        assert!(
+            app.agents[&id].session.state.is_turn_running(),
+            "current turn must keep running"
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Empty composer + Ctrl+Enter must not send an empty interject.
+    #[test]
+    fn empty_ctrl_enter_mid_turn_does_not_send() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let outcome = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.pending_prompts.clear();
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text("");
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+        };
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::SendPrompt(_))
+            ),
+            "empty composer must not send, got {outcome:?}"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "empty Ctrl+Enter must not invent a queued row"
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Queue `#1 [Send now]` mouse Down must send a local queued row as
+    /// `SendInterject`. Key and click must not diverge.
+    ///
+    /// Red before product (code reading): `force_interject_queue_row` returned
+    /// `Action::SendPromptNow` for local rows (`agent_view/queue.rs`). Mouse
+    /// Down on `[Send now]` (`app/mouse.rs`) calls that function, so a click
+    /// would have dispatched `SendPromptNow` instead of `SendInterject`.
+    #[test]
+    fn queue_send_now_click_dispatches_send_interject() {
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "queued follow-up";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.enqueue_prompt(body.into());
+            agent.sync_queue_pane();
+            let row_id = *agent
+                .queue
+                .entry_ids()
+                .first()
+                .expect("queued row must paint");
+            agent.queue.list_state.select_by_id(row_id);
+            let area = Rect::new(0, 0, 80, 6);
+            let mut buf = Buffer::empty(area);
+            let layout_cfg = crate::appearance::LayoutConfig::default();
+            agent
+                .queue
+                .render(area, &mut buf, true, &layout_cfg, None, true);
+            agent.pane_areas.queue = area;
+            let mut found = None;
+            'find: for row in area.y..area.y + area.height {
+                for col in area.x..area.x + area.width {
+                    if agent.queue.send_now_click(col, row) == Some(row_id) {
+                        found = Some((col, row));
+                        break 'find;
+                    }
+                }
+            }
+            let (col, row) = found.expect("queue [Send now] must paint on the local row");
+            match agent.handle_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            }) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Send now on a local queue row must emit Interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "Send now must be Action::Interject, not SendPromptNow, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject from Send now, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "Send now must not cancel-and-send, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "queued row must be consumed"
+        );
+        assert!(
+            app.agents[&id].session.state.is_turn_running(),
+            "current turn must keep running"
         );
     }
 

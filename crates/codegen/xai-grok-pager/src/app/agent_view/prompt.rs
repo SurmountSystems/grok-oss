@@ -622,9 +622,10 @@ impl AgentView {
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
                     }
-                    // Mid-turn send-now (cancel-and-send):
-                    // 1) Non-empty composer → cancel the running turn and send
-                    //    that text as the next prompt.
+                    // Mid-turn send-now is explicit `x.ai/interject` (never
+                    // cancel-and-send). Enter with text is the soft-interject
+                    // path in `dispatch_send_prompt`. This chord:
+                    // 1) Non-empty composer → `Action::Interject`.
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    same as bare Enter: send the top row now.
                     // 3) Idle / nothing to send → no-op (not send-like-Enter).
@@ -644,7 +645,7 @@ impl AgentView {
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
+                        return InputOutcome::Action(Action::Interject { text, images });
                     }
                     if turn_running && let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;

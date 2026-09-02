@@ -825,6 +825,11 @@ pub(super) fn dispatch_send_prompt_inner(
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
+                agent.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+                    &display_text,
+                    &agent.prompt.images,
+                );
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
                 agent.start_pending_live_prompt_task(&display_text);
@@ -939,8 +944,9 @@ pub(super) fn dispatch_send_prompt_inner(
         // (soft interject). A parked sendable wait (task-output / wait-all)
         // is send-now, not interject — the named tests encode immediate
         // `SendPrompt`. Named `/queue` hold and empty Enter (plan Approve /
-        // force-send of a queued row) are other paths. Ctrl+Enter stays
-        // cancel-and-send (`SendPromptNow`).
+        // force-send of a queued row) are other paths. Ctrl+Enter / Send now
+        // is the explicit InterjectPrompt path (`SendInterject`), not
+        // cancel-and-send.
         if consume_input
             && agent.session.state.is_turn_running()
             && !agent.is_parked_on_sendable_wait()
@@ -951,7 +957,8 @@ pub(super) fn dispatch_send_prompt_inner(
 
         // If the user queues a follow-up while a turn is already running, surface
         // a short tip advertising send-now — empty Enter on the composer
-        // force-sends the top queued row (cancel-and-send for a local row).
+        // force-sends the top queued row as an interject (local row:
+        // `Action::Interject`).
         let queued_while_running = agent.session.state.is_turn_running();
 
         // Composer-recognized slash tokens at submit time: styles the
@@ -1055,6 +1062,17 @@ pub(super) fn dispatch_send_prompt_inner(
                 agent.maybe_toast_plan_feedback_queue();
             }
             if let Some(agent) = app.agents.get_mut(&id) {
+                // Server-authoritative send while a turn is running still
+                // persists onto `pending_prompts.json` via the shared queue.
+                // Record `queue` at that enqueue, then `send` as the distinct
+                // model-ask event.
+                if queued_while_running {
+                    agent.append_prompt_wal(
+                        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+                        &text,
+                        &[],
+                    );
+                }
                 agent.append_prompt_wal(
                     xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
                     &text,
@@ -1071,8 +1089,24 @@ pub(super) fn dispatch_send_prompt_inner(
             }];
         }
 
+        // This path always lands on `pending_prompts` first. When drain is
+        // blocked (turn running, no session, server queue owns next turn),
+        // the WAL line is `queue` at enqueue time. Idle drain in the same
+        // dispatch still asks the model; that is `send` below.
+        let drain_blocked = !agent.session.state.is_idle()
+            || agent.session.session_id.is_none()
+            || agent.session.model_switch_pending
+            || agent.session.loading_replay
+            || agent
+                .shared_queue
+                .iter()
+                .any(|e| Some(e.id.as_str()) != agent.session.current_prompt_id.as_deref());
         agent.append_prompt_wal(
-            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            if drain_blocked {
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Queue
+            } else {
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+            },
             &text,
             &agent.prompt.images,
         );
