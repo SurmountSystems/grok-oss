@@ -1009,6 +1009,22 @@ cargo test -p xai-grok-pager --lib -- parses_view_plan_with_trailing_slash
 cargo test -p xai-grok-pager-pty-harness --test plan_approval_resume
 ```
 
+#### Sticky message timestamps and reconnect banner
+
+Fork-owned. Message clocks stay on the first visible row when the original
+timestamp line has scrolled above the fold. Leader disconnect paints a
+sticky `Disconnected. Reconnecting...` banner until reconnect completes.
+
+| path::test | Contract |
+|------------|----------|
+| `timestamp_stays_visible_when_first_line_scrolls_above_fold` | Clipped message still paints the clock on the first visible row |
+| `live_prompt_task_pauses_honest_clock_at_disconnect_toast` | Disconnect toast plus sticky banner; sticky clears after reconnect |
+
+```bash
+cargo test -p xai-grok-pager --lib -- timestamp_stays_visible_when_first_line_scrolls_above_fold
+cargo test -p xai-grok-pager --lib -- live_prompt_task_pauses_honest_clock_at_disconnect_toast
+```
+
 #### ForceRefresh on explicit `/limits`
 
 Explicit TUI `/limits` open and CLI `grok-oss limits` collect are
