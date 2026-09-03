@@ -4,15 +4,29 @@
 //! session id, cwd, and other safe fields. Drops prompt text, tool
 //! arguments, tokens, and JWTs. Tags each row local or remote. Writes a
 //! per-session enqueue drop file. `CoordinatorApp` holds the session list
-//! and selected index for that window.
+//! and selected index for that window. The laptop-side action
+//! **set remote host console API key** writes a staging file for a
+//! machine xAI console API key (console API credits / console team
+//! prepaid). It never prints the key. It does not open git on the guest.
 //!
 //! This crate is not a grok-oss TUI dashboard. `/dashboard` stays the
 //! pager Agent Dashboard. `/running` stays this machine's grok-oss
 //! sessions. The `surmount-coordinator-gui` binary reads `/running --json`
-//! and prints safe JSON. It is not a TUI.
+//! and prints safe JSON. It is not a TUI. This crate does not depend on
+//! gpui.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+mod cli;
+mod remote_console_key;
+
+pub use cli::run_cli;
+pub use remote_console_key::{
+    DEFAULT_GUEST_GROK_HOME, HostFileInstall, RemoteHostConsoleKeyError,
+    RemoteHostConsoleKeyReport, SET_REMOTE_HOST_CONSOLE_API_KEY_ACTION, SshDeployInstall,
+    SshInstallSpec, SshRequest, scp_copy_argv, set_remote_host_console_api_key, ssh_chmod_argv,
+};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -101,6 +115,11 @@ impl From<serde_json::Error> for RunningJsonError {
 pub enum EnqueueError {
     UnsafeSessionId,
     NoSessionSelected,
+    /// Selected row is a remote host. This laptop grok home cannot drain that
+    /// session. Do not write a local drop file that looks like it will fire.
+    RemoteHost {
+        host: String,
+    },
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -112,6 +131,10 @@ impl fmt::Display for EnqueueError {
                 write!(f, "session id is empty or not a single path component")
             }
             Self::NoSessionSelected => write!(f, "no running session is selected"),
+            Self::RemoteHost { host } => write!(
+                f,
+                "session is on remote host {host}; this laptop grok home cannot drain that enqueue"
+            ),
             Self::Io(err) => write!(f, "could not write enqueue drop file: {err}"),
             Self::Json(err) => write!(f, "could not encode enqueue drop file: {err}"),
         }
@@ -196,10 +219,25 @@ impl CoordinatorApp {
         }
     }
 
-    /// Write the enqueue drop file for the selected session.
+    /// Write the enqueue drop file for the selected **local** session.
+    /// Remote-tagged rows error instead of writing a laptop drop file that
+    /// the remote grok-oss window will never drain.
     pub fn enqueue_selected(&self, prompt: &str) -> Result<PathBuf, EnqueueError> {
         let session = self.selected().ok_or(EnqueueError::NoSessionSelected)?;
+        if let SessionHost::Remote(host) = &session.host {
+            return Err(EnqueueError::RemoteHost { host: host.clone() });
+        }
         write_enqueue(&self.grok_home, &session.session_id, prompt)
+    }
+
+    /// Laptop-side action: set a machine console API key for a remote host.
+    /// Writes staging files under this laptop grok home. Never prints the key.
+    pub fn set_remote_host_console_api_key(
+        &self,
+        host: &str,
+        key: &str,
+    ) -> Result<RemoteHostConsoleKeyReport, RemoteHostConsoleKeyError> {
+        crate::remote_console_key::set_remote_host_console_api_key(&self.grok_home, host, key, None)
     }
 }
 
@@ -608,6 +646,37 @@ mod tests {
         let val: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(val["prompt"], "do the selected work");
         assert!(!home.join("l0-enqueue/sess-aaa/enqueue.json").exists());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Named contract: a remote-tagged selected session must not write a
+    /// laptop drop file as if this host will drain it.
+    #[allow(non_snake_case)]
+    #[test]
+    fn CoordinatorApp_enqueue_remote_session_does_not_write_local_drop_file() {
+        let home = test_home();
+        let remote_json = r#"[{"pid": 9, "session_id": "sess-remote", "cwd": "/tmp/r"}]"#;
+        let mut app =
+            CoordinatorApp::load(&home, two_session_json(), Some(("surmount-1", remote_json)))
+                .unwrap();
+        app.select(2);
+        assert_eq!(
+            app.selected().unwrap().host,
+            SessionHost::Remote("surmount-1".to_string())
+        );
+        let err = app
+            .enqueue_selected("do the remote work")
+            .expect_err("remote enqueue");
+        match err {
+            crate::EnqueueError::RemoteHost { host } => {
+                assert_eq!(host, "surmount-1");
+            }
+            other => panic!("expected RemoteHost, got {other}"),
+        }
+        assert!(
+            !home.join("l0-enqueue/sess-remote/enqueue.json").exists(),
+            "must not write a local drop file for a remote session"
+        );
         let _ = fs::remove_dir_all(&home);
     }
 }

@@ -349,6 +349,13 @@ pub mod pending_prompts {
 
     const PENDING_PROMPTS_FILE: &str = "pending_prompts.json";
 
+    /// Ordinary pager-queue snapshots flush without `sync_all`.
+    ///
+    /// Operator: typing, cancel, and interject stay responsive. WAL is the
+    /// crash-durable operator-text log (`prompt_wal.jsonl`). Rebuild still
+    /// fsyncs via [`write_pending_prompts`].
+    pub const PENDING_PROMPTS_QUEUE_SNAPSHOT_FSYNC: bool = false;
+
     /// One queued follow-up restored after grok-oss exits.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct PersistedQueuedPrompt {
@@ -369,6 +376,17 @@ pub mod pending_prompts {
 
     /// Write `rows` to `path` (mode `0600` on Unix). An empty list deletes the file.
     pub fn write_pending_prompts_at(path: &Path, rows: &[PersistedQueuedPrompt]) -> io::Result<()> {
+        write_pending_prompts_at_with_fsync(path, rows, true)
+    }
+
+    /// Same as [`write_pending_prompts_at`], with an explicit fsync choice.
+    /// Queue snapshots pass `false` so send/queue/interject-fallback do not
+    /// `sync_all` on the UI thread. Rebuild / teardown pass `true`.
+    pub fn write_pending_prompts_at_with_fsync(
+        path: &Path,
+        rows: &[PersistedQueuedPrompt],
+        fsync: bool,
+    ) -> io::Result<()> {
         if rows.is_empty() {
             return clear_pending_prompts_at(path);
         }
@@ -387,7 +405,11 @@ pub mod pending_prompts {
             }
             let mut file = options.open(&tmp)?;
             file.write_all(&body)?;
-            file.sync_all()?;
+            if fsync {
+                file.sync_all()?;
+            } else {
+                file.flush()?;
+            }
         }
         #[cfg(unix)]
         {
@@ -418,16 +440,27 @@ pub mod pending_prompts {
     }
 
     /// Write the pending prompt queue for `(cwd, session_id)`. Empty clears.
+    /// Fsyncs. Prefer [`write_pending_prompts_with_fsync`] for queue snapshots.
     pub fn write_pending_prompts(
         cwd: &str,
         session_id: &str,
         rows: &[PersistedQueuedPrompt],
     ) -> io::Result<()> {
+        write_pending_prompts_with_fsync(cwd, session_id, rows, true)
+    }
+
+    /// Queue snapshot persist: same path, optional `sync_all`.
+    pub fn write_pending_prompts_with_fsync(
+        cwd: &str,
+        session_id: &str,
+        rows: &[PersistedQueuedPrompt],
+        fsync: bool,
+    ) -> io::Result<()> {
         let Some(path) = pending_prompts_path(cwd, session_id) else {
             return Ok(());
         };
         let _ = crate::util::grok_home::ensure_sessions_cwd_dir(cwd)?;
-        write_pending_prompts_at(&path, rows)
+        write_pending_prompts_at_with_fsync(&path, rows, fsync)
     }
 
     /// Load the pending prompt queue for `(cwd, session_id)`.
@@ -472,6 +505,29 @@ pub mod pending_prompts {
                 !path.to_string_lossy().contains("prompt_tasks"),
                 "pager queue must not live in grok_oss.db prompt_tasks: {path:?}"
             );
+        }
+
+        #[test]
+        fn write_without_fsync_still_roundtrips() {
+            let tmp = TempDir::new().unwrap();
+            let path = queue_path(&tmp, "sess-a");
+            write_pending_prompts_at_with_fsync(&path, &[row(1, "queued without fsync")], false)
+                .unwrap();
+            let restored = load_pending_prompts_at(&path).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].text, "queued without fsync");
+        }
+
+        /// Operator: typing/cancel/interject stay responsive. Ordinary queue
+        /// snapshots must not `sync_all`. WAL is the durability log.
+        #[test]
+        fn pending_prompts_queue_snapshot_skips_sync_all() {
+            const {
+                assert!(
+                    !PENDING_PROMPTS_QUEUE_SNAPSHOT_FSYNC,
+                    "pending_prompts.json queue snapshots must flush without sync_all"
+                );
+            }
         }
 
         #[test]

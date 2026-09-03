@@ -47,7 +47,9 @@ pub use commands::{ModelMetadata, StrictAppendAck, StrictAppendError};
 pub use compaction_mode::CompactionMode;
 pub use events::ChatStateEvent;
 pub use handle::{ChatStateActorUnreachable, ChatStateHandle};
-pub use image_handles::inflate_conversation_images_for_inference;
+pub use image_handles::{
+    ImageRepairStats, inflate_conversation_images_for_inference, repair_conversation_images_for_api,
+};
 pub use persistence::{
     ChatPersistence, MockChatPersistence, MockPersistenceReceiver, NullChatPersistence,
     PersistenceRecord, StripOutcome,

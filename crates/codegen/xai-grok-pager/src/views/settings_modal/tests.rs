@@ -661,6 +661,10 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "confirm_before_rewind",
             // PAGER-owned multiline (Editor category).
             "multiline_mode",
+            // SHELL-owned composer_multiline (Editor; persist `[ui]
+            // composer_multiline`. Sits immediately below session
+            // Multiline).
+            "composer_multiline",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
             // ghost text, live cache).
             "prompt_suggestions",
@@ -4606,9 +4610,10 @@ fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
 #[test]
 fn section_headers_have_blank_line_above_except_first() {
     let mut s = make_state();
-    // Allocate a generous viewport so every category fits — the
-    // default registry contains 6 categories with 16 settings;
-    // the blank lines push us to ~23 lines, fits in 60.
+    // Viewport of 60 lines. The default registry plus blank lines
+    // above later section headers is taller than that; the
+    // renderer must still keep a blank line above every non-first
+    // header that it does paint.
     let area = Rect {
         x: 0,
         y: 0,

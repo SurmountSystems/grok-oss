@@ -247,6 +247,11 @@ pub async fn set_hide_header(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.hide_header = value).await
 }
 
+/// Persist `[ui].composer_multiline` via `update_config`.
+pub async fn set_composer_multiline(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.composer_multiline = Some(value)).await
+}
+
 /// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
 pub async fn set_plan_approval_park(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.plan_approval_park = Some(value)).await

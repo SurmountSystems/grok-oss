@@ -1283,8 +1283,15 @@ pub(super) fn handle_child_session_notification(
                 _ => None,
             };
             let mut changed = false;
+            if matches!(&update, XaiSessionUpdate::AutoCompactStarted { .. })
+                && agent.active_subagent.as_deref() == Some(child_sid)
+            {
+                // Nested compact chrome must not keep the parent TUI stolen.
+                agent.active_subagent = None;
+                changed = true;
+            }
             if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
-                changed = apply_session_event(
+                changed |= apply_session_event(
                     &update,
                     &mut child_view.session,
                     &mut child_view.scrollback,

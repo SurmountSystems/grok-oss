@@ -1710,7 +1710,11 @@ impl PromptWidget {
 
         // Newline: Shift/Alt+Enter, or Apple Terminal bare Enter with a
         // newline modifier held (CoreGraphics rescue inside is_mod_enter).
+        // `[ui] composer_multiline = false` never inserts that newline.
         if crate::input::is_mod_enter(key) {
+            if !crate::appearance::cache::load_composer_multiline() {
+                return PromptEvent::Ignored;
+            }
             self.textarea.insert_str("\n");
             self.update_file_search_context();
             return PromptEvent::Edited;
@@ -2147,19 +2151,26 @@ impl PromptWidget {
             return EnterOutcome::PassThrough;
         }
 
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+
         // Apple Terminal: Shift+Enter arrives as bare Enter because there's
         // no Kitty keyboard protocol.  Poll CoreGraphics for the real
         // modifier state — if Shift/Option/Cmd is physically held, insert
-        // a newline instead of submitting.
+        // a newline instead of submitting. When composer multiline is off,
+        // that chord sends instead of opening a second line.
         if key.code == KeyCode::Enter && crate::input::is_apple_terminal_newline_modifier_held() {
-            self.textarea.insert_str("\n");
-            return EnterOutcome::NewlineInserted;
+            if allow_newlines {
+                self.textarea.insert_str("\n");
+                return EnterOutcome::NewlineInserted;
+            }
+            return EnterOutcome::Submit;
         }
 
         // Backslash continuation: if the character before the cursor is `\`,
         // replace it with a newline.
         if key.code == KeyCode::Enter
             && key.modifiers.is_empty()
+            && allow_newlines
             && self.apply_backslash_continuation()
         {
             return EnterOutcome::NewlineInserted;
@@ -2167,6 +2178,12 @@ impl PromptWidget {
 
         // Bare Enter → submit.
         if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+            return EnterOutcome::Submit;
+        }
+
+        // Shift+Enter / Alt+Enter with composer multiline off: send, never
+        // insert a newline. When it is on, handle_key inserts the newline.
+        if crate::input::is_mod_enter(key) && !allow_newlines {
             return EnterOutcome::Submit;
         }
 

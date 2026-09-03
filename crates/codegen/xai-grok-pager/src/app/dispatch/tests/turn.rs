@@ -648,7 +648,6 @@ fn cancel_retry_reuses_recorded_subagent_choice() {
 #[test]
 fn confirmed_stop_retry_does_not_rearm_auto_resend() {
     use crate::app::actions::CancelTrigger;
-    use crate::app::dispatch::CANCEL_RESEND_GRACE;
     use crate::app::dispatch::reconcile_overdue_cancels;
 
     let mut app = test_app_with_agent();
@@ -1735,6 +1734,84 @@ fn stop_during_cancelling_finishes_cancel() {
         agent.prompt.text(),
         "h",
         "after cancel completes the Human box must take typing"
+    );
+}
+
+/// Named contract: cancel recovery must not sit a minute-plus.
+///
+/// First CancelTurn still enters Cancelling so lost-wire resend can run.
+/// The bound is resend cap plus turn-end grace (seconds). Dispatch and
+/// reconcile must not sleep that bound. A second `[stop]` force-finishes
+/// immediately. Do not raise the grace into minutes.
+#[test]
+fn cancel_does_not_wait_minutes() {
+    use std::time::{Duration, Instant};
+
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::TURN_END_RECONCILE_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+    use crate::app::dispatch::reconcile_overdue_turn_ends;
+    use crate::app::dispatch::turn::CANCEL_RESEND_MAX_ATTEMPTS;
+    use crate::app::prompt_queue::QueueEntryWire;
+
+    let bound = CANCEL_RESEND_GRACE.saturating_mul(u32::from(CANCEL_RESEND_MAX_ATTEMPTS))
+        + TURN_END_RECONCILE_GRACE;
+    assert!(
+        bound < Duration::from_secs(60),
+        "cancel recovery must not wait minutes, bound={bound:?}"
+    );
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("live-turn".into());
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+        agent.shared_queue = vec![QueueEntryWire {
+            id: "q1".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "queued #1".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+    }
+
+    let started = Instant::now();
+    assert!(matches!(
+        dispatch(Action::CancelTurn, &mut app).as_slice(),
+        [Effect::CancelTurn { .. }]
+    ));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let pending = agent
+            .pending_cancel_resend
+            .as_mut()
+            .expect("first cancel must arm resend so the cap can finish");
+        pending.attempts = CANCEL_RESEND_MAX_ATTEMPTS;
+        pending.sent_at = Instant::now() - CANCEL_RESEND_GRACE;
+    }
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "the cap must arm turn-end, not keep resending"
+    );
+    assert!(
+        reconcile_overdue_turn_ends(&mut app).is_some(),
+        "resend cap must finish Cancelling without waiting a minute"
+    );
+    assert!(
+        !app.agents[&id].session.state.is_cancelling(),
+        "cancel must not leave Cancelling after the cap, got {:?}",
+        app.agents[&id].session.state
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the cancel path must not sleep the grace; elapsed={:?}",
+        started.elapsed()
     );
 }
 

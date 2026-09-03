@@ -2069,6 +2069,81 @@ async fn l3_preflight_overflow_does_not_compact_and_resubmit() {
         .await;
 }
 
+/// Goal Plan Writer is a disposable once-run nested role. 95% of the nested
+/// 200k window must not start compact-and-continue. Same class as L3:
+/// summarize and stop (`EndChildWithoutCompact`).
+///
+/// Owed outcome: a once-run Goal Plan Writer at L2 depth (fork from L1)
+/// must not AUTO compact when the nested 200k sampling window is full.
+#[tokio::test(flavor = "current_thread")]
+async fn goal_plan_writer_once_run_must_not_auto_compact_when_nested_window_is_full() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.startup_hints.once_run = true;
+            actor.startup_hints.subagent_type = Some("general-purpose".into());
+            actor.tool_context.subagent_depth = 1;
+            assert!(
+                !actor.is_l3_session(),
+                "Goal Plan Writer from L1 is L2 depth; the once-run gate must not pretend it is L3"
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "once-run Goal Plan Writer at 95% of the nested 200k window must not AUTO compact"
+            );
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "once-run Goal Plan Writer must not start two-pass prefire compact"
+            );
+            let overflow = api_error_with_context_window(200_000);
+            assert!(
+                !actor.should_compact_on_error(&overflow).await,
+                "once-run Goal Plan Writer overflow must not CompactAndResubmit"
+            );
+        })
+        .await;
+}
+
+/// A forked parent that already fills the nested 200k window must not
+/// immediately compact a Goal Plan Writer child on the first turn. The
+/// child must summarize and stop instead of compact-and-continue.
+///
+/// Owed outcome: nested 200k window full at spawn (forked parent) must not
+/// immediately compact a goal-role child.
+#[tokio::test(flavor = "current_thread")]
+async fn goal_plan_writer_forked_parent_full_window_at_spawn_must_not_immediately_compact() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(200_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.startup_hints.once_run = true;
+            actor.startup_hints.subagent_type = Some("general-purpose".into());
+            actor.tool_context.subagent_depth = 1;
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "forked Goal Plan Writer at 100% of the nested 200k window must not AUTO compact"
+            );
+            assert!(
+                actor.check_preflight_overflow().await.is_none(),
+                "forked Goal Plan Writer at a full nested window must not preflight compact"
+            );
+            assert!(
+                actor.l3_nested_window_is_full().await,
+                "full nested window on a once-run goal role must end the child without compact"
+            );
+        })
+        .await;
+}
+
 /// L2 nested sessions still AUTO compact at 95% of the 200k window.
 #[tokio::test(flavor = "current_thread")]
 async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {

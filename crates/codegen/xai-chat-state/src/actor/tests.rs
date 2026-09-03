@@ -725,6 +725,37 @@ async fn parent_estimated_tokens_omit_huge_spawn_prompt() {
     );
 }
 
+/// Operator contract A: a 2MB ANSI/nix-looking shell ToolResult must not
+/// add ~200k tokens to the conversation estimate after ingest.
+#[tokio::test]
+async fn two_megabyte_nix_tool_result_does_not_add_200k_estimated_tokens() {
+    let h = TestHarness::new();
+    h.handle.record_token_usage(10_000);
+
+    let mut dump = String::from("\u{1b}[31mnix-build\u{1b}[0m\n");
+    dump.push_str(&"N".repeat(999_000));
+    dump.push_str("UNIQUE_NIX_DUMP_MIDDLE_MARK");
+    dump.push_str(&"N".repeat(1_000_000));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("bash-check-remote", dump));
+
+    let estimated = h.handle.get_estimated_total_tokens().await;
+    assert!(
+        estimated < 40_000,
+        "owed: a 2MB ANSI/nix-looking tool result does not add ~200k tokens \
+         to the conversation estimate; got {estimated}"
+    );
+
+    let conv = h.handle.get_conversation().await;
+    let ConversationItem::ToolResult(tr) = &conv[0] else {
+        panic!("expected tool result");
+    };
+    assert!(
+        !tr.content.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+        "stored ToolResult must not keep the middle of the nix dump"
+    );
+}
+
 #[tokio::test]
 async fn estimated_tokens_resets_on_truncate() {
     let mut h = TestHarness::new();
@@ -1020,9 +1051,14 @@ async fn compaction_reseed_excludes_post_response_deltas_from_overhead() {
 async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
     let h = TestHarness::new();
 
-    // 12 turns of large tool results so default pruning (10-turn age) fires.
+    // Default retained prune is 10-turn age. Each 200k-char ToolResult folds
+    // at the 40k ingest path (~4k estimated tokens of head/tail pointer), so
+    // a 12-turn fixture only drops one or two pointers (~4k-8k). Use enough
+    // aged turns that hard-clear still moves the live estimate by >20k, while
+    // the overhead ratio stays on the frozen last-response snapshot.
+    const TURNS: usize = 16;
     let mut conv = Vec::new();
-    for i in 0..12 {
+    for i in 0..TURNS {
         conv.push(ConversationItem::user(format!("q{i}")));
         conv.push(ConversationItem::tool_result(
             format!("call-{i}"),
@@ -1030,16 +1066,24 @@ async fn compaction_overhead_unaffected_by_pruning_after_last_response() {
         ));
     }
     h.handle.replace_conversation(conv.clone());
-    for _ in 0..12 {
+    for _ in 0..TURNS {
         h.handle.increment_prompt_index();
     }
 
-    let estimate_at_response = crate::estimate_conversation_tokens(&conv);
+    let stored = h.handle.get_conversation().await;
+    let estimate_at_response = crate::estimate_conversation_tokens(&stored);
     let provider_total = estimate_at_response + estimate_at_response / 2;
     h.handle.record_token_usage(provider_total);
+    let frozen = h.handle.snapshot().await.unwrap().estimate_at_last_response;
+    assert_eq!(frozen, estimate_at_response);
 
     // Triggers pruning: old tool results are hard-cleared in place.
     h.handle.push_user_message(ConversationItem::user("new q"));
+    let after_prune = h.handle.snapshot().await.unwrap().estimate_at_last_response;
+    assert_eq!(
+        after_prune, estimate_at_response,
+        "retained prune must not rewrite the last-response estimate used for overhead"
+    );
     let pruned_estimate = crate::estimate_conversation_tokens(&h.handle.get_conversation().await);
     assert!(
         pruned_estimate + 20_000 < estimate_at_response,

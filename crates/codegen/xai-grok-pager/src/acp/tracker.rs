@@ -520,6 +520,20 @@ impl AcpUpdateTracker {
             self.session_cwd = Some(cwd.to_path_buf());
         }
     }
+    /// Drop in-flight tool rows whose scrollback blocks are gone.
+    ///
+    /// Overlay hydrate onto an empty or prompt-only child must not let a
+    /// spawn-time pending tool id swallow the same `ToolCall` from disk.
+    pub(crate) fn forget_pending_tools_absent_from_scrollback(
+        &mut self,
+        scrollback: &ScrollbackState,
+    ) {
+        self.pending_tools.retain(|_, pending| {
+            pending
+                .entry_id
+                .is_some_and(|id| scrollback.get_by_id(id).is_some())
+        });
+    }
     /// Current activity within the turn, derived from in-flight state.
     ///
     /// Priority order (highest first):

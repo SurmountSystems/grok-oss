@@ -1172,6 +1172,49 @@
         );
     }
 
+    /// Nested compact chrome must not steal the parent TUI. AutoCompactStarted
+    /// on a live L2 child dismisses the fullscreen overlay so the parent still
+    /// scrolls.
+    #[test]
+    fn nested_compact_chrome_does_not_steal_parent_fullscreen_overlay() {
+        use crate::acp::tracker::TurnActivity;
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-compact-no-steal";
+        agent
+            .subagent_sessions
+            .insert(child_sid.into(), make_subagent_info(child_sid));
+        let mut child_view = make_agent(Some(child_sid));
+        child_view.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child_view));
+        agent.active_subagent = Some(child_sid.into());
+
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 200_000,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        assert!(changed);
+        assert!(
+            agent.active_subagent.is_none(),
+            "compact chrome must not keep the fullscreen overlay steal"
+        );
+        assert!(
+            agent.visible_nested_overlay_sid().is_none(),
+            "parent TUI must remain the visible surface while the child is compacting"
+        );
+        let child_view = agent.subagent_views.get(child_sid).unwrap();
+        assert_eq!(
+            child_view.session.tracker.activity(),
+            Some(TurnActivity::AutoCompacting)
+        );
+    }
+
     #[test]
     fn child_compact_started_does_not_reset_context_used() {
         // Sibling variants in the same outer arm must not touch the numerator;

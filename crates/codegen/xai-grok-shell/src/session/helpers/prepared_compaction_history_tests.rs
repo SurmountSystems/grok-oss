@@ -28,6 +28,54 @@ fn compact_history_does_not_copy_the_data_url_crate() {
     );
 }
 
+/// Operator contract: AUTO compact must send each `image_url` as a
+/// base64-encoded image or a URL. A local session asset path, an
+/// `[Image #N]` token, or an empty value must not reach the API.
+#[test]
+fn compact_request_must_not_send_session_asset_path_or_image_token_as_image_url() {
+    let dir = std::env::temp_dir().join(format!("grok-compact-image-{}", std::process::id()));
+    let assets = dir.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let asset = assets.join("image-operator.jpg");
+    std::fs::write(&asset, b"jpeg-bytes").unwrap();
+    let source = vec![
+        ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: "screenshot".into(),
+            },
+            ContentPart::Image {
+                url: asset.to_string_lossy().as_ref().into(),
+            },
+        ]),
+        ConversationItem::user_with_parts(vec![ContentPart::Image {
+            url: "[Image #1]".into(),
+        }]),
+        ConversationItem::user_with_parts(vec![ContentPart::Image {
+            url: format!("file://{}", asset.display()).into(),
+        }]),
+        ConversationItem::user_with_parts(vec![ContentPart::Image { url: "".into() }]),
+    ];
+    let prepared = build_compaction_chat_history(source, None, true, 0);
+    let json = serde_json::to_string(&prepared.items).expect("serialize");
+    assert!(
+        !json.contains("image_url"),
+        "compact HTTP must not include image_url after strip/repair, got {json}"
+    );
+    assert!(
+        !json.contains(asset.to_string_lossy().as_ref()),
+        "compact HTTP must not send the session asset path"
+    );
+    assert!(
+        !json.contains("[Image #1]"),
+        "compact HTTP must not send an [Image #N] token as image_url"
+    );
+    assert!(
+        !json.contains("file://"),
+        "compact HTTP must not send file:// as image_url"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn no_image_history_is_unchanged_before_prompt() {
     let source = vec![

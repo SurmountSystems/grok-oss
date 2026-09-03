@@ -326,6 +326,8 @@ impl AgentView {
     /// Snapshot the local pager queue so a kill does not depend on
     /// `prompt_tasks` coincidentally holding the same bodies.
     pub(crate) fn persist_pending_prompts(&self) {
+        self.pending_prompts_persist_count
+            .set(self.pending_prompts_persist_count.get().saturating_add(1));
         if cfg!(test) {
             return;
         }
@@ -340,10 +342,11 @@ impl AgentView {
             self.expect_send_now_cancel.as_deref(),
             &self.send_now_painted_blocks,
         );
-        let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts_with_fsync(
             &cwd,
             session_id.0.as_ref(),
             &rows,
+            xai_grok_shell::session::pending_prompts::PENDING_PROMPTS_QUEUE_SNAPSHOT_FSYNC,
         );
     }
 
@@ -484,6 +487,8 @@ impl AgentView {
         if text.trim().is_empty() && images.is_empty() {
             return;
         }
+        self.prompt_wal_append_count
+            .set(self.prompt_wal_append_count.get().saturating_add(1));
         if !force_disk && cfg!(test) && std::env::var_os("GROK_HOME").is_none() {
             return;
         }
@@ -661,6 +666,8 @@ impl AgentView {
             last_unsent_draft_persist: Cell::new(None),
             unsent_draft_persist_flush_count: Cell::new(0),
             unsent_draft_persist_skip_count: Cell::new(0),
+            prompt_wal_append_count: Cell::new(0),
+            pending_prompts_persist_count: Cell::new(0),
             hovered_prompt: false,
             hit_badge: Default::default(),
             hit_context: Default::default(),
@@ -1886,6 +1893,31 @@ impl AgentView {
             child.subagent_sessions.insert(id, info);
         }
     }
+    /// True when the nested child is showing AUTO compact chrome.
+    ///
+    /// Compact chrome must not steal the parent TUI: parent still scrolls.
+    pub(crate) fn child_is_auto_compacting(&self, child_sid: &str) -> bool {
+        use crate::acp::tracker::TurnActivity;
+        self.subagent_views.get(child_sid).is_some_and(|child| {
+            matches!(
+                child.session.tracker.activity(),
+                Some(TurnActivity::AutoCompacting)
+            )
+        })
+    }
+
+    /// Child session id of a fullscreen overlay that is allowed to replace
+    /// the parent TUI. While that child is AutoCompacting this is `None`
+    /// even if `active_subagent` is still set.
+    pub(crate) fn visible_nested_overlay_sid(&self) -> Option<&str> {
+        let sid = self.active_subagent.as_deref()?;
+        if self.child_is_auto_compacting(sid) {
+            None
+        } else {
+            Some(sid)
+        }
+    }
+
     /// Overlay title wait chrome: name the live parented specialist, last
     /// tool, and keep a trailing ellipsis. Does not use the 40-char spinner
     /// clamp so a description like `Land check-remote full gate` stays visible.

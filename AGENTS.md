@@ -73,21 +73,38 @@ less than product code and tests. Do not invent long essays or git nags.
    Ordinary post-impl mop stays one L2 after a finished slice (not a swarm;
    that L2 spawns L3). Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove
    product work with crate-wide cargo via subagents*.
-3b-remote. **The operator owns the VPS builder (pinned 2026-08-25).**
-   Agents must not invoke `just check-remote`, `just test-remote`,
-   `just cargo-remote`, or force-remote `nix build` to `nixbuilder` /
-   surmount-1. That host is the operator's. Agents implement product and
-   tests in the tree. When the operator pastes a quality fail, that paste
-   is the contract. Do not start a second gate on the same drv or the
-   same leftover list. Agents still must not run `cargo test`,
-   `cargo clippy`, `cargo build`, or rustc on this laptop. File-level
-   rustfmt-only may stay local if it does not invoke rustc. GitHub
-   Actions must not call `check-remote`, `test-remote`, or `cargo-remote`.
-   The 2026-08-22 "agents may run `just check-remote` whenever useful" line
-   is superseded. Force-remote recipe details (max-jobs 0, `--store`
+3b-remote. **The operator owns the VPS builder (pinned 2026-08-25;
+   check-remote whitelist 2026-09-02).**
+   Agents must not invoke `just test-remote`, `just cargo-remote`, or
+   force-remote `nix build` to `nixbuilder` / surmount-1 unless the
+   operator also whitelist those in the same words. That host is the
+   operator's. Agents implement product and tests in the tree. When the
+   operator pastes a quality fail, that paste is the contract. Do not
+   start a second gate on the same drv or the same leftover list. Agents
+   still must not run `cargo test`, `cargo clippy`, `cargo build`, or
+   rustc on this laptop. File-level rustfmt-only may stay local if it
+   does not invoke rustc. GitHub Actions must not call `check-remote`,
+   `test-remote`, or `cargo-remote`. Agents may run `just check-remote`
+   under 3b-remote-check (pinned 2026-09-02). That supersedes the
+   2026-08-25 forbid on `just check-remote` and the 2026-08-22 "whenever
+   useful" line. Force-remote recipe details (max-jobs 0, `--store`
    ssh-ng, `--eval-store auto`, `--cores 64`, cargo jobs cap 32) still
    describe how the operator's recipes work. Host dual-pin:
    `~/.grok/AGENTS.md`.
+3b-remote-check. **Agents may run just check-remote (pinned 2026-09-02).**
+   Agents **may** run `just check-remote` (and the related force-remote
+   recipes when the operator has allowed them for this work). Do **not**
+   go crazy: one live `just check-remote` at a time. Do not start a
+   second on the same drv or leftover list. A live remote compile must
+   not be restarted at five minutes (3b-remote-wait). Background with a
+   long wait (timeout 0 or at least twenty minutes). Competing nix on
+   this laptop still means wait or skip; do not pile another nix client
+   onto bitmask-core / carbonado-node if those are still compiling.
+   GitHub Actions still must not call check-remote. `just test-remote` /
+   `just cargo-remote` stay operator-owned unless the operator also
+   whitelist those in the same words (they did not; only check-remote).
+   Dual-pin: host `~/.grok/AGENTS.md` § *Agents may run just
+   check-remote*.
 3b-remote-named. **Named cargo on the VPS is operator-run (pinned
    2026-08-22; operator-owns 2026-08-25).** The recipes stay
    `just test-remote` / `just cargo-remote` on surmount-1. Agents do not
@@ -371,7 +388,7 @@ less than product code and tests. Do not invent long essays or git nags.
    say why (what it solves). Do not flatter, inflate, agree by default, or
    pad empty praise. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
    **Self-improving feedback loop (pinned 2026-08-03; L2 writes 2026-08-28;
-   three-times miss 2026-09-01):**
+   three-times miss 2026-09-01; operator speech 2026-09-02):**
    trigger phrases such as "always remember", "please remember", "I hate
    repeating myself" (and close variants) mean a same-turn standing pin.
    L1 tracks the board and spawns L2. L2 writes project `AGENTS.md` /
@@ -382,8 +399,10 @@ less than product code and tests. Do not invent long essays or git nags.
    build still does not match) is a named failure mode under § *The
    operator's words are the spec*. A dropped operator prompt is a
    product defect under § *Wasted human time* (hard constraint 24).
-   Full host pin:
-   `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
+   Operator speech is work. Report finished nested work the same turn
+   the host says the nested agent exited. Full host pin:
+   `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
+   speech is work*, § *Report finished nested work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -535,7 +554,8 @@ less than product code and tests. Do not invent long essays or git nags.
     SHA-1 is for git object ids (gix, empty-tree, 40-hex commits) only. It
     is not a security hash for downloads or FODs. Artifact verify is
     SHA-256 or minisign. Helper logs must not print tokens, API keys, or
-    secret env values. The operator owns `just check-remote`. Dual-pin:
+    secret env values. The operator owns the VPS builder. Agents may run
+    `just check-remote` under 3b-remote-check (pinned 2026-09-02). Dual-pin:
     [`FORK.md`](FORK.md) Packaging **SHA-1 is git object ids only**.
 17. **Test dependencies are supply chain (pinned 2026-08-27).** Never treat a
     cargo-audit finding, yanked crate, or unmaintained crate as irrelevant
@@ -672,6 +692,43 @@ speaker-label, or `/rebuild` persist bullets when editing those files.
 Dual-pin: [`FORK.md`](FORK.md) § *Wasted human time*. Host pointer:
 `~/.grok/AGENTS.md` § *The operator's words are the spec*.
 
+## Operator speech is work (pinned 2026-09-02)
+
+When the operator tells you something, that is work. Do not ignore it.
+Do not treat it as noise, color, or a mood. Board it and act, or spawn,
+the same turn. The operator does not spend the day talking to machines
+for sport.
+
+Do not be lazy. A status that skips the owed report is a miss.
+
+When the operator is annoyed, frustrated, or angry about how this agent
+is running, that is a same-turn pin-and-fix. It is not a brief apology
+and a pivot. The self-improving feedback loop already keys on "always
+remember" and "I hate repeating myself". This is the honesty form of
+that loop. Fix the process on disk, then keep going.
+
+Be honest. Do not describe finished agents as live. Do not describe
+prompt-instructions as running workers. Do not pad unknown with leftover
+guesses.
+
+This pin does not replace § *The operator's words are the spec*,
+§ *Wasted human time*, Hunter's razor, Operator/Agent speaker labels,
+the prompt write-ahead log known-good tests, L1 lean, or the
+Hierarchical fast path. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+## Report finished nested work the same turn (pinned 2026-09-02)
+
+Report finished nested work the same turn the host says the nested agent
+exited. Read the short on-disk report. Tell the operator what landed,
+what is in the tree versus this running TUI, and what leftover remains.
+Do not spawn the next job and only mention the live count. Finished work
+that is only in a later "one L2 running" defense was never reported.
+
+This sits next to § *Finished nested agents must stop* (kill the
+painted-live row). Stopping the row is not the operator report. Dual-pin:
+this file and host `~/.grok/AGENTS.md` same heading.
+
 ## Subagents — parent is HITL UX only (hard)
 
 The **main/parent thread is HITL UX only**: status to the operator, spawn L2,
@@ -701,7 +758,7 @@ joins under project `.agents/joins/`.
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
 - **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error.
-- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth.
+- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
@@ -928,8 +985,11 @@ cannot fail a deleted catalog test. Catalog:
 - Ship product work: short hierarchical note in [`FORK.md`](FORK.md); link out.
 - **CI is checks only** — never a release package build in GHA. Local gate:
   **`just check`** / **`just ci`**. No `ci-quick` / `ci-host`.
-  The operator owns **`just check-remote`** / **`just test-remote`** on
-  surmount-1 (pinned 2026-08-25). Agents do not invoke those recipes.
+  The operator owns the VPS builder on surmount-1 (pinned 2026-08-25).
+  Agents may run **`just check-remote`** (pinned 2026-09-02; one live
+  run at a time; do not restart at five minutes). Agents do not invoke
+  **`just test-remote`** / **`just cargo-remote`** unless the operator
+  also whitelist those in the same words.
   Optional **`just check-remote`** realizes flake metadata and the workspace
   cargo quality derivation (the same full gate as `just check` / `just test`:
   fmt, then workspace clippy `--all-targets` (members include

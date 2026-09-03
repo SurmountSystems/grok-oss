@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use toml::Value as TomlValue;
 use xai_grok_shell::util::config::{
-    DISPLAY_REFRESH_DEFAULT_CADENCE_MS, MotionCadence, RemoteSettings, resolve_display_refresh,
-    resolve_motion_cadence,
+    DISPLAY_REFRESH_DEFAULT_CADENCE_MS, DISPLAY_REFRESH_SSH_CADENCE_MS, MotionCadence,
+    RemoteSettings, resolve_display_refresh, resolve_motion_cadence_for_session,
 };
 
 /// Inclusive bounds for motion cadence env knobs (`GROK_MIN_DRAW_MS`,
@@ -72,7 +72,12 @@ pub fn start(
     remote: Option<&RemoteSettings>,
 ) -> MotionClocks {
     let policy = resolve_display_refresh(requirements, user, managed, remote);
-    let default_cadence_ms = DISPLAY_REFRESH_DEFAULT_CADENCE_MS;
+    let remote_session = crate::terminal::terminal_context().is_ssh;
+    let default_cadence_ms = if remote_session {
+        DISPLAY_REFRESH_SSH_CADENCE_MS
+    } else {
+        DISPLAY_REFRESH_DEFAULT_CADENCE_MS
+    };
     let (min_draw_env_set, min_draw_env_ms) =
         cadence_ms_from_env("GROK_MIN_DRAW_MS", default_cadence_ms);
     let (scroll_env_set, scroll_env_ms) =
@@ -91,11 +96,12 @@ pub fn start(
         ProbePlan::Sync(p) => p.hz,
         ProbePlan::Disabled | ProbePlan::Async => None,
     };
-    let cadence = resolve_motion_cadence(
+    let cadence = resolve_motion_cadence_for_session(
         &policy,
         probe_hz,
         min_draw_env_set.then_some(min_draw_env_ms),
         scroll_env_set.then_some(scroll_env_ms),
+        remote_session,
     );
     let clocks = MotionClocks {
         min_draw_interval: Duration::from_millis(cadence.min_draw_ms),

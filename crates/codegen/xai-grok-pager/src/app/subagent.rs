@@ -256,6 +256,10 @@ pub(crate) fn replay_inherited_updates_with_fallback(
         child_cwd,
         fallback,
     };
+    child_view
+        .session
+        .tracker
+        .forget_pending_tools_absent_from_scrollback(&child_view.scrollback);
     child_view.scrollback.begin_batch();
     let outcome = stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| {
         child_view

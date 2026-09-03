@@ -2153,7 +2153,7 @@ impl SessionActor {
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    "L3 nested window is full; ending child without compact"
+                    "nested window is full; ending child without compact"
                 );
                 let snapshot = self
                     .finalize_turn_bookkeeping(
@@ -2812,7 +2812,7 @@ impl SessionActor {
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    "L3 nested window is full after tools; ending child without compact"
+                    "nested window is full after tools; ending child without compact"
                 );
                 let snapshot = self
                     .finalize_turn_bookkeeping(

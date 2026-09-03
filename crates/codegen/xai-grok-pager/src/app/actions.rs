@@ -453,6 +453,9 @@ pub enum Action {
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).
     /// Pager-owned, NOT persisted to disk — reset each session.
     SetMultilineMode(bool),
+    /// Allow newlines in the Human box from Enter / Shift+Enter.
+    /// SHELL-owned: cache + `[ui].composer_multiline`. Default on.
+    SetComposerMultiline(bool),
     /// Open the prompt-history search panel on the active agent (composer
     /// as filter query). Dispatched by `/history`.
     OpenHistorySearch,
@@ -550,8 +553,8 @@ pub enum Action {
     /// Hide in-app status / welcome / dashboard headers. SHELL-owned:
     /// cache + `[ui].hide_header`.
     SetHideHeader(bool),
-    /// Keep thinking blocks expanded and hide Ctrl+T. SHELL-owned:
-    /// cache + `[ui].always_expand_thinking`.
+    /// Keep thinking blocks expanded. SHELL-owned: cache +
+    /// `[ui].always_expand_thinking`. Ctrl+T writes this same key.
     SetAlwaysExpandThinking(bool),
     /// Plan approval park (`soft` | `modal`). SHELL-owned:
     /// cache + `[ui].plan_approval_park`.

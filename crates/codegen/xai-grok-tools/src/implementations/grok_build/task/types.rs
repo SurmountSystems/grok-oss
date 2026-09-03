@@ -218,6 +218,9 @@ pub struct SubagentRuntimeOverrides {
     pub output_token_budget: Option<u64>,
     pub output_schema: Option<serde_json::Value>,
     pub loop_task_id: Option<String>,
+    /// Disposable once-run nested role (Goal Plan Writer). When the nested
+    /// sampling window is full, summarize and stop. Do not AUTO compact-and-continue.
+    pub once_run: bool,
 }
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
@@ -1157,7 +1160,18 @@ mod tests {
 
     use super::SubagentCapabilityMode;
     use super::SubagentCapabilityModeExt;
+    use super::SubagentRuntimeOverrides;
     use super::is_valid_resume_id;
+
+    /// Ordinary task spawns are not disposable once-run roles. Goal Plan Writer
+    /// sets `once_run` on the spawn request; Default must stay false.
+    #[test]
+    fn subagent_runtime_overrides_once_run_defaults_false() {
+        assert!(
+            !SubagentRuntimeOverrides::default().once_run,
+            "once_run is opt-in for disposable nested roles"
+        );
+    }
 
     /// Create a `ToolConfig` with the given id and kind set.
     fn tc(id: &str, kind: ToolKind) -> ToolConfig {

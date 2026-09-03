@@ -566,6 +566,61 @@ mod tests {
         );
     }
 
+    /// Named contract: mid-turn Interject paints and returns SendInterject
+    /// without waiting a minute and without cancel-and-send. Dispatch is
+    /// local; the ACP send is an effect, not a join on this thread.
+    #[test]
+    fn interject_does_not_wait_minutes_or_block_paint() {
+        use std::time::{Duration, Instant};
+
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("live-turn".into());
+        }
+        let started = Instant::now();
+        let effects = dispatch(
+            Action::Interject {
+                text: "steer now".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, "steer now"),
+            other => panic!("expected SendInterject, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "interject must not wait on cancel-and-send, got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "interject must not sit on Cancelling, got {:?}",
+            agent.session.state
+        );
+        assert!(
+            agent
+                .scrollback
+                .entries_in_range(0..agent.scrollback.len())
+                .iter()
+                .any(|e| matches!(&e.block, RenderBlock::UserPrompt(p) if p.text.contains("steer now"))),
+            "interject must paint locally before the ACP send"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "interject dispatch must not wait minutes; elapsed={:?}",
+            started.elapsed()
+        );
+    }
+
     /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
     /// Empty composer + Ctrl+Enter must not send an empty interject.
     #[test]

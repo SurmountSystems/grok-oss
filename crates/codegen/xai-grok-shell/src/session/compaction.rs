@@ -173,15 +173,28 @@ impl SessionActor {
         }
     }
     /// L3 is a nested specialist (`is_subagent` at depth 2+). L2 (depth 1)
-    /// stays on the AUTO compact path.
+    /// stays on the AUTO compact path unless [`Self::is_once_run_nested`].
     pub(crate) fn is_l3_session(&self) -> bool {
         self.startup_hints.is_subagent && self.tool_context.subagent_depth >= 2
     }
 
-    /// True when an L3 child has filled its nested sampling window. Callers
-    /// must end the child run, not `run_compact_only`.
+    /// Goal Plan Writer and other disposable once-run nested roles. Forked
+    /// from L1 they are still L2 depth; they must not compact-and-continue.
+    pub(crate) fn is_once_run_nested(&self) -> bool {
+        self.startup_hints.is_subagent && self.startup_hints.once_run
+    }
+
+    /// L3 specialists and once-run nested roles never AUTO compact. They
+    /// summarize and stop (`EndChildWithoutCompact`). Ordinary L2 still AUTO
+    /// compact at 95% of the nested 200k window.
+    pub(crate) fn never_auto_compact(&self) -> bool {
+        self.is_l3_session() || self.is_once_run_nested()
+    }
+
+    /// True when an L3 or once-run nested child has filled its nested
+    /// sampling window. Callers must end the child run, not `run_compact_only`.
     pub(crate) async fn l3_nested_window_is_full(&self) -> bool {
-        if !self.is_l3_session() {
+        if !self.never_auto_compact() {
             return false;
         }
         self.sampling_window_is_full().await
@@ -202,8 +215,8 @@ impl SessionActor {
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
     /// is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return false;
         }
         let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
@@ -1919,8 +1932,8 @@ impl SessionActor {
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
-        // L3 never AUTO compact. Do not CompactAndResubmit.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact. Do not CompactAndResubmit.
+        if self.never_auto_compact() {
             return false;
         }
         if self
@@ -1957,7 +1970,7 @@ impl SessionActor {
     /// Terminal when used is still over the sampling window after compact
     /// was skipped, suppressed, or did not save enough. Do not sample.
     pub(crate) async fn refuse_over_window_sample(&self) -> Result<(), acp::Error> {
-        if self.is_l3_session() {
+        if self.never_auto_compact() {
             return Ok(());
         }
         if self.tool_context.task_output_token_budget.is_some() {
@@ -1989,8 +2002,8 @@ impl SessionActor {
     /// (exact prior count + byte-estimate of items since last response) so
     /// tool results are accounted for. Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return None;
         }
         if self
@@ -2068,8 +2081,8 @@ impl SessionActor {
     /// Returns `Some` when tool call outputs have pushed the estimated token
     /// count past the context window, indicating pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return None;
         }
         if self
@@ -2106,8 +2119,8 @@ impl SessionActor {
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return Ok(());
         }
         self.refresh_token_if_expired().await;

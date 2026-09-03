@@ -1202,6 +1202,62 @@ fn fork_context_normalized_only_for_summarized() {
             summarized.verbatim_fork
         ));
 }
+
+/// Operator contract B: Goal Plan Writer / nested fork must not receive
+/// the parent's full check-remote dump as opening context.
+#[test]
+fn forked_goal_plan_writer_does_not_inherit_two_megabyte_nix_dump() {
+    use xai_grok_sampling_types::conversation::ConversationItem;
+    let chunk = "\u{1b}[31merror:\u{1b}[0m building '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-workspace-cargo-quality'\n";
+    let mut dump = String::with_capacity(2_000_064);
+    while dump.len() < 2_000_000 {
+        dump.push_str(chunk);
+    }
+    dump.truncate(2_000_000);
+    let mid = dump.len() / 2;
+    dump.replace_range(mid..mid + 28, "UNIQUE_NIX_DUMP_MIDDLE_MARK");
+    let items = vec![
+        ConversationItem::system("parent system"),
+        ConversationItem::user("just check-remote"),
+        ConversationItem::assistant("running"),
+        ConversationItem::tool_result("bash-check-remote", dump),
+        ConversationItem::assistant("done"),
+    ];
+    let ctx = verbatim_or_normalize_fork(items, 200_000);
+    assert_eq!(ctx.source, InitialContextSource::Forked);
+    let opening = ctx
+        .conversation
+        .iter()
+        .map(|item| match item {
+            ConversationItem::ToolResult(tr) => tr.content.to_string(),
+            ConversationItem::User(u) => u
+                .content
+                .iter()
+                .filter_map(|p| match p {
+                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                        Some(text.as_ref())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            ConversationItem::Assistant(a) => a.content.to_string(),
+            ConversationItem::System(s) => s.content.to_string(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !opening.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+        "Goal Plan Writer opening context must not contain the parent nix dump middle"
+    );
+    let opening_tokens = xai_chat_state::estimate_conversation_tokens(&ctx.conversation);
+    assert!(
+        opening_tokens < 40_000,
+        "owed: nested fork opening must not add ~200k tokens from a 2MB dump; got {opening_tokens}"
+    );
+}
+
 fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
     SubagentRequest {
         id: "bootstrap-test".into(),

@@ -219,6 +219,12 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
+/// First-level nested coordinators (depth 1 with default max 2) may spawn
+/// specialists. Depth at or above max must not get `spawn_subagent`.
+pub fn nested_spawn_allowed(child_depth: u32, max_depth: u32) -> bool {
+    child_depth < max_depth
+}
+
 /// Apply capability filtering and recursion depth to the exact production
 /// definition toolset.
 pub fn apply_child_tool_policy(
@@ -318,6 +324,76 @@ mod tests {
             allowed_types: None,
         }
     }
+    #[test]
+    fn nested_spawn_allowed_keeps_l2_and_blocks_l3_at_default_max() {
+        assert!(
+            nested_spawn_allowed(1, 2),
+            "depth 1 with max 2 is a first-level nested coordinator and must keep spawn_subagent"
+        );
+        assert!(
+            !nested_spawn_allowed(2, 2),
+            "depth 2 with max 2 is L3 and must not spawn L4"
+        );
+        assert!(
+            !nested_spawn_allowed(1, 1),
+            "explicit max 1 is L1-only spawn"
+        );
+    }
+
+    /// Named contract: an L2 grok-build coordinator keeps spawn_subagent.
+    #[test]
+    fn l2_grok_build_child_tool_policy_keeps_spawn_subagent() {
+        let mut definition = AgentDefinition::default_grok_build();
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "premise: grok-build ships a Task tool"
+        );
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "L2 must keep spawn_subagent (Task) so it can spawn L3"
+        );
+    }
+
+    /// Named contract: at max depth, Task is stripped and bash lifecycle stays.
+    /// That is the live nested overlay: wait/kill present, spawn_subagent gone.
+    #[test]
+    fn max_depth_child_tool_policy_strips_spawn_subagent_and_keeps_bash_lifecycle() {
+        let mut definition = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut definition, None, false);
+        let ids: Vec<&str> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect();
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "max-depth child must not get spawn_subagent; ids={ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.ends_with(":run_terminal_cmd")),
+            "bash must remain so the child can still work; ids={ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .any(|id| id.ends_with(":get_task_output") || id.ends_with(":wait_tasks")),
+            "background wait tools stay when bash can still spawn background work; ids={ids:?}"
+        );
+    }
+
     #[test]
     fn builtin_explore_uses_production_read_only_toolset() {
         let cwd = tempfile::tempdir().unwrap();

@@ -134,6 +134,10 @@ impl AgentView {
                 child.set_active_pane(AgentPane::Scrollback, true);
             }
         }
+        if self.child_is_auto_compacting(&child_sid) {
+            // Nested compact chrome must not force a fullscreen steal.
+            return;
+        }
         self.active_subagent = Some(child_sid);
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
@@ -149,6 +153,7 @@ impl AgentView {
             PlanApprovalFocus::Commenting => {
                 vec![
                     HintItem::new(key!(Enter), "save comment"),
+                    HintItem::new(key!('y'), "copy"),
                     HintItem::new(key!(Esc), "cancel"),
                 ]
             }
@@ -391,6 +396,7 @@ impl AgentView {
         if self.is_casual_commenting() {
             return ShortcutsBarContent::Surface(vec![
                 HintItem::new(key!(Enter), "save comment"),
+                HintItem::new(key!('y'), "copy"),
                 HintItem::new(key!(Esc), "cancel"),
             ]);
         }
@@ -1030,7 +1036,9 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if let Some(ref child_sid) = self.active_subagent.clone()
+            && !self.child_is_auto_compacting(child_sid)
+        {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -1363,7 +1371,7 @@ impl AgentView {
         if self.active_pane == ActivePane::Catalog && !self.catalog.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
-        let viewer_open = self.active_subagent.is_some();
+        let viewer_open = self.visible_nested_overlay_sid().is_some();
         let tasks_height = if viewer_open {
             0
         } else {

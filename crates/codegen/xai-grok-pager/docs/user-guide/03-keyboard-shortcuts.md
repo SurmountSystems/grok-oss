@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+T` | `-` | Expand or collapse all thinking blocks (the agent's chain of thought). Same chord on the main scrollback, a nested overlay, and while the composer is focused; it does not insert a character. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; it does not type a hyphen while the scrollback is focused. In the composer, `-` stays a typed hyphen. |
+| `Ctrl+T` | `-` | Expand or collapse all thinking blocks (the agent's chain of thought). The last toggle is the default for the next thought and is written to `[ui] always_expand_thinking` so the next session starts the same way. Same chord on the main scrollback, a nested overlay, and while the composer is focused; it does not insert a character. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; it does not type a hyphen while the scrollback is focused. In the composer, `-` stays a typed hyphen. Settings → Always expand thinking is the same option. |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -224,7 +224,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+.` (alt: `Ctrl+X`) | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker.
+**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker. `[ui] composer_multiline = false` disables newlines in the Human box entirely. Session Multiline cannot turn them back on while that flag is false.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
@@ -291,7 +291,7 @@ While the agent is generating:
 | Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Soft interject |
 | VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Soft interject (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
-In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.)
+In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.) When `[ui] composer_multiline = false`, both Enter and Shift+Enter send or interject and never insert a newline. Plan Preview uses the same Enter rules as the main Human box.
 
 To hand the agent a note **without** stopping it, queue with plain `Enter` or use the soft-interject chord.
 

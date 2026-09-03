@@ -632,6 +632,10 @@ pub struct StartupHints {
     /// intended to also drive a turn-end delivery gate later.
     #[serde(default)]
     pub delivery_tools: Vec<String>,
+    /// Disposable once-run nested role. Goal Plan Writer sets this so a
+    /// forked L2 child summarizes and stops instead of compact-and-continue.
+    #[serde(default)]
+    pub once_run: bool,
 }
 
 impl StartupHints {
@@ -944,5 +948,16 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: TokenUsageCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, original);
+    }
+
+    /// Disposable once-run nested roles set this so AUTO compact-and-continue
+    /// does not run. Absent ACP `startupHints` must not mark a session once-run.
+    #[test]
+    fn startup_hints_once_run_defaults_false_and_deserializes_camel_case() {
+        assert!(!StartupHints::default().once_run);
+        let absent: StartupHints = serde_json::from_value(json!({})).unwrap();
+        assert!(!absent.once_run);
+        let present: StartupHints = serde_json::from_value(json!({ "onceRun": true })).unwrap();
+        assert!(present.once_run);
     }
 }

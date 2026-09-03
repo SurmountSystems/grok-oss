@@ -50,7 +50,7 @@ List live grok-oss TUI windows on this machine. Alias: `/windows`.
 
 This is **Running grok-oss sessions**. It is not the [Agent Dashboard](23-dashboard.md), not `/sessions`, not `/tasks`, not `/resume`, and not `/start`. `/dashboard` still owns the roster inside this pager process. Do not treat `/running` as a second dashboard.
 
-**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that GPUI window will call: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and writes a per-session enqueue drop file. Binary `surmount-coordinator-gui` reads `/running --json` from stdin or a file and prints that safe JSON. It is not this TUI and not `/dashboard`.
+**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop coordinator. It is not a website on the mail host :443. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that GPUI window will call: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and writes a per-session enqueue drop file. It also has the laptop-side action **set remote host console API key** for a machine xAI console API key on host surmount-1 (console API credits / console team prepaid, not included SuperGrok period limits, not SuperGrok dollar credits). That action writes a staging file the operator copies, or prints `scp` as the existing deploy user. It never prints the key. It does not open git on the guest. Binary `surmount-coordinator-gui` reads `/running --json` from stdin or a file and prints that safe JSON, and the same binary accepts `set-remote-host-console-api-key`. It is not this TUI and not `/dashboard`. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1). The GPUI window itself is leftover when this crate has no `gui` feature.
 
 The list comes from `$GROK_HOME/active_sessions.json`. When `GROK_HOME` is unset, that file is `~/.grok/active_sessions.json`. Two grok homes do not see each other. Only live grok-oss processes appear. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
 
@@ -322,7 +322,7 @@ Always-approve remains the preferred daily autonomy mode. Context-only is an exp
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`.
+Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables newlines entirely; `/multiline` cannot restore them while that persist flag is off.
 
 ### `/history`
 

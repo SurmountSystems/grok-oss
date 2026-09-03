@@ -44,7 +44,7 @@ You can enter plan mode yourself in two ways:
 - **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
 - **Shift+Tab** -- Cycle the session mode: Normal, then Plan, then Always-approve, then back to Normal. From Normal, a single press lands on Plan.
 
-After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen the pane. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. A dot marks the option recorded in grok-oss.db when the operator explicitly chose Approve, Comment, Revise, or Exit. Present, empty Enter, and always-approve tool permissions do not write that row. Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
+After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen the pane. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. A clickable **copy** control (`y`) copies the plan, including while a line-comment overlay is open. A dot marks the **selected** CTA (the one Enter will submit). That mark is live selection, not a leftover grok-oss.db recorded row. Present, empty Enter, and always-approve tool permissions do not Approve. Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
 
 ---
 
@@ -70,7 +70,7 @@ When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool r
 
 A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve.
 
-The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
+The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Click a button to mark it and run it (the selected one is marked). Enter submits the marked CTA. A first click on **Approve** still Approves. A first click on **Comment** focuses the comment composer. A first click on idle **Revise** focuses the box and waits; after a comment is typed, Revise rewrites. A first click on **Exit** abandons. After **Comment**, **Clarify** sends questions (not a rewrite). A second click on an already-selected CTA still submits that action. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` never Approves. When the Human box is composing a line comment or revise draft, Enter still saves or sends that draft (`Enter:save comment` on the line-comment overlay, including while session Multiline is on).
 
 If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, comment (then Approve, Clarify, or Revise), revise, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
@@ -85,10 +85,11 @@ Scroll the plan with the arrow keys or `j`/`k`. Clicking a plan row focuses or s
 | **Clarify** | Shown after **Comment** (or after focusing the prompt). Sends the current comment as a read-only question. Does not rewrite the plan. Empty Preview `?` still arms this path. While you are typing in the Human box, `?` inserts. |
 | **Revise** | Idle click focuses the box and waits. After a comment is typed, Revise rewrites the plan with that text. An empty Revise click does not submit. |
 | **Exit** | Abandon the plan without approving and turn plan mode off. Empty `Ctrl+C` also exits. |
-| `y` | Copy the full plan to the clipboard. |
+| **copy** / `y` | Copy the full plan to the clipboard. Empty Preview `y` copies. `y` also copies while the line-comment overlay is open. While you are typing a Prompt draft in the Human box, `y` inserts. The clickable copy control is the mouse path. |
 | `Tab` | Move focus between the plan preview and the prompt. |
+| `Enter` | Submit the marked CTA when Preview is empty. Empty `Enter` never Approves. While commenting, Enter saves the line comment. |
 
-Empty `Enter` on the prompt never Approves. Use the clickable **Approve** button.
+Empty `Enter` never Approves. Use the clickable **Approve** button, or mark Approve and then click it again.
 
 ### Screenshots in plan mode
 
@@ -108,7 +109,7 @@ The approval view has three focus states:
 - **Commenting**: Add an inline comment to the selected line range. Press `c` for that explicit line-comment gesture. Do not use a row click for this.
 - **Prompt**: Type a comment. Then click **Approve** (implement with notes), **Clarify** (read-only answers), or **Revise** (rewrite). You can also type `also` or `Also` here.
 
-Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). You can type those comments in the Human box while Preview is focused; you do not have to Tab to Prompt first. Empty Approve still implements without inventing notes. **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate. `Ctrl+Z` undoes the last Human-box edit, including a wipe (first `Ctrl+C`), while Preview or Prompt is focused.
+Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). You can type those comments in the Human box while Preview is focused; you do not have to Tab to Prompt first. Empty Approve still implements without inventing notes. **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate. `Ctrl+Z` undoes the last Human-box edit, including a wipe (first `Ctrl+C`), while Preview or Prompt is focused. Shift+Enter in Preview matches the main Human box: it inserts a newline when composer multiline is on, and it sends (or interjects) when `[ui] composer_multiline = false` or session Multiline is on. Overlay copy, clarify, and approve do not steal Shift+Enter.
 
 ### Leaving the Approval View
 

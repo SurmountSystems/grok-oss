@@ -367,6 +367,7 @@ impl ChannelSpawner {
             runtime_overrides: SubagentRuntimeOverrides {
                 model,
                 harness_agent_type,
+                once_run: true,
                 ..Default::default()
             },
             run_in_background: false,
@@ -1317,6 +1318,14 @@ mod tests {
         assert_eq!(
             request.runtime_overrides.model.as_deref(),
             Some("cfg-model")
+        );
+        assert!(
+            request.runtime_overrides.once_run,
+            "Goal Plan Writer is a disposable once-run role; spawn must mark once_run so the child summarizes and stops instead of compact-and-continue"
+        );
+        assert!(
+            request.fork_context,
+            "Goal Plan Writer forks parent history; that fill must not AUTO compact the once-run child"
         );
         // Reply SUCCESS so the explicit pair does NOT trigger a fail-open retry.
         let _ = request.result_tx.send(SubagentResult {

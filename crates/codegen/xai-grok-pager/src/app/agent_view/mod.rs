@@ -1195,6 +1195,10 @@ pub struct AgentView {
     pub(crate) unsent_draft_persist_flush_count: Cell<u32>,
     /// Test counter: keystroke persists skipped by the debounce.
     pub(crate) unsent_draft_persist_skip_count: Cell<u32>,
+    /// Test counter: WAL appends (send/interject/queue). Keystrokes must stay 0.
+    pub(crate) prompt_wal_append_count: Cell<u32>,
+    /// Test counter: `pending_prompts.json` snapshots. Keystrokes must stay 0.
+    pub(crate) pending_prompts_persist_count: Cell<u32>,
     /// Whether the mouse is hovering over the prompt widget.
     pub hovered_prompt: bool,
     pub hit_badge: HitArea,

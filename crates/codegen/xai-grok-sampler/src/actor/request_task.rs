@@ -694,7 +694,19 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped_urls = request.strip_images();
+            // Path-shaped session assets and `[Image #N]` tokens 400 as
+            // `invalid_image`. Drop those first and keep valid data/`http(s)`
+            // siblings so a retry does not leave every screenshot out.
+            // If every remaining image is already API-shaped, strip all
+            // (corrupt pixels in a data URL).
+            let stripped_urls = {
+                let shaped = request.strip_images_not_api_urls();
+                if !shaped.is_empty() {
+                    shaped
+                } else {
+                    request.strip_images()
+                }
+            };
             if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 emit_failed(event_tx, request_id, err);

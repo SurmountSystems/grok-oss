@@ -12,6 +12,8 @@
 //! display. Unlike a screen/grid emulator it keeps an unbounded, fully-styled
 //! transcript that maps onto the pager's line model.
 
+use std::borrow::Cow;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use vte::{Params, Parser, Perform};
@@ -23,24 +25,129 @@ use crate::theme::color_support::quantize;
 const MAX_ROWS: usize = 50_000;
 const MAX_COLS: usize = 8_192;
 
+/// Do not re-parse tens of thousands of nix progress lines on every layout.
+/// A huge `copying path` dump must not freeze parent TUI scroll.
+pub const MAX_TERMINAL_PARSE_BYTES: usize = 48 * 1024;
+pub const MAX_TERMINAL_PARSE_LINES: usize = 256;
+const PARSE_HEAD_LINES: usize = 32;
+const PARSE_TAIL_LINES: usize = 192;
+const PARSE_HEAD_BYTES: usize = 8 * 1024;
+const PARSE_TAIL_BYTES: usize = 24 * 1024;
+
 /// A single rendered transcript line: styled spans plus de-escaped plain text.
 pub struct RenderedLine {
     pub line: Line<'static>,
     pub plain: String,
 }
 
+/// Fold a huge PTY dump to a head + tail so layout does not re-parse 50k nix
+/// rows every frame. DEC private / OSC sequences stay in the string; the VTE
+/// sink still ignores them (they must not latch the host tty).
+pub fn bound_terminal_raw(raw: &str) -> Cow<'_, str> {
+    if raw.is_empty() {
+        return Cow::Borrowed(raw);
+    }
+    // NUL in a piped nix/binary dump must not ride into ratatui spans.
+    let stripped: Cow<'_, str> = if raw.as_bytes().contains(&0) {
+        Cow::Owned(raw.chars().filter(|&c| c != '\0').collect())
+    } else {
+        Cow::Borrowed(raw)
+    };
+    let src = stripped.as_ref();
+    let newlines = src.bytes().filter(|&b| b == b'\n').count();
+    let line_count = if src.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
+    };
+    if src.len() <= MAX_TERMINAL_PARSE_BYTES && line_count <= MAX_TERMINAL_PARSE_LINES {
+        stripped
+    } else {
+        Cow::Owned(fold_head_tail(src, line_count))
+    }
+}
+
+fn fold_head_tail(raw: &str, line_count: usize) -> String {
+    let mut starts = Vec::with_capacity(line_count.min(MAX_TERMINAL_PARSE_LINES + 2));
+    starts.push(0);
+    for (i, b) in raw.bytes().enumerate() {
+        if b == b'\n' && i + 1 < raw.len() {
+            starts.push(i + 1);
+        }
+    }
+    let n = starts.len();
+    let mut out = String::new();
+    if n > PARSE_HEAD_LINES + PARSE_TAIL_LINES {
+        let omitted = n - PARSE_HEAD_LINES - PARSE_TAIL_LINES;
+        let head_end = starts[PARSE_HEAD_LINES];
+        out.push_str(&raw[..head_end]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\u{2026} +{omitted} lines\n"));
+        let tail_start_line = n - PARSE_TAIL_LINES;
+        out.push_str(&raw[starts[tail_start_line]..]);
+    } else {
+        out.push_str(raw);
+    }
+    if out.len() > MAX_TERMINAL_PARSE_BYTES {
+        byte_trim_middle(&mut out);
+    }
+    out
+}
+
+fn byte_trim_middle(s: &mut String) {
+    if s.len() <= MAX_TERMINAL_PARSE_BYTES {
+        return;
+    }
+    let head = floor_char_boundary(s, PARSE_HEAD_BYTES.min(s.len()));
+    let tail_at = s.len().saturating_sub(PARSE_TAIL_BYTES);
+    let tail = ceil_char_boundary(s, tail_at);
+    if head >= tail {
+        return;
+    }
+    let marker = "\n\u{2026} +truncated\n";
+    let mut out = String::with_capacity(head + marker.len() + (s.len() - tail));
+    out.push_str(&s[..head]);
+    out.push_str(marker);
+    out.push_str(&s[tail..]);
+    *s = out;
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Parse a raw terminal stream (ANSI SGR + cursor/erase + carriage return) into
 /// styled lines. `base` is the default style for text without an SGR override.
 ///
 /// Deterministic and idempotent: a fresh emulator per call, safe to invoke from
-/// both the render path and the height-cache path.
+/// both the render path and the height-cache path. Huge dumps are folded first
+/// so parent TUI layout cannot freeze on a nix `copying path` stream.
 pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     if raw.is_empty() {
         return Vec::new();
     }
+    let bounded = bound_terminal_raw(raw);
     let mut sink = TermSink::new(base);
     let mut parser = Parser::new();
-    parser.advance(&mut sink, raw.as_bytes());
+    parser.advance(&mut sink, bounded.as_bytes());
     sink.finish()
 }
 
@@ -536,5 +643,55 @@ mod tests {
     #[test]
     fn progress_erase_entire_line_collapses() {
         assert_eq!(lines("loading 99%\x1b[2K\rdone\n"), vec!["done"]);
+    }
+
+    /// Parent grok-oss TUI must still scroll after a shell tool dumps a huge
+    /// nix/ANSI stream. Do not paint raw `copying path` rows as unbounded
+    /// host scrollback, and DEC mouse/alt-screen must not survive as text.
+    #[test]
+    fn huge_nix_ansi_dump_is_folded_and_does_not_emit_mode_latch_text() {
+        let mut raw = String::from("\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b]0;nix\x07");
+        raw.push('\0');
+        for i in 0..400 {
+            raw.push_str(&format!(
+                "copying path '/nix/store/{i:064}-cargo-package' to 'ssh-ng://builder'...\n"
+            ));
+        }
+        raw.push_str("\x1b[?1003l\x1b[?1000l\x1b[?1049l");
+        assert!(
+            bound_terminal_raw(&raw).as_ref().len() < raw.len(),
+            "400 nix copy lines must fold before VTE parse"
+        );
+        let rendered = render_terminal_lines(&raw, Style::default());
+        assert!(
+            rendered.len() < MAX_TERMINAL_PARSE_LINES,
+            "folded dump must stay under the parse line cap, got {}",
+            rendered.len()
+        );
+        assert!(
+            rendered.len() > 8,
+            "fold must keep a visible head of copying-path lines, got {}",
+            rendered.len()
+        );
+        let plains: Vec<&str> = rendered.iter().map(|rl| rl.plain.as_str()).collect();
+        assert!(
+            plains.iter().any(|p| p.contains("copying path")),
+            "operator still sees nix copy progress in the folded tail/head"
+        );
+        assert!(
+            plains.iter().any(|p| p.contains('\u{2026}')),
+            "fold marker must name that lines were omitted"
+        );
+        for p in &plains {
+            assert!(
+                !p.contains("\x1b["),
+                "painted text must not dump raw CSI onto the host scrollback: {p:?}"
+            );
+            assert!(!p.contains('\0'), "NUL must not survive bound paint: {p:?}");
+            assert!(
+                !p.contains("?1000") && !p.contains("?1049"),
+                "DEC mouse/alt-screen must not latch as painted text: {p:?}"
+            );
+        }
     }
 }

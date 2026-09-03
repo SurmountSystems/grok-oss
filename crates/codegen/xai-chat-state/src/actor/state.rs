@@ -263,6 +263,7 @@ impl ChatState {
             );
         }
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut conversation);
 
         let initial_tokens = estimate_conversation_tokens(&conversation);
 

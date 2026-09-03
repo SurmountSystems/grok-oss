@@ -1170,7 +1170,7 @@ fn conversation_tail_is_complete(
 /// Input that is empty or only `System` item(s) — before OR after filtering —
 /// inherited nothing, so it fails open to `New` rather than a hollow fork.
 fn verbatim_or_normalize_fork(
-    items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    mut items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
     child_context_window: u64,
 ) -> InitialContext {
     if !items
@@ -1185,6 +1185,7 @@ fn verbatim_or_normalize_fork(
             verbatim_fork: false,
         };
     }
+    xai_grok_sampling_types::fold_tool_results_in_conversation(&mut items);
     let estimated_tokens = xai_chat_state::estimate_conversation_tokens(&items);
     const SAFE_FORK_PERCENT: u64 = 80;
     let threshold = child_context_window * SAFE_FORK_PERCENT / 100;

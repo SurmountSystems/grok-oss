@@ -1009,13 +1009,18 @@ impl AgentView {
         }
         // Letter CTA keys (`a` Approve, `A` Notes, `s` Revise, `q` Exit) must
         // type. Approve is the clickable button. Empty Preview `?` arms
-        // Clarify. Prompt focus or a live draft inserts `?`.
+        // Clarify. Prompt focus or a live draft inserts `?`. Empty Preview
+        // `y` copies the plan. Comment overlay `y` copies too. A live
+        // Preview or Prompt draft inserts `y`.
         let empty_prompt =
             self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
         let preview_focused = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
+        if crate::key!('y').matches(key) && (is_commenting || (empty_prompt && preview_focused)) {
+            return self.copy_plan_full();
+        }
         if !is_commenting && matches_shifted_char(key, '?') {
             if empty_prompt && preview_focused {
                 return self.focus_plan_prompt(PlanPromptIntent::Questions);
@@ -1028,7 +1033,32 @@ impl AgentView {
             self.persist_unsent_composer_draft();
             return InputOutcome::Changed;
         }
-        match self.prompt.route_enter(key) {
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        // Session Multiline: Enter inserts a newline. Preview must match
+        // the main Human box. `[ui] composer_multiline = false` never
+        // takes this arm (Enter still sends). Line-comment overlay
+        // footer is `Enter:save comment`; do not insert a newline there.
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.multiline_mode
+            && allow_newlines
+            && !is_commenting
+            && !self.prompt.file_search_visible()
+        {
+            self.prompt.textarea.insert_str("\n");
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.persist_unsent_composer_draft();
+            return InputOutcome::Changed;
+        }
+        let mut enter_outcome = self.prompt.route_enter(key);
+        if matches!(enter_outcome, EnterOutcome::PassThrough)
+            && crate::input::is_mod_enter(key)
+            && self.multiline_mode
+            && allow_newlines
+        {
+            enter_outcome = EnterOutcome::Submit;
+        }
+        match enter_outcome {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => {
                 let panel_open = self.line_viewer.is_some();
@@ -1329,7 +1359,25 @@ impl AgentView {
             }
             return self.cancel_casual_plan_commenting();
         }
-        match self.prompt.route_enter(key) {
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.multiline_mode
+            && allow_newlines
+            && !self.prompt.file_search_visible()
+        {
+            self.prompt.textarea.insert_str("\n");
+            return InputOutcome::Changed;
+        }
+        let mut enter_outcome = self.prompt.route_enter(key);
+        if matches!(enter_outcome, EnterOutcome::PassThrough)
+            && crate::input::is_mod_enter(key)
+            && self.multiline_mode
+            && allow_newlines
+        {
+            enter_outcome = EnterOutcome::Submit;
+        }
+        match enter_outcome {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => return self.save_casual_plan_comment(),
             EnterOutcome::PassThrough => {}
@@ -2427,6 +2475,97 @@ mod plan_pane_letter_a_contract_tests {
             agent.active_modal.is_none(),
             "empty Preview ? must not open the command palette"
         );
+    }
+
+    /// Operator: when Preview footer advertises `y:copy`, `y` must copy the
+    /// plan (`copy_plan_full`), not insert `y` in the Human box.
+    /// Empty composer + Preview `y:copy` footer: `y` copies. That matches
+    /// empty `?` still Clarify.
+    #[test]
+    fn plan_preview_empty_y_copies_plan() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEmpty y copies this body\n");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "fixture: empty Human box while Preview is focused"
+        );
+        agent.toast = None;
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Preview y must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty Preview y must keep the parked plan"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "empty Preview y must copy, not Approve or Exit"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "empty Preview y copies the plan; it must not insert y in the Human box, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.toast.is_some(),
+            "empty Preview y must take the copy_plan_full path (clipboard toast)"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("empty Preview y keeps plan review parked");
+        assert_eq!(
+            pav.focus,
+            PlanApprovalFocus::Preview,
+            "empty Preview y must not steal focus into Commenting or Prompt"
+        );
+    }
+
+    /// A live Human-box draft treats `y` as text. Footer `y:copy` must not
+    /// steal a letter from a comment the operator intends to send.
+    #[test]
+    fn plan_preview_y_inserts_when_composer_has_text() {
+        let draft = "please keep this comment";
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nLive draft y inserts\n");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text(draft);
+        agent.prompt.set_cursor(agent.prompt.text().len());
+        agent.toast = None;
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "composing y must be handled; got {outcome:?}"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{draft}y"),
+            "Preview with a live draft must insert y, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "composing y must not submit or abandon the parked plan"
+        );
+        assert!(agent.toast.is_none(), "composing y must not copy the plan");
     }
 
     /// Capital A is not Notes. `Also` must type into the main prompt.

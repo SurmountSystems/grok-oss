@@ -2554,11 +2554,22 @@ fn alt_and_shift_enter_insert_newline_not_dispatch() {
 
 #[test]
 fn compose_enter_is_newline_matrix() {
+    crate::appearance::cache::set_composer_multiline(true);
     // Strict swap: (multiline, mod_enter) → is_newline
     assert!(!compose_enter_is_newline(false, false));
     assert!(compose_enter_is_newline(false, true));
     assert!(compose_enter_is_newline(true, false));
     assert!(!compose_enter_is_newline(true, true));
+}
+
+#[test]
+fn compose_enter_is_newline_never_when_composer_multiline_off() {
+    crate::appearance::cache::set_composer_multiline(false);
+    assert!(!compose_enter_is_newline(false, false));
+    assert!(!compose_enter_is_newline(false, true));
+    assert!(!compose_enter_is_newline(true, false));
+    assert!(!compose_enter_is_newline(true, true));
+    crate::appearance::cache::set_composer_multiline(true);
 }
 
 /// With multiline_mode on, bare Enter inserts a newline (does not

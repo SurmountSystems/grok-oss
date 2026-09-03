@@ -73,15 +73,16 @@ use super::session::load::{
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
-    clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_allow_worktree, set_always_expand_thinking,
-    set_ask_user_question_timeout_enabled, set_auto_compact_threshold, set_auto_dark_theme,
-    set_auto_light_theme, set_auto_run_implement, set_auto_update, set_bubble_copy_buttons,
-    set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks, set_combine_queued_prompts,
-    set_compact_mode, set_confirm_before_rewind, set_contextual_hint_image_input,
-    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
-    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_reasoning_effort, set_default_selected_permission,
+    clear_default_model, clear_fork_secondary_model, persist_always_expand_thinking_after_ctrl_t,
+    preview_auto_dark_theme, preview_auto_light_theme, preview_theme, set_allow_worktree,
+    set_always_expand_thinking, set_ask_user_question_timeout_enabled, set_auto_compact_threshold,
+    set_auto_dark_theme, set_auto_light_theme, set_auto_run_implement, set_auto_update,
+    set_bubble_copy_buttons, set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks,
+    set_combine_queued_prompts, set_compact_mode, set_composer_multiline,
+    set_confirm_before_rewind, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
+    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
+    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
+    set_default_reasoning_effort, set_default_selected_permission,
     set_display_refresh_auto_cadence, set_economic_mode, set_features_session_recap,
     set_fork_secondary_model, set_group_tool_verbs, set_hide_header, set_hunk_tracker_mode,
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
@@ -563,8 +564,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ExpandAllThinking => {
+            let prev = crate::appearance::cache::load_always_expand_thinking();
             with_scrollback(app, |s| s.expand_all_thinking());
-            vec![]
+            persist_always_expand_thinking_after_ctrl_t(app, prev)
         }
         Action::ToggleRaw => {
             with_scrollback(app, |s| s.toggle_raw_selected());
@@ -1131,6 +1133,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
+        Action::SetComposerMultiline(v) => set_composer_multiline(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),

@@ -37,7 +37,7 @@ impl AgentView {
     ) -> ExternalPromptEditorAccess {
         let pane_owns_prompt = minimal_logical_prompt || self.active_pane == AgentPane::Prompt;
         let owned_elsewhere = !matches!(self.prompt_mode, super::PromptMode::Normal)
-            || self.active_subagent.is_some()
+            || self.visible_nested_overlay_sid().is_some()
             || !pane_owns_prompt
             || self.active_modal.is_some()
             || self.extensions_modal.is_some()
@@ -473,7 +473,9 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if let Some(ref child_sid) = self.active_subagent.clone()
+            && !self.child_is_auto_compacting(child_sid)
+        {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && key!('q', CONTROL).matches(key)

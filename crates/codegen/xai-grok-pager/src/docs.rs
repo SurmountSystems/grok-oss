@@ -812,6 +812,18 @@ mod tests {
             "19-plan-mode.md must still say empty Enter never Approves"
         );
         assert!(
+            content.contains("copy") && (content.contains("`y`") || content.contains("y copies")),
+            "19-plan-mode.md must teach the copy control and y"
+        );
+        assert!(
+            content.contains("selected") && content.contains("Enter submits"),
+            "19-plan-mode.md must say the selected CTA is marked and Enter submits it"
+        );
+        assert!(
+            content.contains("line-comment overlay") || content.contains("comment overlay"),
+            "19-plan-mode.md must say y copies while the line-comment overlay is open"
+        );
+        assert!(
             content.contains("Ctrl+Z") || content.contains("ctrl+z"),
             "19-plan-mode.md must say Ctrl+Z restores the Human box"
         );
@@ -907,6 +919,103 @@ mod tests {
         assert!(
             mcp.content.contains("grok-oss mcp add"),
             "07-mcp-servers must show grok-oss mcp add"
+        );
+    }
+
+    /// Named contract: user-guide describes a machine console API key for
+    /// host surmount-1, install under that host grok home, no guest git,
+    /// GPG sign on the laptop, attach SSH + tmux as user grok, and L0 as
+    /// a different product from pager /dashboard.
+    #[test]
+    fn user_guide_machine_console_api_key_for_surmount_1() {
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let dash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "23-dashboard.md")
+            .expect("23-dashboard.md is embedded");
+        let content = auth.content;
+        assert!(
+            content.contains("surmount-1"),
+            "02-authentication.md must name host surmount-1"
+        );
+        assert!(
+            content.contains("console API credits") && content.contains("console team prepaid"),
+            "02-authentication.md must name console API credits / console team prepaid"
+        );
+        assert!(
+            content.contains("not included SuperGrok period limits")
+                && content.contains("not SuperGrok dollar credits"),
+            "02-authentication.md must say the machine key is not included SuperGrok period limits and not SuperGrok dollar credits"
+        );
+        assert!(
+            content.contains("$GROK_HOME") && content.contains("~/.grok"),
+            "02-authentication.md must name grok home as $GROK_HOME or ~/.grok"
+        );
+        assert!(
+            content.contains("/home/grok/.grok"),
+            "02-authentication.md must document typical grok home for user grok"
+        );
+        assert!(
+            content.contains("Never commit the key"),
+            "02-authentication.md must say never commit the key"
+        );
+        assert!(
+            content.contains("must not git push") && content.contains("unconfigured"),
+            "02-authentication.md must say git stays unconfigured and the guest must not git push"
+        );
+        assert!(
+            content.contains("Do not `git init`, `git remote`, or `ssh-keygen`"),
+            "02-authentication.md must forbid git init, git remote, and ssh-keygen on the guest"
+        );
+        assert!(
+            !content.contains("git remote add origin"),
+            "02-authentication.md must not instruct adding a guest git remote"
+        );
+        assert!(
+            content.contains("GPG-signed on the laptop"),
+            "02-authentication.md must say commits are GPG-signed on the laptop"
+        );
+        assert!(
+            content.contains("SSH + tmux as user grok") && content.contains("no boot TUI"),
+            "02-authentication.md must keep attach as SSH + tmux as user grok with no boot TUI"
+        );
+        assert!(
+            content.contains("set remote host console API key"),
+            "02-authentication.md must name the L0 action"
+        );
+        assert!(
+            content.contains("not a website on the mail host :443")
+                && content.contains("not pager `/dashboard`")
+                && content.contains("not `/running`"),
+            "02-authentication.md must say L0 is not mail-host :443, not /dashboard, not /running"
+        );
+        assert!(
+            content.contains("Do not copy a laptop SuperGrok OAuth"),
+            "02-authentication.md must forbid copying laptop SuperGrok OAuth onto the guest"
+        );
+        assert!(
+            slash.content.contains("set remote host console API key")
+                && slash
+                    .content
+                    .contains("not a website on the mail host :443"),
+            "04-slash-commands.md must name the L0 machine-key action and keep L0 off /dashboard"
+        );
+        assert!(
+            dash.content.contains("set remote host console API key")
+                && dash.content.contains("not `/dashboard`")
+                && dash.content.contains("not `/running`"),
+            "23-dashboard.md must keep L0 as a different product from /dashboard and /running"
+        );
+        assert!(
+            !content.contains("xai-FAKE-MACHINE-CONSOLE-KEY"),
+            "user-guide must not include a fake key token"
         );
     }
 }

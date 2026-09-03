@@ -105,6 +105,13 @@ no runtime reader. Serde default tests are not this class.
 | `xai-grok-pager` `always_expand_thinking_finish_overrides_sticky_collapsed` | Finish honors always-expand over session sticky |
 | `xai-grok-pager` `always_expand_thinking_flip_rematerializes_stacked_thinking` | Settings flip rematerializes stacked thinking rows |
 | `xai-grok-pager` `set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay` | Parent and nested overlay thinking rematerialize live |
+| `xai-grok-pager` `ctrl_t_expand_is_default_for_next_thinking_block` | Last Ctrl+T expand is the default for the next thought |
+| `xai-grok-pager` `ctrl_t_collapse_is_default_for_next_thinking_block` | Last Ctrl+T collapse is the default for the next thought |
+| `xai-grok-pager` `ctrl_t_expand_persists_always_expand_thinking` | Ctrl+T expand writes `[ui] always_expand_thinking` |
+| `xai-grok-pager` `ctrl_t_collapse_persists_always_expand_thinking_off` | Ctrl+T collapse writes `[ui] always_expand_thinking = false` |
+| `xai-grok-pager` `ctrl_t_turns_always_expand_thinking_off_and_collapses` | Ctrl+T can turn always-expand off |
+| `xai-grok-pager` `apply_always_expand_thinking_flip_leaves_aborted_collapsed` | Aborted thinking stays collapsed when always-expand turns on |
+| `xai-grok-pager-render` `prime_applies_always_expand_thinking_from_ui` | Launch seeds always-expand from `[ui]` so the next session matches Ctrl+T |
 | `xai-grok-pager` `bubble_copy_buttons_on_paints_copy_icon` | Bubble copy chrome reads the flag |
 | `xai-grok-pager` `bubble_copy_buttons_on_paints_copy_icon_when_first_line_is_full_width` | A full-width first line still paints the always-on copy glyph |
 | `xai-grok-pager` `append_bubble_copy_button_paints_when_first_line_fills_content_width` | The paint helper still marks a hit column when the first line fills the width |
@@ -118,10 +125,12 @@ no runtime reader. Serde default tests are not this class.
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header always_expand_thinking \
   scrub_ascii_punct allow_worktree bubble_copy_buttons plan_approval_park
 cargo test -p xai-grok-pager --lib -- theme_choices_include_doge_and_default_is_doge \
-  hide_header_zeroes always_expand_thinking bubble_copy_buttons_on \
+  hide_header_zeroes always_expand_thinking ctrl_t_expand_is_default \
+  ctrl_t_collapse_is_default bubble_copy_buttons_on \
   append_bubble_copy_button_paints clicking_human_bubble_copy clicking_assistant_bubble_copy \
   clicking_wide_human_bubble_copy
-cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui
+cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui \
+  prime_applies_always_expand_thinking_from_ui
 cargo test -p xai-grok-shell --lib -- resolve_subagents_copies_allow_worktree
 ```
 
@@ -182,6 +191,16 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
+  y_copies_the_plan_while_the_comment_overlay_is_open \
+  plan_approval_pane_has_a_clickable_copy_control \
+  plan_approval_copy_button_click_copies_the_plan \
+  selected_idle_cta_is_visually_marked \
+  enter_submits_the_marked_idle_cta \
+  enter_while_composing_a_comment_still_saves_the_comment \
+  empty_enter_never_approves_even_when_approve_is_marked \
+  click_selects_a_cta_and_first_click_approve_still_submits \
+  second_click_on_already_selected_cta_still_submits \
+  letter_key_types_and_is_not_the_only_submit \
   forked_session_status_header_paints_switcher_and_dashboard \
   forked_session_status_header_clicks_open_dashboard_and_cycle \
   load_session_restores_fork_family_from_disk
@@ -329,6 +348,44 @@ cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_n
 These are not classes 8 through 14. Land still walks them because this catalog
 lists the named tests. Paint-only bubble copy is already a failed land under
 class 2 (click-to-copy rows).
+
+#### L0 machine console API key for host surmount-1
+
+Laptop coordinator crate `surmount-coordinator-gui`. Action **set remote
+host console API key**. The operator creates a machine xAI console API key
+at console.x.ai for host surmount-1. That key spends console API credits /
+console team prepaid. It is not included SuperGrok period limits. It is not
+SuperGrok dollar credits. Paste on stdin. Never print the key. Do not open
+git on the guest. Do not generate a GitHub SSH key. L0 is not pager
+`/dashboard` and not `/running`. Tests use a fake key and assert it is
+absent from Display, Debug, CLI stdout, and SSH argv.
+
+| path::test | Contract |
+|------------|----------|
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_never_prints_the_key` | L0 never prints the machine console API key |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_documented_workflow_does_not_require_guest_git_remote` | Documented workflow does not require a guest git remote |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_does_not_generate_github_ssh` | Does not generate a GitHub SSH key on the guest |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_is_not_pager_dashboard` | L0 is not pager `/dashboard` and not `/running` |
+| `surmount-coordinator-gui` `scp_copy_argv_does_not_include_the_key` | `scp` argv is file paths only |
+| `surmount-coordinator-gui` `CoordinatorApp_set_remote_host_console_api_key_never_prints_the_key` | CoordinatorApp action never prints the key |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_cli_never_prints_the_key` | CLI stdout never includes the key |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_cli_refuses_key_on_argv` | Key on argv is refused and not echoed |
+| `surmount-coordinator-gui` `set_remote_host_console_api_key_cli_ssh_plan_omits_the_key` | SSH plan omits the key and does not run git or ssh-keygen |
+| `xai-grok-pager` `user_guide_machine_console_api_key_for_surmount_1` | User-guide names machine key, grok home, no guest git, GPG on the laptop, SSH + tmux as user grok, L0 ≠ `/dashboard` |
+
+```bash
+cargo test -p surmount-coordinator-gui --lib -- \
+  set_remote_host_console_api_key_never_prints_the_key \
+  set_remote_host_console_api_key_documented_workflow_does_not_require_guest_git_remote \
+  set_remote_host_console_api_key_does_not_generate_github_ssh \
+  set_remote_host_console_api_key_is_not_pager_dashboard \
+  scp_copy_argv_does_not_include_the_key \
+  CoordinatorApp_set_remote_host_console_api_key_never_prints_the_key \
+  set_remote_host_console_api_key_cli_never_prints_the_key \
+  set_remote_host_console_api_key_cli_refuses_key_on_argv \
+  set_remote_host_console_api_key_cli_ssh_plan_omits_the_key
+cargo test -p xai-grok-pager --lib -- user_guide_machine_console_api_key_for_surmount_1
+```
 
 #### Footer context chip names sampling vs catalog
 
@@ -656,6 +713,12 @@ A 75% centered overlay is a failed land for default soft park.
 | `plan_row_click_does_not_enter_commenting` | A plan row click does not enter Commenting |
 | `plan_loop_status_does_not_claim_side_panel_when_viewer_closed` | Status does not claim Side panel open when the viewer is closed |
 | `plan_preview_ctrl_z_restores_wiped_human_box` | Preview-focused Ctrl+Z restores a wiped Human box |
+| `plan_preview_key_treats_shift_enter_as_composer_text` | Preview Shift+Enter reaches the Human box; overlay copy/clarify/approve do not steal it |
+| `plan_preview_shift_enter_inserts_newline_when_composer_multiline_on` | Preview Shift+Enter inserts a newline when `[ui] composer_multiline` is on |
+| `plan_preview_shift_enter_sends_when_composer_multiline_off` | Preview Shift+Enter sends when `[ui] composer_multiline` is false |
+| `plan_preview_session_multiline_shift_enter_sends` | Preview session Multiline Shift+Enter sends; Enter still inserts a newline |
+| `composer_multiline_off_shift_enter_sends_not_newline` | Main Human box Shift+Enter sends when `[ui] composer_multiline` is false |
+| `composer_multiline_on_shift_enter_inserts_newline` | Main Human box Shift+Enter inserts a newline when the persist flag is on |
 | `plan_prompt_ctrl_z_restores_wiped_human_box` | Prompt-focused Ctrl+Z restores a wiped Human box |
 | `preview_typed_comment_rides_along_on_approve` | Preview type-after-park notes ride along with Approve |
 | `prompt_tab_typed_comment_rides_along_on_approve` | Tab to Prompt then Approve still sends typed notes |
@@ -667,6 +730,10 @@ A 75% centered overlay is a failed land for default soft park.
 | `resume_restore_keeps_revise_box_draft` | Isolated present Approve does not consume a restored draft |
 | `plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char` | Plan Human-box typing does not persist every character |
 | `main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char` | Main prompt typing does not persist every character |
+| `plan_human_box_keystroke_burst_does_not_append_prompt_wal` | Plan Human-box typing does not append WAL or rewrite the queue |
+| `main_composer_keystroke_burst_does_not_append_prompt_wal` | Main prompt typing does not append WAL or rewrite the queue |
+| `idle_plan_overlay_does_not_demand_fast_ticks` | Idle parked plan pane does not spin the 30fps loop |
+| `plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown` | Same-width paints do not re-scan a 240k plan |
 | `xai-grok-shell` `keystroke_burst_does_not_flush_unsent_draft_every_char` | Unsent-draft debounce skips writes inside the window |
 
 ```bash
@@ -676,6 +743,12 @@ cargo test -p xai-grok-pager --lib -- \
   plan_row_click_does_not_enter_commenting \
   plan_loop_status_does_not_claim_side_panel_when_viewer_closed \
   plan_preview_ctrl_z_restores_wiped_human_box \
+  plan_preview_key_treats_shift_enter_as_composer_text \
+  plan_preview_shift_enter_inserts_newline_when_composer_multiline_on \
+  plan_preview_shift_enter_sends_when_composer_multiline_off \
+  plan_preview_session_multiline_shift_enter_sends \
+  composer_multiline_off_shift_enter_sends_not_newline \
+  composer_multiline_on_shift_enter_inserts_newline \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -686,8 +759,15 @@ cargo test -p xai-grok-pager --lib -- \
   empty_approve_does_not_send_composer_as_second_prompt \
   resume_restore_keeps_revise_box_draft \
   plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
-  main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char
+  main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
+  plan_human_box_keystroke_burst_does_not_append_prompt_wal \
+  main_composer_keystroke_burst_does_not_append_prompt_wal \
+  idle_plan_overlay_does_not_demand_fast_ticks \
+  plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown
 cargo test -p xai-grok-shell --lib -- keystroke_burst_does_not_flush_unsent_draft_every_char
+cargo test -p xai-grok-shared --lib -- composer_multiline_defaults_on
+cargo test -p xai-grok-pager-render --lib -- prime_applies_composer_multiline_from_ui
+cargo test -p xai-grok-pager --test settings_e2e -- composer_multiline
 ```
 
 #### Plan-review and Linux prompt screenshot paste
@@ -1036,13 +1116,67 @@ or weaken these tests in recon.
 | `queue_send_now_click_dispatches_send_interject` | Mouse Down on queue `[Send now]` for a local row dispatches `SendInterject`. Key and click must not diverge. Not last-known-good. |
 | `empty_ctrl_enter_mid_turn_does_not_send` | Empty composer does not send. Not last-known-good. |
 | `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
+| `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute. Performance contract; not last-known-good. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   ctrl_enter_mid_turn_dispatches_send_interject \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
-  prompt_wal_appends_on_mid_turn_interject
+  prompt_wal_appends_on_mid_turn_interject \
+  interject_does_not_wait_minutes_or_block_paint
+```
+
+#### TUI performance (typing, cancel, interject)
+
+Performance contracts are fork-owned. They are not last-known-good until
+typing, cancel, and interject stay responsive. Hang/cancel, Interject Send
+now, WAL, and queue-snapshot tests are in the tree. The live TUI may still
+be 1.0.3. Do not treat 1.0.3 as last-known-good.
+
+A keystroke burst must not `sync_all` every character, must not append
+`prompt_wal.jsonl` per letter, and must not rewrite `pending_prompts.json`
+on each key. Ordinary queue snapshots skip `sync_all`. Writes without
+fsync still roundtrip. Idle parked plan must not spin the 30fps loop.
+Same-width paints must not re-scan a 240k plan body. Cancel recovery must
+not sit a minute-plus. Mid-turn Interject must paint and return
+`SendInterject` without waiting a minute and without cancel-and-send.
+
+Do not delete or weaken image-token, lost-prompt, Operator/Agent speaker
+label, WAL append, or `/rebuild` persist tests. Debounce and idle-plan
+paint names already listed under Soft plan present stay contracts.
+
+Land: [`FORK.md`](../../FORK.md) Land checklist extra restack-droppable
+**TUI performance**.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-shell` `pending_prompts_queue_snapshot_skips_sync_all` | Ordinary `pending_prompts.json` snapshots skip `sync_all` |
+| `xai-grok-shell` `pending_prompts::tests::write_without_fsync_still_roundtrips` | Queue snapshot without fsync still roundtrips (pending_prompts variant) |
+| `plan_human_box_keystroke_burst_does_not_append_prompt_wal` | Plan Human-box typing does not append WAL or rewrite the queue |
+| `main_composer_keystroke_burst_does_not_append_prompt_wal` | Main prompt typing does not append WAL or rewrite the queue |
+| `plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char` | Plan Human-box typing does not persist every character (already under Soft plan present) |
+| `main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char` | Main prompt typing does not persist every character (already under Soft plan present) |
+| `xai-grok-shell` `keystroke_burst_does_not_flush_unsent_draft_every_char` | Unsent-draft debounce skips writes inside the window (already under Soft plan present) |
+| `idle_plan_overlay_does_not_demand_fast_ticks` | Idle parked plan pane does not spin the 30fps loop (already under Soft plan present) |
+| `plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown` | Same-width paints do not re-scan a 240k plan (already under Soft plan present) |
+| `cancel_does_not_wait_minutes` | Cancel recovery bound is under a minute; dispatch does not sleep that bound |
+| `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  plan_human_box_keystroke_burst_does_not_append_prompt_wal \
+  main_composer_keystroke_burst_does_not_append_prompt_wal \
+  plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
+  main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
+  idle_plan_overlay_does_not_demand_fast_ticks \
+  plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown \
+  cancel_does_not_wait_minutes \
+  interject_does_not_wait_minutes_or_block_paint
+cargo test -p xai-grok-shell --lib -- \
+  pending_prompts_queue_snapshot_skips_sync_all \
+  pending_prompts::tests::write_without_fsync_still_roundtrips \
+  keystroke_burst_does_not_flush_unsent_draft_every_char
 ```
 
 #### Compact must not re-enqueue occupancy
@@ -1140,6 +1274,70 @@ cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_pa
 cargo test -p xai-grok-tools --lib -- \
   completed_subagent_task_output_is_capped_or_points_at_report \
   blocking_spawn_subagent_completed_to_prompt_format_is_capped
+```
+
+#### Compact image_url (2026-09-03)
+
+AUTO compact, recap, and turn HTTP must send each `image_url` as a base64
+data URL or an `http(s)` URL. A local session asset path, a `file://`
+handle, an `[Image #N]` token, or an empty value 400s
+(`invalid_image`: "image_url must either be a base64-encoded image or a
+URL."). Compact still strips user images to `[image]` so it does not
+re-inline the data URL crate. Request clones convert or omit leftover
+Image parts. Stored `chat_history.jsonl` is not rewritten. An
+`invalid_image` retry must not drop valid data URL siblings. Do not
+delete or weaken image-token, lost-prompt, Operator/Agent speaker-label,
+prompt write-ahead log, or `/rebuild` persist tests when editing this
+file.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-chat-state` `repair_encodes_raw_session_asset_path_as_data_url` | Raw session asset path becomes a data URL on the request clone |
+| `xai-chat-state` `repair_omits_image_token_empty_and_missing_path` | `[Image #N]`, empty, and missing paths are omitted, not sent |
+| `xai-grok-sampling-types` `path_image_token_and_empty_are_not_api_image_urls` | Path, `[Image #N]`, and empty are not API `image_url` values |
+| `xai-grok-shell` `compact_request_must_not_send_session_asset_path_or_image_token_as_image_url` | Compact HTTP JSON has no path / token / `file://` `image_url` |
+| `xai-grok-sampler` `invalid_image_retry_drops_path_shaped_urls_and_keeps_valid_data_url` | `invalid_image` retry drops paths and tokens, keeps a valid data URL |
+
+```bash
+cargo test -p xai-chat-state --lib -- \
+  repair_encodes_raw_session_asset_path_as_data_url \
+  repair_omits_image_token_empty_and_missing_path
+cargo test -p xai-grok-sampling-types --lib -- \
+  path_image_token_and_empty_are_not_api_image_urls
+cargo test -p xai-grok-shell --lib -- \
+  compact_request_must_not_send_session_asset_path_or_image_token_as_image_url
+cargo test -p xai-grok-sampler --test test_actor -- \
+  invalid_image_retry_drops_path_shaped_urls_and_keeps_valid_data_url
+```
+
+#### Shell/nix tool-result ingest (2026-09-02)
+
+A 2MB ANSI/nix-looking shell ToolResult must not add ~200k tokens to nested
+200k or L1 500k sampling. Truncate, elide, or keep a log path. Goal Plan
+Writer / nested fork must not receive the parent's full `just check-remote`
+dump as opening context. L3 and once-run Goal Plan Writer must not
+compact-and-continue. Do not delete or weaken these tests in recon, onto,
+import, or join. Do not drop the Prompt write-ahead log, image-token,
+lost-prompt, Operator/Agent speaker-label, or `/rebuild` persist bullets
+when editing this file.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-sampling-types` `two_megabyte_nix_ansi_tool_result_does_not_add_200k_tokens` | A 2MB ANSI/nix ToolResult does not add ~200k tokens after fold |
+| `xai-grok-sampling-types` `two_megabyte_task_completed_user_is_folded` | Auto-wake TaskCompleted user text is folded the same way |
+| `xai-grok-sampling-types` `tool_result_pointer_keeps_log_path` | Pointer keeps a named full-output log path |
+| `xai-chat-state` `two_megabyte_nix_tool_result_does_not_add_200k_estimated_tokens` | Push ingest does not add ~200k estimated tokens |
+| `xai-grok-shell` `forked_goal_plan_writer_does_not_inherit_two_megabyte_nix_dump` | Nested fork opening context does not contain the parent dump |
+| `xai-grok-shell` `goal_plan_writer_once_run_must_not_auto_compact_when_nested_window_is_full` | Once-run Goal Plan Writer does not AUTO compact at 95% of 200k |
+| `xai-grok-shell` `goal_plan_writer_forked_parent_full_window_at_spawn_must_not_immediately_compact` | Full nested window at spawn does not compact-and-continue |
+
+```bash
+cargo test -p xai-grok-sampling-types --lib -- two_megabyte_nix_ansi_tool_result_does_not_add_200k_tokens
+cargo test -p xai-chat-state --lib -- two_megabyte_nix_tool_result_does_not_add_200k_estimated_tokens
+cargo test -p xai-grok-shell --lib -- \
+  forked_goal_plan_writer_does_not_inherit_two_megabyte_nix_dump \
+  goal_plan_writer_once_run_must_not_auto_compact_when_nested_window_is_full \
+  goal_plan_writer_forked_parent_full_window_at_spawn_must_not_immediately_compact
 ```
 
 ---
@@ -1314,7 +1512,7 @@ skills order
 soft-park filters. Extra restack-droppable neighbors live under *Required land
 inventory* (plan present is not Approve, three-layer product prompt,
 `from_config` cold catalog, SHA-aware `/rebuild`, all-PID `/rebuild` SIGUSR1, nucleo, Pause / Clear
-finished, aborted thinking is not the live turn, user-guide hop and spend-order pins, seeded custom model on
+finished, aborted thinking is not the live turn, TUI performance (typing, cancel, interject), user-guide hop and spend-order pins, seeded custom model on
 `session/load` stays Chat Completions). Full residual-aligned blocks
 below.
 
@@ -1331,6 +1529,16 @@ Do not call SuperGrok free.
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
+| `y_copies_the_plan_while_the_comment_overlay_is_open` | Comment overlay `y` copies the plan | **Keep** |
+| `plan_approval_pane_has_a_clickable_copy_control` | Copy is a clickable control, not a fifth idle CTA | **Keep** |
+| `plan_approval_copy_button_click_copies_the_plan` | Clicking the copy control copies the plan | **Keep** |
+| `selected_idle_cta_is_visually_marked` | Selected CTA is marked; leftover recorded-choice is not | **Keep** |
+| `enter_submits_the_marked_idle_cta` | Enter submits the marked idle CTA; empty Enter never Approves | **Keep** |
+| `enter_while_composing_a_comment_still_saves_the_comment` | Enter while commenting saves the line comment | **Keep** |
+| `empty_enter_never_approves_even_when_approve_is_marked` | Empty Enter never Approves, even with Approve marked | **Keep** |
+| `click_selects_a_cta_and_first_click_approve_still_submits` | Click marks the CTA and runs it; first Approve click still Approves | **Keep** |
+| `second_click_on_already_selected_cta_still_submits` | Second click on the already-selected CTA still submits | **Keep** |
+| `letter_key_types_and_is_not_the_only_submit` | Letter keys type; they are not the only submit | **Keep** |
 | `sampling_config_auto_use_*` | `sampling_config_for_model` / `prepare_sampling_config_for_model` fills console failover when included SuperGrok period limits are full | **Keep** |
 | `sampling_config_hops_to_sibling_included_before_extras` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
 | `limits_snapshot_second_process_reads_file_and_does_not_http` | One grok-oss process fetches SuperGrok billing; others read the flock snapshot | **Keep** |
@@ -1471,11 +1679,13 @@ cargo test -p xai-grok-pager-bin --test version_without_tty
 cargo test -p xai-grok-pager --test settings_e2e -- hide_header always_expand_thinking \
   scrub_ascii_punct allow_worktree bubble_copy_buttons plan_approval_park
 cargo test -p xai-grok-pager --lib -- theme_choices_include_doge_and_default_is_doge \
-  hide_header_zeroes always_expand_thinking bubble_copy_buttons_on \
+  hide_header_zeroes always_expand_thinking ctrl_t_expand_is_default \
+  ctrl_t_collapse_is_default bubble_copy_buttons_on \
   append_bubble_copy_button_paints clicking_human_bubble_copy clicking_assistant_bubble_copy \
   clicking_wide_human_bubble_copy
 cargo test -p xai-grok-shared --lib -- hide_header stale_hide_title
-cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui
+cargo test -p xai-grok-pager-render --lib -- prime_applies_scrub_ascii_punct_from_ui \
+  prime_applies_always_expand_thinking_from_ui
 cargo test -p xai-grok-shell --lib -- resolve_subagents_copies_allow_worktree
 
 # 3. Token Economy ledger /spend (extra SQL, not SuperGrok dollar credits)
@@ -1574,6 +1784,12 @@ cargo test -p xai-grok-pager --lib -- \
   plan_row_click_does_not_enter_commenting \
   plan_loop_status_does_not_claim_side_panel_when_viewer_closed \
   plan_preview_ctrl_z_restores_wiped_human_box \
+  plan_preview_key_treats_shift_enter_as_composer_text \
+  plan_preview_shift_enter_inserts_newline_when_composer_multiline_on \
+  plan_preview_shift_enter_sends_when_composer_multiline_off \
+  plan_preview_session_multiline_shift_enter_sends \
+  composer_multiline_off_shift_enter_sends_not_newline \
+  composer_multiline_on_shift_enter_inserts_newline \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -1589,6 +1805,11 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
   main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
+  plan_human_box_keystroke_burst_does_not_append_prompt_wal \
+  main_composer_keystroke_burst_does_not_append_prompt_wal \
+  idle_plan_overlay_does_not_demand_fast_ticks \
+  plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown \
+  cancel_does_not_wait_minutes \
   event_paste_plan_commenting_empty_defers_clipboard_image_probe \
   plan_feedback_ctrl_v_defers_clipboard_image_probe \
   agent_empty_bracketed_paste_defers_probe_for_clipboard_image \
@@ -1638,6 +1859,7 @@ cargo test -p xai-grok-pager --lib -- \
   ctrl_enter_mid_turn_dispatches_send_interject \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
+  interject_does_not_wait_minutes_or_block_paint \
   session_load_restores_wal_send_missing_from_prompt_history \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
   resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
@@ -1669,7 +1891,10 @@ cargo test -p xai-grok-shell --lib -- \
   main_session_sampling_window_is_catalog_500k_even_when_economic_is_on \
   nested_session_sampling_window_stays_200k_when_catalog_is_500k \
   relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect \
-  relaunch_drain_keeps_parent_turn_until_idle_like_disconnect
+  relaunch_drain_keeps_parent_turn_until_idle_like_disconnect \
+  pending_prompts_queue_snapshot_skips_sync_all \
+  pending_prompts::tests::write_without_fsync_still_roundtrips \
+  keystroke_burst_does_not_flush_unsent_draft_every_char
 cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt
 cargo test -p xai-chat-state --lib -- parent_estimated_tokens_omit_huge_spawn_prompt
 cargo test -p xai-tool-types --lib -- to_model_text_caps_huge_last_answer_for_parent_ingest

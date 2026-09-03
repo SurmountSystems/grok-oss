@@ -66,7 +66,12 @@ fn prepare_items(
     // compact model (~50k tokens per 200k-char URL). Drop bytes first.
     // See [xAI image understanding](https://docs.x.ai/docs/guides/image-understanding)
     // (accessed: 2026-09-01).
-    let items = strip_images(items);
+    let mut items = strip_images(items);
+    // Compact HTTP is not ChatState request-build: inflate never ran.
+    // Strip already turns user images into `[image]`. Repair converts or
+    // omits any leftover path / `[Image #N]` / empty `image_url` so a
+    // skipped strip cannot 400 compact with `invalid_image`.
+    let _ = xai_chat_state::repair_conversation_images_for_api(&mut items);
     let (trigger_bytes, reclaim_target_bytes) =
         effective_image_budget_limits(compaction_tool_tokens);
     let budgeted = apply_image_budget_with_limits(items, trigger_bytes, reclaim_target_bytes);

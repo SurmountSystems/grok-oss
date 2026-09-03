@@ -61,10 +61,10 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
     let Some(agent) = app.agents.get(&id) else {
         return vec![];
     };
-    let Some(child_sid) = agent.active_subagent.as_ref() else {
+    let Some(child_sid) = agent.visible_nested_overlay_sid() else {
         return vec![];
     };
-    if !agent.subagent_views.contains_key(child_sid.as_str()) {
+    if !agent.subagent_views.contains_key(child_sid) {
         return vec![];
     }
     let mut ids = Vec::new();
@@ -77,12 +77,12 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
         }
     };
     if agent.session.state.is_idle()
-        && let Some(info) = agent.subagent_sessions.get(child_sid.as_str())
+        && let Some(info) = agent.subagent_sessions.get(child_sid)
     {
         push(info);
     }
     for info in agent.subagent_sessions.values() {
-        if info.parent_session_id.as_deref() == Some(child_sid.as_str()) {
+        if info.parent_session_id.as_deref() == Some(child_sid) {
             push(info);
         }
     }
@@ -98,9 +98,8 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     // overlay nested job when the parent is Idle, so [stop] cannot sit on Cancelling.
     let overlay_open = app.agents.get(&id).is_some_and(|agent| {
         agent
-            .active_subagent
-            .as_ref()
-            .is_some_and(|sid| agent.subagent_views.contains_key(sid.as_str()))
+            .visible_nested_overlay_sid()
+            .is_some_and(|sid| agent.subagent_views.contains_key(sid))
     });
     let overlay_kill_ids = overlay_live_kill_ids(app, id);
     if overlay_open {
@@ -198,6 +197,9 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             );
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
+            // `emit_cancel_turn` takes the live hint; capture it first.
+            let gesture_retry = agent.cancel_trigger_hint.is_some();
+            let has_recorded_choice = agent.pending_cancel_resend.is_some();
             let cancel_subagents = resolve_cancel_subagents(agent);
             let effect = emit_cancel_turn(
                 agent,
@@ -205,10 +207,14 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 cancel_subagents,
                 /* rewind_if_no_output */ false,
             );
-            // `[stop]` during Cancelling must finish the local spinner.
-            // Re-send alone reset the grace timer and could sit for minutes
-            // when a queue row had already changed `current_prompt_id`.
-            force_finish_local_cancel(agent);
+            // `[stop]` / Esc (live hint) during Cancelling finishes the spinner.
+            // A stuck Cancelling pane with no recorded choice also finishes.
+            // A hintless retry that still holds the first cancel's subagent
+            // choice must keep that record so a later retry after confirm
+            // reuses it instead of escalating.
+            if gesture_retry || !has_recorded_choice {
+                force_finish_local_cancel(agent);
+            }
             return vec![effect];
         }
         // Compact owns the pane (`CommandRunning`) even if a leftover wake
@@ -508,6 +514,8 @@ fn force_finish_local_cancel(agent: &mut AgentView) {
     agent.cancel_turn_buttons.clear();
     agent.pending_cancel_resend = None;
     agent.pending_turn_end_reconcile = None;
+    // After cancel completes the Human box must take typing.
+    agent.set_active_pane(ActivePane::Prompt, true);
 }
 
 /// Build `Effect::CancelTurn`, consuming the gesture hint and arming the
@@ -713,13 +721,16 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         .agents
         .iter()
         .flat_map(|(id, parent)| {
-            parent.subagent_views.iter().filter_map(|(sid, child)| {
-                child
-                    .pending_turn_end_reconcile
-                    .as_ref()
-                    .is_some_and(|p| p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE)
-                    .then(|| (*id, sid.clone()))
-            })
+            parent
+                .subagent_views
+                .iter()
+                .filter(|(_, child)| {
+                    child
+                        .pending_turn_end_reconcile
+                        .as_ref()
+                        .is_some_and(|p| p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE)
+                })
+                .map(|(sid, _)| (*id, sid.clone()))
         })
         .collect();
     if overdue.is_empty() && overdue_children.is_empty() {

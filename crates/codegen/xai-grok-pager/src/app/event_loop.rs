@@ -1266,6 +1266,14 @@ pub(crate) async fn run(
         )
         .value,
     );
+    crate::appearance::cache::set_always_expand_thinking(
+        xai_grok_shell::util::config::resolve_always_expand_thinking(
+            requirements.as_ref(),
+            user_config.as_ref(),
+            managed_config.as_ref(),
+        )
+        .value,
+    );
     crate::appearance::cache::set_group_tool_verbs(
         xai_grok_shell::util::config::resolve_group_tool_verbs(
             requirements.as_ref(),
@@ -1467,6 +1475,8 @@ pub(crate) async fn run(
     // field) must not wipe a valid `show_timeline` or leave appearance /
     // cache / `current_ui` disagreeing — `/timeline` and the rail all read
     // the same canonical value after this sync + `prime` below.
+    let always_expand_thinking = crate::appearance::cache::load_always_expand_thinking();
+    app.current_ui.always_expand_thinking = Some(always_expand_thinking);
     let show_timeline = crate::appearance::cache::load_show_timeline();
     app.current_ui.show_timeline = Some(show_timeline);
     if app.appearance.show_timeline != show_timeline {
