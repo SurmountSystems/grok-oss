@@ -577,6 +577,91 @@ async fn invalid_image_code_strips_and_retries() {
     );
 }
 
+/// Operator contract: a request that fails over images must not drop every
+/// attachment on retry. Path-shaped session assets and `[Image #N]` tokens
+/// are left out; valid data URL siblings stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_image_retry_drops_path_shaped_urls_and_keeps_valid_data_url() {
+    const PATH: &str = "/home/hunter/.grok/sessions/x/assets/image-1.jpg";
+    const TOKEN: &str = "[Image #1]";
+    const DATA: &str = "data:image/png;base64,AAAA";
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |body: String| {
+            let bodies = Arc::clone(&bodies_handler);
+            async move {
+                let n = {
+                    let mut b = bodies.lock().unwrap();
+                    b.push(body);
+                    b.len()
+                };
+                if n == 1 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "code": INVALID_IMAGE_ERROR_CODE,
+                            "error": "image_url must either be a base64-encoded image or a URL.",
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse::chat_completion_events("recovered", "test-model");
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in these images?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(PATH);
+        u.add_image(TOKEN);
+        u.add_image(DATA);
+    }
+    handle.submit(RequestId::from("req-image-path-strip"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events.iter().any(|e| match e {
+            SamplingEvent::ImagesStripped { stripped_urls, .. } => {
+                stripped_urls.len() == 2
+                    && stripped_urls.iter().any(|u| u.as_ref() == PATH)
+                    && stripped_urls.iter().any(|u| u.as_ref() == TOKEN)
+                    && stripped_urls.iter().all(|u| u.as_ref() != DATA)
+            }
+            _ => false,
+        }),
+        "retry must leave path and [Image #N] out and keep the data URL, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after path-shaped strip-retry"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one rejection, one strip-retry");
+    assert!(
+        bodies[1].contains(DATA),
+        "retry must still send the valid data URL"
+    );
+    assert!(
+        !bodies[1].contains(PATH) && !bodies[1].contains(TOKEN),
+        "retry must not resend path-shaped or [Image #N] image_url"
+    );
+}
+
 /// A legacy-phrase 400 with no code still strips and recovers, but the
 /// reason is `PayloadHeuristic`: without the deterministic code the server
 /// blamed nothing specific, so the strip must stay request-local.

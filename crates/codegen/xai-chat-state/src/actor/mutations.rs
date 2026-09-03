@@ -222,6 +222,8 @@ impl ChatStateActor {
             .state
             .omitted_spawn_prompt_tokens
             .saturating_add(omitted);
+        let _ = xai_grok_sampling_types::fold_tool_result_on_conversation_item(&mut item);
+        let _ = xai_grok_sampling_types::fold_task_completion_user_on_conversation_item(&mut item);
         let count_in_delta = !matches!(item, ConversationItem::Assistant(_));
         if count_in_delta {
             let estimated_tokens = super::state::estimate_item_tokens(&item);
@@ -259,6 +261,8 @@ impl ChatStateActor {
         reason: DanglingToolCallReason,
     ) {
         self.ensure_conversation_integrity_with_reason(reason);
+        let mut item = item;
+        let _ = xai_grok_sampling_types::fold_task_completion_user_on_conversation_item(&mut item);
         let estimated_tokens = super::state::estimate_item_tokens(&item);
         self.state.estimated_tokens_since_model += estimated_tokens;
         tracing::debug!(
@@ -304,9 +308,11 @@ impl ChatStateActor {
     /// old tool results to appear older than they really are.
     ///
     /// This is compensated by raising the effective clearing threshold by the
-    /// number of synthetic User items (`total_user_items - prompt_index`).
-    /// The result: a tool result is never cleared before `hard_clear_age_turns`
-    /// REAL turns have elapsed, even in sessions with many synthetic messages.
+    /// number of synthetic User items (`users_before_current - prompt_index`).
+    /// The just-appended User is the current real turn; `prompt_index` has not
+    /// been incremented for it yet, so it is not synthetic. The result: a tool
+    /// result is never cleared before `hard_clear_age_turns` REAL turns have
+    /// elapsed, even in sessions with many synthetic messages.
     ///
     /// # Replay / rewind correctness
     ///
@@ -330,17 +336,21 @@ impl ChatStateActor {
         // old tool results appear older than they really are and can cause
         // premature hard-clears.
         //
-        // Fix: raise the effective clearing threshold by the number of synthetic
-        // User items.  This guarantees a tool result is never cleared before
-        // `hard_clear_age_turns` REAL turns have elapsed, regardless of how many
-        // synthetic messages the session contains.
+        // This runs after `push_user_message` appends the new User. That item is
+        // the current real turn; `prompt_index` has not been incremented for it
+        // yet. Do not count it as synthetic. `users_before_current - prompt_index`
+        // is the injected extras (warnings, task-completed, and similar).
+        //
+        // Raise the effective clearing threshold by that count so a tool result
+        // is never cleared before `hard_clear_age_turns` REAL turns have elapsed.
         let total_user_items = self
             .state
             .conversation
             .iter()
             .filter(|i| matches!(i, ConversationItem::User(_)))
             .count();
-        let synthetic_count = total_user_items.saturating_sub(self.state.prompt_index);
+        let users_before_current = total_user_items.saturating_sub(1);
+        let synthetic_count = users_before_current.saturating_sub(self.state.prompt_index);
         let effective_threshold = self
             .pruning_config
             .hard_clear_age_turns
@@ -394,6 +404,9 @@ impl ChatStateActor {
     ///
     /// Used for before/after measurement logging when pruning runs.
     /// Sums the byte lengths of all string fields; does not allocate.
+    /// Image URL length here is RAM/JSON size, not vision tokens. Token
+    /// gates use [`super::state::estimate_item_tokens`], which never does
+    /// `url.len() / 4`.
     fn conversation_content_bytes(&self) -> usize {
         self.state
             .conversation
@@ -527,6 +540,7 @@ impl ChatStateActor {
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
         let mut items = items;
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut items);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut items);
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =
@@ -585,6 +599,7 @@ impl ChatStateActor {
         // intentionally survive a restore — see `replace_conversation`.
         let mut conversation = snap.conversation;
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut conversation);
         self.state.conversation = conversation;
         self.rebase_turn_capture_offset();
         self.state.sampling_config = snap.sampling_config;

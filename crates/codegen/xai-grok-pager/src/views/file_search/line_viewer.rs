@@ -658,16 +658,28 @@ pub enum RecordedPlanChoice {
     Exit,
 }
 
-fn recorded_choice_marks_index(
-    recorded: Option<RecordedPlanChoice>,
+/// CTA marked for Enter-submit. This is live selection, not a leftover
+/// grok-oss.db recorded-choice glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedPlanCta {
+    Approve,
+    Comment,
+    Clarify,
+    Revise,
+    Exit,
+}
+
+fn selected_cta_marks_index(
+    selected: Option<SelectedPlanCta>,
     index: usize,
     comment_flow: bool,
 ) -> bool {
-    match (recorded, index) {
-        (Some(RecordedPlanChoice::Approve), 0) => true,
-        (Some(RecordedPlanChoice::Comment), 1) if !comment_flow => true,
-        (Some(RecordedPlanChoice::Revise), 2) => true,
-        (Some(RecordedPlanChoice::Exit), 3) => true,
+    match (selected, index) {
+        (Some(SelectedPlanCta::Approve), 0) => true,
+        (Some(SelectedPlanCta::Comment), 1) if !comment_flow => true,
+        (Some(SelectedPlanCta::Clarify), 1) if comment_flow => true,
+        (Some(SelectedPlanCta::Revise), 2) => true,
+        (Some(SelectedPlanCta::Exit), 3) => true,
         _ => false,
     }
 }
@@ -682,6 +694,9 @@ pub struct PlanViewerExtras {
     pub feedback_active: bool,
     /// Latest explicit Approve / Comment / Revise / Exit for this plan.
     pub recorded_choice: Option<RecordedPlanChoice>,
+    /// Live marked CTA. Enter submits this. A grok-oss.db recorded row
+    /// does not paint this mark.
+    pub selected_cta: Option<SelectedPlanCta>,
     pub approve_button_area: Option<Rect>,
     pub approve_hovered: bool,
     /// Unused Notes hit target (CTA removed; kept so hover/mouse stay typed).
@@ -757,6 +772,14 @@ pub struct LineViewerState {
     /// Compared against the current content width in `prepare_layout` to
     /// trigger a rebuild when the viewer is resized.
     last_table_width: Option<usize>,
+    /// Last overlay content `width` passed to [`Self::rebuild_markdown_for_width`].
+    /// A same-width keystroke paint must not walk the plan body again.
+    last_rebuild_width: Option<u16>,
+    /// How many times a width change reached the markdown body scan.
+    /// Keystroke paints at a stable width must not increment this.
+    markdown_width_probes: u32,
+    /// How many times markdown items were rebuilt from source.
+    markdown_rebuilds: u32,
     /// Copy of comments last applied via `rebuild_with_comments`, so that
     /// a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
@@ -812,6 +835,9 @@ impl LineViewerState {
             title_override: None,
             markdown_content: None,
             last_table_width: None,
+            last_rebuild_width: None,
+            markdown_width_probes: 0,
+            markdown_rebuilds: 0,
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
@@ -874,6 +900,9 @@ impl LineViewerState {
             title_override: None,
             markdown_content: Some(content),
             last_table_width: None,
+            last_rebuild_width: None,
+            markdown_width_probes: 0,
+            markdown_rebuilds: 0,
             last_comments: Vec::new(),
             mermaid_after: Vec::new(),
             fullscreen: false,
@@ -918,6 +947,12 @@ impl LineViewerState {
         let Some(ref content) = self.markdown_content else {
             return;
         };
+        // Same-width paints (every keystroke) must not walk the plan body.
+        if self.last_rebuild_width == Some(width) {
+            return;
+        }
+
+        self.markdown_width_probes = self.markdown_width_probes.saturating_add(1);
 
         let prefix_width = digit_count(source_line_count(content).max(1)) + 1;
         let scrollbar_width = SCROLLBAR_TOTAL_COLS as usize; // gap + track
@@ -926,9 +961,12 @@ impl LineViewerState {
             .saturating_sub(scrollbar_width);
 
         if self.last_table_width == Some(content_width) {
+            self.last_rebuild_width = Some(width);
             return;
         }
         self.last_table_width = Some(content_width);
+        self.last_rebuild_width = Some(width);
+        self.markdown_rebuilds = self.markdown_rebuilds.saturating_add(1);
 
         let built = build_markdown_lines(content, Some(content_width));
         self.source_lines = built.source_lines;
@@ -1799,7 +1837,7 @@ pub fn render_line_viewer(
         };
         let badge_w: u16 = badge_text.width() as u16;
         let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
-        let recorded = viewer.plan_ref().and_then(|p| p.recorded_choice);
+        let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
         let choice_dot = format!(" {}", crate::glyphs::filled_dot());
         let choice_dot_w: u16 = choice_dot.width() as u16;
         let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
@@ -1809,6 +1847,7 @@ pub fn render_line_viewer(
             // prefixes. Narrow docks drop separators, then drop the badge.
             // Idle: Comment is the notes entry. After Comment / prompt
             // focus, Clarify replaces it so the typed comment can ride.
+            // Copy is a separate control (`y copy`), not a fifth idle CTA.
             let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
@@ -1827,6 +1866,8 @@ pub fn render_line_viewer(
                 send_hovered,
                 abandon_hovered,
             ];
+            let copy_spans = build_shortcut_button('y', "copy", copy_hovered, theme);
+            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
 
             let mut painted = false;
             for &(sep, sep_w_here, with_badge) in
@@ -1839,7 +1880,7 @@ pub fn render_line_viewer(
                     total_w = total_w.saturating_add(badge_w);
                 }
                 for i in 0..4 {
-                    if recorded_choice_marks_index(recorded, i, comment_flow) {
+                    if selected_cta_marks_index(selected, i, comment_flow) {
                         total_w = total_w.saturating_add(choice_dot_w);
                     }
                 }
@@ -1851,7 +1892,8 @@ pub fn render_line_viewer(
                 let mut areas: [Option<Rect>; 4] = [None; 4];
                 for i in 0..4 {
                     let start = x;
-                    let style = if hovers[i] {
+                    let marked = selected_cta_marks_index(selected, i, comment_flow);
+                    let style = if hovers[i] || marked {
                         Style::default()
                             .fg(theme.text_primary)
                             .bg(theme.bg_base)
@@ -1861,7 +1903,7 @@ pub fn render_line_viewer(
                     };
                     buf.set_string(x, bottom_y, labels[i], style);
                     x += widths[i];
-                    if recorded_choice_marks_index(recorded, i, comment_flow) {
+                    if marked {
                         buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
                         x += choice_dot_w;
                     }
@@ -1876,6 +1918,18 @@ pub fn render_line_viewer(
                     }
                 }
 
+                let cta_left = areas[0].map(|a| a.x).unwrap_or(inner.x);
+                let mut copy_area = None;
+                if copy_w > 0 && inner.x.saturating_add(copy_w) < cta_left {
+                    let mut cx = inner.x;
+                    for span in &copy_spans {
+                        let w = span.width() as u16;
+                        buf.set_span(cx, bottom_y, span, w);
+                        cx += w;
+                    }
+                    copy_area = Some(Rect::new(inner.x, bottom_y, copy_w, 1));
+                }
+
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = areas[0];
                 if comment_flow {
@@ -1888,7 +1942,7 @@ pub fn render_line_viewer(
                 plan.send_button_area = areas[2];
                 plan.abandon_button_area = areas[3];
                 plan.approve_notes_button_area = None;
-                plan.copy_button_area = None;
+                plan.copy_button_area = copy_area;
                 painted = true;
                 break;
             }
@@ -2031,6 +2085,45 @@ mod tests {
         assert_eq!(
             viewer.markdown_content_for_feedback().as_deref(),
             Some(body)
+        );
+    }
+
+    /// Operator contract: typing/paint stay responsive. A 240k plan must
+    /// not be scanned or re-parsed on every same-width keystroke paint.
+    #[test]
+    fn plan_overlay_repeat_prepare_at_same_width_does_not_rebuild_markdown() {
+        let mut body = String::from("# Plan\n\n");
+        body.push_str(&"step\n".repeat(48_000));
+        assert!(
+            body.len() >= 240_000,
+            "fixture must be a large plan body, got {}",
+            body.len()
+        );
+        let mut viewer = LineViewerState::open_markdown_content("plan.md", body, None)
+            .expect("markdown content should open");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.prepare_layout(80, 24);
+        let probes = viewer.markdown_width_probes;
+        let rebuilds = viewer.markdown_rebuilds;
+        assert!(
+            probes >= 1 && rebuilds >= 1,
+            "first layout must probe and rebuild, probes={probes} rebuilds={rebuilds}"
+        );
+        for _ in 0..20 {
+            viewer.prepare_layout(80, 24);
+        }
+        assert_eq!(
+            viewer.markdown_width_probes, probes,
+            "same-width paints must not walk the 240k plan body every key"
+        );
+        assert_eq!(
+            viewer.markdown_rebuilds, rebuilds,
+            "same-width paints must not re-parse the 240k plan every key"
+        );
+        viewer.prepare_layout(120, 24);
+        assert!(
+            viewer.markdown_width_probes > probes,
+            "a real width change must still rebuild"
         );
     }
 
@@ -2557,12 +2650,12 @@ mod tests {
         assert!(plan.send_button_area.is_some());
         assert!(plan.abandon_button_area.is_some());
         assert!(
-            plan.copy_button_area.is_none(),
-            "copy stays on the hint row, not as a fifth idle CTA"
+            plan.copy_button_area.is_some(),
+            "copy is a clickable control, not a fifth idle CTA"
         );
     }
 
-    /// No grok_oss.db recorded-choice row means no choice dot.
+    /// No selected CTA and no leftover recorded glyph means no choice dot.
     #[test]
     fn view_plan_no_recorded_choice_paints_no_choice_dot() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -2576,6 +2669,7 @@ mod tests {
         viewer.plan_mut().feedback_active = true;
         viewer.plan_mut().show_action_buttons = false;
         viewer.plan_mut().recorded_choice = None;
+        viewer.plan_mut().selected_cta = None;
 
         let full = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(full);
@@ -2587,13 +2681,14 @@ mod tests {
         let dot = crate::glyphs::filled_dot();
         assert!(
             !footer.contains(dot),
-            "no recorded row must not paint a choice dot; got {footer:?}"
+            "no selected CTA must not paint a choice dot; got {footer:?}"
         );
     }
 
-    /// Recorded Approve paints a dot next to Approve only.
+    /// Operator: buttons marked when selected. A grok-oss.db recorded
+    /// Approve row is not the live mark.
     #[test]
-    fn view_plan_recorded_approve_paints_dot_next_to_approve_only() {
+    fn recorded_plan_choice_is_not_the_live_selection_mark() {
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "# Plan\n\nApproved\n".to_owned(),
@@ -2604,6 +2699,7 @@ mod tests {
         viewer.fullscreen = true;
         viewer.plan_mut().feedback_active = true;
         viewer.plan_mut().recorded_choice = Some(RecordedPlanChoice::Approve);
+        viewer.plan_mut().selected_cta = None;
 
         let full = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(full);
@@ -2613,13 +2709,84 @@ mod tests {
         let modal = viewer.last_modal_area.expect("footer");
         let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
         assert!(
-            label_has_choice_dot(&footer, "approve"),
-            "recorded Approve must paint a dot next to approve; got {footer:?}"
+            !label_has_choice_dot(&footer, "approve"),
+            "a leftover recorded Approve must not mark the live CTA; got {footer:?}"
         );
-        for other in ["comment", "revise", "exit"] {
+    }
+
+    /// Operator: selected idle CTA is visually marked.
+    #[test]
+    fn selected_idle_cta_is_visually_marked() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nSelect Revise\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().selected_cta = Some(SelectedPlanCta::Revise);
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer.last_modal_area.expect("footer");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        assert!(
+            label_has_choice_dot(&footer, "revise"),
+            "the selected idle CTA must be marked; got {footer:?}"
+        );
+        for other in ["approve", "comment", "exit"] {
             assert!(
                 !label_has_choice_dot(&footer, other),
-                "recorded Approve must not mark {other}; got {footer:?}"
+                "only the selected CTA is marked; {other} was; got {footer:?}"
+            );
+        }
+    }
+
+    /// Operator: plan approval pane has a clickable copy control.
+    #[test]
+    fn plan_approval_pane_has_a_clickable_copy_control() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nCopy me\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+        viewer.plan_mut().comment_flow_active = true;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer.last_modal_area.expect("footer");
+        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            lower.contains("copy"),
+            "comment overlay must paint a copy control; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("copy plan"),
+            "copy is not the casual copy-plan decision CTA; got {footer:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert!(
+            plan.copy_button_area.is_some(),
+            "copy must be a clickable hit target while commenting"
+        );
+        for needle in ["approve", "clarify", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "comment-flow CTAs must stay; missing {needle}; got {footer:?}"
             );
         }
     }

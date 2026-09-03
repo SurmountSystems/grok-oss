@@ -21,6 +21,7 @@ mod status;
 mod task_result;
 mod transcript;
 mod turn;
+mod unstick;
 mod voice;
 use super::billing::{
     CreditLimitUpsellMode, credit_limit_upsell_mode, is_max_tier, open_credit_limit_upsell,
@@ -323,7 +324,7 @@ fn test_app() -> AppView {
 /// `acp_tx` is cloned from the test `AppView`; the
 /// `deferred_model_switch` is pulled from the `AppView`'s CLI
 /// overrides for parity with `dispatch_new_session_inner`.
-fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSession {
+pub(super) fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSession {
     AgentSession {
         id,
         acp_tx: app.acp_tx.clone(),
@@ -396,7 +397,10 @@ pub(super) fn enqueue_local(app: &mut AppView, id: AgentId, text: &str) {
         .session
         .enqueue_prompt(text.to_string());
 }
-fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::SubagentInfo {
+pub(super) fn make_test_subagent(
+    child_sid: &str,
+    sa_id: &str,
+) -> crate::app::subagent::SubagentInfo {
     crate::app::subagent::SubagentInfo {
         subagent_id: Arc::from(sa_id),
         child_session_id: Arc::from(child_sid),

@@ -248,6 +248,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+        unstick_retry: bool,
     ) -> PromptTurnResult {
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
@@ -517,6 +518,12 @@ impl SessionActor {
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         xai_grok_telemetry::session_ctx::begin_prompt_id();
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+        let last_user_query = self.chat_state_handle.get_last_user_query_text().await;
+        let skip_duplicate_user_query = unstick_retry
+            && last_user_query
+                .as_deref()
+                .is_some_and(|q| q.trim() == original_prompt_text.trim())
+            && !original_prompt_text.trim().is_empty();
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
@@ -543,22 +550,25 @@ impl SessionActor {
             .begin_prompt(current_prompt_index)
             .await;
         let echo_mode = user_echo_mode(prompt_id);
-        for block in prompt_blocks.iter() {
-            let update = acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-            );
-            let notification_meta = self.build_notification_meta();
-            let notification = acp::SessionNotification::new(self.session_info.id.clone(), update)
-                .meta(notification_meta.as_object().cloned());
-            if echo_mode == UserEchoMode::PersistOnly {
-                let _ = self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
-                    ));
-            } else {
-                self.emit_notification_direct(notification).await;
+        if !skip_duplicate_user_query {
+            for block in prompt_blocks.iter() {
+                let update = acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
+                );
+                let notification_meta = self.build_notification_meta();
+                let notification =
+                    acp::SessionNotification::new(self.session_info.id.clone(), update)
+                        .meta(notification_meta.as_object().cloned());
+                if echo_mode == UserEchoMode::PersistOnly {
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+                        ));
+                } else {
+                    self.emit_notification_direct(notification).await;
+                }
             }
         }
         let crate::session::prompt_parser::ParsedPrompt {
@@ -747,89 +757,103 @@ impl SessionActor {
             if trace_gcs_config.is_some() {
                 self.chat_state_handle.begin_turn_capture();
             }
-            let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-            let mut user_chat = match &origin {
-                super::super::PromptOrigin::TaskCompleted { .. } => {
-                    ConversationItem::task_completed(user_message)
+            if skip_duplicate_user_query {
+                self.mark_front_message_committed().await;
+                if let Some(ack) = persist_ack {
+                    let _ = ack.send(());
                 }
-                super::super::PromptOrigin::SubagentCompleted { .. } => {
-                    ConversationItem::subagent_completed(user_message)
-                }
-                super::super::PromptOrigin::WorkflowCompleted { .. } => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::NotificationDrain => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::GoalSummary => {
-                    ConversationItem::goal_summary(user_message)
-                }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
-                super::super::PromptOrigin::SchedulerFired => {
-                    ConversationItem::scheduler_fired(user_message)
-                }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(
-                        self.maybe_apply_interrupt_envelope(user_message, verbatim),
-                    );
-                    if let Some(interrupt) = self
-                        .events
-                        .take_prior_interrupt_category()
-                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
-                    {
-                        item.set_prior_turn_interrupt(interrupt);
+                tracing::info!(
+                    session_id = %self.session_info.id.0,
+                    prompt_id = %prompt_id,
+                    "unstick retry: last user turn already matches; skipping append"
+                );
+            } else {
+                let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+                let mut user_chat = match &origin {
+                    super::super::PromptOrigin::TaskCompleted { .. } => {
+                        ConversationItem::task_completed(user_message)
                     }
-                    item
+                    super::super::PromptOrigin::SubagentCompleted { .. } => {
+                        ConversationItem::subagent_completed(user_message)
+                    }
+                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::NotificationDrain => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::GoalSummary => {
+                        ConversationItem::goal_summary(user_message)
+                    }
+                    super::super::PromptOrigin::GoalClassifierNudge => {
+                        ConversationItem::goal_classifier_nudge(user_message)
+                    }
+                    super::super::PromptOrigin::SchedulerFired => {
+                        ConversationItem::scheduler_fired(user_message)
+                    }
+                    super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                    super::super::PromptOrigin::User => {
+                        let mut item = ConversationItem::user(
+                            self.maybe_apply_interrupt_envelope(user_message, verbatim),
+                        );
+                        if let Some(interrupt) =
+                            self.events.take_prior_interrupt_category().and_then(
+                                crate::session::events::prior_turn_interrupt_from_cancellation,
+                            )
+                        {
+                            item.set_prior_turn_interrupt(interrupt);
+                        }
+                        item
+                    }
+                };
+                user_chat.set_prompt_index(current_prompt_index);
+                if !self.is_cursor_harness() {
+                    let images_dir =
+                        xai_grok_shared::session::session_dir(&self.session_info).join("images");
+                    for image in &user_images {
+                        user_chat.add_image(conversation_image_handle(image, Some(&images_dir)));
+                    }
+                    for image in &extra_images {
+                        user_chat.add_image(conversation_image_handle(image, Some(&images_dir)));
+                    }
                 }
-            };
-            user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
-                for image in &user_images {
-                    user_chat.add_image(pick_user_image_url(image));
-                }
-                for image in &extra_images {
-                    user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
-                }
-            }
-            if let Some(ack) = persist_ack {
-                if self
-                    .chat_state_handle
-                    .push_user_message_and_ack(user_chat)
-                    .await
-                    .is_some()
-                {
-                    self.mark_front_message_committed().await;
-                    let (flush_tx, flush_rx) = oneshot::channel();
+                if let Some(ack) = persist_ack {
                     if self
-                        .notifications
-                        .persistence_tx
-                        .send(PersistenceMsg::FlushAndAck {
-                            respond_to: flush_tx,
-                        })
-                        .is_ok()
-                        && matches!(flush_rx.await, Ok(Ok(())))
+                        .chat_state_handle
+                        .push_user_message_and_ack(user_chat)
+                        .await
+                        .is_some()
                     {
-                        let _ = ack.send(());
+                        self.mark_front_message_committed().await;
+                        let (flush_tx, flush_rx) = oneshot::channel();
+                        if self
+                            .notifications
+                            .persistence_tx
+                            .send(PersistenceMsg::FlushAndAck {
+                                respond_to: flush_tx,
+                            })
+                            .is_ok()
+                            && matches!(flush_rx.await, Ok(Ok(())))
+                        {
+                            let _ = ack.send(());
+                        } else {
+                            tracing::error!(
+                                session_id = %self.session_info.id.0,
+                                prompt_id = %prompt_id,
+                                "persist_ack flush barrier failed"
+                            );
+                        }
                     } else {
                         tracing::error!(
                             session_id = %self.session_info.id.0,
                             prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
+                            "persist_ack skipped: chat-state actor unavailable"
                         );
                     }
                 } else {
-                    tracing::error!(
-                        session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
-                    );
+                    self.chat_state_handle.push_user_message(user_chat);
+                    self.mark_front_message_committed().await;
                 }
-            } else {
-                self.chat_state_handle.push_user_message(user_chat);
-                self.mark_front_message_committed().await;
             }
         }
         self.dispatch_hook(
@@ -2129,7 +2153,7 @@ impl SessionActor {
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    "L3 nested window is full; ending child without compact"
+                    "nested window is full; ending child without compact"
                 );
                 let snapshot = self
                     .finalize_turn_bookkeeping(
@@ -2788,7 +2812,7 @@ impl SessionActor {
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    "L3 nested window is full after tools; ending child without compact"
+                    "nested window is full after tools; ending child without compact"
                 );
                 let snapshot = self
                     .finalize_turn_bookkeeping(

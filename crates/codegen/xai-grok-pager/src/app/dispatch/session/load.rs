@@ -1256,6 +1256,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if !adopting {
             apply_canceled_turn_resume_on_load(agent, resume_canceled_turn);
         }
+        agent.reconcile_restored_unsent_occupancy(adopting);
         agent.apply_persisted_plan_decision_on_load();
         let drain = maybe_drain_queue(agent);
         let page_flip_entry = drain.page_flip_entry;

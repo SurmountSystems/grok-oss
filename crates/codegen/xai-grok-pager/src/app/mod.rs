@@ -17,6 +17,7 @@ pub mod app_view;
 pub mod auto_implement;
 pub mod bundle;
 pub mod cli;
+pub(crate) mod l0_enqueue;
 pub use crate::link_opener;
 /// Off-thread full-file syntax highlight upgrade for edit diffs.
 pub mod edit_highlight_worker;
@@ -620,13 +621,14 @@ async fn bounded_connect(
 /// its history). Sessions not found locally are restored from remote storage.
 ///
 /// Returns `Ok(true)` when the user accepted a pending update. The caller
-/// should print a message telling the user to relaunch `grok`.
+/// should print a message telling the user to relaunch `grok-oss`.
 pub async fn run(
     args: PagerArgs,
     bg_update_rx: Option<
         tokio::sync::oneshot::Receiver<Option<xai_grok_update::auto_update::UpdateAvailable>>,
     >,
 ) -> anyhow::Result<bool> {
+    dispatch::rebuild::note_process_start_unix_secs();
     xai_tty_utils::redirect_native_stderr();
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();

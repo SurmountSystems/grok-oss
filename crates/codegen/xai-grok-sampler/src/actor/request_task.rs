@@ -61,6 +61,12 @@ async fn wait_shared_or_cancel(
 /// Before each HTTP attempt: honor any shared cross-process cooldown.
 /// Cancel-aware so Esc is not blocked for the full peer cooldown.
 ///
+/// This is HTTP 429 (and 403-with-retry-hint) coordination across grok-oss
+/// processes on one machine. It is not the exhausted-credit memo, not
+/// included SuperGrok period limits, not SuperGrok dollar credits, and not
+/// console team prepaid. A 100% client printout must not mark SuperGrok
+/// used up and must not skip this wait.
+///
 /// Returns `false` if cancelled during the wait.
 async fn wait_before_attempt(config: &SamplerConfig, cancel_token: &CancellationToken) -> bool {
     let store = SharedRateLimitStore::process_default();
@@ -568,30 +574,31 @@ async fn apply_retry_decision(
         }
     }
 
-    // Plain HTTP 429: hop to the next configured identity first (when any),
-    // instead of sleeping forever on the same key. Observe shared cooldown
-    // for the identity we leave so peers wait; do not sticky-memo as credit-dead.
+    // Plain HTTP 429: publish shared cooldown once so peer grok-oss processes
+    // wait before sampling. Do not sticky-memo as credit-dead (that memo is
+    // included SuperGrok period limits / SuperGrok dollar credits / console
+    // team prepaid, not this flock file). Then hop to the next configured
+    // identity when any, instead of sleeping forever on the same key.
     if err.is_rate_limited() {
         let left_key = provider_key_for_config(config);
         let local_backoff = retry_mod::retry_backoff_with_jitter(*retry_count);
+        let wait = err
+            .retry_after()
+            .map(Duration::from_secs)
+            .unwrap_or(local_backoff);
+        let store = SharedRateLimitStore::process_default();
+        let meta = RateLimitMeta {
+            status: Some(429),
+            reason: Some(err.to_string()),
+        };
+        if let Err(e) = store.observe(&left_key, wait, meta) {
+            tracing::debug!(error = %e, "shared rate limit observe failed");
+        }
         if let Some(hop_reason) = try_rotate_to_failover_key(
             config,
             client,
             crate::exhausted_identity::HopCause::RateLimited,
         ) {
-            // Observe the identity we left (config already points at next).
-            let store = SharedRateLimitStore::process_default();
-            let wait = err
-                .retry_after()
-                .map(Duration::from_secs)
-                .unwrap_or(local_backoff);
-            let meta = RateLimitMeta {
-                status: Some(429),
-                reason: Some(err.to_string()),
-            };
-            if let Err(e) = store.observe(&left_key, wait, meta) {
-                tracing::debug!(error = %e, "shared rate limit observe on hop failed");
-            }
             *retry_count += 1;
             emit_retrying_with_reason(
                 event_tx,
@@ -687,7 +694,19 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped_urls = request.strip_images();
+            // Path-shaped session assets and `[Image #N]` tokens 400 as
+            // `invalid_image`. Drop those first and keep valid data/`http(s)`
+            // siblings so a retry does not leave every screenshot out.
+            // If every remaining image is already API-shaped, strip all
+            // (corrupt pixels in a data URL).
+            let stripped_urls = {
+                let shaped = request.strip_images_not_api_urls();
+                if !shaped.is_empty() {
+                    shaped
+                } else {
+                    request.strip_images()
+                }
+            };
             if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 emit_failed(event_tx, request_id, err);

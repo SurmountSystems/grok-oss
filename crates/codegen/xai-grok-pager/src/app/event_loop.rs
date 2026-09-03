@@ -1266,6 +1266,14 @@ pub(crate) async fn run(
         )
         .value,
     );
+    crate::appearance::cache::set_always_expand_thinking(
+        xai_grok_shell::util::config::resolve_always_expand_thinking(
+            requirements.as_ref(),
+            user_config.as_ref(),
+            managed_config.as_ref(),
+        )
+        .value,
+    );
     crate::appearance::cache::set_group_tool_verbs(
         xai_grok_shell::util::config::resolve_group_tool_verbs(
             requirements.as_ref(),
@@ -1467,6 +1475,8 @@ pub(crate) async fn run(
     // field) must not wipe a valid `show_timeline` or leave appearance /
     // cache / `current_ui` disagreeing — `/timeline` and the rail all read
     // the same canonical value after this sync + `prime` below.
+    let always_expand_thinking = crate::appearance::cache::load_always_expand_thinking();
+    app.current_ui.always_expand_thinking = Some(always_expand_thinking);
     let show_timeline = crate::appearance::cache::load_show_timeline();
     app.current_ui.show_timeline = Some(show_timeline);
     if app.appearance.show_timeline != show_timeline {
@@ -1737,6 +1747,12 @@ pub(crate) async fn run(
 
     const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut billing_poll_at: Option<Instant> = None;
+
+    // L0 drop files arrive while this window may be idle (`TickDemand::None`
+    // parks animation ticks). Poll even when idle so a coordinator enqueue
+    // becomes one human prompt without waiting for the next bind.
+    const L0_ENQUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    let mut l0_enqueue_poll_at: Option<Instant> = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
 
     const GATE_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut gate_poll_at: Option<Instant> = None;
@@ -2258,6 +2274,13 @@ pub(crate) async fn run(
             }
         };
 
+        let l0_enqueue_poll = async {
+            match l0_enqueue_poll_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+
         let gate_poll = async {
             match gate_poll_at {
                 Some(at) => sleep_until(at).await,
@@ -2624,6 +2647,17 @@ pub(crate) async fn run(
                 }
             }
 
+            _ = l0_enqueue_poll => {
+                if let Some(effs) = crate::app::l0_enqueue::drain_into_app(&mut app) {
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                }
+                l0_enqueue_poll_at = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
+            }
+
             _ = gate_poll => {
                 gate_poll_at = None;
                 let effs = vec![Effect::RefreshGate];
@@ -2978,6 +3012,8 @@ pub(crate) async fn run(
                 };
                 reconnect_abort_handle = None;
                 app.reconnect_pending = false;
+                app.clear_session_reconnect_sticky();
+                app.show_toast("Reconnected");
 
                 let outcome = match result {
                     Ok(outcome) => outcome,

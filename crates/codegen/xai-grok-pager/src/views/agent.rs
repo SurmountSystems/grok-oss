@@ -1100,9 +1100,6 @@ pub fn build_hints(
                     continue;
                 }
                 if def.id == ActionId::ExpandAllThinking {
-                    if crate::appearance::cache::load_always_expand_thinking() {
-                        continue;
-                    }
                     let mut item = def.hint();
                     item.label = std::borrow::Cow::Borrowed(thinking_label);
                     hints.push(item);
@@ -1214,9 +1211,7 @@ pub fn build_hints(
                         hints.push(HintItem::new(key, "expand"));
                     }
                 }
-                if !always_expand_thinking
-                    && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
-                {
+                if let Some(key) = registry.key_for(ActionId::ExpandAllThinking) {
                     // Replace the selected-entry expand with `-` only when
                     // that slot would otherwise be "expand". A collapsed
                     // thinking hint on an already-expanded prompt stays
@@ -1274,7 +1269,7 @@ pub fn build_hints(
             {
                 hints.push(HintItem::paired(l, h, "turn").pinned());
             }
-            if !selected_is_user_prompt && !always_expand_thinking {
+            if !selected_is_user_prompt {
                 hints.push(HintItem::new(thinking_expand_key, thinking_label));
             }
             if vim_mode

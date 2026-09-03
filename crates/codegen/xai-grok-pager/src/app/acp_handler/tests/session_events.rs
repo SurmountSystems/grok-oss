@@ -957,6 +957,78 @@
         }
     }
 
+    /// Named contract: AUTO compact must not re-enqueue the occupancy
+    /// operator prompt, or any operator prompt. Compact-held occupancy
+    /// is for re-auth resubmit, not a second waiting `/implement`.
+    #[test]
+    fn auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt() {
+        use crate::scrollback::block::RenderBlock;
+
+        crate::appearance::cache::set_auto_run_implement(true);
+        crate::appearance::cache::set_economic_mode(false);
+
+        let occupancy =
+            "/implement --effort 3 occupancy leftover that compact must not re-queue";
+        let mut app = make_app_with_agent("sess-compact-no-requeue");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("occ-1".into());
+            agent.session.in_flight_prompt = None;
+            agent.session.pending_prompts.clear();
+            agent.session.compact_held_prompt = Some(InFlightPrompt {
+                text: occupancy.into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            agent.session.prompt_history = vec![occupancy.into()];
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(occupancy));
+            agent.scrollback.push_block(RenderBlock::agent_message(
+                "## Next implement prompt\n\
+                 /implement leftover from assistant residual after compact\n\
+                 1) this is not a new operator turn",
+            ));
+        }
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-compact-no-requeue",
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before: Some(509_400),
+                    tokens_after: 422_100,
+                    elapsed_ms: Some(133_000),
+                    summary_preview: None,
+                    saved_too_little: false,
+                },
+            ),
+            &mut app,
+        );
+
+        let agent = &app.agents[&AgentId(0)];
+        let queue: Vec<&str> = agent
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert!(
+            queue.is_empty(),
+            "AUTO compact must not enqueue occupancy or any operator prompt; queue={queue:?}"
+        );
+        assert!(
+            agent.session.compact_held_prompt.is_none(),
+            "successful AUTO compact must drop the hold, not queue it"
+        );
+        assert!(
+            !agent.has_held_user_queue(),
+            "occupancy must not become held queue after compact"
+        );
+    }
+
     /// Token refreshes must not copy the model-card catalog into
     /// `session_sampling_window`. After that poison the chip treats windows
     /// as equal and paints unlabeled `201K / 500K`.
@@ -1054,6 +1126,92 @@
         assert_eq!(
             child_view.context_state.as_ref().map(|c| c.used),
             Some(25000)
+        );
+    }
+
+    /// Surmount / grok-oss fork: after `SubagentFinished`, `AutoCompactStarted`
+    /// on that child must not set AutoCompacting / live compact activity.
+    #[test]
+    fn auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity() {
+        use crate::acp::tracker::TurnActivity;
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-finished-compact";
+        let mut info = make_subagent_info(child_sid);
+        info.finished = true;
+        info.status = Some(std::sync::Arc::from("completed"));
+        info.duration_ms = Some(3_274_000);
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        let mut child_view = make_agent(Some(child_sid));
+        child_view.session.state = crate::app::agent::AgentState::Idle;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child_view));
+
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 203_300,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        assert!(
+            !changed,
+            "finished nested session must not apply a new AutoCompactStarted"
+        );
+        let child_view = agent.subagent_views.get(child_sid).unwrap();
+        assert_ne!(
+            child_view.session.tracker.activity(),
+            Some(TurnActivity::AutoCompacting),
+            "AutoCompactStarted after SubagentFinished must not set live compact activity"
+        );
+        assert!(
+            !child_view.session.state.is_busy(),
+            "finished nested child must not go busy for a late compact"
+        );
+    }
+
+    /// Nested compact chrome must not steal the parent TUI. AutoCompactStarted
+    /// on a live L2 child dismisses the fullscreen overlay so the parent still
+    /// scrolls.
+    #[test]
+    fn nested_compact_chrome_does_not_steal_parent_fullscreen_overlay() {
+        use crate::acp::tracker::TurnActivity;
+        let mut agent = make_agent(Some("root-sess"));
+        let child_sid = "child-compact-no-steal";
+        agent
+            .subagent_sessions
+            .insert(child_sid.into(), make_subagent_info(child_sid));
+        let mut child_view = make_agent(Some(child_sid));
+        child_view.session.state = crate::app::agent::AgentState::TurnRunning;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child_view));
+        agent.active_subagent = Some(child_sid.into());
+
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 200_000,
+            context_window: 200_000,
+            percentage: 100,
+            threshold_percent: Some(95),
+            threshold_tokens: None,
+            reason: "auto-compact at 95%".into(),
+        };
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        assert!(changed);
+        assert!(
+            agent.active_subagent.is_none(),
+            "compact chrome must not keep the fullscreen overlay steal"
+        );
+        assert!(
+            agent.visible_nested_overlay_sid().is_none(),
+            "parent TUI must remain the visible surface while the child is compacting"
+        );
+        let child_view = agent.subagent_views.get(child_sid).unwrap();
+        assert_eq!(
+            child_view.session.tracker.activity(),
+            Some(TurnActivity::AutoCompacting)
         );
     }
 

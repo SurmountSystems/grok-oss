@@ -112,6 +112,13 @@ impl AgentActivity {
         self.inner.subagents.clone()
     }
 
+    /// Whether initializing or running nested subagents are still on this
+    /// process. Distinct from a parent turn: a TUI disconnect leaves this
+    /// true; `/rebuild` must not exec-replace while it is.
+    pub fn has_live_subagents(&self) -> bool {
+        self.inner.subagents.load(Ordering::Relaxed) > 0
+    }
+
     /// Whether the agent has live work: a running turn, a parked blocking
     /// interaction, or an initializing/running subagent.
     ///
@@ -122,8 +129,7 @@ impl AgentActivity {
     /// which a sync `Send` probe cannot do). The flush's quiesce loop
     /// re-snapshots and still ends such an actor via its Shutdown arm.
     pub fn is_busy(&self) -> bool {
-        self.inner.subagents.load(Ordering::Relaxed) > 0
-            || self.lock_live_sessions().iter().any(|e| e.is_busy())
+        self.has_live_subagents() || self.lock_live_sessions().iter().any(|e| e.is_busy())
     }
 
     /// Number of live registered sessions (diagnostics/tests).
@@ -300,9 +306,12 @@ mod tests {
         let activity = AgentActivity::default();
         let gauge = activity.subagent_gauge();
         assert!(!activity.is_busy());
+        assert!(!activity.has_live_subagents());
         gauge.store(1, Ordering::Relaxed);
+        assert!(activity.has_live_subagents());
         assert!(activity.is_busy());
         gauge.store(0, Ordering::Relaxed);
+        assert!(!activity.has_live_subagents());
         assert!(!activity.is_busy());
     }
 

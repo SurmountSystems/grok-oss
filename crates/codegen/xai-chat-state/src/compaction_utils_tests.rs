@@ -2308,6 +2308,46 @@ fn prepare_for_summarization_is_idempotent() {
     assert_eq!(once_json, twice_json, "second pass must be a no-op");
 }
 #[test]
+fn strip_images_does_not_serialize_the_data_url_crate() {
+    let data_url = format!("data:image/jpeg;base64,{}", "C".repeat(200_000));
+    let mut user = ConversationItem::user("look");
+    user.add_image(&data_url);
+    let tool = ConversationItem::tool_result_with_images(
+        "c1",
+        "tool text",
+        vec![ContentPart::Image {
+            url: data_url.clone().into(),
+        }],
+    );
+    let stripped = strip_images(vec![user, tool]);
+    let json = serde_json::to_string(&stripped).expect("serialize");
+    assert!(
+        !json.contains(&data_url),
+        "compact/history persist must not copy the data URL crate"
+    );
+    assert!(
+        json.len() < 10_000,
+        "stripped JSON must stay small, got {}",
+        json.len()
+    );
+    assert!(json.contains("[image]"), "user image becomes a placeholder");
+}
+
+#[test]
+fn verbatim_summarization_does_not_serialize_the_data_url_crate() {
+    let data_url = format!("data:image/jpeg;base64,{}", "D".repeat(200_000));
+    let mut user = ConversationItem::user("look");
+    user.add_image(&data_url);
+    let result = prepare_conversation_for_verbatim_summarization(vec![user], false);
+    let json = serde_json::to_string(&result).expect("serialize");
+    assert!(
+        !json.contains(&data_url),
+        "verbatim compact prep must not copy the data URL crate"
+    );
+    assert!(json.contains("[image]"));
+}
+
+#[test]
 fn test_strip_images_replaces_with_placeholder() {
     let mut user = ConversationItem::user("describe this");
     user.add_image("data:image/png;base64,iVBORw0KGgo=");

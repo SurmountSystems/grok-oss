@@ -309,8 +309,10 @@ impl AgentView {
         Some(kind_from_wire(&wire.kind) == QueueEntryKind::Prompt)
     }
 
-    /// Send one merged-queue row now (cancel-and-send), by selection id. The
-    /// shell cancels the running turn and runs this row as the next turn.
+    /// Send one merged-queue row now as a mid-turn interject, by selection id.
+    /// Local prompt rows emit `Action::Interject` (`x.ai/interject`). Server
+    /// rows emit `Action::QueueInterjectShared` (`x.ai/queue/interject`).
+    /// Neither path cancel-and-sends the running turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
         if !self.session.state.is_turn_running() {
             self.show_toast("No turn running — prompt will send when ready");
@@ -351,7 +353,7 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
-            return InputOutcome::Action(Action::SendPromptNow {
+            return InputOutcome::Action(Action::Interject {
                 text: prompt.text,
                 images: prompt.images,
             });
@@ -838,10 +840,10 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[1]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -915,10 +917,10 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[0]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
@@ -962,11 +964,11 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[1]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::Interject { text, images }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the interject");
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         // Local interject removed it from the client-owned queue.
         assert!(agent.session.pending_prompts.is_empty());
@@ -1094,10 +1096,10 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[0]);
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "/find-session")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(
             agent.session.pending_prompts.is_empty(),
@@ -1138,10 +1140,10 @@ mod queue_edit_routing_tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_prompt_key_for_test(&enter);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "/find-session")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
     }
@@ -1158,10 +1160,10 @@ mod queue_edit_routing_tests {
 
         let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { images, .. }) => {
+            InputOutcome::Action(Action::Interject { images, .. }) => {
                 assert_eq!(images.len(), 1);
             }
-            other => panic!("expected SendPromptNow with images, got {other:?}"),
+            other => panic!("expected Interject with images, got {other:?}"),
         }
         assert!(agent.prompt.images.is_empty());
         assert!(agent.toast.is_none(), "no drop toast expected");
@@ -1286,7 +1288,7 @@ mod queue_edit_routing_tests {
 
         let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "hello there")
             }
             other => panic!("expected Interject, got {other:?}"),
@@ -1346,7 +1348,7 @@ mod queue_edit_routing_tests {
 
         let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one");
             }
             other => panic!("expected Interject of queued follow-up, got {other:?}"),
@@ -1374,7 +1376,7 @@ mod queue_edit_routing_tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_prompt_key_for_test(&enter);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one");
             }
             other => panic!("expected Interject of top queued follow-up, got {other:?}"),
@@ -1403,7 +1405,7 @@ mod queue_edit_routing_tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_prompt_key_for_test(&enter);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one");
             }
             other => panic!("multiline empty Enter must send-now top queued row, got {other:?}"),
@@ -1456,7 +1458,7 @@ mod queue_edit_routing_tests {
 
         let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "composer wins");
             }
             other => panic!("expected composer Interject, got {other:?}"),
@@ -1552,7 +1554,7 @@ mod queue_edit_routing_tests {
         let outcome =
             agent.handle_prompt_key_with_registry_for_test(&vscode_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "steer please")
             }
             other => panic!("expected Interject, got {other:?}"),
@@ -1585,7 +1587,7 @@ mod queue_edit_routing_tests {
         agent.queue.list_state.select_by_id(ids[1]);
         let outcome = agent.handle_queue_key(&vscode_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
             other => panic!("expected Interject, got {other:?}"),

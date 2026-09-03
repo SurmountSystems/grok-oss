@@ -252,6 +252,68 @@ fn tool_call_lifecycle() {
     assert_eq!(sb.len(), 1);
     assert_eq!(tracker.pending_tools.len(), 0);
 }
+/// A completed Write can arrive as a full `ToolCall` (not `ToolCallUpdate`).
+/// The pending start must finish so overlay chrome cannot sit on
+/// `Running: Write …` after the file exists.
+#[test]
+fn write_tool_call_completed_clears_pending_running_activity() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+    tracker.handle_update(
+        tool_call("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    assert!(
+        matches!(
+            tracker.activity(),
+            Some(TurnActivity::ToolRunning { ref title, .. }) if title.starts_with("Write")
+        ),
+        "pending Write must paint Running, got {:?}",
+        tracker.activity()
+    );
+    tracker.handle_update(
+        tool_call_completed("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(tracker.pending_tools.len(), 0);
+    assert_ne!(
+        tracker.activity().map(|a| matches!(
+            a,
+            TurnActivity::ToolRunning { title, .. } if title.starts_with("Write")
+        )),
+        Some(true),
+        "completed Write must not keep ToolRunning, got {:?}",
+        tracker.activity()
+    );
+}
+/// Lost Write completion must drop `Running: Write …` after the short bound.
+#[test]
+fn stale_write_tool_running_drops_activity_after_bound() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+    tracker.handle_update(
+        tool_call("tc-write", acp::ToolKind::Edit, title),
+        &meta(),
+        &mut sb,
+    );
+    tracker.backdate_pending_tool_started_at(
+        "tc-write",
+        WRITING_DELTA_STALE_AFTER + std::time::Duration::from_secs(1),
+    );
+    assert_ne!(
+        tracker.activity().map(|a| matches!(
+            a,
+            TurnActivity::ToolRunning { title, .. } if title.starts_with("Write")
+        )),
+        Some(true),
+        "stale Write must not keep Running chrome, got {:?}",
+        tracker.activity()
+    );
+}
 #[test]
 fn tool_call_already_completed() {
     let mut sb = ScrollbackState::new();
@@ -4411,5 +4473,190 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
             .contains("SuperGrok"),
         "upsell text must be shown in the card body, got: {:?}",
         block.output
+    );
+}
+
+const ABORTED_REASONING: &str =
+    "The user is asking me to acknowledge them - they sent a screenshot of the session.";
+const ABORTED_DRAFT: &str = "Hey, sorry about that -- I see the screenshot and the weird state you're in. Looks like the resume pulled up a session where the prompt is stuck in both the";
+
+fn thinking_texts(sb: &ScrollbackState) -> Vec<String> {
+    (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::Thinking(t)) => Some(t.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn thinking_count(sb: &ScrollbackState) -> usize {
+    (0..sb.len())
+        .filter(|&i| matches!(sb.get(i).map(|e| &e.block), Some(RenderBlock::Thinking(_))))
+        .count()
+}
+
+/// Contract A: thinking chrome must not present an aborted user-facing draft
+/// as the live turn. Pause or truncate leaves the thought incomplete or
+/// collapsed, not a half-apology stuck on screen.
+#[test]
+fn abort_turn_does_not_present_aborted_user_facing_draft_as_the_live_turn() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
+    tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
+    tracker.abort_turn(&mut sb);
+    let texts = thinking_texts(&sb);
+    for body in &texts {
+        assert!(
+            !body.contains("Hey, sorry about that"),
+            "aborted user-facing draft must not stay in thinking chrome, got {body:?}"
+        );
+    }
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    for body in &agent_bodies {
+        assert!(
+            !body.contains("Hey, sorry about that"),
+            "aborted draft must not become the assistant message either, got {body:?}"
+        );
+    }
+}
+
+/// Contract B: Thought for 0.0s must not paint as a real thought block
+/// (omit or merge). Instant empty pre-created leftovers are omitted.
+#[test]
+fn abort_turn_omits_instant_empty_thinking_so_thought_for_zero_does_not_paint() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.pre_create_thinking(&mut sb);
+    assert_eq!(
+        thinking_count(&sb),
+        1,
+        "precondition: empty thinking exists"
+    );
+    tracker.abort_turn(&mut sb);
+    assert_eq!(
+        thinking_count(&sb),
+        0,
+        "empty instant thinking must be omitted so Thought for 0.0s cannot paint"
+    );
+    tracker.pre_create_thinking(&mut sb);
+    tracker.finish_turn(&mut sb);
+    assert_eq!(
+        thinking_count(&sb),
+        0,
+        "finish_turn must also omit empty instant thinking"
+    );
+}
+
+/// Contract C: after pause with no [stop], do not leave a truncated assistant
+/// draft inside an expanded thought as if it were the reply.
+#[test]
+fn abort_turn_collapses_truncated_draft_out_of_expanded_thinking() {
+    use crate::scrollback::types::DisplayMode;
+    std::thread::spawn(|| {
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        crate::appearance::cache::set_always_expand_thinking(true);
+        struct ResetAlwaysExpand;
+        impl Drop for ResetAlwaysExpand {
+            fn drop(&mut self) {
+                crate::appearance::cache::set_always_expand_thinking(false);
+            }
+        }
+        let _reset = ResetAlwaysExpand;
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
+        tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
+        tracker.abort_turn(&mut sb);
+        assert_eq!(thinking_count(&sb), 1, "reasoning thought should remain");
+        let entry = sb.get(0).expect("thinking entry");
+        assert_eq!(
+            entry.display_mode,
+            DisplayMode::Collapsed,
+            "paused thinking must collapse even when always_expand_thinking is on"
+        );
+        match &entry.block {
+            RenderBlock::Thinking(t) => {
+                assert!(
+                    t.is_aborted(),
+                    "paused thought must be marked aborted so expand cannot restick the draft"
+                );
+                assert!(
+                    !t.text().contains("Hey, sorry about that"),
+                    "truncated draft must not remain in the collapsed thought, got {:?}",
+                    t.text()
+                );
+            }
+            other => panic!("expected thinking, got {other:?}"),
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+/// Contract D: distinguish model reasoning from the assistant message.
+/// Internal "the user is asking me..." must not leak as the answer.
+#[test]
+fn abort_turn_keeps_internal_reasoning_out_of_the_assistant_answer() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
+    tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
+    tracker.abort_turn(&mut sb);
+    let texts = thinking_texts(&sb);
+    assert!(
+        texts.iter().any(|b| b.contains("The user is asking me")),
+        "internal reasoning may stay in thinking chrome, got {texts:?}"
+    );
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    for body in &agent_bodies {
+        assert!(
+            !body.contains("The user is asking me"),
+            "internal reasoning must not leak as the assistant answer, got {body:?}"
+        );
+        assert!(
+            !body.contains("Hey, sorry about that"),
+            "truncated draft must not leak as the assistant answer, got {body:?}"
+        );
+    }
+}
+
+/// Live thought chunks that switch into a user-facing draft must peel the
+/// draft before pause can freeze it as expanded thinking.
+#[test]
+fn thought_chunk_peels_trailing_user_facing_draft_while_streaming() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(thought_chunk(ABORTED_REASONING), &meta(), &mut sb);
+    tracker.handle_update(
+        thought_chunk(&format!("\n{ABORTED_DRAFT}")),
+        &meta(),
+        &mut sb,
+    );
+    let texts = thinking_texts(&sb);
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("The user is asking me"),
+        "reasoning must stay while streaming, got {:?}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("Hey, sorry about that"),
+        "trailing draft must not stay in live thinking chrome, got {:?}",
+        texts[0]
     );
 }

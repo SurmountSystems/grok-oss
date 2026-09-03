@@ -453,6 +453,9 @@ pub enum Action {
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).
     /// Pager-owned, NOT persisted to disk — reset each session.
     SetMultilineMode(bool),
+    /// Allow newlines in the Human box from Enter / Shift+Enter.
+    /// SHELL-owned: cache + `[ui].composer_multiline`. Default on.
+    SetComposerMultiline(bool),
     /// Open the prompt-history search panel on the active agent (composer
     /// as filter query). Dispatched by `/history`.
     OpenHistorySearch,
@@ -550,8 +553,8 @@ pub enum Action {
     /// Hide in-app status / welcome / dashboard headers. SHELL-owned:
     /// cache + `[ui].hide_header`.
     SetHideHeader(bool),
-    /// Keep thinking blocks expanded and hide Ctrl+T. SHELL-owned:
-    /// cache + `[ui].always_expand_thinking`.
+    /// Keep thinking blocks expanded. SHELL-owned: cache +
+    /// `[ui].always_expand_thinking`. Ctrl+T writes this same key.
     SetAlwaysExpandThinking(bool),
     /// Plan approval park (`soft` | `modal`). SHELL-owned:
     /// cache + `[ui].plan_approval_park`.
@@ -789,6 +792,10 @@ pub enum Action {
     ///
     /// `/start` only. Not `/resume` (session picker) and not a pause toggle.
     StartPausedOrInterruptedWork,
+    /// `/unstick`: resend the last L1 prompt as if the network dropped it.
+    ///
+    /// Not `/resume` (session picker) and not continue interrupted turn.
+    UnstickLastL1Prompt,
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
@@ -1637,6 +1644,20 @@ pub enum Effect {
         /// offsets index the block's `text` displayed verbatim — never
         /// combined with a `displayText` override.
         skill_token_ranges: Vec<std::ops::Range<usize>>,
+    },
+    /// Resend the last L1 prompt as if the network dropped it.
+    ///
+    /// Same `session/prompt` wire as [`Self::SendPrompt`], with `_meta.unstickRetry`
+    /// so the shell must not append a second `<user_query>` when the last user
+    /// turn already matches. Not a duplicate Human line.
+    UnstickResendPrompt {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        text: String,
+        prompt_id: String,
+        /// WAL `images/` file ids. Sent as resource links, never data URLs.
+        images: Vec<xai_grok_shell::session::prompt_wal::PromptWalImage>,
+        images_dir: Option<std::path::PathBuf>,
     },
     /// Send a direct bash command to the agent (with typed PromptBlockMeta).
     SendBashCommand {

@@ -120,6 +120,7 @@ impl AgentView {
             return;
         }
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
         let l2 = crate::app::subagent::overlay_child_is_l2_coordinator(
             &self.subagent_sessions,
             &child_sid,
@@ -132,6 +133,10 @@ impl AgentView {
                 child.mark_as_subagent_view();
                 child.set_active_pane(AgentPane::Scrollback, true);
             }
+        }
+        if self.child_is_auto_compacting(&child_sid) {
+            // Nested compact chrome must not force a fullscreen steal.
+            return;
         }
         self.active_subagent = Some(child_sid);
     }
@@ -148,6 +153,7 @@ impl AgentView {
             PlanApprovalFocus::Commenting => {
                 vec![
                     HintItem::new(key!(Enter), "save comment"),
+                    HintItem::new(key!('y'), "copy"),
                     HintItem::new(key!(Esc), "cancel"),
                 ]
             }
@@ -390,6 +396,7 @@ impl AgentView {
         if self.is_casual_commenting() {
             return ShortcutsBarContent::Surface(vec![
                 HintItem::new(key!(Enter), "save comment"),
+                HintItem::new(key!('y'), "copy"),
                 HintItem::new(key!(Esc), "cancel"),
             ]);
         }
@@ -635,49 +642,81 @@ impl AgentView {
         let _title_row = frame.title_row;
         let inner = frame.content;
         let _border_style = Style::default().fg(border_color);
+        let child_busy = self
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|c| c.session.state.is_busy());
+        let has_child_view = self.subagent_views.contains_key(child_sid);
         let info = self.subagent_sessions.get(child_sid);
         let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
-        let is_running = info.is_some_and(|s| s.is_running());
-        let elapsed = info
-            .map(|s| crate::util::format_duration(s.display_elapsed()))
+        // SubagentFinished may lag ACP turn-end. A child view that already
+        // left TurnRunning must not keep a live overlay timer.
+        let info_running = info.is_some_and(|s| s.is_running());
+        let nested_live = self.running_live_specialists().any(|s| {
+            s.parent_session_id
+                .as_deref()
+                .is_some_and(|p| p == child_sid)
+        });
+        // Host `SubagentFinished` owns the title clock. A leftover child
+        // view or nested specialist must not keep spawn-wall elapsed after
+        // the nested session already finished.
+        let is_running = if info.is_some_and(|s| s.finished) {
+            false
+        } else if has_child_view {
+            (info_running && child_busy) || nested_live
+        } else {
+            info_running
+        };
+        let elapsed_ms = info.map(|s| {
+            if is_running {
+                s.display_elapsed()
+            } else {
+                s.duration_ms
+                    .map(std::time::Duration::from_millis)
+                    .unwrap_or_else(|| s.display_elapsed())
+            }
+        });
+        let elapsed = elapsed_ms
+            .map(crate::util::format_duration)
             .unwrap_or_default();
         let (type_label, description): (String, String) = match info {
             Some(s) => format_subagent_label(s),
             None => (String::new(), raw_description.to_string()),
         };
-        let icon = if is_running {
-            crate::glyphs::sparkler_frame_at_ms(
-                info.map(|s| s.display_elapsed().as_millis() as u64)
-                    .unwrap_or(0),
-            )
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            crate::glyphs::check_mark()
-        } else {
-            crate::glyphs::ballot_x()
-        };
-        let icon_color = if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let label_color = if info.is_some_and(|s| s.pending_kill) {
-            theme.accent_error
-        } else if is_running {
-            theme.accent_running
-        } else if info.and_then(|s| s.status.as_deref()) == Some("completed") {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
+        let status_completed = info.and_then(|s| s.status.as_deref()) == Some("completed");
+        let pending_kill = info.is_some_and(|s| s.pending_kill);
         let meta = info
             .and_then(|s| s.model.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("")
             .to_string();
-        let badge = info.map(format_context_badge).unwrap_or("");
+        let badge = info.map(format_context_badge).unwrap_or("").to_string();
+        let icon = if is_running {
+            crate::glyphs::sparkler_frame_at_ms(
+                elapsed_ms.map(|d| d.as_millis() as u64).unwrap_or(0),
+            )
+        } else if status_completed {
+            crate::glyphs::check_mark()
+        } else {
+            crate::glyphs::ballot_x()
+        };
+        let icon_color = if is_running {
+            theme.accent_running
+        } else if status_completed {
+            theme.accent_success
+        } else {
+            theme.accent_error
+        };
+        let label_color = if pending_kill {
+            theme.accent_error
+        } else if is_running {
+            theme.accent_running
+        } else if status_completed {
+            theme.accent_success
+        } else {
+            theme.accent_error
+        };
         let activity_label: Option<String> = if is_running {
             self.overlay_wait_activity_label(child_sid)
         } else {
@@ -777,23 +816,41 @@ impl AgentView {
             &Span::styled(&elapsed_text, Style::default().fg(theme.gray)),
             elapsed_text.width() as u16,
         );
+        self.hit_overlay_nested_status.clear();
+        self.overlay_nested_status_child_sid = None;
         if let Some(activity) = activity_label.as_deref() {
             let segment = format!("{activity} \u{00b7} ");
             let w = segment.width() as u16;
             rx = rx.saturating_sub(w);
-            buf.set_span_safe(
-                rx,
-                title_y,
-                &Span::styled(segment, Style::default().fg(theme.gray)),
-                w,
-            );
+            let activity_style = if self.hit_overlay_nested_status.hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span_safe(rx, title_y, &Span::styled(segment, activity_style), w);
+            let nested_sid = self
+                .subagent_sessions
+                .values()
+                .filter(|info| {
+                    info.is_running()
+                        && info.workflow_run_id.is_none()
+                        && info.parent_session_id.as_deref() == Some(child_sid)
+                })
+                .min_by_key(|info| info.started_at)
+                .map(|info| info.child_session_id.to_string());
+            if let Some(sid) = nested_sid {
+                self.hit_overlay_nested_status.rect = Some(Rect::new(rx, title_y, w, 1));
+                self.overlay_nested_status_child_sid = Some(sid);
+            }
         }
         if !badge.is_empty() {
             rx = rx.saturating_sub(badge.width() as u16 + 1);
             buf.set_span_safe(
                 rx,
                 title_y,
-                &Span::styled(badge, Style::default().fg(theme.gray_dim)),
+                &Span::styled(&badge, Style::default().fg(theme.gray_dim)),
                 badge.width() as u16,
             );
         }
@@ -979,7 +1036,9 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if let Some(ref child_sid) = self.active_subagent.clone()
+            && !self.child_is_auto_compacting(child_sid)
+        {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -1312,7 +1371,7 @@ impl AgentView {
         if self.active_pane == ActivePane::Catalog && !self.catalog.is_visible() {
             self.active_pane = ActivePane::Scrollback;
         }
-        let viewer_open = self.active_subagent.is_some();
+        let viewer_open = self.visible_nested_overlay_sid().is_some();
         let tasks_height = if viewer_open {
             0
         } else {
@@ -3807,21 +3866,32 @@ impl AgentView {
             };
             // Isolated Preview still types in the Human box. Re-paint the
             // box caret after the plan pane so a right dock cannot hide it.
+            // If the prompt widget skipped caret_cell (unfocused layout),
+            // sit at the inner origin of the prompt pane.
             if self
                 .plan_approval_view
                 .as_ref()
                 .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
-                && let Some((cx, cy)) = prompt_caret_cell
             {
-                let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
-                crate::views::prompt_widget::paint_composer_box_cursor(
-                    buf,
-                    cx,
-                    cy,
-                    &theme,
-                    theme.bg_base,
-                    allow_block_glyph,
-                );
+                let caret = prompt_caret_cell.or_else(|| {
+                    let p = self.pane_areas.prompt;
+                    if p.width > 2 && p.height > 2 {
+                        Some((p.x.saturating_add(1), p.y.saturating_add(1)))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((cx, cy)) = caret {
+                    let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                    crate::views::prompt_widget::paint_composer_box_cursor(
+                        buf,
+                        cx,
+                        cy,
+                        &theme,
+                        theme.bg_base,
+                        allow_block_glyph,
+                    );
+                }
             }
             return (viewer_cursor, prompt_post_flush);
         }
@@ -4995,6 +5065,133 @@ mod voice_recording_overlay_tests {
         );
     }
 
+    /// Isolated Preview with an **empty** Human box (cursor 0). Sibling
+    /// [`plan_approval_preview_paints_composer_box_caret`] types comment
+    /// text first, so it cannot catch a missing insertion cell on empty
+    /// wrap. Filled pin must show the Human-green plate. Hollow pin must
+    /// still be a visible box caret (not canvas-on-canvas vanish).
+    #[test]
+    fn plan_approval_preview_empty_composer_paints_box_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        let area = Rect::new(0, 0, 100, 40);
+
+        let mut agent = plan_approval_agent();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().expect("plan view").focus,
+            PlanApprovalFocus::Preview
+        );
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        assert!(
+            agent.prompt.text().is_empty(),
+            "fixture: Isolated Preview composer starts empty"
+        );
+
+        let draw = |agent: &mut AgentView| {
+            let reg = ActionRegistry::defaults();
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                &BundleState::default(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            buf
+        };
+        let dump = |buf: &Buffer| -> String {
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect()
+        };
+
+        let human_green = crate::theme::doge::as_doge_human_green(theme.accent_user);
+        let is_human_green = |c: ratatui::style::Color| -> bool {
+            c == human_green
+                || matches!(
+                    c,
+                    ratatui::style::Color::Rgb(0, 255, 0)
+                        | ratatui::style::Color::Green
+                        | ratatui::style::Color::LightGreen
+                        | ratatui::style::Color::Indexed(2 | 10 | 46)
+                )
+        };
+        let find_filled_plate = |buf: &Buffer| -> bool {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                        && is_human_green(cell.bg)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        let find_visible_caret = |buf: &Buffer| -> bool {
+            // Hollow half keeps the full-block glyph. Color may be green ink
+            // on canvas; the contract is that the cell is not a vanished space.
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        {
+            let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                agent.prompt.text().is_empty(),
+                "empty Preview must not invent draft text:\n{text}"
+            );
+            assert!(
+                find_filled_plate(&buf),
+                "empty Preview (cursor 0) must paint the filled Human-green box caret:\n{text}"
+            );
+        }
+        {
+            let _hollow_phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                find_visible_caret(&buf),
+                "empty Preview hollow blink half must stay a visible Human-green box caret, \
+                 not a vanished empty cell:\n{text}"
+            );
+        }
+    }
+
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
     /// Same 1.0.3 leftover the live screenshot still shows until rebuild:
     /// `request changes` / `c comment` / `copy plan` / `quit plan` plus
@@ -5622,6 +5819,62 @@ mod nested_l2_overlay_wait_chrome_tests {
         assert!(
             !lower.contains("waiting for the model"),
             "bare Waiting for the model is FAIL while a parented specialist is live:\n{text}"
+        );
+    }
+
+    /// Overlay Write of a remaining-work markdown must not keep `Running`
+    /// after `handle_update` completes the tool (file exists).
+    #[test]
+    fn nested_overlay_write_clears_running_after_completed_handle_update() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Completed)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix plan cancel hang");
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            !text.contains("Running: Write"),
+            "completed Write must not keep overlay Running chrome:\n{text}"
+        );
+        let l2 = parent.subagent_views.get("l2-coord").unwrap();
+        assert!(
+            !matches!(
+                l2.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::ToolRunning { title, .. })
+                    if title.starts_with("Write")
+            ),
+            "handle_update Completed must finish the Write, got {:?}",
+            l2.resolve_turn_activity()
         );
     }
 

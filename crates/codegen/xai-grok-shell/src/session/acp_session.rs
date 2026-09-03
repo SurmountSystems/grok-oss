@@ -236,6 +236,8 @@ pub(crate) struct InputItem {
     /// land behind earlier still-queued send-now prompts so stacked sends
     /// (e.g. during a goal turn, which promotes but never cancels) run FIFO.
     pub(crate) send_now: bool,
+    /// `_meta.unstickRetry`: skip a second user turn when the last query matches.
+    pub(crate) unstick_retry: bool,
 }
 use crate::session::commands::{NotificationPriority, NotificationSource};
 /// Resolved tool names for goal-mode prompts.
@@ -1977,6 +1979,9 @@ mod tool_layer_images_bridge_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/unstick_retry_tests.rs"]
+mod unstick_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;

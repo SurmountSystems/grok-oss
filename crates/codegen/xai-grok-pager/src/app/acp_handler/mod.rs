@@ -767,32 +767,45 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     let interjection_id = parsed.get("interjectionId").and_then(|v| v.as_str());
 
     let sid = acp::SessionId::new(session_id.to_string());
-    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
+    let Some(matched) = find_session_match(app, &sid) else {
         return false;
     };
+    let id = matched.agent_id();
     let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         return false;
     };
+    if matches!(matched, SessionMatch::Child(_)) {
+        if let Some(child) = agent.subagent_views.get_mut(session_id) {
+            return apply_interjection_paint(child, interjection_id, text) && is_active;
+        }
+    }
+    apply_interjection_paint(agent, interjection_id, text) && is_active
+}
 
+fn apply_interjection_paint(
+    paint: &mut crate::app::agent_view::AgentView,
+    interjection_id: Option<&str>,
+    text: &str,
+) -> bool {
     if let Some(iid) = interjection_id {
         // Two self-message flows land here, painted differently on the
         // originator: a direct interjection (already an interjection block,
         // tracked by `self_interjection_ids`) is a pure dedup — drop it; a goal
         // Send Now (a plain user-prompt block in `send_now_painted_blocks`) must
         // instead be converted to interjection styling.
-        if agent.self_interjection_ids.remove(iid) {
+        if paint.self_interjection_ids.remove(iid) {
             return false;
         }
         // `edited` is ignored: the painted block already holds the authoritative
         // (possibly edited) text — we only restyle it. Drift resolution via
         // `edited` matters only on the turn-start adoption path.
-        if agent.is_self_originated_prompt(iid)
-            && let Some((entry_id, _)) = agent.send_now_painted_blocks.remove(iid)
+        if paint.is_self_originated_prompt(iid)
+            && let Some((entry_id, _)) = paint.send_now_painted_blocks.remove(iid)
         {
-            agent.clear_send_now_expectation();
-            if let Some(index) = agent.scrollback.index_of_id(entry_id)
-                && let Some(RenderBlock::UserPrompt(block)) = agent
+            paint.clear_send_now_expectation();
+            if let Some(index) = paint.scrollback.index_of_id(entry_id)
+                && let Some(RenderBlock::UserPrompt(block)) = paint
                     .scrollback
                     .entry_mut(index)
                     .map(|entry| &mut entry.block)
@@ -803,10 +816,30 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
         }
     }
 
-    agent
+    if last_scrollback_prompt_matches(&paint.scrollback, text) {
+        return false;
+    }
+
+    paint
         .scrollback
         .push_block(RenderBlock::interjection_prompt(text));
-    is_active
+    true
+}
+
+fn last_scrollback_prompt_matches(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+    text: &str,
+) -> bool {
+    let Some(last) = scrollback.len().checked_sub(1) else {
+        return false;
+    };
+    let Some(entry) = scrollback.entry(last) else {
+        return false;
+    };
+    match &entry.block {
+        RenderBlock::UserPrompt(b) => crate::app::subagent::subagent_prompt_text_eq(&b.text, text),
+        _ => false,
+    }
 }
 
 /// Handle an ACP `ext_method` request (blocking request that expects a response).

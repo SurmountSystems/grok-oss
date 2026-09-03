@@ -549,6 +549,7 @@ pub(crate) fn user_item_with_rx(
             combined_texts: None,
         }),
         send_now: false,
+        unstick_retry: false,
     };
     (item, rx)
 }
@@ -583,6 +584,7 @@ pub(crate) fn input_with_origin_rx(
         parsed_prompt_tx: None,
         queue_meta: None,
         send_now: false,
+        unstick_retry: false,
     };
     (item, rx)
 }

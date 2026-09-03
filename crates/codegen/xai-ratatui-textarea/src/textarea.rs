@@ -731,8 +731,20 @@ impl TextArea {
     /// it is shown at the start of the next visual line instead of on the
     /// invisible right border.
     pub fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
+        if area.height == 0 {
+            return None;
+        }
         let tw = self.text_width(area);
         let lines = self.wrapped_lines(tw);
+        // Empty buffer: `wrap_ranges` may skip textwrap's static `""` slice,
+        // leaving no visual line. Cursor 0 is still the insertion point at
+        // the first textarea cell (empty Isolated Preview Human box).
+        if lines.is_empty() {
+            if self.text().is_empty() && self.cursor() == 0 {
+                return Some((area.x, area.y));
+            }
+            return None;
+        }
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
         let mut i = Self::wrapped_line_index_by_start(&lines, self.cursor())?;
         let ls = &lines[i];

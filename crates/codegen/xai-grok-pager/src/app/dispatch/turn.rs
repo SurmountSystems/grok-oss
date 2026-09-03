@@ -61,10 +61,10 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
     let Some(agent) = app.agents.get(&id) else {
         return vec![];
     };
-    let Some(child_sid) = agent.active_subagent.as_ref() else {
+    let Some(child_sid) = agent.visible_nested_overlay_sid() else {
         return vec![];
     };
-    if !agent.subagent_views.contains_key(child_sid.as_str()) {
+    if !agent.subagent_views.contains_key(child_sid) {
         return vec![];
     }
     let mut ids = Vec::new();
@@ -77,12 +77,12 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
         }
     };
     if agent.session.state.is_idle()
-        && let Some(info) = agent.subagent_sessions.get(child_sid.as_str())
+        && let Some(info) = agent.subagent_sessions.get(child_sid)
     {
         push(info);
     }
     for info in agent.subagent_sessions.values() {
-        if info.parent_session_id.as_deref() == Some(child_sid.as_str()) {
+        if info.parent_session_id.as_deref() == Some(child_sid) {
             push(info);
         }
     }
@@ -98,9 +98,8 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     // overlay nested job when the parent is Idle, so [stop] cannot sit on Cancelling.
     let overlay_open = app.agents.get(&id).is_some_and(|agent| {
         agent
-            .active_subagent
-            .as_ref()
-            .is_some_and(|sid| agent.subagent_views.contains_key(sid.as_str()))
+            .visible_nested_overlay_sid()
+            .is_some_and(|sid| agent.subagent_views.contains_key(sid))
     });
     let overlay_kill_ids = overlay_live_kill_ids(app, id);
     if overlay_open {
@@ -126,6 +125,9 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                     agent, session_id, /* cancel_subagents */ true,
                     /* rewind_if_no_output */ false,
                 ));
+                // `[stop]` during Cancelling must finish, not reset grace
+                // and sit on the spinner (plan-mode overlay hang).
+                force_finish_local_cancel(agent);
             } else {
                 effects.extend(cancel_agent_turn(
                     agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
@@ -195,13 +197,25 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             );
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
+            // `emit_cancel_turn` takes the live hint; capture it first.
+            let gesture_retry = agent.cancel_trigger_hint.is_some();
+            let has_recorded_choice = agent.pending_cancel_resend.is_some();
             let cancel_subagents = resolve_cancel_subagents(agent);
-            return vec![emit_cancel_turn(
+            let effect = emit_cancel_turn(
                 agent,
                 session_id,
                 cancel_subagents,
                 /* rewind_if_no_output */ false,
-            )];
+            );
+            // `[stop]` / Esc (live hint) during Cancelling finishes the spinner.
+            // A stuck Cancelling pane with no recorded choice also finishes.
+            // A hintless retry that still holds the first cancel's subagent
+            // choice must keep that record so a later retry after confirm
+            // reuses it instead of escalating.
+            if gesture_retry || !has_recorded_choice {
+                force_finish_local_cancel(agent);
+            }
+            return vec![effect];
         }
         // Compact owns the pane (`CommandRunning`) even if a leftover wake
         // marker is still set — `/compact` can drain while that marker is live.
@@ -470,6 +484,40 @@ fn cancel_agent_turn(
     )]
 }
 
+/// Leave `TurnCancelling` locally so the Human box can type again.
+///
+/// Wire cancel may still be in flight. Queue `#1` must not pin Cancelling.
+fn force_finish_local_cancel(agent: &mut AgentView) {
+    if !agent.session.state.is_cancelling() {
+        return;
+    }
+    let pid = agent
+        .running_wake_turn
+        .as_ref()
+        .map(|wake| wake.prompt_id.clone())
+        .or_else(|| agent.session.current_prompt_id.clone());
+    let elapsed = agent.turn_elapsed().unwrap_or_default();
+    agent.complete_live_prompt_task(pid.as_deref(), None);
+    agent.session.finish_turn(&mut agent.scrollback);
+    crate::app::turn_completion::push_turn_terminal_marker(
+        agent,
+        Some(SessionEvent::TurnCancelled { elapsed }),
+        pid.as_deref(),
+    );
+    agent.mark_turn_finished();
+    agent.dismiss_plan_approval_after_turn_if_stale();
+    agent.surface_idle_plan_review_if_needed();
+    agent.activity_started_at = None;
+    agent.last_activity = None;
+    drain_permission_queue(agent);
+    agent.cancel_turn_view = None;
+    agent.cancel_turn_buttons.clear();
+    agent.pending_cancel_resend = None;
+    agent.pending_turn_end_reconcile = None;
+    // After cancel completes the Human box must take typing.
+    agent.set_active_pane(ActivePane::Prompt, true);
+}
+
 /// Build `Effect::CancelTurn`, consuming the gesture hint and arming the
 /// resend reconcile (skipped for a rewind, which leaves no cancelling state).
 pub(super) fn emit_cancel_turn(
@@ -516,18 +564,16 @@ pub(super) fn emit_cancel_turn(
         && !rewind_if_no_output
         && !desynced_from_wake
     {
-        // Keep `confirmed` across a manual retry: `[stop]` stays clickable
-        // while cancelling, and resetting the flag would re-arm auto-resend
-        // against a queued prompt the shell may already have promoted.
-        let existing = agent
-            .pending_cancel_resend
-            .as_ref()
-            .filter(|p| p.prompt_id == target_prompt_id);
+        // Keep `confirmed` and the grace clock across a retry, even when a
+        // queue row changed `current_prompt_id`. Filtering on prompt id
+        // reset attempts to 1; resetting `sent_at` postponed force-finish.
+        let existing = agent.pending_cancel_resend.as_ref();
         let confirmed = existing.is_some_and(|p| p.confirmed);
         let attempts = existing.map(|p| p.attempts.max(1)).unwrap_or(1);
+        let sent_at = existing.map(|p| p.sent_at).unwrap_or_else(Instant::now);
         agent.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
-            prompt_id: target_prompt_id,
-            sent_at: Instant::now(),
+            prompt_id: target_prompt_id.or_else(|| existing.and_then(|p| p.prompt_id.clone())),
+            sent_at,
             attempts,
             confirmed,
             cancel_subagents,
@@ -586,6 +632,33 @@ fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
         return None;
     }
     let pending = agent.pending_cancel_resend.as_mut()?;
+    if pending.attempts >= CANCEL_RESEND_MAX_ATTEMPTS
+        && pending.sent_at.elapsed() >= CANCEL_RESEND_GRACE
+        && agent.pending_turn_end_reconcile.is_none()
+    {
+        let prompt_id = agent
+            .session
+            .current_prompt_id
+            .clone()
+            .or_else(|| pending.prompt_id.clone())
+            .unwrap_or_default();
+        crate::unified_log::warn(
+            "cancel.force_finish_after_resend_cap",
+            Some(&session_id.0),
+            Some(serde_json::json!({
+                "attempts": pending.attempts,
+                "target_prompt_id": pending.prompt_id,
+            })),
+        );
+        agent.pending_turn_end_reconcile = Some(crate::app::agent_view::PendingTurnEnd {
+            prompt_id,
+            stop_reason: Some("cancelled".into()),
+            agent_result: None,
+            cancel_trigger: None,
+            received_at: Instant::now() - TURN_END_RECONCILE_GRACE,
+        });
+        return None;
+    }
     if pending.confirmed
         || pending.attempts >= CANCEL_RESEND_MAX_ATTEMPTS
         || pending.sent_at.elapsed() < CANCEL_RESEND_GRACE
@@ -644,7 +717,23 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         })
         .map(|(id, _)| *id)
         .collect();
-    if overdue.is_empty() {
+    let overdue_children: Vec<(AgentId, String)> = app
+        .agents
+        .iter()
+        .flat_map(|(id, parent)| {
+            parent
+                .subagent_views
+                .iter()
+                .filter(|(_, child)| {
+                    child
+                        .pending_turn_end_reconcile
+                        .as_ref()
+                        .is_some_and(|p| p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE)
+                })
+                .map(|(sid, _)| (*id, sid.clone()))
+        })
+        .collect();
+    if overdue.is_empty() && overdue_children.is_empty() {
         return None;
     }
 
@@ -664,11 +753,17 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
 
         let still_ours =
             agent.session.current_prompt_id.as_deref() == Some(pending.prompt_id.as_str());
-        let busy = agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
-        if !still_ours || !busy {
-            // The turn already resolved through the normal path (or a new
-            // turn was adopted); the marker is stale. Restore the adoption
-            // for the path that owns it.
+        let cancelling = agent.session.state.is_cancelling();
+        let busy = agent.session.state.is_turn_running() || cancelling;
+        if !busy {
+            if let Some(p) = pending_adoption {
+                app.pending_running_adoptions.insert(id, p);
+            }
+            continue;
+        }
+        if !still_ours && !cancelling {
+            // A new running turn was adopted; the marker is stale.
+            // Cancelling plus a queue-promoted prompt id must still finish.
             if let Some(p) = pending_adoption {
                 app.pending_running_adoptions.insert(id, p);
             }
@@ -763,6 +858,54 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         let drain = maybe_drain_queue(agent);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
+    }
+    for (parent_id, child_sid) in overdue_children {
+        let Some(parent) = app.agents.get_mut(&parent_id) else {
+            continue;
+        };
+        let Some(child) = parent.subagent_views.get_mut(&child_sid) else {
+            continue;
+        };
+        let Some(pending) = child.pending_turn_end_reconcile.take() else {
+            continue;
+        };
+        let still_ours =
+            child.session.current_prompt_id.as_deref() == Some(pending.prompt_id.as_str());
+        let cancelling = child.session.state.is_cancelling();
+        let busy = child.session.state.is_turn_running() || cancelling;
+        if !busy || (!still_ours && !cancelling) {
+            continue;
+        }
+        fired = true;
+        let was_cancelling = child.session.state.is_cancelling()
+            || pending.stop_reason.as_deref() == Some("cancelled");
+        let expected_send_now = child.expect_send_now_cancel.take();
+        let send_now_cancel = was_cancelling
+            && match pending.cancel_trigger.as_deref() {
+                Some(trigger) => trigger == "send_now",
+                None => expected_send_now.is_some(),
+            };
+        let elapsed = child.turn_elapsed().unwrap_or_default();
+        child.complete_live_prompt_task(Some(pending.prompt_id.as_str()), None);
+        child.session.finish_turn(&mut child.scrollback);
+        let event = if was_cancelling {
+            (!send_now_cancel).then_some(SessionEvent::TurnCancelled { elapsed })
+        } else {
+            Some(SessionEvent::TurnCompleted {
+                elapsed: Some(elapsed),
+            })
+        };
+        crate::app::turn_completion::push_turn_terminal_marker(
+            child,
+            event,
+            Some(pending.prompt_id.as_str()),
+        );
+        child.mark_turn_finished();
+        child.pending_cancel_resend = None;
+        child.activity_started_at = None;
+        child.last_activity = None;
+        child.cancel_turn_view = None;
+        child.cancel_turn_buttons.clear();
     }
     for (id, page_flip_entry) in drained_ids {
         note_peek_page_flip(app, id, page_flip_entry);

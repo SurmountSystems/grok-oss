@@ -55,9 +55,15 @@ pub fn estimate_tool_specs_tokens(tools: &[ToolSpec]) -> u64 {
 
 /// Bytes/4 estimate for a single [`ConversationItem`].
 ///
-/// Images are counted at [`xai_token_estimation::IMAGE_TOKEN_ESTIMATE`] each.
-/// Shared by [`estimate_conversation_tokens`] and [`estimate_messages_tokens`]
-/// so the per-variant arithmetic stays in one place.
+/// **Model path:** image content parts are vision tokens, not JSON text.
+/// Count each `ContentPart::Image` at [`xai_token_estimation::IMAGE_TOKEN_ESTIMATE`]
+/// (256..1792 band; see that constant). Never `url.len() / 4`. A 200k-char
+/// `data:image/...;base64,...` crate is a harness serialization artifact.
+/// **Tool path:** `view_image` is for search-found images; pasted screenshots
+/// do not go through that tool. Tool-result images still count as image
+/// tokens here. Shared by [`estimate_conversation_tokens`],
+/// [`estimate_messages_tokens`], the context chip, AUTO compact, preflight,
+/// and `/context`.
 pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
     use xai_grok_sampling_types::ContentPart;
     match item {
@@ -82,7 +88,15 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
                     .sum::<usize>();
             (bytes as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
-        ConversationItem::ToolResult(tr) => xai_token_estimation::estimate_tokens(&tr.content),
+        ConversationItem::ToolResult(tr) => {
+            let images = tr
+                .images
+                .iter()
+                .filter(|p| matches!(p, ContentPart::Image { .. }))
+                .count() as u64;
+            xai_token_estimation::estimate_tokens(&tr.content)
+                + xai_token_estimation::estimate_image_tokens(images)
+        }
         ConversationItem::BackendToolCall(b) => {
             xai_token_estimation::estimate_tokens(&b.text_summary())
         }
@@ -249,6 +263,7 @@ impl ChatState {
             );
         }
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut conversation);
 
         let initial_tokens = estimate_conversation_tokens(&conversation);
 
@@ -432,6 +447,61 @@ mod tests {
     #[test]
     fn estimate_messages_tokens_zero_for_empty() {
         assert_eq!(estimate_messages_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_item_tokens_ignores_data_url_byte_length() {
+        // Harness path: a 200k-char data URL must not charge ~50k text tokens.
+        // Model path: one image is IMAGE_TOKEN_ESTIMATE (hundreds to low thousands).
+        let data_url = format!("data:image/jpeg;base64,{}", "A".repeat(200_000));
+        let with_image = ConversationItem::user_with_parts(vec![
+            xai_grok_sampling_types::ContentPart::Text {
+                text: "see this".into(),
+            },
+            xai_grok_sampling_types::ContentPart::Image {
+                url: data_url.into(),
+            },
+        ]);
+        let text_only = ConversationItem::user("see this");
+        let delta = estimate_item_tokens(&with_image) - estimate_item_tokens(&text_only);
+        assert_eq!(delta, xai_token_estimation::IMAGE_TOKEN_ESTIMATE);
+        assert!(
+            delta < 2_000,
+            "pasted image must add hundreds-to-low-thousands of tokens, not url.len()/4"
+        );
+        let crate_as_text = 200_000u64 / xai_token_estimation::BYTES_PER_TOKEN;
+        assert!(
+            delta < crate_as_text / 10,
+            "must not walk the data URL as text ({crate_as_text} tokens)"
+        );
+    }
+
+    #[test]
+    fn estimate_conversation_tokens_does_not_sum_image_url_len() {
+        let data_url = format!("data:image/png;base64,{}", "B".repeat(200_000));
+        let items = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user_with_parts(vec![
+                xai_grok_sampling_types::ContentPart::Text {
+                    text: "hello".into(),
+                },
+                xai_grok_sampling_types::ContentPart::Image {
+                    url: data_url.into(),
+                },
+            ]),
+        ];
+        let tokens = estimate_conversation_tokens(&items);
+        let messages = estimate_messages_tokens(&items);
+        assert!(
+            tokens < 5_000,
+            "got {tokens}, data URL crate must not charge the window"
+        );
+        assert!(messages < 5_000, "got {messages}");
+        assert_eq!(
+            messages,
+            estimate_item_tokens(&items[1]),
+            "/context message_tokens must share estimate_item_tokens"
+        );
     }
 
     #[test]

@@ -648,7 +648,6 @@ fn cancel_retry_reuses_recorded_subagent_choice() {
 #[test]
 fn confirmed_stop_retry_does_not_rearm_auto_resend() {
     use crate::app::actions::CancelTrigger;
-    use crate::app::dispatch::CANCEL_RESEND_GRACE;
     use crate::app::dispatch::reconcile_overdue_cancels;
 
     let mut app = test_app_with_agent();
@@ -697,22 +696,15 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
         ),
         "a manual retry still re-sends, got {effects:?}"
     );
-    let pending = app.agents[&id]
-        .pending_cancel_resend
-        .as_ref()
-        .expect("resend record must survive");
     assert!(
-        pending.confirmed,
-        "a confirmed record must stay confirmed across a gesture retry"
+        app.agents[&id].session.state.is_idle(),
+        "[stop] during Cancelling must finish, got {:?}",
+        app.agents[&id].session.state
     );
-
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .pending_cancel_resend
-        .as_mut()
-        .unwrap()
-        .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    assert!(
+        app.agents[&id].pending_cancel_resend.is_none(),
+        "force-finish must drop the resend record"
+    );
     assert!(
         reconcile_overdue_cancels(&mut app).is_none(),
         "auto-resend must stay off after a confirmed gesture retry"
@@ -1374,7 +1366,8 @@ fn cancel_turn_in_subagent_overlay_retries_when_child_already_cancelling() {
             .unwrap()
             .session
             .state
-            .is_cancelling()
+            .is_idle(),
+        "second overlay [stop] must finish Cancelling, not sit"
     );
 }
 
@@ -1554,6 +1547,274 @@ fn reconcile_overdue_cancels_resends_for_overlay_child() {
     );
 }
 
+/// After the resend cap, cancel of a plan-mode / overlay turn must finish
+/// in a bounded way. `Cancelling…` must not sit a minute-plus.
+#[test]
+fn cancel_resend_cap_finishes_cancelling_overlay_turn() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+    use crate::app::dispatch::reconcile_overdue_turn_ends;
+    use crate::app::dispatch::turn::CANCEL_RESEND_MAX_ATTEMPTS;
+
+    let mut app = test_app_with_agent();
+    let parent_id = AgentId(0);
+    let child_sid = "child-overlay-force-finish";
+    let mut child_session = make_test_agent_session(&app, AgentId(1), child_sid);
+    child_session.state = AgentState::TurnRunning;
+    child_session.current_prompt_id = Some("pid-plan-cancel".into());
+    let mut child = AgentView::new(child_session, ScrollbackState::new());
+    child.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    {
+        let parent = app.agents.get_mut(&parent_id).unwrap();
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        parent.active_subagent = Some(child_sid.to_string());
+    }
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::CancelTurn { .. }]));
+    {
+        let child = app
+            .agents
+            .get_mut(&parent_id)
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap();
+        let pending = child.pending_cancel_resend.as_mut().unwrap();
+        pending.attempts = CANCEL_RESEND_MAX_ATTEMPTS;
+        pending.sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    }
+
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "the cap must not keep resending"
+    );
+    let fired = reconcile_overdue_turn_ends(&mut app);
+    assert!(
+        fired.is_some(),
+        "resend cap must arm a turn-end finish for the overlay child"
+    );
+    let child = app
+        .agents
+        .get(&parent_id)
+        .unwrap()
+        .subagent_views
+        .get(child_sid)
+        .unwrap();
+    assert!(
+        child.session.state.is_idle(),
+        "overlay cancel must leave Cancelling, got {:?}",
+        child.session.state
+    );
+}
+
+/// Operator 2026-09-02: cancel of a plan-mode turn with a live queue row
+/// must not leave Cancelling after the cancel path returns.
+#[test]
+fn cancel_plan_mode_turn_with_queue_row_does_not_leave_cancelling_after_cancel_returns() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+    use crate::app::dispatch::reconcile_overdue_turn_ends;
+    use crate::app::dispatch::turn::CANCEL_RESEND_MAX_ATTEMPTS;
+    use crate::app::prompt_queue::QueueEntryWire;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("plan-turn".into());
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+        agent.shared_queue = vec![QueueEntryWire {
+            id: "q1".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "LKG grok-oss PR 51".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+    }
+
+    let first = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(first.as_slice(), [Effect::CancelTurn { .. }]),
+        "first cancel must fly, got {first:?}"
+    );
+    assert!(
+        app.agents[&id].session.state.is_cancelling(),
+        "first cancel starts Cancelling"
+    );
+
+    // Queue promotion changed the live prompt id while the pane stayed
+    // Cancelling. That mismatch used to skip turn-end reconcile forever.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.current_prompt_id = Some("q1".into());
+        let pending = agent.pending_cancel_resend.as_mut().unwrap();
+        pending.attempts = CANCEL_RESEND_MAX_ATTEMPTS;
+        pending.sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    }
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "the cap must arm turn-end, not keep resending"
+    );
+    let fired = reconcile_overdue_turn_ends(&mut app);
+    assert!(
+        fired.is_some(),
+        "cancel path must finish after the resend cap even when queue #1 changed the prompt id"
+    );
+    assert!(
+        !app.agents[&id].session.state.is_cancelling(),
+        "plan-mode cancel with a live queue row must not leave Cancelling, got {:?}",
+        app.agents[&id].session.state
+    );
+}
+
+/// `[stop]` during Cancelling must finish cancel, not sit.
+#[test]
+fn stop_during_cancelling_finishes_cancel() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::prompt_queue::QueueEntryWire;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("plan-turn".into());
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+        agent.shared_queue = vec![QueueEntryWire {
+            id: "q1".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "queued #1".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+    }
+    assert!(matches!(
+        dispatch(Action::CancelTurn, &mut app).as_slice(),
+        [Effect::CancelTurn { .. }]
+    ));
+    assert!(app.agents[&id].session.state.is_cancelling());
+
+    app.agents.get_mut(&id).unwrap().cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    let retry = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(retry.as_slice(), [Effect::CancelTurn { .. }]),
+        "[stop] during Cancelling must still send cancel, got {retry:?}"
+    );
+    assert!(
+        app.agents[&id].session.state.is_idle(),
+        "[stop] during Cancelling must finish, got {:?}",
+        app.agents[&id].session.state
+    );
+    assert_eq!(app.agents[&id].shared_queue.len(), 1);
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    let registry = crate::actions::ActionRegistry::defaults();
+    let _ = agent.handle_input(
+        &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('h'),
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        &registry,
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "after cancel completes the Human box must take typing"
+    );
+}
+
+/// Named contract: cancel recovery must not sit a minute-plus.
+///
+/// First CancelTurn still enters Cancelling so lost-wire resend can run.
+/// The bound is resend cap plus turn-end grace (seconds). Dispatch and
+/// reconcile must not sleep that bound. A second `[stop]` force-finishes
+/// immediately. Do not raise the grace into minutes.
+#[test]
+fn cancel_does_not_wait_minutes() {
+    use std::time::{Duration, Instant};
+
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::CANCEL_RESEND_GRACE;
+    use crate::app::dispatch::TURN_END_RECONCILE_GRACE;
+    use crate::app::dispatch::reconcile_overdue_cancels;
+    use crate::app::dispatch::reconcile_overdue_turn_ends;
+    use crate::app::dispatch::turn::CANCEL_RESEND_MAX_ATTEMPTS;
+    use crate::app::prompt_queue::QueueEntryWire;
+
+    let bound = CANCEL_RESEND_GRACE.saturating_mul(u32::from(CANCEL_RESEND_MAX_ATTEMPTS))
+        + TURN_END_RECONCILE_GRACE;
+    assert!(
+        bound < Duration::from_secs(60),
+        "cancel recovery must not wait minutes, bound={bound:?}"
+    );
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("live-turn".into());
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+        agent.shared_queue = vec![QueueEntryWire {
+            id: "q1".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "queued #1".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+    }
+
+    let started = Instant::now();
+    assert!(matches!(
+        dispatch(Action::CancelTurn, &mut app).as_slice(),
+        [Effect::CancelTurn { .. }]
+    ));
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let pending = agent
+            .pending_cancel_resend
+            .as_mut()
+            .expect("first cancel must arm resend so the cap can finish");
+        pending.attempts = CANCEL_RESEND_MAX_ATTEMPTS;
+        pending.sent_at = Instant::now() - CANCEL_RESEND_GRACE;
+    }
+    assert!(
+        reconcile_overdue_cancels(&mut app).is_none(),
+        "the cap must arm turn-end, not keep resending"
+    );
+    assert!(
+        reconcile_overdue_turn_ends(&mut app).is_some(),
+        "resend cap must finish Cancelling without waiting a minute"
+    );
+    assert!(
+        !app.agents[&id].session.state.is_cancelling(),
+        "cancel must not leave Cancelling after the cap, got {:?}",
+        app.agents[&id].session.state
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the cancel path must not sleep the grace; elapsed={:?}",
+        started.elapsed()
+    );
+}
+
 /// Idle parent with no overlay must not cancel a background running child view.
 #[test]
 fn cancel_turn_without_overlay_while_idle_is_noop_even_with_running_child() {
@@ -1611,7 +1872,10 @@ fn cancel_turn_when_already_cancelling_resends_cancel() {
         ),
         "cancel while cancelling must re-send the cancel, got {effects:?}"
     );
-    assert!(app.agents[&id].session.state.is_cancelling());
+    assert!(
+        app.agents[&id].session.state.is_idle(),
+        "[stop] during Cancelling must finish cancel, not sit"
+    );
 }
 
 #[test]

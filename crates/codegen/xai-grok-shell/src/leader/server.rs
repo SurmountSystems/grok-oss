@@ -346,6 +346,52 @@ fn is_session_attach_request(json: &serde_json::Value) -> bool {
         .and_then(|m| m.as_str())
         .is_some_and(|m| m == "session/load" || m == "session/resume")
 }
+
+/// In-flight `session/prompt` RPCs keyed by namespaced request id.
+/// Value is `(client_id, session_id)`.
+type InFlightSessionPrompts = HashMap<String, (ClientId, String)>;
+
+/// `/unstick` stamps `_meta.unstickRetry` on `session/prompt`.
+fn session_prompt_is_unstick_retry(json: &serde_json::Value) -> bool {
+    if json.get("method").and_then(|m| m.as_str()) != Some(AGENT_METHOD_NAMES.session_prompt) {
+        return false;
+    }
+    let meta = json
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .or_else(|| json.get("_meta"));
+    meta.and_then(|m| m.get("unstickRetry"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Take in-flight `session/prompt` ids for this client and session so `/unstick`
+/// can drop them like a disconnected client's RPC. Other sessions stay.
+fn take_in_flight_session_prompts_for_unstick(
+    in_flight: &mut InFlightSessionPrompts,
+    client_id: ClientId,
+    session_id: &str,
+) -> Vec<String> {
+    let mut taken = Vec::new();
+    in_flight.retain(|ns, (cid, sid)| {
+        if *cid == client_id && sid == session_id {
+            taken.push(ns.clone());
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
+/// Drop a response when the client is gone or `/unstick` marked this RPC.
+fn response_is_orphaned(
+    client_still_connected: bool,
+    namespaced_id: &str,
+    orphaned_request_ids: &mut HashSet<String>,
+) -> bool {
+    !client_still_connected || orphaned_request_ids.remove(namespaced_id)
+}
 /// Extract the leader unicast target `ClientId` from a notification's
 /// `params._meta["x.ai/leaderClientId"]`.
 ///
@@ -1379,18 +1425,11 @@ async fn finalize_cpu_profile_on_shutdown(control_state: LeaderServerControlStat
         }
     }
 }
-/// Bounded grace the leader waits for in-flight turns to finish before a
-/// `RelaunchForUpdate` relaunch. If the agent is still busy when this elapses,
-/// the leader exits anyway — the in-flight turn ends and the session reloads
-/// cleanly (truncated at the last persisted boundary).
-const RELAUNCH_GRACE: Duration = Duration::from_secs(5);
 /// Bound on the post-drain session flush ([`AgentActivity::flush_all_sessions`]).
+/// Nested ids and an in-flight parent turn are not this bound: this process
+/// stays up until they are idle (same as a TUI disconnect).
 const RELAUNCH_FLUSH_GRACE: Duration = Duration::from_secs(5);
-/// Total shutdown budget advertised to clients in the `Relaunching` ack:
-/// idle-drain plus session flush.
-const RELAUNCH_TOTAL_GRACE: Duration =
-    Duration::from_millis((RELAUNCH_GRACE.as_millis() + RELAUNCH_FLUSH_GRACE.as_millis()) as u64);
-/// Poll cadence while waiting for the agent to go idle during the grace period.
+/// Poll cadence while waiting for nested ids and the parent turn to go idle.
 const RELAUNCH_GRACE_POLL: Duration = Duration::from_millis(100);
 /// Decide whether a [`ControlCommand::RelaunchForUpdate`] is accepted (the
 /// synchronous half — kept separate from arming the drain so the caller can send
@@ -1424,46 +1463,75 @@ fn decide_relaunch_for_update(
     info!(
         from_version = %leader_version,
         to_version = %to_version,
-        grace_ms = RELAUNCH_TOTAL_GRACE.as_millis() as u64,
+        grace_ms = RELAUNCH_FLUSH_GRACE.as_millis() as u64,
         "RelaunchForUpdate accepted; draining before relaunch onto new binary"
     );
     Ok(ControlPayload::Relaunching {
         from_version: leader_version,
         to_version,
-        grace_ms: RELAUNCH_TOTAL_GRACE.as_millis() as u64,
+        grace_ms: RELAUNCH_FLUSH_GRACE.as_millis() as u64,
     })
 }
-/// Arm the bounded-grace drain for an accepted relaunch: wait up to
-/// [`RELAUNCH_GRACE`] for the agent to go idle (`agent_busy` for IPC traffic
-/// AND [`AgentActivity::is_busy`] for relay-driven turns / subagents), flush
-/// every session actor, then set [`ShutdownReason::AutoUpdate`] and cancel —
-/// the same exit path the auto-update checker uses. Must be called *after*
-/// the `Relaunching` ack has been sent so the ack is delivered before
-/// `ShuttingDown`.
+/// Arm the drain for an accepted relaunch. Must run *after* the `Relaunching`
+/// ack so that ack is delivered before `ShuttingDown`.
+///
+/// Nested ids on this process must survive like a TUI disconnect: do not
+/// flush or exec-replace while [`AgentActivity::has_live_subagents`] is true.
+/// Spawned leaders already pass `--no-exit-on-disconnect`, so a dropped TUI
+/// leaves this process up. After nested ids finish, keep this process up
+/// while the parent turn is still busy (`agent_busy` or remaining
+/// [`AgentActivity::is_busy`]) with no wall-clock kill. Then flush session
+/// actors, send [`ShutdownReason::AutoUpdate`], and cancel.
 fn spawn_relaunch_drain(
     shutdown_tx: watch::Sender<super::protocol::ShutdownReason>,
     cancel: CancellationToken,
     agent_busy: Arc<AtomicBool>,
     agent_activity: AgentActivity,
 ) {
+    spawn_relaunch_drain_with_grace(
+        shutdown_tx,
+        cancel,
+        agent_busy,
+        agent_activity,
+        RELAUNCH_FLUSH_GRACE,
+    );
+}
+
+fn spawn_relaunch_drain_with_grace(
+    shutdown_tx: watch::Sender<super::protocol::ShutdownReason>,
+    cancel: CancellationToken,
+    agent_busy: Arc<AtomicBool>,
+    agent_activity: AgentActivity,
+    // Session-flush bound only. Not a parent-turn AutoUpdate deadline.
+    grace: Duration,
+) {
     tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + RELAUNCH_GRACE;
-        while agent_busy.load(Ordering::Relaxed) || agent_activity.is_busy() {
-            if tokio::time::Instant::now() >= deadline {
-                warn!(
-                    "RelaunchForUpdate grace elapsed while agent busy; relaunching anyway (in-flight turn ends)"
-                );
+        let mut logged_nested_hold = false;
+        let mut logged_parent_hold = false;
+        loop {
+            if agent_activity.has_live_subagents() {
+                if !logged_nested_hold {
+                    info!(
+                        "RelaunchForUpdate: nested work still live; keeping this leader process (same as TUI disconnect)"
+                    );
+                    logged_nested_hold = true;
+                }
+            } else if agent_busy.load(Ordering::Relaxed) || agent_activity.is_busy() {
+                if !logged_parent_hold {
+                    info!(
+                        "RelaunchForUpdate: parent turn still busy; keeping this leader process (same as TUI disconnect)"
+                    );
+                    logged_parent_hold = true;
+                }
+            } else {
                 break;
             }
             tokio::select! {
-                // Another path already triggered shutdown — let it own the exit.
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(RELAUNCH_GRACE_POLL) => {}
             }
         }
-        agent_activity
-            .flush_all_sessions(RELAUNCH_FLUSH_GRACE)
-            .await;
+        agent_activity.flush_all_sessions(grace).await;
         let _ = shutdown_tx.send(super::protocol::ShutdownReason::AutoUpdate);
         cancel.cancel();
     });
@@ -1538,8 +1606,9 @@ fn make_version_mismatch_notification(
 /// * `agent_busy` - Atomic flag set while the agent has in-flight **IPC**
 ///   requests; relay-driven traffic never sets it
 /// * `agent_activity` - Agent-derived activity view (running turns, parked
-///   interactions, live subagents) consulted by the `RelaunchForUpdate` drain
-///   alongside `agent_busy`, plus the pre-shutdown session flush
+///   interactions, live subagents). The `RelaunchForUpdate` drain stays up
+///   while nested ids are live and while the parent turn is busy (same as a
+///   TUI disconnect), then flushes session actors before shutdown
 /// * `ready_rx` - Watch receiver; ACP forwarding is gated until this is `true`
 /// * `relay_demand_tx` - Watch sender flipped to `true` when the first
 ///   [`ClientMode::Headless`] client registers. `run_leader` defers starting the
@@ -1591,6 +1660,8 @@ pub async fn run_leader_server(
     let mut last_active_client: Option<ClientId> = None;
     let mut had_clients = false;
     let mut pending_requests: usize = 0;
+    let mut in_flight_session_prompts: InFlightSessionPrompts = HashMap::new();
+    let mut orphaned_request_ids: HashSet<String> = HashSet::new();
     let relaunching = Arc::new(AtomicBool::new(false));
     loop {
         let poll = tokio::select! {
@@ -1704,6 +1775,7 @@ pub async fn run_leader_server(
                     pending_load_by_req.retain(|_, (c, _)| *c != id);
                     load_live_buffer.retain(|(c, _), _| *c != id);
                     load_replay_max_seq.retain(|(c, _), _| *c != id);
+                    in_flight_session_prompts.retain(|_, (c, _)| *c != id);
                     let mut detached_sessions: Vec<String> = Vec::new();
                     let viewed: Vec<String> = session_subscribers
                         .iter()
@@ -1920,6 +1992,43 @@ pub async fn run_leader_server(
                     let rewritten = json.as_mut().and_then(|j| rewrite_request_id(j, id));
                     payload_mutated |= rewritten.is_some();
                     if let Some(json) = json.as_ref()
+                        && session_prompt_is_unstick_retry(json)
+                        && let Some(sid) = extract_session_id(json)
+                    {
+                        let taken = take_in_flight_session_prompts_for_unstick(
+                            &mut in_flight_session_prompts,
+                            id,
+                            &sid,
+                        );
+                        if !taken.is_empty() {
+                            for ns in &taken {
+                                orphaned_request_ids.insert(ns.clone());
+                            }
+                            warn!(
+                                client_id = id.0,
+                                session_id = sid.as_str(),
+                                count = taken.len(),
+                                "Orphaning hung session/prompt for /unstick (same drop as disconnected client)"
+                            );
+                            xai_grok_telemetry::unified_log::warn(
+                                "leader.unstick.orphaned_prompt",
+                                Some(sid.as_str()),
+                                Some(serde_json::json!({
+                                    "client_id": id.0,
+                                    "orphaned_request_ids": taken,
+                                })),
+                            );
+                        }
+                    }
+                    if let Some((ns_id, _)) = rewritten.as_ref()
+                        && let Some(json) = json.as_ref()
+                        && json.get("method").and_then(|m| m.as_str())
+                            == Some(AGENT_METHOD_NAMES.session_prompt)
+                        && let Some(sid) = extract_session_id(json)
+                    {
+                        in_flight_session_prompts.insert(ns_id.clone(), (id, sid));
+                    }
+                    if let Some(json) = json.as_ref()
                         && is_session_attach_request(json)
                         && let Some(load_sid) = extract_session_id(json)
                         && let Some((ns_id, _)) = rewritten.as_ref()
@@ -1943,24 +2052,40 @@ pub async fn run_leader_server(
                     pending_requests = pending_requests.saturating_sub(1);
                     agent_busy.store(pending_requests > 0, Ordering::Relaxed);
                 }
-                if let Some((orphan_client, ref orphan_req_id)) = parsed_response
-                    && !clients.contains_key(&orphan_client)
-                {
-                    warn!(
-                        client_id = orphan_client.0,
-                        request_id = orphan_req_id.as_str(),
-                        "Dropping RPC response: requesting client disconnected (response orphaned)"
+                let mut drop_orphaned = false;
+                if let Some((orphan_client, ref orphan_req_id)) = parsed_response {
+                    in_flight_session_prompts.remove(orphan_req_id);
+                    let client_still_connected = clients.contains_key(&orphan_client);
+                    drop_orphaned = response_is_orphaned(
+                        client_still_connected,
+                        orphan_req_id,
+                        &mut orphaned_request_ids,
                     );
-                    xai_grok_telemetry::unified_log::warn(
-                        "leader.response.orphaned",
-                        None,
-                        Some(serde_json::json!({
-                            "client_id": orphan_client.0,
-                            "request_id": orphan_req_id,
-                        })),
-                    );
+                    if drop_orphaned {
+                        let reason = if client_still_connected {
+                            "unstick"
+                        } else {
+                            "disconnected"
+                        };
+                        warn!(
+                            client_id = orphan_client.0,
+                            request_id = orphan_req_id.as_str(),
+                            reason,
+                            "Dropping RPC response: requesting client disconnected or /unstick orphaned this request"
+                        );
+                        xai_grok_telemetry::unified_log::warn(
+                            "leader.response.orphaned",
+                            None,
+                            Some(serde_json::json!({
+                                "client_id": orphan_client.0,
+                                "request_id": orphan_req_id,
+                                "reason": reason,
+                            })),
+                        );
+                    }
                 }
                 if let Some((client_id, ref raw_response_id)) = parsed_response
+                    && !drop_orphaned
                     && let Some(client) = clients.get_mut(&client_id)
                     && let Some(json) = json.as_mut()
                 {

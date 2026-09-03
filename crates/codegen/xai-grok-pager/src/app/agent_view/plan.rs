@@ -597,10 +597,12 @@ impl AgentView {
         let notes = self.prompt.text_without_image_chips();
         let notes = notes.trim();
         // Isolated present leaves the composer as the agent prompt. Consume
-        // it as review notes only when that text is the keep-draft snapshot
-        // or Comment / Revise / Clarify is armed. Text typed after the pane
-        // closed is not review notes. Image chips with no leftover text are
-        // still the Approve payload: drain them onto the implement turn.
+        // it as review notes when the plan pane is open (Preview typing
+        // after park is the Human box), when Comment / Revise / Clarify is
+        // armed, or when that text is the keep-draft snapshot. Pane shut:
+        // a restored agent prompt is not review notes. Image chips with no
+        // leftover text are still the Approve payload: drain them onto the
+        // implement turn.
         let feedback_armed = self.plan_approval_view.as_ref().is_some_and(|pav| {
             matches!(
                 pav.focus,
@@ -614,8 +616,20 @@ impl AgentView {
                 && (!notes.is_empty() || has_images)
         });
         let images_only_idle = notes.is_empty() && has_images;
-        let consumed_composer = (feedback_armed || keep_draft_snapshot || images_only_idle)
-            && (!notes.is_empty() || has_images);
+        // Pane-open Preview typing after park lives in `feedback_draft`.
+        // Composer text typed while the viewer was closed is the next
+        // user prompt, not review notes.
+        let preview_typed_notes = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.feedback_draft
+                .as_deref()
+                .is_some_and(|d| d.trim() == notes)
+                && self.is_plan_viewer()
+                && !notes.is_empty()
+        });
+        let pane_open_notes = preview_typed_notes;
+        let consumed_composer =
+            (feedback_armed || keep_draft_snapshot || images_only_idle || pane_open_notes)
+                && (!notes.is_empty() || has_images);
         let images = if consumed_composer {
             self.prompt.drain_images()
         } else {
@@ -628,6 +642,13 @@ impl AgentView {
             crate::views::file_search::line_viewer::RecordedPlanChoice::Approve,
         );
         let review_notes = consumed_composer.then_some(notes).filter(|n| !n.is_empty());
+        if let Some(notes_text) = review_notes {
+            self.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::PlanNotes,
+                notes_text,
+                &images,
+            );
+        }
         let review_comments = if !pav.comments.is_empty() || review_notes.is_some() {
             let formatted = pav.format_feedback(review_notes);
             if formatted.trim().is_empty() {
@@ -652,7 +673,7 @@ impl AgentView {
         self.close_plan_review(pav, "build");
         if consumed_composer {
             self.prompt.set_text("");
-            self.persist_unsent_composer_draft();
+            self.persist_unsent_composer_draft_now();
         }
         // Idle (no waiter) must start implement. Images-only must not
         // Interject empty text. Live-waiter Approve continues via the
@@ -745,6 +766,7 @@ impl AgentView {
         // the textarea image elements, and a later drain would be empty.
         let images = self.prompt.drain_images();
         self.prompt.set_text("");
+        self.persist_unsent_composer_draft_now();
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
         // Block idle "Plan written" / local idle re-park until re-present.
@@ -851,7 +873,11 @@ impl AgentView {
     }
 
     pub(crate) fn reopen_plan_approval(&mut self) {
-        self.snapshot_or_clear_plan_feedback_draft();
+        // Composer text typed while the plan pane was closed is the next
+        // user prompt. Do not snapshot it as plan review notes.
+        if self.line_viewer.is_some() {
+            self.snapshot_or_clear_plan_feedback_draft();
+        }
         let keep_draft =
             !self.prompt.text().trim().is_empty() && !self.composer_holds_view_plan_slash();
         let live_cursor = self.prompt.cursor();
@@ -982,13 +1008,57 @@ impl AgentView {
             return self.abandon_plan();
         }
         // Letter CTA keys (`a` Approve, `A` Notes, `s` Revise, `q` Exit) must
-        // type. Approve is the clickable button. `?` is not a letter.
+        // type. Approve is the clickable button. Empty Preview `?` arms
+        // Clarify. Prompt focus or a live draft inserts `?`. Empty Preview
+        // `y` copies the plan. Comment overlay `y` copies too. A live
+        // Preview or Prompt draft inserts `y`.
         let empty_prompt =
             self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
-        if !is_commenting && empty_prompt && matches_shifted_char(key, '?') {
-            return self.focus_plan_prompt(PlanPromptIntent::Questions);
+        let preview_focused = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
+        if crate::key!('y').matches(key) && (is_commenting || (empty_prompt && preview_focused)) {
+            return self.copy_plan_full();
         }
-        match self.prompt.route_enter(key) {
+        if !is_commenting && matches_shifted_char(key, '?') {
+            if empty_prompt && preview_focused {
+                return self.focus_plan_prompt(PlanPromptIntent::Questions);
+            }
+            // Live draft / Prompt focus: insert `?`. Do not arm Clarify and
+            // do not wait for textarea.input — Preview overlay used to steal
+            // this key before it reached the composer.
+            self.prompt.textarea.insert_str("?");
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.persist_unsent_composer_draft();
+            return InputOutcome::Changed;
+        }
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        // Session Multiline: Enter inserts a newline. Preview must match
+        // the main Human box. `[ui] composer_multiline = false` never
+        // takes this arm (Enter still sends). Line-comment overlay
+        // footer is `Enter:save comment`; do not insert a newline there.
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.multiline_mode
+            && allow_newlines
+            && !is_commenting
+            && !self.prompt.file_search_visible()
+        {
+            self.prompt.textarea.insert_str("\n");
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.persist_unsent_composer_draft();
+            return InputOutcome::Changed;
+        }
+        let mut enter_outcome = self.prompt.route_enter(key);
+        if matches!(enter_outcome, EnterOutcome::PassThrough)
+            && crate::input::is_mod_enter(key)
+            && self.multiline_mode
+            && allow_newlines
+        {
+            enter_outcome = EnterOutcome::Submit;
+        }
+        match enter_outcome {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => {
                 let panel_open = self.line_viewer.is_some();
@@ -1289,7 +1359,25 @@ impl AgentView {
             }
             return self.cancel_casual_plan_commenting();
         }
-        match self.prompt.route_enter(key) {
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.multiline_mode
+            && allow_newlines
+            && !self.prompt.file_search_visible()
+        {
+            self.prompt.textarea.insert_str("\n");
+            return InputOutcome::Changed;
+        }
+        let mut enter_outcome = self.prompt.route_enter(key);
+        if matches!(enter_outcome, EnterOutcome::PassThrough)
+            && crate::input::is_mod_enter(key)
+            && self.multiline_mode
+            && allow_newlines
+        {
+            enter_outcome = EnterOutcome::Submit;
+        }
+        match enter_outcome {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => return self.save_casual_plan_comment(),
             EnterOutcome::PassThrough => {}
@@ -1689,7 +1777,7 @@ mod plan_approval_enter_tests {
     }
 
     #[test]
-    fn question_mark_on_empty_prompt_focuses_clarify() {
+    fn question_mark_on_empty_prompt_inserts() {
         let mut agent = agent_with_revise_prompt();
         let q = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&q);
@@ -1697,9 +1785,10 @@ mod plan_approval_enter_tests {
         let pav = agent
             .plan_approval_view
             .as_ref()
-            .expect("clarify stays parked for typed input");
+            .expect("prompt-focused ? must stay parked and type");
         assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
-        assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert_ne!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert_eq!(agent.prompt.text(), "?");
     }
 
     #[test]
@@ -2277,6 +2366,208 @@ mod plan_pane_letter_a_contract_tests {
         );
     }
 
+    /// Preview or prompt-focused: a live Human-box draft treats `?` as text.
+    /// It must not arm Clarify and must not open the command palette.
+    #[test]
+    fn plan_preview_question_mark_inserts_when_composer_has_text() {
+        let draft = "please add auth middleware";
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nRevise sentence");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text(draft);
+        agent.prompt.set_cursor(agent.prompt.text().len());
+        assert!(
+            !agent.prompt.text().contains('?'),
+            "fixture must start without a question mark"
+        );
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "question mark must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "question mark must not submit or abandon the parked plan"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{draft}?"),
+            "Preview with a live draft must insert ?, got {:?}",
+            agent.prompt.text()
+        );
+        assert_ne!(
+            agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions,
+            "question mark must not arm Clarify while composing"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "question mark must not open the command palette"
+        );
+
+        let mut box_agent = make_agent();
+        install_parked_plan(&mut box_agent, "# Plan\n\nRevise sentence");
+        box_agent.show_plan_preview();
+        if let Some(ref mut pav) = box_agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        box_agent.prompt.set_text(draft);
+        box_agent.prompt.set_cursor(box_agent.prompt.text().len());
+        let _ = type_key(
+            &mut box_agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            box_agent.prompt.text(),
+            format!("{draft}?"),
+            "prompt-focused composing must insert ?, got {:?}",
+            box_agent.prompt.text()
+        );
+        assert_ne!(
+            box_agent.plan_approval_view.as_ref().unwrap().prompt_intent,
+            PlanPromptIntent::Questions,
+            "prompt-focused question mark must not arm Clarify while composing"
+        );
+        assert!(
+            box_agent.active_modal.is_none(),
+            "prompt-focused question mark must not open the command palette"
+        );
+    }
+
+    /// Empty Preview `?` still arms Clarify. It must not open the palette.
+    #[test]
+    fn plan_preview_empty_question_mark_arms_clarify() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEmpty question");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(agent.prompt.text().trim().is_empty());
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Preview question mark must be handled; got {outcome:?}"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("empty Preview ? must keep the parked plan");
+        assert_eq!(pav.focus, PlanApprovalFocus::Prompt);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Questions);
+        assert!(
+            agent.prompt.text().is_empty(),
+            "empty Preview ? arms Clarify; it must not insert ?"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "empty Preview ? must not open the command palette"
+        );
+    }
+
+    /// Operator: when Preview footer advertises `y:copy`, `y` must copy the
+    /// plan (`copy_plan_full`), not insert `y` in the Human box.
+    /// Empty composer + Preview `y:copy` footer: `y` copies. That matches
+    /// empty `?` still Clarify.
+    #[test]
+    fn plan_preview_empty_y_copies_plan() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEmpty y copies this body\n");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "fixture: empty Human box while Preview is focused"
+        );
+        agent.toast = None;
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "empty Preview y must be handled; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty Preview y must keep the parked plan"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "empty Preview y must copy, not Approve or Exit"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "empty Preview y copies the plan; it must not insert y in the Human box, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.toast.is_some(),
+            "empty Preview y must take the copy_plan_full path (clipboard toast)"
+        );
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("empty Preview y keeps plan review parked");
+        assert_eq!(
+            pav.focus,
+            PlanApprovalFocus::Preview,
+            "empty Preview y must not steal focus into Commenting or Prompt"
+        );
+    }
+
+    /// A live Human-box draft treats `y` as text. Footer `y:copy` must not
+    /// steal a letter from a comment the operator intends to send.
+    #[test]
+    fn plan_preview_y_inserts_when_composer_has_text() {
+        let draft = "please keep this comment";
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nLive draft y inserts\n");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text(draft);
+        agent.prompt.set_cursor(agent.prompt.text().len());
+        agent.toast = None;
+
+        let outcome = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "composing y must be handled; got {outcome:?}"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{draft}y"),
+            "Preview with a live draft must insert y, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "composing y must not submit or abandon the parked plan"
+        );
+        assert!(agent.toast.is_none(), "composing y must not copy the plan");
+    }
+
     /// Capital A is not Notes. `Also` must type into the main prompt.
     #[test]
     fn plan_prompt_capital_a_inserts_also() {
@@ -2845,9 +3136,11 @@ mod plan_pane_letter_a_contract_tests {
         }
     }
 
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
     /// Clickable Approve with typed composer comments must produce one
-    /// wrapped review line. The raw comment must not remain in the
-    /// composer for a second send (keep-draft stash is the same snapshot).
+    /// wrapped review line. Preview typing rides along without copying
+    /// notes into stashed_prompt. The raw comment must not remain in the
+    /// composer for a second send.
     #[test]
     fn approve_with_composer_comments_sends_one_human_line() {
         let mut agent = make_agent();
@@ -2866,9 +3159,6 @@ mod plan_pane_letter_a_contract_tests {
             notes.contains("All this is sensible"),
             "fixture must type the review comment, got {notes:?}"
         );
-        if let Some(ref mut pav) = agent.plan_approval_view {
-            pav.stashed_prompt.text = notes.clone();
-        }
 
         let outcome = click_plan_approve(&mut agent);
         assert!(
@@ -2955,6 +3245,269 @@ mod plan_pane_letter_a_contract_tests {
                 InputOutcome::Changed
             ),
             "empty Approve must not leave a sendable composer"
+        );
+    }
+
+    fn click_plan_exit(agent: &mut AgentView) -> InputOutcome {
+        {
+            let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+            viewer.plan_mut().abandon_button_area = Some(Rect::new(10, 20, 8, 1));
+            viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+        }
+        agent.handle_line_viewer_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn assert_approve_notes_rode_along(
+        agent: &mut AgentView,
+        outcome: InputOutcome,
+        notes_needle: &str,
+    ) {
+        match &outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains("approved the plan with the following review comments")
+                        && text.contains(notes_needle),
+                    "Approve must wrap the comment once; got {text:?}"
+                );
+            }
+            other => panic!("Approve with comments must Interject once; got {other:?}"),
+        }
+        apply_approve_outcome_to_scrollback(agent, outcome);
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "Approve must consume the comment so persist/send cannot post it again, got {:?}",
+            agent.prompt.text()
+        );
+        let hits: Vec<String> = user_prompt_texts(agent)
+            .into_iter()
+            .filter(|t| t.contains(notes_needle))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one human/scrollback entry must contain the comment; got {hits:?}"
+        );
+        assert!(
+            hits[0].contains("approved the plan with the following review comments"),
+            "the one entry must be the wrapped review, got {:?}",
+            hits[0]
+        );
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// Preview-focused typing after park must ride along with Approve. Do
+    /// not copy the notes into stashed_prompt.
+    #[test]
+    fn preview_typed_comment_rides_along_on_approve() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nPreview notes ride along");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        type_chars(&mut agent, "please keep the debounce as written");
+        assert!(
+            agent.plan_approval_view.as_ref().is_some_and(|pav| pav
+                .stashed_prompt
+                .text
+                .trim()
+                .is_empty()),
+            "this contract is Preview type-after-park, not keep-draft stash"
+        );
+        let outcome = click_plan_approve(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Approve must close the review"
+        );
+        assert_approve_notes_rode_along(&mut agent, outcome, "please keep the debounce as written");
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// Tab to Prompt then Approve must send typed notes even if intent is
+    /// still default Revise.
+    #[test]
+    fn prompt_tab_typed_comment_rides_along_on_approve() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nTab Prompt notes ride along");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        type_chars(&mut agent, "ship the named tests as contracts");
+        let _ = type_key(&mut agent, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt),
+            "Tab must focus Prompt, not decide the plan"
+        );
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            // Tab may arm Comment. Approve must still send notes when
+            // intent stays default Revise.
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        let outcome = click_plan_approve(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Approve must close the review"
+        );
+        assert_approve_notes_rode_along(&mut agent, outcome, "ship the named tests as contracts");
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// Plan Human-box notes that ride Approve append `prompt_wal.jsonl`
+    /// (`PlanNotes`) before the model is asked.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn prompt_wal_appends_on_approve_notes() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-approve-notes";
+        let notes = "please keep the named WAL append on Approve";
+
+        let mut agent = make_agent();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        install_parked_plan(&mut agent, "# Plan\n\nApprove notes must hit the WAL");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        type_chars(&mut agent, notes);
+        let outcome = click_plan_approve(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Approve must close the review"
+        );
+        assert_approve_notes_rode_along(&mut agent, outcome, notes);
+        let rows =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            rows.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::PlanNotes
+                    && r.text == notes
+                    && r.session_id == sid
+            }),
+            "prompt_wal.jsonl must contain the Approve notes before the model is asked, got {rows:?}"
+        );
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// Esc / close with a Human-box draft must keep the text in the box or
+    /// in feedback_draft. It must not Approve or Exit.
+    #[test]
+    fn esc_with_human_box_draft_keeps_feedback_draft() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nEsc keeps draft");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        type_chars(&mut agent, "keep this after esc");
+        let _ = type_key(&mut agent, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(agent.line_viewer.is_none(), "Esc must close the plan pane");
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Esc must not Exit the parked plan"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "Esc must not decide the plan"
+        );
+        let in_box = agent.prompt.text().contains("keep this after esc");
+        let in_draft = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.feedback_draft.as_deref())
+            .is_some_and(|d| d.contains("keep this after esc"));
+        assert!(
+            in_box || in_draft,
+            "Esc must keep the Human-box draft or feedback_draft, composer={:?} draft={:?}",
+            agent.prompt.text(),
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.clone())
+        );
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// A Human-box draft must survive Tab Preview to Prompt and Prompt to
+    /// Preview.
+    #[test]
+    fn tab_preview_prompt_keeps_human_box_draft() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nTab keeps draft");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        type_chars(&mut agent, "keep this draft across tab");
+        let _ = type_key(&mut agent, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt),
+            "Tab from Preview must focus Prompt"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "keep this draft across tab",
+            "Tab Preview to Prompt must keep the Human-box draft, got {:?}",
+            agent.prompt.text()
+        );
+        let _ = type_key(&mut agent, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview),
+            "Tab from Prompt must focus Preview"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            "keep this draft across tab",
+            "Tab Prompt to Preview must keep the Human-box draft, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// Exit / abandon must not silently drop unsent Human-box text. Keep
+    /// the draft or send it.
+    #[test]
+    fn exit_with_human_box_draft_does_not_drop_unsent_text() {
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nExit keeps unsent");
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        type_chars(&mut agent, "do not drop this unsent text");
+        let outcome = click_plan_exit(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Exit must close the review"
+        );
+        assert!(agent.plan_decision_resolved, "Exit must decide the plan");
+        let still_in_box = agent.prompt.text().contains("do not drop this unsent text");
+        let sent = match &outcome {
+            InputOutcome::Action(Action::Interject { text, .. })
+            | InputOutcome::Action(Action::SendPrompt(text))
+            | InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+                text.contains("do not drop this unsent text")
+            }
+            _ => false,
+        };
+        assert!(
+            still_in_box || sent,
+            "Exit must not silently drop unsent Human-box text; composer={:?} outcome={outcome:?}",
+            agent.prompt.text()
         );
     }
 

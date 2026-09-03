@@ -29,7 +29,7 @@ pub use config::{PersonaIOField, SubagentPersona, SubagentRole};
 pub use definition::{
     DefinitionResolutionContext, DefinitionValidationContext, HarnessToolsetContext,
     apply_child_tool_policy, apply_definition_runtime_defaults, apply_harness_toolset,
-    available_agent_names, discover_agent_definition, gate_agent_definition,
+    available_agent_names, discover_agent_definition, gate_agent_definition, nested_spawn_allowed,
     render_subagent_initial_user_message, render_subagent_system_prompt, resolve_agent_definition,
     resolve_runtime_config, select_role, subagent_harness_flavor_is_representable,
     validate_agent_name,

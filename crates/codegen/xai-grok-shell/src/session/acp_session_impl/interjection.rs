@@ -88,6 +88,7 @@ impl SessionActor {
             // Send-now semantics (see doc): a later real send-now must not
             // leapfrog this fallback in `queue_input`'s FIFO scan.
             send_now: front,
+            unstick_retry: false,
         };
         let mut state = self.state.lock().await;
         if front {
@@ -319,8 +320,10 @@ impl SessionActor {
                 None => wrapped.clone(),
             };
             let mut item = ConversationItem::interjection(model_text);
+            let images_dir =
+                xai_grok_shared::session::session_dir(&self.session_info).join("images");
             for img in &images {
-                item.add_image(pick_user_image_url(img));
+                item.add_image(conversation_image_handle(img, Some(&images_dir)));
             }
             self.inject_synthetic_user_message(&wrapped, item, false, &images)
                 .await;

@@ -273,12 +273,20 @@ impl SharedRateLimitStore {
     }
 
     /// Async sleep until the shared cooldown expires (if any).
+    ///
+    /// Each loop reads the flock JSON (not only the process cache) so a peer
+    /// grok-oss process that just observed HTTP 429 is visible before we
+    /// sample. This is C1 on one machine, not a daemon.
     pub async fn wait_if_limited(&self, key: &ProviderKey) {
         if shared_rate_limits_disabled() {
             return;
         }
         loop {
-            let rem = self.remaining(key);
+            let now = Self::now_ms();
+            let rem = self
+                .snapshot(key)
+                .map(|s| s.remaining(now))
+                .unwrap_or(Duration::ZERO);
             if rem.is_zero() {
                 return;
             }

@@ -26,6 +26,7 @@ pub use credit_limit::{CreditLimitBlock, CreditLimitCardAction};
 pub use session_event::{SessionEvent, SessionEventBlock};
 pub use subagent::{SubagentBlock, SubagentBlockKind};
 pub use system::SystemMessageBlock;
+pub(crate) use thinking::INSTANT_THOUGHT_MS;
 pub use thinking::ThinkingBlock;
 pub use tool::{
     DiffLineOutput, DiffRenderConfig, DiscoveredTool, EditToolCallBlock, ExecuteToolCallBlock,

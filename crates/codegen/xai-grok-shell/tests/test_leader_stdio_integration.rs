@@ -3280,6 +3280,129 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     cancel.cancel();
 }
 
+/// `/unstick` must drop a hung `session/prompt` at the leader the same way a
+/// disconnected client loses that RPC (`leader.response.orphaned`), while the
+/// pager stays connected. Resend is a new RPC. Not `session/cancel`, not
+/// `/resume`, not evict, not unwind of nested work.
+#[tokio::test]
+async fn unstick_leader_drops_hung_session_prompt_like_disconnected_client() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, response_tx) = setup_persistent_test_server(&temp).await;
+
+    let (mut reader, mut writer) = raw_register(&sock_path, "unstick-client").await;
+    write_message(
+        &mut writer,
+        &ClientMessage::Acp {
+            payload: r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#.into(),
+        },
+    )
+    .await
+    .unwrap();
+    let new_fwd = acp_rx.recv().await.unwrap();
+    let new_json: serde_json::Value = serde_json::from_str(&new_fwd).unwrap();
+    let new_id = new_json["id"].as_str().unwrap().to_string();
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","result":{{"sessionId":"sess-unstick"}},"id":"{new_id}"}}"#
+        ))
+        .unwrap();
+    let new_resp = raw_recv_acp(&mut reader).await;
+    assert_eq!(new_resp["result"]["sessionId"], "sess-unstick");
+
+    write_message(
+        &mut writer,
+        &ClientMessage::Acp {
+            payload: r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"sess-unstick","prompt":[]}}"#.into(),
+        },
+    )
+    .await
+    .unwrap();
+    let hung_fwd = acp_rx.recv().await.unwrap();
+    let hung_json: serde_json::Value = serde_json::from_str(&hung_fwd).unwrap();
+    assert_eq!(hung_json["method"], "session/prompt");
+    let hung_id = hung_json["id"].as_str().unwrap().to_string();
+    assert!(
+        hung_json
+            .pointer("/params/_meta/unstickRetry")
+            .and_then(|v| v.as_bool())
+            != Some(true),
+        "the hung RPC is the original prompt, not the unstick retry"
+    );
+
+    write_message(
+        &mut writer,
+        &ClientMessage::Acp {
+            payload: r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess-unstick","prompt":[],"_meta":{"unstickRetry":true}}}"#.into(),
+        },
+    )
+    .await
+    .unwrap();
+    let retry_fwd = acp_rx.recv().await.unwrap();
+    let retry_json: serde_json::Value = serde_json::from_str(&retry_fwd).unwrap();
+    assert_eq!(
+        retry_json["method"], "session/prompt",
+        "/unstick must resend session/prompt, not session/cancel or /resume; got {retry_json}"
+    );
+    assert_ne!(
+        retry_json["method"].as_str(),
+        Some("session/cancel"),
+        "/unstick must not unwind nested work via session/cancel"
+    );
+    assert_eq!(
+        retry_json.pointer("/params/_meta/unstickRetry"),
+        Some(&serde_json::json!(true)),
+        "retry must keep _meta.unstickRetry so the shell skips a second user turn"
+    );
+    let retry_id = retry_json["id"].as_str().unwrap().to_string();
+    assert_ne!(
+        retry_id, hung_id,
+        "retry must be a new namespaced RPC, not the hung id"
+    );
+
+    // Late hung completion: same drop as a disconnected client.
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","result":{{"stopReason":"end_turn"}},"id":"{hung_id}"}}"#
+        ))
+        .unwrap();
+    assert_eq!(
+        wait_for_orphan_log(&hung_id).await,
+        1,
+        "hung session/prompt must be dropped via leader.response.orphaned while the pager stays connected"
+    );
+    let quiet = tokio::time::timeout(Duration::from_millis(400), raw_recv_acp(&mut reader)).await;
+    assert!(
+        quiet.is_err(),
+        "the hung RPC result must not reach the still-connected pager, got {quiet:?}"
+    );
+
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","result":{{"stopReason":"end_turn"}},"id":"{retry_id}"}}"#
+        ))
+        .unwrap();
+    let retry_resp = raw_recv_acp(&mut reader).await;
+    assert_eq!(
+        retry_resp["id"], 3,
+        "retry response restores the original id"
+    );
+    assert_eq!(retry_resp["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        orphan_log_count(&hung_id),
+        1,
+        "the hung RPC is orphan-dropped exactly once"
+    );
+    assert_eq!(
+        orphan_log_count(&retry_id),
+        0,
+        "the retry RPC must not be orphan-dropped"
+    );
+
+    drop(reader);
+    drop(writer);
+    cancel.cancel();
+}
+
 /// Acceptance: a `session/cancel` composed just before the leader dies is
 /// currently lost in the reconnect swap window — the send lands in a dead
 /// channel and nothing re-delivers it, so the turn runs on. This asserts the

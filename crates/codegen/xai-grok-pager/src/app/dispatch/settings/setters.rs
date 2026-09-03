@@ -1,5 +1,6 @@
 //! Individual setting setters with persistence effects and toasts.
 
+use super::super::ctx::with_scrollback;
 use super::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
@@ -50,6 +51,39 @@ pub(in crate::app::dispatch) fn set_multiline_mode(app: &mut AppView, new: bool)
     );
     app.show_toast(&save_success_toast("Multiline", new));
     vec![]
+}
+
+pub(super) fn set_composer_multiline_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_composer_multiline(new);
+    app.current_ui.composer_multiline = Some(new);
+}
+
+/// Allow newlines in the Human box from Enter / Shift+Enter.
+///
+/// SHELL-owned: cache + `[ui].composer_multiline` via `Effect::PersistSetting`.
+/// Default on. When off, session Multiline cannot insert a newline.
+pub(in crate::app::dispatch) fn set_composer_multiline(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_composer_multiline();
+    if prev == new {
+        return vec![];
+    }
+    set_composer_multiline_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "composer_multiline",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Composer multiline", new));
+    vec![Effect::PersistSetting {
+        key: "composer_multiline",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
 }
 
 /// State-only mutation for `render_mermaid`: update the process-wide cache so
@@ -495,6 +529,33 @@ pub(in crate::app::dispatch) fn set_always_expand_thinking(
     set_always_expand_thinking_inner(app, new);
     refresh_open_settings_modals(app);
     app.show_toast(&save_success_toast("Always expand thinking", new));
+    vec![Effect::PersistSetting {
+        key: "always_expand_thinking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Ctrl+T already updated the cache via `expand_all_thinking`. Persist
+/// `[ui] always_expand_thinking` and rematerialize other scrollbacks.
+/// No toast: the expand/collapse is the feedback.
+pub(in crate::app::dispatch) fn persist_always_expand_thinking_after_ctrl_t(
+    app: &mut AppView,
+    prev: bool,
+) -> Vec<Effect> {
+    let new = crate::appearance::cache::load_always_expand_thinking();
+    if prev == new {
+        return vec![];
+    }
+    app.current_ui.always_expand_thinking = Some(new);
+    for agent in app.agents.values_mut() {
+        agent.scrollback.apply_always_expand_thinking_flip(new);
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.apply_always_expand_thinking_flip(new);
+        }
+    }
+    with_scrollback(app, |s| s.apply_thinking_ctrl_t_groups(new));
+    refresh_open_settings_modals(app);
     vec![Effect::PersistSetting {
         key: "always_expand_thinking",
         value: crate::settings::SettingValue::Bool(new),

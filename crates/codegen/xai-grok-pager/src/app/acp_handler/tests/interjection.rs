@@ -268,3 +268,38 @@
             "an interjection from another pane must render"
         );
     }
+
+    /// Optimistic paint plus a leftover echo (no id, or nested overlay
+    /// routing) must not leave a duplicate Human line. Operator screenshot:
+    /// duplicate prompt remaining `[Image #1]`.
+    #[test]
+    fn interjection_echo_does_not_duplicate_last_human_prompt() {
+        let mut app = make_app_with_agent("sess-dup");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent
+                .scrollback
+                .push_block(RenderBlock::interjection_prompt(
+                    "Also why am I waiting here? [Image #1]",
+                ));
+        }
+        let affected = handle_ext_notification(
+            &interjection_broadcast("sess-dup", "Also why am I waiting here? [Image #1]"),
+            &mut app,
+        );
+        assert!(
+            !affected,
+            "Surmount / grok-oss fork: same last Human prompt must not paint twice"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let count = (0..agent.scrollback.len())
+            .filter(|i| {
+                matches!(
+                    agent.scrollback.get(*i).map(|e| &e.block),
+                    Some(RenderBlock::UserPrompt(b))
+                        if b.text.contains("[Image #1]")
+                )
+            })
+            .count();
+        assert_eq!(count, 1, "prompt with [Image #1] must appear once");
+    }

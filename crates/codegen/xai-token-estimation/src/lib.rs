@@ -8,8 +8,20 @@
 /// Bytes per token under the rough character-based heuristic.
 pub const BYTES_PER_TOKEN: u64 = 4;
 
-/// Per-image approximate token cost when summing
-/// low-resolution image patches.
+/// Per-image approximate token cost on the **model path**.
+///
+/// Pasted screenshots ride as content parts (`input_image` / `image_url`).
+/// The server decodes bytes and the vision encoder emits image tokens. The
+/// best public formula is 448×448 tiles, 256 tokens per tile, plus one
+/// overhead tile, cap 6 tiles: `(tiles + 1) * 256` = 256..1792 per image.
+/// `detail` only changes encoder resolution / tile budget. Usage may break
+/// out `prompt_tokens_details.image_tokens`.
+/// See [xAI image understanding](https://docs.x.ai/docs/guides/image-understanding)
+/// (accessed: 2026-09-01).
+///
+/// 765 sits in that 256..1792 band (about three tiles plus overhead). It is
+/// **not** `data-URL byte length / 4`. That serialization is a harness
+/// artifact and must not charge the sampling window.
 pub const IMAGE_TOKEN_ESTIMATE: u64 = 765;
 
 /// Bytes/4 estimate of a string's token count.

@@ -158,8 +158,18 @@ fn image_compaction_history() -> Vec<ConversationItem> {
 
 fn assert_preserved_compaction_body(body: &serde_json::Value) {
     let serialized = body.to_string();
-    assert!(serialized.contains(USER_IMAGE_SENTINEL));
-    assert!(serialized.contains(TOOL_IMAGE_SENTINEL));
+    assert!(
+        !serialized.contains(USER_IMAGE_SENTINEL),
+        "compact HTTP must not re-inline the user data URL crate"
+    );
+    assert!(
+        !serialized.contains(TOOL_IMAGE_SENTINEL),
+        "compact HTTP must not re-inline tool-result image bytes"
+    );
+    assert!(
+        serialized.contains("[image]"),
+        "user image becomes a placeholder, not vision tokens on the compact model"
+    );
     assert!(serialized.contains("user text sentinel"));
     assert!(serialized.contains("tool result text sentinel"));
     assert!(serialized.contains("call-image-sentinel"));

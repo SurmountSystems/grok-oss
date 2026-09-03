@@ -87,6 +87,7 @@ grok-rate-limit = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = "3.1"
 tempfile = { workspace = true }
+tar = { workspace = true }
 # Official TOON Rust port (SPEC-ish goldens). default-features off avoids the
 # CLI binary deps (clap/ratatui/tiktoken/…) — library encode/decode only.
 toon-format = { version = "0.5.0", default-features = false }

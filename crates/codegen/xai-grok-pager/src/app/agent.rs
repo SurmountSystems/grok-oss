@@ -1011,7 +1011,7 @@ impl AgentSession {
     }
     /// Cancel the current turn: cleanup tracker, set state to Cancelling.
     pub fn cancel_turn(&mut self, scrollback: &mut ScrollbackState) {
-        self.tracker.finish_turn(scrollback);
+        self.tracker.abort_turn(scrollback);
         self.state = AgentState::TurnCancelling;
     }
     /// Current activity within a running turn (for turn status line display).

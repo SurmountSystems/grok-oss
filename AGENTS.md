@@ -73,21 +73,38 @@ less than product code and tests. Do not invent long essays or git nags.
    Ordinary post-impl mop stays one L2 after a finished slice (not a swarm;
    that L2 spawns L3). Dual-pin: host `~/.grok/AGENTS.md` § *Do not prove
    product work with crate-wide cargo via subagents*.
-3b-remote. **The operator owns the VPS builder (pinned 2026-08-25).**
-   Agents must not invoke `just check-remote`, `just test-remote`,
-   `just cargo-remote`, or force-remote `nix build` to `nixbuilder` /
-   surmount-1. That host is the operator's. Agents implement product and
-   tests in the tree. When the operator pastes a quality fail, that paste
-   is the contract. Do not start a second gate on the same drv or the
-   same leftover list. Agents still must not run `cargo test`,
-   `cargo clippy`, `cargo build`, or rustc on this laptop. File-level
-   rustfmt-only may stay local if it does not invoke rustc. GitHub
-   Actions must not call `check-remote`, `test-remote`, or `cargo-remote`.
-   The 2026-08-22 "agents may run `just check-remote` whenever useful" line
-   is superseded. Force-remote recipe details (max-jobs 0, `--store`
+3b-remote. **The operator owns the VPS builder (pinned 2026-08-25;
+   check-remote whitelist 2026-09-02).**
+   Agents must not invoke `just test-remote`, `just cargo-remote`, or
+   force-remote `nix build` to `nixbuilder` / surmount-1 unless the
+   operator also whitelist those in the same words. That host is the
+   operator's. Agents implement product and tests in the tree. When the
+   operator pastes a quality fail, that paste is the contract. Do not
+   start a second gate on the same drv or the same leftover list. Agents
+   still must not run `cargo test`, `cargo clippy`, `cargo build`, or
+   rustc on this laptop. File-level rustfmt-only may stay local if it
+   does not invoke rustc. GitHub Actions must not call `check-remote`,
+   `test-remote`, or `cargo-remote`. Agents may run `just check-remote`
+   under 3b-remote-check (pinned 2026-09-02). That supersedes the
+   2026-08-25 forbid on `just check-remote` and the 2026-08-22 "whenever
+   useful" line. Force-remote recipe details (max-jobs 0, `--store`
    ssh-ng, `--eval-store auto`, `--cores 64`, cargo jobs cap 32) still
    describe how the operator's recipes work. Host dual-pin:
    `~/.grok/AGENTS.md`.
+3b-remote-check. **Agents may run just check-remote (pinned 2026-09-02).**
+   Agents **may** run `just check-remote` (and the related force-remote
+   recipes when the operator has allowed them for this work). Do **not**
+   go crazy: one live `just check-remote` at a time. Do not start a
+   second on the same drv or leftover list. A live remote compile must
+   not be restarted at five minutes (3b-remote-wait). Background with a
+   long wait (timeout 0 or at least twenty minutes). Competing nix on
+   this laptop still means wait or skip; do not pile another nix client
+   onto bitmask-core / carbonado-node if those are still compiling.
+   GitHub Actions still must not call check-remote. `just test-remote` /
+   `just cargo-remote` stay operator-owned unless the operator also
+   whitelist those in the same words (they did not; only check-remote).
+   Dual-pin: host `~/.grok/AGENTS.md` § *Agents may run just
+   check-remote*.
 3b-remote-named. **Named cargo on the VPS is operator-run (pinned
    2026-08-22; operator-owns 2026-08-25).** The recipes stay
    `just test-remote` / `just cargo-remote` on surmount-1. Agents do not
@@ -120,7 +137,7 @@ less than product code and tests. Do not invent long essays or git nags.
    complaint with "we already set jobs." Host dual-pin: `~/.grok/AGENTS.md`.
 3b-say-the-other-path. **Tell the operator when it is a different path
    (pinned 2026-08-23).** If the right fix is not a patch in this tree,
-   say that in the same-turn status, on **You**, with evidence. Name the
+   say that in the same-turn status, on **Operator**, with evidence. Name the
    other path in ordinary English: this laptop's Nix install, the VPS
    builder host, wait until not on cellular, rebuild `grok-oss` to see
    a TUI change, an operator TTY. Do not send them to the VPS for a
@@ -165,7 +182,7 @@ less than product code and tests. Do not invent long essays or git nags.
    never documented. The remaining-work pointer must name owed
    outcomes, live subagent ids when they exist (or say see the session
    board), and what is in the tree versus what this running grok-oss
-   binary still is. Chat Job / State / You / Next is not that pointer.
+   binary still is. Chat Job / State / Operator / Next is not that pointer.
    L1 must not rewrite that pointer; L2 writes it. Host dual-pin:
    `~/.grok/AGENTS.md` § *Document every live task on disk*. Remaining-work
    pointer this session:
@@ -296,7 +313,7 @@ less than product code and tests. Do not invent long essays or git nags.
    Do not use half-labels as if they were sentences (wrong: "SuperGrok included
    weekly"). Right: "the included SuperGrok period limits for the current
    billing period (how much of that included quota is already used)." Numbered
-   leftover lists, Job / State / You / Next lines, and remaining-work bullets
+   leftover lists, Job / State / Operator / Next lines, and remaining-work bullets
    each need a subject and a finite verb. Wrong: "This running TUI until you
    install." Right: "This running TUI will not show the plan-composer fixes
    until you install grok-oss and reopen the session." When naming a meter,
@@ -304,13 +321,29 @@ less than product code and tests. Do not invent long essays or git nags.
    "room/headroom"). Config and wire names may follow the plain thought in
    parentheses. Operator corrections about incomplete phrasing are permanent
    law. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
-   **Job / State / You / Next, with evidence for You (pinned 2026-08-21;
-   other path 2026-08-23):**
-   Keep the four-line restatement. On **You**, always say why the
+   **Job / State / Operator / Next, with evidence for Operator (pinned
+   2026-08-21; other path 2026-08-23; speaker labels 2026-09-01):**
+   Keep the four-line restatement. On **Operator**, always say why the
    operator must act, or why they need not. Name the evidence. If the
    work is not this tree, say the other path there. Do not
-   use an unexplained heuristic. Maximally truthseeking. Host dual-pin:
+   use an unexplained heuristic. Maximally truthseeking. In reports and
+   this restatement, speaker labels are **Operator** (not You, not Human)
+   and **Agent** (not Me, not Grok when Grok means the assistant). Do not
+   rename grok-oss, Grok OSS, or a Grok model id. Do not rename the
+   product composer Human box (`accent_user`). Host dual-pin:
    `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
+   **Address the Operator as Operator (pinned 2026-09-01):** The
+   operator prefers being called Operator instead of Human. In chat,
+   reports, board titles, spawn descriptions, residual, plans, and
+   status, say **Operator** when naming the person. The four-line
+   restatement stays Job / State / **Operator** / Next. Report speaker
+   labels stay Operator / Agent. Do not rename the product composer
+   Human box (`accent_user`) or DOGE Human green. That chrome was
+   left alone in the 2026-09-01 report-label pin. This pin is how we
+   address the Operator. Do not globally replace the word Human in
+   user-guide theming (Human green caret). Product names grok-oss
+   and Grok 4.6 stay. Host dual-pin: `~/.grok/AGENTS.md` § Prose +
+   tone.
    **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
    minute or more to the operator, write minutes (or hours and leftover
    minutes). Do not write 943 seconds or 943s. Compact chrome is `15m43s`
@@ -354,14 +387,22 @@ less than product code and tests. Do not invent long essays or git nags.
    sycophancy. When an idea is actually good, say so in plain English and
    say why (what it solves). Do not flatter, inflate, agree by default, or
    pad empty praise. Host dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
-   **Self-improving feedback loop (pinned 2026-08-03; L2 writes 2026-08-28):**
+   **Self-improving feedback loop (pinned 2026-08-03; L2 writes 2026-08-28;
+   three-times miss 2026-09-01; operator speech 2026-09-02):**
    trigger phrases such as "always remember", "please remember", "I hate
    repeating myself" (and close variants) mean a same-turn standing pin.
    L1 tracks the board and spawns L2. L2 writes project `AGENTS.md` /
    residual when product-specific, and host `~/.grok/AGENTS.md` when
    cross-repo. Prefer a short named subsection. Chat alone does not
-   survive compaction. L1 must not edit those law files itself. Full
-   host pin: `~/.grok/AGENTS.md` § *Self-improving feedback loop*.
+   survive compaction. L1 must not edit those law files itself. The
+   three-times loop (tell, then nonsense, then verbatim because the
+   build still does not match) is a named failure mode under § *The
+   operator's words are the spec*. A dropped operator prompt is a
+   product defect under § *Wasted human time* (hard constraint 24).
+   Operator speech is work. Report finished nested work the same turn
+   the host says the nested agent exited. Full host pin:
+   `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
+   speech is work*, § *Report finished nested work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -492,15 +533,19 @@ less than product code and tests. Do not invent long essays or git nags.
     log line. Exceptions: pure docs/typos/format; operator says skip. Host:
     `~/.grok/AGENTS.md` § *Red/green TDD* + § *User-reported bugs & features*.
 15. **Do not fit tests to code** (pinned 2026-07-26; named tests are
-    contracts 2026-08-25; do not naively update tests 2026-08-27). Changing a
+    contracts 2026-08-25; do not naively update tests 2026-08-27;
+    operator words are the spec 2026-09-01). Changing a
     test needs a named contract + evidence + stronger/equal assert; park if
     intent unclear. False-green → stricter assert, not weaker. Do **not**
     rewrite a failing assert so it matches the code. Reconcile the named
-    contract with FORK and process first, then fix the product. Do not skip Nix-sandbox S3, MCP, or bwrap tests to
+    contract with FORK and process first, then fix the product. The first
+    test encodes the operator's contract (quote the owed outcome), not a
+    weaker paraphrase. Do not skip Nix-sandbox S3, MCP, or bwrap tests to
     go green. Hermeticity fixes (PATH bash, writable `$GROK_HOME`, webpki
     roots, bwrap placeholders, grok argv0 on Nix coreutils) keep the named
     contract. Dual-pin: [`FORK.md`](FORK.md) Land checklist **Named tests
-    are contracts**. Host: § *Test intent*.
+    are contracts**; this file § *The operator's words are the spec*.
+    Host: § *Test intent*.
 16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
     Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
     bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules
@@ -509,7 +554,8 @@ less than product code and tests. Do not invent long essays or git nags.
     SHA-1 is for git object ids (gix, empty-tree, 40-hex commits) only. It
     is not a security hash for downloads or FODs. Artifact verify is
     SHA-256 or minisign. Helper logs must not print tokens, API keys, or
-    secret env values. The operator owns `just check-remote`. Dual-pin:
+    secret env values. The operator owns the VPS builder. Agents may run
+    `just check-remote` under 3b-remote-check (pinned 2026-09-02). Dual-pin:
     [`FORK.md`](FORK.md) Packaging **SHA-1 is git object ids only**.
 17. **Test dependencies are supply chain (pinned 2026-08-27).** Never treat a
     cargo-audit finding, yanked crate, or unmaintained crate as irrelevant
@@ -549,6 +595,139 @@ less than product code and tests. Do not invent long essays or git nags.
     the parent. Do not add more `[patch.crates-io]` path vendoring. Do
     not fetch crates.io to skip the delay. Dual-pin: [`FORK.md`](FORK.md)
     Packaging; [`RESIDUAL.md`](RESIDUAL.md) Open fargo unwind.
+22. **Hunter's razor (pinned 2026-09-01).** Never assume competence. Never
+    assume someone else has thought everything through. A solution is not
+    superior because it comes from SpaceX or from xAI / SpaceXAI
+    upstream. Newer upstream is not automatically better. Evaluate both
+    sides. The result must be maximally meritocratic, synthesizing from
+    both if needed. That is how a senior engineer solves problems. We
+    balance the constraints with the best knowledge we have. This is not
+    a license to ignore upstream. Upstream can win. Our fix can win. A
+    synthesis can win. Full law: [`FORK.md`](FORK.md) § *Hunter's razor*.
+23. **The operator's words are the spec (pinned 2026-09-01).** Take the
+    operator's words as the spec. Do not substitute a weaker paraphrase,
+    a guess at what they probably meant, or a convenient subset. If the
+    build does not match the named contract, the work is not done.
+    Repeating the same prompt three times (tell, then after nonsense that
+    did not take the words seriously, then verbatim because the build
+    still does not match) is a process miss, not a reason to hold the
+    operator's hand. The first red test encodes that contract. Observed
+    red, then product so the same test passes. Do not fit the test to
+    the code. Tests are Surmount contracts. Keep the stronger assert.
+    Adjacent to Hunter's razor; it does not replace it. Full law: this
+    file § *The operator's words are the spec*. Host dual-pin:
+    `~/.grok/AGENTS.md` same heading. Land: [`FORK.md`](FORK.md)
+    **Named tests are contracts**.
+24. **Wasted human time (pinned 2026-09-01).** A dropped operator prompt
+    is a product defect. Repeating because the harness lost the text is
+    an engineering miss. The durability path is the prompt write-ahead
+    log (`prompt_wal.jsonl`). Tests that encode this are Surmount
+    contracts: keep the stronger assert, enroll them in the catalog, do
+    not fit them to a wipe. **Operator-verified known good (2026-09-02)**
+    for send, rebuild-flush, interject, and plan-notes append tests:
+    [`FORK.md`](FORK.md) Land checklist **Named tests are contracts** and
+    [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+    § Prompt write-ahead log. Adjacent to constraint 23; it does not
+    replace Hunter's razor, image-token, lost-prompt, Operator/Agent, or
+    `/rebuild` persist bullets. Full law: this file § *Wasted human
+    time*. Dual-pin: [`FORK.md`](FORK.md) same heading. Host pointer:
+    `~/.grok/AGENTS.md` § *The operator's words are the spec*.
+
+## The operator's words are the spec (pinned 2026-09-01)
+
+The operator is a serious, experienced engineer. The operator's words
+are the spec. Take them seriously. Do not substitute a weaker paraphrase,
+a guess at what they probably meant, or a convenient subset. If the
+build does not match the named contract, the work is not done.
+
+Repeating the same prompt three times is a miss. The failure mode is:
+tell the agent what to do, then repeat because the agent cooked up
+nonsense that did not take the words seriously, then repeat verbatim
+because what got built still does not match the spec. That is an
+engineering defect in process, and often in product (lost drafts, a hung
+L1, tests fitted to code). It is not an excuse that Grok needs its hand
+held. Solve it through rigorous engineering of process and tools. Keep
+existing subagents going. Spawn additional ones for this work when it
+is in flight. Always be self-improving process and tools.
+
+Red/green TDD: the first test encodes the operator's contract. Quote the
+owed outcome. Observe red, then change the product so the same test
+passes. Do not fit the test to the code. Tests are Surmount contracts.
+Meritocratic: keep the stronger assert. Hunter's razor still applies to
+upstream versus our fix. This pin is adjacent and does not replace it.
+
+"I hate repeating myself" and "always remember" already trigger a
+same-turn standing pin. This subsection names the three-times loop as
+that failure mode.
+
+Host dual-pin: `~/.grok/AGENTS.md` § *The operator's words are the spec*.
+Land readers: [`FORK.md`](FORK.md) **Named tests are contracts**.
+
+## Wasted human time (pinned 2026-09-01)
+
+A dropped operator prompt is a product defect. Repeating because the
+harness lost the text is an engineering miss, not a reason to hold the
+operator's hand. The durability path is the prompt write-ahead log
+(`prompt_wal.jsonl`). `/rebuild` and session load must preserve that
+log the same way they preserve an unsent composer draft and
+`pending_prompts.json`, once that file exists in the tree. User-guide
+`04-slash-commands` `/rebuild` must say that relaunch preserves the WAL
+once the file exists. Do not document that preservation as shipped
+while the file is absent.
+
+This is adjacent to § *The operator's words are the spec* (hard
+constraint 23). It does not replace it. Named tests are Surmount
+contracts: quote the owed outcome, keep the stronger assert, enroll
+them in the catalog, do not fit them to a wipe. Meritocratic with
+Hunter's razor. **Operator-verified known good (2026-09-02)** for named
+tests that encode live `send`, `rebuild-flush`, `interject`, and
+`plan-notes` appends, because live session files contained those kinds.
+Queue enqueue is still a catalog contract and is not that known-good
+mark. Restore and skip tests stay contracts. Land and catalog:
+[`FORK.md`](FORK.md) Land checklist **Named tests are contracts** and
+[`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+§ Prompt write-ahead log. Do not delete or weaken those tests in recon.
+Do not clobber the image-token, lost-prompt integration, Operator/Agent
+speaker-label, or `/rebuild` persist bullets when editing those files.
+Dual-pin: [`FORK.md`](FORK.md) § *Wasted human time*. Host pointer:
+`~/.grok/AGENTS.md` § *The operator's words are the spec*.
+
+## Operator speech is work (pinned 2026-09-02)
+
+When the operator tells you something, that is work. Do not ignore it.
+Do not treat it as noise, color, or a mood. Board it and act, or spawn,
+the same turn. The operator does not spend the day talking to machines
+for sport.
+
+Do not be lazy. A status that skips the owed report is a miss.
+
+When the operator is annoyed, frustrated, or angry about how this agent
+is running, that is a same-turn pin-and-fix. It is not a brief apology
+and a pivot. The self-improving feedback loop already keys on "always
+remember" and "I hate repeating myself". This is the honesty form of
+that loop. Fix the process on disk, then keep going.
+
+Be honest. Do not describe finished agents as live. Do not describe
+prompt-instructions as running workers. Do not pad unknown with leftover
+guesses.
+
+This pin does not replace § *The operator's words are the spec*,
+§ *Wasted human time*, Hunter's razor, Operator/Agent speaker labels,
+the prompt write-ahead log known-good tests, L1 lean, or the
+Hierarchical fast path. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+## Report finished nested work the same turn (pinned 2026-09-02)
+
+Report finished nested work the same turn the host says the nested agent
+exited. Read the short on-disk report. Tell the operator what landed,
+what is in the tree versus this running TUI, and what leftover remains.
+Do not spawn the next job and only mention the live count. Finished work
+that is only in a later "one L2 running" defense was never reported.
+
+This sits next to § *Finished nested agents must stop* (kill the
+painted-live row). Stopping the row is not the operator report. Dual-pin:
+this file and host `~/.grok/AGENTS.md` same heading.
 
 ## Subagents — parent is HITL UX only (hard)
 
@@ -579,7 +758,7 @@ joins under project `.agents/joins/`.
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
 - **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error.
-- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth.
+- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
@@ -806,8 +985,11 @@ cannot fail a deleted catalog test. Catalog:
 - Ship product work: short hierarchical note in [`FORK.md`](FORK.md); link out.
 - **CI is checks only** — never a release package build in GHA. Local gate:
   **`just check`** / **`just ci`**. No `ci-quick` / `ci-host`.
-  The operator owns **`just check-remote`** / **`just test-remote`** on
-  surmount-1 (pinned 2026-08-25). Agents do not invoke those recipes.
+  The operator owns the VPS builder on surmount-1 (pinned 2026-08-25).
+  Agents may run **`just check-remote`** (pinned 2026-09-02; one live
+  run at a time; do not restart at five minutes). Agents do not invoke
+  **`just test-remote`** / **`just cargo-remote`** unless the operator
+  also whitelist those in the same words.
   Optional **`just check-remote`** realizes flake metadata and the workspace
   cargo quality derivation (the same full gate as `just check` / `just test`:
   fmt, then workspace clippy `--all-targets` (members include

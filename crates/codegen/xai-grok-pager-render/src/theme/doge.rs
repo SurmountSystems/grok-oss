@@ -197,6 +197,22 @@ pub mod palette {
     pub const WHITE: Color = rgb(255, 255, 255);
 }
 
+/// Map a terminal-palette green onto DOGE Human green `#00FF00`.
+///
+/// Named ANSI `Color::Green` / `Color::LightGreen` and the matching 16-color
+/// / cube indexes follow the host palette (xterm normal green is `#00cd00`).
+/// [0001_DOGE](https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md)
+/// (accessed: 2026-08-31) requires `(0, 255, 0)`. Other colors pass through
+/// so non-green Human accents (and `Reset` under `NO_COLOR`) stay unchanged.
+pub fn as_doge_human_green(color: Color) -> Color {
+    match color {
+        Color::Green | Color::LightGreen => palette::GREEN,
+        // 2 = ANSI normal green, 10 = bright green, 46 = 256-color cube (0,255,0).
+        Color::Indexed(2 | 10 | 46) => palette::GREEN,
+        other => other,
+    }
+}
+
 impl Theme {
     /// DOGE — pure `#000` bg, `#fff` text/lines, pure 8-colour primaries only.
     ///
@@ -477,6 +493,28 @@ mod tests {
     /// Product semantic roles on DOGE (application layer over pure 8-colour):
     /// Green = Human; Magenta = Agent; Yellow = dates/times/context;
     /// Cyan = system / limits / credits; no gray paint tokens.
+    #[test]
+    fn as_doge_human_green_named_ansi_is_rgb_0_255_0() {
+        let spec = Color::Rgb(0, 255, 0);
+        assert_ne!(
+            Color::Green,
+            spec,
+            "named ANSI Green is not the DOGE RGB triple"
+        );
+        assert_eq!(as_doge_human_green(Color::Green), spec);
+        assert_eq!(as_doge_human_green(Color::LightGreen), spec);
+        assert_eq!(as_doge_human_green(Color::Indexed(2)), spec);
+        assert_eq!(as_doge_human_green(Color::Indexed(10)), spec);
+        assert_eq!(as_doge_human_green(Color::Indexed(46)), spec);
+        assert_eq!(as_doge_human_green(spec), spec);
+        assert_eq!(
+            as_doge_human_green(Color::Magenta),
+            Color::Magenta,
+            "non-green Human-adjacent chrome must not snap to green"
+        );
+        assert_eq!(as_doge_human_green(Color::Reset), Color::Reset);
+    }
+
     #[test]
     fn doge_accent_user_is_pure_green_for_human() {
         let t = Theme::doge();

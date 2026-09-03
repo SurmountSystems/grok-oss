@@ -606,9 +606,10 @@ pub enum LeaderRelaunchOutcome {
 }
 
 /// After a successful install, ask reachable leaders older than
-/// `installed_version` to relaunch (bounded grace; clients reconnect via
-/// `session/load`). Best-effort: discovery/connect/control failures are
-/// recorded as skips, not hard errors.
+/// `installed_version` to relaunch. Nested ids and an in-flight parent turn
+/// keep that leader process up (same as a TUI disconnect) until idle;
+/// clients reconnect via `session/load`. Best-effort: discovery/connect/control
+/// failures are recorded as skips, not hard errors.
 ///
 /// `installed_version` should be a full binary identity when available
 /// (`0.1.100 (abc123)`), so same-package local rebuilds are accepted by
