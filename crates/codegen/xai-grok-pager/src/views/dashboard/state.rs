@@ -4096,6 +4096,9 @@ impl DashboardState {
 /// Multiline off: Shift/Alt (or rescued) Enter inserts a newline.
 /// Multiline on: bare Enter inserts a newline; Shift/Alt sends/creates/opens.
 fn compose_enter_is_newline(multiline: bool, mod_enter: bool) -> bool {
+    if !crate::appearance::cache::load_composer_multiline() {
+        return false;
+    }
     multiline != mod_enter
 }
 

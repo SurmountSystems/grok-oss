@@ -1402,6 +1402,14 @@ pub(crate) async fn run(
         )
         .value,
     );
+    crate::appearance::cache::set_always_expand_thinking(
+        xai_grok_shell::util::config::resolve_always_expand_thinking(
+            requirements.as_ref(),
+            user_config.as_ref(),
+            managed_config.as_ref(),
+        )
+        .value,
+    );
     crate::appearance::cache::set_group_tool_verbs(
         xai_grok_shell::util::config::resolve_group_tool_verbs(
             requirements.as_ref(),
@@ -2523,6 +2531,17 @@ pub(crate) async fn run(
                 }
             }
 
+            _ = l0_enqueue_poll => {
+                if let Some(effs) = crate::app::l0_enqueue::drain_into_app(&mut app) {
+                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                }
+                l0_enqueue_poll_at = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
+            }
+
             _ = gate_poll => {
                 gate_poll_at = None;
                 let effs = vec![Effect::RefreshGate];
@@ -2858,6 +2877,8 @@ pub(crate) async fn run(
                 };
                 reconnect_abort_handle = None;
                 app.reconnect_pending = false;
+                app.clear_session_reconnect_sticky();
+                app.show_toast("Reconnected");
 
                 let outcome = match result {
                     Ok(outcome) => outcome,

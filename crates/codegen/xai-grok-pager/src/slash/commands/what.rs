@@ -20,10 +20,10 @@ The live cache is not the source. Do not use a repo or host overlay skill pack f
 The operator cannot parse the last agent chat. Restate. Do not apologize. \
 Do not write a file. Do not spawn. \
 Reply with this shape only, four labeled complete thoughts, nothing fluffier: \
-What we are doing: one sentence, the real product outcome this session is trying to finish right now. \
-What is true right now: running, waiting, blocked, or done. Name the real file, command, crate, or test. Translate leftover jargon into ordinary words. \
-What you need to do: the operator action, or the word nothing if they do not need to act. Then say why. Name the evidence. Do not leave a bare nothing. \
-What I will do next: the next concrete agent step. \
+Job: one sentence, the real product outcome this session is trying to finish right now. \
+State: running, waiting, blocked, or done. Name the real file, command, crate, or test. Translate leftover jargon into ordinary words. \
+Operator: the operator action, or the word nothing if they do not need to act. Then say why. Name the evidence. Do not leave a bare nothing. \
+Next: the next concrete agent step. Do not say You or Human for the operator. Do not say Me or Grok for the assistant. \
 Complete American English thoughts. Short sentences. \
 No leftover board ids or hex run ids in the body. \
 No say the word if you want me to continue when the next step is already clear. \
@@ -41,7 +41,7 @@ impl SlashCommand for WhatCommand {
     }
 
     fn description(&self) -> &str {
-        "Restate what we are doing, what is true, what you need to do, and what I will do next"
+        "Restate Job, State, Operator, and Next"
     }
 
     fn usage(&self) -> &str {
@@ -135,14 +135,20 @@ mod tests {
             !text.contains(".agents/skills/what"),
             "must not point at repo or host .agents/skills/what as the grok-oss source; got {text}"
         );
-        assert!(text.contains("What we are doing:"), "{text}");
-        assert!(text.contains("What is true right now:"), "{text}");
-        assert!(text.contains("What you need to do:"), "{text}");
+        assert!(text.contains("Job: one sentence"), "{text}");
+        assert!(
+            text.contains("State: running, waiting, blocked, or done"),
+            "{text}"
+        );
+        assert!(text.contains("Operator: the operator action"), "{text}");
         assert!(
             text.contains("Name the evidence"),
-            "What you need to do must require evidence; got {text}"
+            "Operator must require evidence; got {text}"
         );
-        assert!(text.contains("What I will do next:"), "{text}");
+        assert!(
+            text.contains("Next: the next concrete agent step"),
+            "{text}"
+        );
         assert!(text.contains("not /recap"), "{text}");
         assert!(text.contains("not /finish"), "{text}");
         assert!(text.contains("not /reports"), "{text}");

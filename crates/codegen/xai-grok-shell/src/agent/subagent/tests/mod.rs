@@ -1323,7 +1323,7 @@ fn forked_initial_context_normalizes_parent_history() {
             ConversationItem::user("UNIQUE_FORK_MARKER_abc123 implement multi-repo fix"),
             ConversationItem::assistant("noted"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(ctx.copy_error.is_none());
     assert_eq!(ctx.prefix_len, Some(2));
@@ -1359,7 +1359,7 @@ fn forked_initial_context_inherits_parent_across_reasoning() {
             )),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert_eq!(ctx.prefix_len, Some(2));
     assert_eq!(ctx.conversation.len(), 2);
@@ -1388,7 +1388,7 @@ fn forked_initial_context_inherits_parent_across_reasoning() {
 }
 #[test]
 fn forked_initial_context_empty_fails_open_to_new() {
-    let ctx = forked_initial_context(vec![]);
+    let ctx = forked_initial_context(vec![], None);
     assert_eq!(ctx.source, InitialContextSource::New);
     assert!(ctx.conversation.is_empty());
     assert!(ctx.copy_error.is_some());
@@ -1425,7 +1425,7 @@ fn forked_initial_context_applies_fork_filter_before_normalize() {
             ConversationItem::assistant("complete asst"),
             ConversationItem::user("INCOMPLETE_TRAILING"),
         ];
-    let ctx = forked_initial_context(items);
+    let ctx = forked_initial_context(items, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     if let Some(ConversationItem::User(u)) = ctx.conversation.get(1) {
         let text: String = u
@@ -1467,7 +1467,7 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
             )),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
+    let ctx = verbatim_or_normalize_fork(items, 256_000, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             ctx.verbatim_fork,
@@ -1513,6 +1513,57 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
         );
 }
 #[test]
+fn verbatim_fork_with_spawn_prompt_drops_parent_image_parts() {
+    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
+    let items = vec![
+            ConversationItem::system("parent system"),
+            ConversationItem::user_with_parts(vec![
+                ContentPart::Text {
+                    text: "see [Image #1]".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,QUJDRA==".into(),
+                },
+            ]),
+            ConversationItem::assistant("ack"),
+        ];
+    let spawn = "look at [Image #1] without copying bytes";
+    assert!(!spawn.contains("data:image"));
+    let mut ctx = verbatim_or_normalize_fork(items, 256_000, Some(spawn));
+    assert_eq!(ctx.source, InitialContextSource::Forked);
+    assert!(
+            ctx.verbatim_fork,
+            "small complete-tail parent still mirrors verbatim when a spawn prompt is present"
+        );
+    super::nested_spawn_prompt::drop_parent_image_parts_for_spawn_fork(&mut ctx.conversation);
+    let has_image_part = ctx.conversation.iter().any(|item| match item {
+            ConversationItem::User(u) => u
+                .content
+                .iter()
+                .any(|p| matches!(p, ContentPart::Image { .. })),
+            ConversationItem::ToolResult(tr) => tr
+                .images
+                .iter()
+                .any(|p| matches!(p, ContentPart::Image { .. })),
+            _ => false,
+        });
+    assert!(
+            !has_image_part,
+            "verbatim fork with a spawn prompt must drop leftover parent Image parts"
+        );
+    let text_has_data_url = ctx.conversation.iter().any(|item| match item {
+            ConversationItem::User(u) => u.content.iter().any(|p| matches!(
+                p,
+                ContentPart::Text { text } if text.contains("data:image")
+            )),
+            _ => false,
+        });
+    assert!(
+            !text_has_data_url,
+            "verbatim fork must not copy data:image into inherited text"
+        );
+}
+#[test]
 fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
     use xai_grok_sampling_types::conversation::{
         AssistantItem, ContentPart, ConversationItem, ToolCall,
@@ -1534,7 +1585,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
                 reasoning_effort: None,
             }),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
+    let ctx = verbatim_or_normalize_fork(items, 256_000, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             !ctx.verbatim_fork,
@@ -1558,7 +1609,7 @@ fn summarized_fork_is_not_a_verbatim_mirror() {
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST"),
             ConversationItem::assistant("ack"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 1);
+    let ctx = verbatim_or_normalize_fork(items, 1, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(!ctx.verbatim_fork);
     let verbatim_mirror_fork = ctx.source == InitialContextSource::Forked
@@ -1576,7 +1627,7 @@ fn verbatim_fork_falls_back_to_summary_when_oversize() {
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST with some text"),
             ConversationItem::assistant("ack one"),
         ];
-    let ctx = verbatim_or_normalize_fork(items, 1);
+    let ctx = verbatim_or_normalize_fork(items, 1, None);
     assert_eq!(ctx.source, InitialContextSource::Forked);
     assert!(
             !ctx.verbatim_fork,
@@ -1608,7 +1659,7 @@ fn verbatim_fork_empty_after_filter_fails_open_to_new() {
 #[test]
 fn forked_initial_context_system_only_fails_open_to_new() {
     use xai_grok_sampling_types::conversation::ConversationItem;
-    let ctx = forked_initial_context(vec![ConversationItem::system("sys")]);
+    let ctx = forked_initial_context(vec![ConversationItem::system("sys")], None);
     assert_eq!(ctx.source, InitialContextSource::New);
     assert!(!ctx.verbatim_fork);
     assert!(ctx.conversation.is_empty());
@@ -1637,6 +1688,7 @@ fn fork_context_normalized_only_for_summarized() {
                 ConversationItem::assistant("a"),
             ],
         256_000,
+        None,
     );
     assert!(verbatim.verbatim_fork);
     assert!(!fork_context_normalized(
@@ -1650,6 +1702,7 @@ fn fork_context_normalized_only_for_summarized() {
                 ConversationItem::assistant("a"),
             ],
         1,
+        None,
     );
     assert!(!summarized.verbatim_fork);
     assert!(fork_context_normalized(
@@ -1657,6 +1710,62 @@ fn fork_context_normalized_only_for_summarized() {
             summarized.verbatim_fork
         ));
 }
+
+/// Operator contract B: Goal Plan Writer / nested fork must not receive
+/// the parent's full check-remote dump as opening context.
+#[test]
+fn forked_goal_plan_writer_does_not_inherit_two_megabyte_nix_dump() {
+    use xai_grok_sampling_types::conversation::ConversationItem;
+    let chunk = "\u{1b}[31merror:\u{1b}[0m building '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-workspace-cargo-quality'\n";
+    let mut dump = String::with_capacity(2_000_064);
+    while dump.len() < 2_000_000 {
+        dump.push_str(chunk);
+    }
+    dump.truncate(2_000_000);
+    let mid = dump.len() / 2;
+    dump.replace_range(mid..mid + 28, "UNIQUE_NIX_DUMP_MIDDLE_MARK");
+    let items = vec![
+        ConversationItem::system("parent system"),
+        ConversationItem::user("just check-remote"),
+        ConversationItem::assistant("running"),
+        ConversationItem::tool_result("bash-check-remote", dump),
+        ConversationItem::assistant("done"),
+    ];
+    let ctx = verbatim_or_normalize_fork(items, 200_000, None);
+    assert_eq!(ctx.source, InitialContextSource::Forked);
+    let opening = ctx
+        .conversation
+        .iter()
+        .map(|item| match item {
+            ConversationItem::ToolResult(tr) => tr.content.to_string(),
+            ConversationItem::User(u) => u
+                .content
+                .iter()
+                .filter_map(|p| match p {
+                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                        Some(text.as_ref())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            ConversationItem::Assistant(a) => a.content.to_string(),
+            ConversationItem::System(s) => s.content.to_string(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !opening.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+        "Goal Plan Writer opening context must not contain the parent nix dump middle"
+    );
+    let opening_tokens = xai_chat_state::estimate_conversation_tokens(&ctx.conversation);
+    assert!(
+        opening_tokens < 40_000,
+        "owed: nested fork opening must not add ~200k tokens from a 2MB dump; got {opening_tokens}"
+    );
+}
+
 fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
     SubagentRequest {
         id: "bootstrap-test".into(),

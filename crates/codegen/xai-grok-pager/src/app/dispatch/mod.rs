@@ -39,6 +39,7 @@ mod status;
 mod task_result;
 mod transcript;
 mod turn;
+pub(crate) mod unstick;
 mod voice;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;

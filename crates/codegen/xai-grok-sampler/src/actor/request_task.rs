@@ -63,6 +63,12 @@ async fn wait_shared_or_cancel(
 /// Before each HTTP attempt: honor any shared cross-process cooldown.
 /// Cancel-aware so Esc is not blocked for the full peer cooldown.
 ///
+/// This is HTTP 429 (and 403-with-retry-hint) coordination across grok-oss
+/// processes on one machine. It is not the exhausted-credit memo, not
+/// included SuperGrok period limits, not SuperGrok dollar credits, and not
+/// console team prepaid. A 100% client printout must not mark SuperGrok
+/// used up and must not skip this wait.
+///
 /// Returns `false` if cancelled during the wait.
 async fn wait_before_attempt(config: &SamplerConfig, cancel_token: &CancellationToken) -> bool {
     let store = SharedRateLimitStore::process_default();
@@ -470,7 +476,19 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped_urls = request.strip_images();
+            // Path-shaped session assets and `[Image #N]` tokens 400 as
+            // `invalid_image`. Drop those first and keep valid data/`http(s)`
+            // siblings so a retry does not leave every screenshot out.
+            // If every remaining image is already API-shaped, strip all
+            // (corrupt pixels in a data URL).
+            let stripped_urls = {
+                let shaped = request.strip_images_not_api_urls();
+                if !shaped.is_empty() {
+                    shaped
+                } else {
+                    request.strip_images()
+                }
+            };
             if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 let terminal_event_queued = emit_failed(event_tx, request_id, err);

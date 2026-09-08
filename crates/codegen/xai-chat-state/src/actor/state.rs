@@ -80,7 +80,15 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
                     .sum::<usize>();
             (bytes as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
-        ConversationItem::ToolResult(tr) => xai_token_estimation::estimate_tokens(&tr.content),
+        ConversationItem::ToolResult(tr) => {
+            let images = tr
+                .images
+                .iter()
+                .filter(|p| matches!(p, ContentPart::Image { .. }))
+                .count() as u64;
+            xai_token_estimation::estimate_tokens(&tr.content)
+                + xai_token_estimation::estimate_image_tokens(images)
+        }
         ConversationItem::BackendToolCall(b) => {
             xai_token_estimation::estimate_tokens(&b.text_summary())
         }
@@ -218,6 +226,7 @@ impl ChatState {
             );
         }
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut conversation);
 
         let initial_tokens = estimate_conversation_tokens(&conversation);
 

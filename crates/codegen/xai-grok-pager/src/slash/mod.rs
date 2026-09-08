@@ -1696,6 +1696,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_view_plan_with_trailing_slash() {
+        let inv = parse_invocation("/view-plan/").expect("parsed");
+        assert_eq!(inv.token, "view-plan");
+        assert_eq!(inv.args, "");
+    }
+
+    #[test]
     fn rejects_bare_slash() {
         assert!(parse_invocation("/").is_none());
     }
@@ -2251,6 +2258,7 @@ mod tests {
             "/session-info",
             "/find",
             "/doctor",
+            "/unstick",
         ] {
             assert!(
                 !names.contains(&hide),
@@ -2276,6 +2284,10 @@ mod tests {
         assert!(names.iter().any(|d| d == "/compact"));
         assert!(names.iter().any(|d| d == "/fork"));
         assert!(names.iter().any(|d| d == "/doctor"));
+        assert!(
+            names.iter().any(|d| d == "/unstick"),
+            "/unstick must stay on the agent view, got {names:?}"
+        );
     }
 
     /// `/cd` is dashboard-only: it appears in the dropdown on the session-less dashboard surface but is hidden on the default (agent view) surface.

@@ -817,6 +817,7 @@ pub(super) async fn run_session(
                                     verbatim,
                                     json_schema,
                                     send_now,
+                                    unstick_retry,
                                     task_wake_fallback,
                                     tool_overrides_update,
                                     respond_to,

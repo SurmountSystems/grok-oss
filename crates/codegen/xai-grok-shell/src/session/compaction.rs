@@ -2189,7 +2189,7 @@ impl SessionActor {
     /// Terminal when used is still over the sampling window after compact
     /// was skipped, suppressed, or did not save enough. Do not sample.
     pub(crate) async fn refuse_over_window_sample(&self) -> Result<(), acp::Error> {
-        if self.is_l3_session() {
+        if self.never_auto_compact() {
             return Ok(());
         }
         if self.tool_context.task_output_token_budget.is_some() {
@@ -2221,8 +2221,8 @@ impl SessionActor {
     /// Uses `get_estimated_total_tokens()` (exact prior count plus a byte-estimate of items since last response) so tool results are accounted for.
     /// Returns `None` when `is_flushing`.
     pub(crate) async fn check_auto_compact_needed(&self) -> Option<AutoCompactTriggerInfo> {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return None;
         }
         if self
@@ -2312,8 +2312,8 @@ impl SessionActor {
     /// Leaves credit/auth suppress (a switch can't fix those) and short-circuits.
     /// Auth compact failures abort the turn (same as pre-sampling/preflight).
     pub(crate) async fn maybe_compact_on_model_switch(self: &Arc<Self>) -> Result<(), acp::Error> {
-        // L3 never AUTO compact.
-        if self.is_l3_session() {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
             return Ok(());
         }
         self.refresh_token_if_expired().await;

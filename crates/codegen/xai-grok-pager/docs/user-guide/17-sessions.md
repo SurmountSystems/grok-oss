@@ -38,6 +38,9 @@ Grok stores each session in its own directory, grouped by working directory. It 
   compaction_checkpoints/ # saved state from compaction (manual or auto)
   subagents/              # per-subagent metadata (meta.json); the child sessions live in the normal sessions tree
   canceled_turn_resume.json  # optional: mid-turn cancel/quit marker for auto-continue
+  unsent_prompt_draft        # composer text that has not been sent
+  pending_prompts.json       # local pager queue
+  prompt_wal.jsonl           # append-only operator prompt write-ahead log
 ```
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. It also records the latest last-turn summary and session recap so listing surfaces can show them. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore. `tool_definitions.json` omits MCP `server__tool` entries because the model reaches those through `search_tool` and `use_tool`, which are listed. Per-turn token and cost totals are available through `grok usage`.
@@ -65,6 +68,7 @@ Do not confuse these:
 | Continue interrupted turn | `canceled_turn_resume.json` plus the restart setting. |
 | `/resume` or `--resume` | You pick a session (or continue the most recent globally, per CLI). |
 | `/start` | Starts paused or interrupted work in the current session. Not the picker. |
+| `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Human line. |
 | Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.

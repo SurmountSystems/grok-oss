@@ -6,6 +6,8 @@
 //! It produces styled [`Line`]s plus de-escaped plain text: what a terminal would actually display.
 //! Unlike a screen/grid emulator it keeps an unbounded, fully-styled transcript that maps onto the pager's line model.
 
+use std::borrow::Cow;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use vte::{Params, Parser, Perform};
@@ -16,6 +18,15 @@ use crate::theme::color_support::quantize;
 /// Tool output is already truncated upstream; these only guard against escape-code abuse.
 const MAX_ROWS: usize = 50_000;
 const MAX_COLS: usize = 8_192;
+
+/// Do not re-parse tens of thousands of nix progress lines on every layout.
+/// A huge `copying path` dump must not freeze parent TUI scroll.
+pub const MAX_TERMINAL_PARSE_BYTES: usize = 48 * 1024;
+pub const MAX_TERMINAL_PARSE_LINES: usize = 256;
+const PARSE_HEAD_LINES: usize = 32;
+const PARSE_TAIL_LINES: usize = 192;
+const PARSE_HEAD_BYTES: usize = 8 * 1024;
+const PARSE_TAIL_BYTES: usize = 24 * 1024;
 
 /// A single rendered transcript line: styled spans plus de-escaped plain text.
 pub struct RenderedLine {
@@ -28,9 +39,10 @@ pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     if raw.is_empty() {
         return Vec::new();
     }
+    let bounded = bound_terminal_raw(raw);
     let mut sink = TermSink::new(base);
     let mut parser = Parser::new();
-    parser.advance(&mut sink, raw.as_bytes());
+    parser.advance(&mut sink, bounded.as_bytes());
     sink.finish()
 }
 
@@ -569,5 +581,55 @@ mod tests {
     #[test]
     fn progress_erase_entire_line_collapses() {
         assert_eq!(lines("loading 99%\x1b[2K\rdone\n"), vec!["done"]);
+    }
+
+    /// Parent grok-oss TUI must still scroll after a shell tool dumps a huge
+    /// nix/ANSI stream. Do not paint raw `copying path` rows as unbounded
+    /// host scrollback, and DEC mouse/alt-screen must not survive as text.
+    #[test]
+    fn huge_nix_ansi_dump_is_folded_and_does_not_emit_mode_latch_text() {
+        let mut raw = String::from("\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b]0;nix\x07");
+        raw.push('\0');
+        for i in 0..400 {
+            raw.push_str(&format!(
+                "copying path '/nix/store/{i:064}-cargo-package' to 'ssh-ng://builder'...\n"
+            ));
+        }
+        raw.push_str("\x1b[?1003l\x1b[?1000l\x1b[?1049l");
+        assert!(
+            bound_terminal_raw(&raw).as_ref().len() < raw.len(),
+            "400 nix copy lines must fold before VTE parse"
+        );
+        let rendered = render_terminal_lines(&raw, Style::default());
+        assert!(
+            rendered.len() < MAX_TERMINAL_PARSE_LINES,
+            "folded dump must stay under the parse line cap, got {}",
+            rendered.len()
+        );
+        assert!(
+            rendered.len() > 8,
+            "fold must keep a visible head of copying-path lines, got {}",
+            rendered.len()
+        );
+        let plains: Vec<&str> = rendered.iter().map(|rl| rl.plain.as_str()).collect();
+        assert!(
+            plains.iter().any(|p| p.contains("copying path")),
+            "operator still sees nix copy progress in the folded tail/head"
+        );
+        assert!(
+            plains.iter().any(|p| p.contains('\u{2026}')),
+            "fold marker must name that lines were omitted"
+        );
+        for p in &plains {
+            assert!(
+                !p.contains("\x1b["),
+                "painted text must not dump raw CSI onto the host scrollback: {p:?}"
+            );
+            assert!(!p.contains('\0'), "NUL must not survive bound paint: {p:?}");
+            assert!(
+                !p.contains("?1000") && !p.contains("?1049"),
+                "DEC mouse/alt-screen must not latch as painted text: {p:?}"
+            );
+        }
     }
 }

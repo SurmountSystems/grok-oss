@@ -36,6 +36,11 @@ where
             std::borrow::Cow::Owned(_) => panic!("wrap_ranges: unexpected owned string"),
         }
     }
+    // One empty visual line so a focused caret can sit at column 0.
+    // textwrap often yields a static `""` slice we skip above.
+    if text.is_empty() && lines.is_empty() {
+        lines.push(0..0);
+    }
     lines
 }
 

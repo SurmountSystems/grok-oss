@@ -3255,36 +3255,77 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                    prompt_text = format!("Read image file: {path}");
+                    match persist_extracted_tool_image(
+                        &image_content.mime_type,
+                        &image_content.data,
+                        &images_dir,
+                    ) {
+                        Some(saved) => {
+                            prompt_text =
+                                format!("Read image file: {path}. Saved to {}", saved.display());
+                            if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
+                                inline_images.push(part);
+                            }
+                        }
+                        None if parent => {
+                            prompt_text = format!(
+                                "Read image file: {path}. Image was not attached to the parent conversation."
+                            );
+                        }
+                        None => {
+                            let url = format!(
+                                "data:{};base64,{}",
+                                image_content.mime_type, image_content.data
+                            );
+                            inline_images.push(ContentPart::Image {
+                                url: std::sync::Arc::<str>::from(url),
+                            });
+                            prompt_text = format!("Read image file: {path}");
+                        }
+                    }
                 }
             }
         }
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = *output
         {
+            let mut saved_paths = Vec::new();
             for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
+                match persist_extracted_tool_image(&page.mime_type, &page.data, &images_dir) {
+                    Some(saved) => {
+                        if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
+                            inline_images.push(part);
+                        }
+                        saved_paths.push(saved.display().to_string());
+                    }
+                    None if parent => {}
+                    None => {
+                        let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                    }
+                }
             }
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            prompt_text = format!(
-                "Read PDF file: {path} ({} pages rendered, {} total)",
-                pdf.pages.len(),
-                pdf.total_pages,
-            );
+            prompt_text = if saved_paths.is_empty() {
+                format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                )
+            } else {
+                format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total). Saved to: {}",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                    saved_paths.join(", "),
+                )
+            };
         }
         (prompt_text, inline_images, extracted_images)
     }

@@ -11,20 +11,27 @@ repo. See [`FORK.md`](FORK.md) for remotes, sync policy, and branding rules.
 
 ## How to contribute
 
-1. Fork or branch from current `main`.
-2. Prefer small, reviewable commits.
+This fork uses **git-flow-style feature branches** so collaborators can
+work in parallel. Canonical process:
+[`docs/github-tracking.md`](docs/github-tracking.md) and
+[`docs/git-workflow.md`](docs/git-workflow.md).
+
+1. Branch from current `main` as `feat/<slug>`, `fix/<slug>`, or
+   `docs/<slug>`. One concern per branch when the work can split.
+2. Prefer small, reviewable **signed** commits (`git commit -S`) on a
+   real TTY. Agents never commit and never GPG-sign.
 3. **Keep open PRs mergeable without rewriting history.** If `main` moved,
    merge `origin/main` into your feature branch and push normally. Do **not**
-   rebase a published PR branch or force-push while CI is running. See
-   [`docs/git-workflow.md`](docs/git-workflow.md).
+   rebase a published PR branch or force-push while CI is running.
 4. Keep **upstream mergeability**: avoid renaming `xai-grok-*` crates or
    rewriting large unrelated areas.
-5. Run targeted checks when possible:
-   ```bash
-   cargo check -p xai-grok-pager-bin
-   cargo test -p xai-grok-shell --test openrouter_credentials
-   ```
-6. Open a PR against Surmount `main` with a short summary and test plan.
+5. Run targeted checks when possible. Full remote gate is
+   `just check-remote` (operator VPS).
+6. After a signed push, open a PR against Surmount `main` that describes
+   all the work and links the GitHub issues (plan Approve files a plan
+   issue; bug reports file bug issues with screenshots).
+7. Agents: Plan **Approve** → `gh issue create` with the full plan text.
+   Bug report → issue with screenshots. Operator signed+pushed → PR.
 
 ## Security reports
 

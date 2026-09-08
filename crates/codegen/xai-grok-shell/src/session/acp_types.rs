@@ -968,4 +968,15 @@ mod tests {
         assert_eq!(agents.detail.as_deref(), Some("1 file"));
         assert!(agents.tokens > 0);
     }
+
+    /// Disposable once-run nested roles set this so AUTO compact-and-continue
+    /// does not run. Absent ACP `startupHints` must not mark a session once-run.
+    #[test]
+    fn startup_hints_once_run_defaults_false_and_deserializes_camel_case() {
+        assert!(!StartupHints::default().once_run);
+        let absent: StartupHints = serde_json::from_value(json!({})).unwrap();
+        assert!(!absent.once_run);
+        let present: StartupHints = serde_json::from_value(json!({ "onceRun": true })).unwrap();
+        assert!(present.once_run);
+    }
 }

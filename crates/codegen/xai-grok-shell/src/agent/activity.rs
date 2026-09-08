@@ -96,8 +96,7 @@ impl AgentActivity {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.inner.subagents.load(Ordering::Relaxed) > 0
-            || self.lock_live_sessions().iter().any(|e| e.is_busy())
+        self.has_live_subagents() || self.lock_live_sessions().iter().any(|e| e.is_busy())
     }
 
     /// Number of live registered sessions (diagnostics/tests).
@@ -257,9 +256,12 @@ mod tests {
         let activity = AgentActivity::default();
         let gauge = activity.subagent_gauge();
         assert!(!activity.is_busy());
+        assert!(!activity.has_live_subagents());
         gauge.store(1, Ordering::Relaxed);
+        assert!(activity.has_live_subagents());
         assert!(activity.is_busy());
         gauge.store(0, Ordering::Relaxed);
+        assert!(!activity.has_live_subagents());
         assert!(!activity.is_busy());
     }
 

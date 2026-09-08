@@ -106,11 +106,15 @@ async fn goal_send_now_routes_text_and_image_as_planner_steering_and_interjectio
 /// Draining an image-bearing interjection injects structured `ContentPart::Image` parts (base64 data URLs) on the synthetic user message.
 /// The message keeps `SyntheticReason::Interjection`.
 #[tokio::test]
-async fn drain_interjection_with_images_attaches_image_parts() {
+async fn drain_interjection_with_images_does_not_attach_image_parts_on_parent() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            assert_eq!(
+                actor.tool_context.subagent_depth, 0,
+                "this contract is the parent (main) grok-oss session"
+            );
             actor.pending_interjections.push(PendingInterjection {
                 text: "look at [Image #1]".to_string(),
                 attachments: vec![test_image_content()],
@@ -319,17 +323,13 @@ async fn drain_interjection_truncation_never_touches_image_data() {
             };
             let text = conversation.last().unwrap().text_content();
             assert!(text.contains("[truncated]"), "oversized text must truncate");
-            let image_url = user_item
-                .content
-                .iter()
-                .find_map(|p| match p {
-                    xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
-                    _ => None,
-                })
-                .expect("image part must survive truncation");
             assert!(
-                image_url.ends_with(&original_image.data),
-                "image payload must be byte-identical (never truncated)"
+                user_image_urls(user_item).is_empty(),
+                "parent truncation path must not attach ContentPart::Image"
+            );
+            assert!(
+                !text.contains(&original_image.data),
+                "truncated parent text must not inline image bytes"
             );
         })
         .await;

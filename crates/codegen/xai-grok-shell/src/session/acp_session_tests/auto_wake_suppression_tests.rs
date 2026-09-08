@@ -404,6 +404,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                         None,
                         None,
                         None,
+                        false,
                     )
                     .await
             });
@@ -462,6 +463,7 @@ async fn disk_full_refusal_still_clears_task_completion_reservation() {
                     None,
                     None,
                     None,
+                    false,
                 )
                 .await
                 .expect_err("latched disk-full must refuse the wake");
@@ -562,6 +564,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                         None,
                         None,
                         None,
+                        false,
                     )
                     .await
             });
@@ -654,6 +657,7 @@ async fn accepted_reservation_survives_user_start() {
                         None,
                         None,
                         None,
+                        false,
                     )
                     .await
             });

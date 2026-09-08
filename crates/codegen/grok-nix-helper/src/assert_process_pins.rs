@@ -31,6 +31,8 @@ pub const REQUIRED_FILES: &[&str] = &[
     "crates/codegen/grok-nix-helper/src/detect_upstream.rs",
     "crates/codegen/grok-nix-helper/src/fork_paths.rs",
     "crates/codegen/grok-nix-helper/src/git_cmd.rs",
+    "crates/codegen/grok-nix-helper/src/print_rsync_pull.rs",
+    "crates/codegen/grok-nix-helper/src/print_submodule_adds.rs",
     "crates/codegen/grok-nix-helper/src/extract_debug.rs",
     "crates/codegen/grok-nix-helper/src/generate_announcements.rs",
     "crates/codegen/grok-nix-helper/src/sync_upstream.rs",

@@ -922,6 +922,8 @@ pub(super) fn handle_session_notification_with_origin(
                 info.attempt.last_progress_at = std::time::Instant::now();
                 info.transcript.retry_disk_after_finish();
             }
+            agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
+            agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
@@ -1712,7 +1714,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 child_session_id.clone(),
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
-                    child_session_id: Arc::from(child_session_id),
+                    child_session_id: Arc::from(child_session_id.clone()),
                     description: Arc::from(description),
                     subagent_type: Arc::from(subagent_type),
                     persona: persona.map(Arc::from),
@@ -1752,6 +1754,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     child_updates_replayed: false,
                 },
             );
+            agent.ensure_subagent_child_view(&child_session_id);
             true
         }
         XaiSessionUpdate::SubagentProgress {
@@ -1784,6 +1787,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             true
         }
         XaiSessionUpdate::SubagentFinished {
+            subagent_id,
             child_session_id,
             status,
             error,
@@ -1815,6 +1819,8 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed);
                 }
             }
+            agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
+            agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
             true
         }

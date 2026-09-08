@@ -18,6 +18,25 @@ use crate::app::app_view::{AppView, RebuildRelaunch};
 use crate::scrollback::block::RenderBlock;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Unix epoch seconds when this TUI process started. Compared to a rebuild
+/// request timestamp so a later `grok-oss --resume` is not treated as an
+/// old peer that still needs force-arm.
+static PROCESS_START_UNIX_SECS: OnceLock<u64> = OnceLock::new();
+
+/// Record process start once (TUI `app::run`). Later calls are ignored.
+pub(crate) fn note_process_start_unix_secs() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = PROCESS_START_UNIX_SECS.set(now);
+}
+
+pub(crate) fn process_start_unix_secs() -> Option<u64> {
+    PROCESS_START_UNIX_SECS.get().copied()
+}
 
 /// Running-process identity used to decide whether a peer rebuild request is
 /// newer than this binary (package version + optional git SHA).
@@ -107,6 +126,15 @@ fn last_user_prompt_full_text(
         }
     }
     None
+}
+
+/// Flush unsent composer text, plan Human-box notes, and the pager queue
+/// before re-exec. Keystroke persist is debounced and skipped in tests;
+/// rebuild must write the same files a disconnect restore reads.
+fn persist_session_work_for_rebuild(app: &AppView) {
+    for agent in app.agents.values() {
+        agent.persist_session_work_to_disk_for_rebuild();
+    }
 }
 
 /// Write `canceled_turn_resume.json` for every mid-turn agent before re-exec.
@@ -203,6 +231,7 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
     {
         agent.show_toast("Rebuild on another window: relaunching on the new binary…");
     }
+    persist_session_work_for_rebuild(app);
     persist_running_turns_for_rebuild(app);
     app.rebuild_relaunch = Some(relaunch);
     true
@@ -217,6 +246,48 @@ pub(crate) enum PeerRebuildExitReason {
     /// Leader IPC cancelled. Also tries identity/path gates without the flag
     /// so a leader `RelaunchForUpdate` race still picks up the request.
     LeaderDisconnect,
+}
+
+/// Env set on rebuild `exec` so a later leader-IPC drop does not re-exec loop.
+pub(crate) const GROK_REBUILD_RELAUNCH_ENV: &str = "GROK_REBUILD_RELAUNCH";
+
+/// True when this process is already the `/rebuild` re-exec onto the new binary.
+pub(crate) fn is_rebuild_reexec_process() -> bool {
+    std::env::var_os(GROK_REBUILD_RELAUNCH_ENV).is_some()
+}
+
+/// Env pairs written onto the rebuild `exec` (besides `GROK_SCREEN_MODE`).
+pub(crate) fn rebuild_relaunch_process_env() -> [(&'static str, &'static str); 1] {
+    [(GROK_REBUILD_RELAUNCH_ENV, "1")]
+}
+
+/// Surmount / grok-oss fork: leader IPC drop during `/rebuild` must still
+/// force-arm re-exec for a peer that started before the rebuild request.
+///
+/// Operator report: the grok-build invoker came back; Surmount Server and
+/// other live TUIs printed a resume hint and died. `RelaunchForUpdate`
+/// cancels client IPC before SIGUSR1 is observed. Same-commit / unknown
+/// SHA / no `(deleted)` marker then skips opportunistic arm. Last-session
+/// on start is not the only survivor.
+///
+/// Do **not** force-arm when:
+/// - this process is already the rebuild re-exec (`GROK_REBUILD_RELAUNCH`), or
+/// - this process started after the request (operator typed
+///   `grok-oss --resume <id>` onto the new binary). That attach must stay
+///   in the TUI. Force-arm plus exec then a second leader drop is the
+///   Resume-hint-then-Finishing-session miss.
+pub(crate) fn leader_disconnect_retries_as_signaled(
+    already_rebuild_reexec: bool,
+    process_started_at_unix_secs: Option<u64>,
+    request_requested_at_unix_secs: Option<u64>,
+) -> bool {
+    if already_rebuild_reexec {
+        return false;
+    }
+    !matches!(
+        (process_started_at_unix_secs, request_requested_at_unix_secs),
+        (Some(started), Some(requested)) if started > requested
+    )
 }
 
 /// Call on event-loop exits that can race with peer rebuild.
@@ -239,18 +310,34 @@ pub(crate) fn arm_peer_rebuild_before_exit(
     app: &mut AppView,
     reason: PeerRebuildExitReason,
 ) -> bool {
-    let signaled = crate::app::signal_handler::take_peer_rebuild_relaunch();
+    if app.rebuild_relaunch.is_some() {
+        return true;
+    }
+    let signaled = crate::app::signal_handler::peek_peer_rebuild_relaunch();
     if !should_try_peer_rebuild_arm(reason, signaled) {
-        return app.rebuild_relaunch.is_some();
+        return false;
     }
     if try_arm_peer_rebuild_relaunch_from_request(app, signaled) {
+        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
         return true;
     }
     // Leader may have drained for RelaunchForUpdate before SIGUSR1 was
-    // observed, or cancel won the race with the flag already cleared. Still
-    // pick up a fresh request under identity/path gates.
-    if matches!(reason, PeerRebuildExitReason::LeaderDisconnect) && !signaled {
-        return try_arm_peer_rebuild_relaunch_from_request(app, false);
+    // observed. Force SIGUSR1 gates (fresh request + exe + session) so
+    // same-commit / unknown SHA / no `(deleted)` still re-exec. Skip when
+    // this process is already the rebuild re-exec, or when it started
+    // after the request (`grok-oss --resume` on the new binary).
+    let request_at =
+        xai_grok_update::read_rebuild_relaunch_request().map(|r| r.requested_at_unix_secs);
+    if matches!(reason, PeerRebuildExitReason::LeaderDisconnect)
+        && leader_disconnect_retries_as_signaled(
+            is_rebuild_reexec_process(),
+            process_start_unix_secs(),
+            request_at,
+        )
+        && try_arm_peer_rebuild_relaunch_from_request(app, true)
+    {
+        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
+        return true;
     }
     false
 }
@@ -288,14 +375,19 @@ pub(super) fn handle_rebuild_done(
 
             let mut effects = Vec::new();
 
+            // Flush drafts and the pager queue before cancel. Cancel can
+            // rewind the in-flight prompt into the composer; that must not
+            // replace the operator's unsent text on disk.
+            persist_session_work_for_rebuild(app);
             // Persist continue-interrupted-turn before cancel. Cancel does not
             // write the marker; first-activity also clears the in-flight stash.
             persist_running_turns_for_rebuild(app);
 
             // Mid-turn: cancel the parent turn so this process does not keep
-            // driving it. Do not cancel nested subagents: after re-exec they
-            // resume like a network disconnect, and the Subagents list must
-            // not go empty.
+            // driving it. Do not cancel nested subagent ids in this TUI persist
+            // path. Nested work is not a reason to block `/rebuild`. Leader
+            // `RelaunchForUpdate` also keeps nested ids on that leader (same
+            // as a TUI disconnect); it does not exec-replace while they are live.
             if let Some(agent) = app.agents.get(&agent_id)
                 && agent.session.state.is_turn_running()
             {
@@ -324,7 +416,7 @@ pub(super) fn handle_rebuild_done(
                         "Binary installed at {}. No active session id to re-exec; \
                          restart with: {} --resume <session>",
                         report.installed_path.display(),
-                        report.installed_path.display()
+                        crate::client_identity::PRODUCT_CLI_NAME
                     )));
                 }
             }
@@ -434,6 +526,9 @@ pub(crate) fn exec_rebuild_relaunch(relaunch: &RebuildRelaunch) -> std::io::Resu
     let mut cmd = std::process::Command::new(&plan.exe);
     cmd.args(&plan.args);
     cmd.env(GROK_SCREEN_MODE_ENV, plan.screen_mode_env);
+    for (key, value) in rebuild_relaunch_process_env() {
+        cmd.env(key, value);
+    }
 
     // No user-visible stderr after restore. Contract is unit-tested via
     // `rebuild_relaunch_post_restore_user_message` (must stay None).
@@ -557,6 +652,75 @@ mod tests {
             PeerRebuildExitReason::LeaderDisconnect,
             false
         ));
+    }
+
+    /// Surmount / grok-oss fork: `/rebuild` must resume a session that is
+    /// not the invoker. Leader IPC drop without SIGUSR1 still force-arms
+    /// unless this process is already the rebuild re-exec.
+    #[test]
+    fn leader_disconnect_retries_as_signaled_for_peer_not_already_reexec() {
+        assert!(
+            leader_disconnect_retries_as_signaled(false, Some(500), Some(1_000)),
+            "a live peer TUI that started before the rebuild request must re-exec when the leader drains"
+        );
+        assert!(
+            !leader_disconnect_retries_as_signaled(true, Some(500), Some(1_000)),
+            "grok-oss --resume on the already-reexec binary must attach, not loop-quit"
+        );
+    }
+
+    /// Operator report 2026-09-01: after `/rebuild`, `grok-oss --resume <id>`
+    /// printed the resume hint and `Finishing session...` instead of attaching.
+    /// A process that started after the request is operator resume, not an
+    /// old peer. Force-arm would exec, then a second leader drop would quit.
+    #[test]
+    fn operator_resume_after_rebuild_does_not_force_arm_on_leader_disconnect() {
+        assert!(
+            !leader_disconnect_retries_as_signaled(false, Some(2_000), Some(1_000)),
+            "grok-oss --resume started after /rebuild must attach, not force-arm re-exec"
+        );
+        assert!(
+            leader_disconnect_retries_as_signaled(false, Some(500), Some(1_000)),
+            "a peer that was already running when /rebuild wrote the request must still force-arm"
+        );
+        assert!(
+            leader_disconnect_retries_as_signaled(false, None, Some(1_000)),
+            "unknown process start still force-arms (peer-safe)"
+        );
+    }
+
+    /// Surmount / grok-oss fork: rebuild exec marks the new process so a
+    /// later leader drop does not treat it as an un-relaunched peer.
+    #[test]
+    fn rebuild_relaunch_process_env_marks_reexec() {
+        let env = rebuild_relaunch_process_env();
+        assert_eq!(env, [(GROK_REBUILD_RELAUNCH_ENV, "1")]);
+        assert_ne!(GROK_REBUILD_RELAUNCH_ENV, "GROK_SCREEN_MODE");
+    }
+
+    /// Surmount / grok-oss fork: `grok-oss --resume` after install, already
+    /// on the new binary, must not opportunistic-quit (that is the
+    /// attach-then-Finishing-session miss).
+    #[test]
+    fn resume_attach_after_rebuild_does_not_immediate_quit_when_already_on_installed_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("grok-oss");
+        std::fs::write(&exe, b"stub").unwrap();
+        let req =
+            xai_grok_update::make_rebuild_relaunch_request(exe.clone(), "0.2.120 (samesha)", 1_000);
+        assert!(
+            peer_rebuild_relaunch_if_applicable(
+                "0.2.120 (samesha)",
+                &req,
+                1_000,
+                Some("01a027e0-20ad-7a62-ab05-5d65b99e34b1"),
+                false,
+                Some(exe.as_path()),
+                false,
+            )
+            .is_none(),
+            "interactive grok-oss --resume on the installed binary must stay attached"
+        );
     }
 
     /// Contract: peer of a rebuild arms re-exec when identity is older and the
@@ -772,6 +936,33 @@ mod tests {
         assert!(!as_str.iter().any(|s| s.contains("do stuff")));
     }
 
+    /// Surmount / grok-oss fork: peer re-exec argv resumes that peer's
+    /// session id, not the `/rebuild` invoker's.
+    #[test]
+    fn plan_rebuild_relaunch_resumes_peer_session_id_not_invoker() {
+        let peer = RebuildRelaunch {
+            session_id: "01a027e0-20ad-7a62-ab05-5d65b99e34b1".into(),
+            installed_exe: PathBuf::from("/tmp/grok-oss-new"),
+            minimal: false,
+        };
+        let plan = plan_rebuild_relaunch(&peer, ["grok-oss"].iter().copied());
+        let as_str: Vec<String> = plan
+            .args
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            as_str
+                .windows(2)
+                .any(|w| w[0] == "--resume" && w[1] == "01a027e0-20ad-7a62-ab05-5d65b99e34b1"),
+            "peer rebuild must --resume the interrupted session, got {as_str:?}"
+        );
+        assert!(
+            !as_str.iter().any(|s| s.contains("do stuff")),
+            "must not re-fire a positional prompt on resume"
+        );
+    }
+
     #[test]
     fn plan_rebuild_relaunch_minimal_sets_minimal_env_and_flag() {
         use crate::app::screen_mode_relaunch::screen_mode_env_value;
@@ -802,6 +993,14 @@ mod tests {
         assert!(out.contains("GROK_SCREEN_MODE=minimal"), "{out}");
         assert!(out.contains("--resume sess-1"), "{out}");
         assert!(out.contains("--minimal"), "{out}");
+        assert!(
+            out.contains("grok-oss"),
+            "blocked-rebuild resume must name grok-oss:\n{out}"
+        );
+        assert!(
+            !out.contains("grok --resume"),
+            "must not tell operators to run upstream grok --resume:\n{out}"
+        );
     }
 
     #[test]
@@ -817,6 +1016,14 @@ mod tests {
         assert!(out.contains("GROK_SCREEN_MODE=fullscreen"), "{out}");
         assert!(out.contains("--fullscreen"), "{out}");
         assert!(out.contains("--resume sess-1"), "{out}");
+        assert!(
+            out.contains("grok-oss"),
+            "exec-failure resume must name grok-oss:\n{out}"
+        );
+        assert!(
+            !out.contains("grok --resume"),
+            "must not tell operators to run upstream grok --resume:\n{out}"
+        );
         // Must not recommend bare upstream `grok` without product mode env.
         assert!(
             !out.contains("Resume with: grok-oss --resume"),
@@ -870,6 +1077,49 @@ mod tests {
         assert!(
             joined.contains("asked to quit"),
             "failure copy must say the fleet was not signaled: {joined}"
+        );
+    }
+
+    /// Surmount / grok-oss fork: no session id still names `grok-oss --resume`,
+    /// never bare `grok --resume`.
+    #[test]
+    fn handle_rebuild_done_without_session_id_prints_grok_oss_resume_not_bare_grok() {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = crate::app::agent::AgentId(0);
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.session.session_id = None;
+        }
+        let installed = PathBuf::from("/tmp/grok-oss-installed");
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        assert!(
+            app.rebuild_relaunch.is_none(),
+            "no session id cannot arm self re-exec"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "must stay in this TUI when there is no session to re-exec: {effects:?}"
+        );
+        let agent = app.agents.get(&agent_id).expect("agent");
+        let joined: String = agent
+            .scrollback
+            .iter_entries()
+            .filter_map(|(_, e)| match &e.block {
+                crate::scrollback::block::RenderBlock::System(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("grok-oss --resume"),
+            "must tell the operator grok-oss --resume, got: {joined}"
+        );
+        assert!(
+            !joined.contains("grok --resume"),
+            "must not tell operators to run upstream grok --resume:\n{joined}"
         );
     }
 
@@ -1324,9 +1574,10 @@ mod tests {
         }
     }
 
-    /// Contract: after rebuild re-exec, nested agents resume like a network
-    /// disconnect. The Subagents list must not go empty. Mid-turn cancel must
-    /// not cancel nested subagents.
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// This TUI persist path does not cancel nested subagent ids. The
+    /// Subagents list must not go empty here. Leader `RelaunchForUpdate`
+    /// keeps nested ids on that leader the same way a TUI disconnect does.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_keeps_nested_subagents_for_resume() {
@@ -1396,8 +1647,8 @@ mod tests {
         );
         assert!(!after[0].finished);
 
-        // Re-exec equivalent: nested rows still present the way a disconnect
-        // reconnect restores them (not cancelled orphans).
+        // Re-exec equivalent: this persist path still holds nested rows
+        // (not cancelled orphans). Leader drain keeps nested ids too.
         let mut reopened = crate::app::app_view::tests::test_app_with_agent();
         {
             let agent = reopened.agents.get_mut(&agent_id).unwrap();
@@ -1419,6 +1670,388 @@ mod tests {
             !restored.is_empty(),
             "after re-exec the Subagents list must still show nested work"
         );
+        assert_eq!(restored[0].subagent_id.as_ref(), "sa-rebuild-nested");
+        assert_eq!(restored[0].child_session_id.as_ref(), "cs-rebuild-nested");
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            !toast.to_lowercase().contains("blocked")
+                && !toast.to_lowercase().contains("until")
+                && !toast.to_lowercase().contains("nested"),
+            "rebuild must not tell the operator they are blocked until nested work finishes; got {toast:?}"
+        );
+    }
+
+    /// Named contract: `/rebuild` starts while nested agents are running.
+    /// Nested work is not a gate.
+    #[test]
+    fn rebuild_and_relaunch_starts_while_nested_subagents_are_running() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::agent::{AgentId, AgentState};
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some("sess-parent".into());
+            agent.session.state = AgentState::TurnRunning;
+            agent.subagent_sessions.insert(
+                "cs-rebuild-nested".into(),
+                running_l2_subagent("Rebuild nested resume"),
+            );
+        }
+        let effects = super::super::dispatch(Action::RebuildAndRelaunch, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RunRebuild { .. })),
+            "/rebuild must start while nested agents are running, got {effects:?}"
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        assert!(
+            !agent.subagent_sessions.is_empty(),
+            "starting /rebuild must not drop nested session ids"
+        );
+    }
+
+    fn restore_session_work_after_rebuild_load(agent: &mut crate::app::agent_view::AgentView) {
+        agent.restore_unsent_composer_draft_from_disk();
+        agent.restore_pending_prompts_from_disk();
+        agent.restore_prompt_wal_from_disk();
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// A WAL send that never made it into prompt_history or the queue is
+    /// restored as a pending Human turn on session load.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn session_load_restores_wal_send_missing_from_prompt_history() {
+        use crate::app::agent::AgentId;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-restore-missing-send";
+        let body = "operator send that never reached prompt_history";
+        let record = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+            sid,
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            body,
+            Vec::new(),
+        );
+        xai_grok_shell::session::prompt_wal::append_prompt_wal(&cwd_str, sid, &record)
+            .expect("write WAL");
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.prompt_history.clear();
+            agent.session.pending_prompts.clear();
+            agent.restore_prompt_wal_from_disk();
+            assert!(
+                agent.session.pending_prompts.iter().any(|p| p.text == body),
+                "session load must restore a WAL send missing from prompt_history as a pending Human turn; history={:?} queue={:?}",
+                agent.session.prompt_history,
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Named contract: an unsent composer draft survives `/rebuild` the same
+    /// way it survives a disconnect. Reopen must not leave an empty composer
+    /// when the draft was non-empty.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::AgentId;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-unsent-draft";
+        let draft = "still typing this rebuild-preserve note";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.prompt.set_text(draft);
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let on_disk = xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+            &cwd_str, sid,
+        )
+        .expect("load draft")
+        .expect(
+            "successful /rebuild must write unsent_prompt_draft when the composer was non-empty",
+        );
+        assert_eq!(on_disk, draft);
+        let wal =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            wal.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                    && r.text == draft
+            }),
+            "successful /rebuild must append a rebuild-flush WAL line for the unsent draft, got {wal:?}"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text("");
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert_eq!(
+                agent.prompt.text(),
+                draft,
+                "session load after /rebuild must restore a non-empty unsent composer draft"
+            );
+        }
+    }
+
+    /// Named contract: queued operator prompts, including mid-turn interject
+    /// text, survive `/rebuild`. The operator must not retype them.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them()
+     {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-pending-queue";
+        let queued = "also do this mid-turn interject after rebuild";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-running".into());
+            agent.session.enqueue_prompt(queued.into());
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let rows = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd_str, sid)
+            .expect("load queue");
+        assert!(
+            rows.iter().any(|r| r.text == queued),
+            "successful /rebuild must write pending_prompts.json with the queued body, got {rows:?}"
+        );
+        let wal =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            wal.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                    && r.text == queued
+            }),
+            "successful /rebuild must append a rebuild-flush WAL line for the queued body, got {wal:?}"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.pending_prompts.clear();
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert!(
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .any(|p| p.text == queued),
+                "session load after /rebuild must restore queued prompts; got {:?}",
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Named contract: plan Human-box `feedback_draft` and session `plan.md`
+    /// operator notes survive `/rebuild`.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_plan_feedback_draft_and_plan_md() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::agent::AgentId;
+        use crate::views::plan_approval_view::PlanApprovalViewState;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-preserve-plan-notes";
+        let notes = "operator plan notes that must survive rebuild";
+        let plan_body = "# Plan\n\nKeep these operator notes on disk\n";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.plan_mode_active = true;
+            let mut pav = PlanApprovalViewState::for_idle_decision(Some(plan_body.into()));
+            pav.feedback_draft = Some(notes.into());
+            agent.plan_approval_view = Some(pav);
+            agent.prompt.set_text("/view-plan");
+            agent.latest_inline_plan_content = Some(plan_body.into());
+        }
+        let plan_path =
+            xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(&cwd_str, sid)
+                .expect("draft path")
+                .parent()
+                .expect("session dir")
+                .join("plan.md");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, plan_body).unwrap();
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let on_disk =
+            xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(&cwd_str, sid)
+                .expect("load draft")
+                .expect("plan Human-box notes must land in unsent_prompt_draft across /rebuild");
+        assert_eq!(on_disk, notes);
+        assert_eq!(
+            std::fs::read_to_string(&plan_path).expect("plan.md"),
+            plan_body,
+            "/rebuild must not wipe session plan.md"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text("");
+            agent.plan_mode_active = true;
+            agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
+                plan_body.into(),
+            )));
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            assert_eq!(
+                agent.prompt.text(),
+                notes,
+                "session load after /rebuild must restore plan Human-box notes into the composer"
+            );
+            assert_eq!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .and_then(|p| p.feedback_draft.as_deref()),
+                Some(notes),
+                "session load after /rebuild must restore feedback_draft"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&plan_path).expect("plan.md after load"),
+                plan_body
+            );
+        }
     }
 
     /// Named contract: a leftover `canceled_turn_resume.json` from an earlier

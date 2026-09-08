@@ -72,13 +72,17 @@ theme = "doge"                         # default when unset is also DOGE; "grokn
                                        # previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
+composer_multiline = true              # Human box may insert newlines (default on). Set false
+                                       # so Enter and Shift+Enter send (or interject) and never
+                                       # open a second line. Session Multiline cannot restore
+                                       # newlines while this is false.
 max_thoughts_width = 120               # max column width for reasoning display
 default_selected_permission = "always_allow_all_sessions" # preselected row on the FIRST approval prompt
 remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
 always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
-                                       # true keeps the body open and hides the Ctrl+T hint
+                                       # true keeps the body open. Ctrl+T writes this same key.
 group_tool_verbs = true                # fold runs of read/search/list tool calls and subagent rows
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
@@ -184,6 +188,19 @@ simple_mode = false
 ```
 
 You can also flip it from the settings pane (`/settings` → **Disable vim input mode**); Grok writes your choice to `[ui] simple_mode`. `simple_mode` and `vim_mode` are independent — one governs the prompt editor, the other governs scrollback navigation. See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the full binding reference.
+
+#### Composer multiline
+
+`[ui] composer_multiline` is whether the Human box may insert newlines. Default is on, so Shift+Enter still inserts a newline when session Multiline is off, and `Ctrl+M` / `/multiline` still swaps Enter and Shift+Enter for that session.
+
+Set it false when you want a single-line Human box:
+
+```toml
+[ui]
+composer_multiline = false
+```
+
+Then Enter sends (or interjects if a turn is running). Shift+Enter also sends. Neither key opens a second line. Session Multiline cannot restore newlines while this is false. Plan Preview and the main Prompt use the same flag. `/settings` → **Composer multiline** writes the same key.
 
 #### Default selected permission
 

@@ -638,8 +638,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ExpandAllThinking => {
+            let prev = crate::appearance::cache::load_always_expand_thinking();
             with_scrollback(app, |s| s.expand_all_thinking());
-            vec![]
+            persist_always_expand_thinking_after_ctrl_t(app, prev)
         }
         Action::ToggleRaw => {
             with_scrollback(app, |s| s.toggle_raw_selected());
@@ -1139,6 +1140,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::StartPausedOrInterruptedWork => {
             super::start::dispatch_start_paused_or_interrupted(app)
         }
+        Action::UnstickLastL1Prompt => super::unstick::dispatch_unstick_last_l1_prompt(app),
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
@@ -1228,6 +1230,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
+        Action::SetComposerMultiline(v) => set_composer_multiline(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),

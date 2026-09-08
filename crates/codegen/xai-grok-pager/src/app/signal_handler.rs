@@ -305,6 +305,14 @@ mod tests {
         let _ = take_peer_rebuild_relaunch();
         mark_peer_rebuild_relaunch_from_sigusr1();
         assert!(
+            peek_peer_rebuild_relaunch(),
+            "SIGUSR1 must set the cooperative re-exec flag (peek must not consume)"
+        );
+        assert!(
+            peek_peer_rebuild_relaunch(),
+            "peek must leave the flag so a later arm retry still sees SIGUSR1"
+        );
+        assert!(
             take_peer_rebuild_relaunch(),
             "SIGUSR1 must set the cooperative re-exec flag"
         );

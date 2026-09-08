@@ -785,7 +785,8 @@ pub(crate) async fn run_shell_child(
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
     let tools_before_policy = definition.tool_config.tools.len();
-    let allow_nested_subagents = child_depth < ctx.subagents_max_depth;
+    let allow_nested_subagents =
+        xai_grok_subagent_resolution::nested_spawn_allowed(child_depth, ctx.subagents_max_depth);
     xai_grok_subagent_resolution::apply_child_tool_policy(
         &mut definition,
         effective_runtime.capability_mode,
@@ -979,6 +980,11 @@ pub(crate) async fn run_shell_child(
     let task_prompt_text = prompt.clone();
     let (mut forked_conversation, mut inherited_prefix_len) =
         (forked_conversation, inherited_prefix_len.unwrap_or(0));
+    if verbatim_mirror_fork {
+        super::nested_spawn_prompt::drop_parent_image_parts_for_spawn_fork(
+            &mut forked_conversation,
+        );
+    }
     if context_source != InitialContextSource::Resumed
         && !verbatim_mirror_fork
         && let Some(ref pi) = effective_runtime.persona_instructions

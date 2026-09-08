@@ -25,6 +25,7 @@ mod status_line;
 mod task_result;
 mod transcript;
 mod turn;
+mod unstick;
 mod voice;
 mod voice_clip;
 use super::billing::{

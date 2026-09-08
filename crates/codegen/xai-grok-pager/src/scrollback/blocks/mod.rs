@@ -23,6 +23,7 @@ pub use context_info::ContextInfoBlock;
 pub use session_event::{MemoryCaptureBlock, MemoryCommandKind, SessionEvent, SessionEventBlock};
 pub use subagent::{SubagentBlock, SubagentBlockKind};
 pub use system::SystemMessageBlock;
+pub(crate) use thinking::INSTANT_THOUGHT_MS;
 pub use thinking::ThinkingBlock;
 pub use tool::{
     DiffLineOutput, DiffRenderConfig, DiscoveredTool, EditToolCallBlock, ExecuteToolCallBlock,

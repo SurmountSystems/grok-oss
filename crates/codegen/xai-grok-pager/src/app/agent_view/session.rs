@@ -18,6 +18,7 @@ use crate::views::queue_pane::QueuePane;
 use crate::views::tasks_pane::TasksPane;
 use crate::views::todo_pane::TodoPane;
 use ratatui::layout::Rect;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use xai_grok_telemetry::events::{CancellationCompleted, CancellationScope};
@@ -135,6 +136,138 @@ impl AgentView {
             self.prompt.set_cursor(text.len());
         }
     }
+
+    /// Tests skip disk so they do not read the operator grok home.
+    pub(crate) fn restore_prompt_wal(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        self.restore_prompt_wal_from_disk();
+    }
+
+    /// If chat_history / prompt_history / queue lack a WAL send, restore it
+    /// as a pending Human turn. Does not rewrite the WAL.
+    pub(crate) fn restore_prompt_wal_from_disk(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let sid = session_id.0.as_ref();
+        let Ok(records) = xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd, sid) else {
+            return;
+        };
+        if records.is_empty() {
+            return;
+        }
+        let mut queue_texts: Vec<String> = self
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.clone())
+            .chain(self.shared_queue.iter().map(|w| w.text.clone()))
+            .collect();
+        let composer = self.prompt.text();
+        if !composer.trim().is_empty() {
+            queue_texts.push(composer.to_string());
+        }
+        let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, sid)
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        let missing = xai_grok_shell::session::prompt_wal::wal_sends_missing_from_history(
+            &records,
+            &self.session.prompt_history,
+            &queue_texts,
+            chat_blob.as_deref(),
+        );
+        for rec in missing {
+            if rec.text.trim().is_empty() {
+                continue;
+            }
+            self.session.enqueue_prompt(rec.text);
+        }
+        if !self.session.pending_prompts.is_empty() {
+            self.sync_queue_pane();
+        }
+    }
+
+    /// After draft, queue, and WAL restore: the operator prompt appears once.
+    ///
+    /// Not adopting a live sampler: keep the unsent body in the composer;
+    /// drop matching queue rows so drain cannot start a false turn.
+    /// Adopting a live sampler: occupancy is the queue or the live turn, not
+    /// a second copy in the composer.
+    pub(crate) fn reconcile_restored_unsent_occupancy(&mut self, adopting_live_sampler: bool) {
+        let draft = self.prompt.text().trim().to_string();
+        if draft.is_empty() {
+            return;
+        }
+        let matches_draft = |text: &str| text.trim() == draft;
+        let in_queue = self
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| matches_draft(&p.text))
+            || self.shared_queue.iter().any(|w| matches_draft(&w.text));
+        if adopting_live_sampler {
+            if in_queue {
+                self.prompt.set_text("");
+                self.persist_unsent_composer_draft_now();
+            }
+            return;
+        }
+        if !in_queue {
+            return;
+        }
+        self.session
+            .pending_prompts
+            .retain(|p| !matches_draft(&p.text));
+        self.shared_queue.retain(|w| !matches_draft(&w.text));
+        self.sync_queue_pane();
+        self.persist_pending_prompts();
+    }
+
+    /// Append one WAL line (fsync) before the model is asked, before compact,
+    /// and before re-exec. Tests write only when `GROK_HOME` is set.
+    pub(crate) fn append_prompt_wal(
+        &self,
+        kind: xai_grok_shell::session::prompt_wal::PromptWalKind,
+        text: &str,
+        images: &[crate::prompt_images::PastedImage],
+    ) {
+        self.append_prompt_wal_inner(kind, text, images, false);
+    }
+
+    fn append_prompt_wal_inner(
+        &self,
+        kind: xai_grok_shell::session::prompt_wal::PromptWalKind,
+        text: &str,
+        images: &[crate::prompt_images::PastedImage],
+        force_disk: bool,
+    ) {
+        if text.trim().is_empty() && images.is_empty() {
+            return;
+        }
+        self.prompt_wal_append_count
+            .set(self.prompt_wal_append_count.get().saturating_add(1));
+        if !force_disk && cfg!(test) && std::env::var_os("GROK_HOME").is_none() {
+            return;
+        }
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let record = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+            session_id.0.as_ref(),
+            kind,
+            text,
+            prompt_wal_images(images),
+        );
+        let _ = xai_grok_shell::session::prompt_wal::append_prompt_wal(
+            &cwd,
+            session_id.0.as_ref(),
+            &record,
+        );
+    }
+
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
@@ -329,6 +462,11 @@ impl AgentView {
             last_text_click: None,
             last_clipboard_toast_at: None,
             last_context_click_at: None,
+            last_unsent_draft_persist: Cell::new(None),
+            unsent_draft_persist_flush_count: Cell::new(0),
+            unsent_draft_persist_skip_count: Cell::new(0),
+            prompt_wal_append_count: Cell::new(0),
+            pending_prompts_persist_count: Cell::new(0),
             hovered_prompt: false,
             hit_context: Default::default(),
             hit_credits: Default::default(),
@@ -474,10 +612,13 @@ impl AgentView {
             timeline_hover_preview: None,
             session_agent_name: None,
             subagent_sessions: HashMap::new(),
+            finished_nested_wait_ids: HashSet::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
             role: AgentRole::Root,
             hit_subagent_frame_close: Default::default(),
+            hit_overlay_nested_status: Default::default(),
+            overlay_nested_status_child_sid: None,
             sharing_enabled: false,
             memory_mode: None,
             billing_surface_visible: false,
@@ -1147,8 +1288,17 @@ impl AgentView {
     /// A `TaskOutput` wait shows the bg task's description (`{description}…`).
     /// A `Subagent` wait shows the subagent count (`Waiting for subagent` or `Waiting for N subagents`).
     pub(crate) fn resolve_turn_activity(&self) -> Option<crate::acp::tracker::TurnActivity> {
-        self.resolve_turn_activity_unenriched()
-            .map(|activity| self.enrich_waiting_activity(activity))
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        match self.open_turn_wait_kind() {
+            Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted) => None,
+            Some(OpenTurnWaitKind::NestedSubagentStillRunning) => self
+                .resolve_turn_activity_unenriched()
+                .map(|activity| self.enrich_waiting_activity(activity))
+                .or(Some(TurnActivity::Waiting(WaitingReason::subagent()))),
+            Some(OpenTurnWaitKind::LiveSampler) | None => self
+                .resolve_turn_activity_unenriched()
+                .map(|activity| self.enrich_waiting_activity(activity)),
+        }
     }
     /// Wait detection without display enrichment, for predicates that need the wait's identity and must not churn with view-resolved display state.
     /// [`Self::resolve_turn_activity`] adds the display subject on top.
@@ -1190,10 +1340,19 @@ impl AgentView {
             }) = activity
                 && !self.waited_work_still_running(task_ids)
             {
-                // Fall through: do not keep task-output wait chrome.
-            } else {
-                return Some(activity);
+                // Do not fall through to Waiting(Model). The wait tool may
+                // still be Pending, but every known nested id already
+                // exited. Synthesizing model wait is the L1 hang after a
+                // finished spawn (Waiting for the model + climbing timer).
+                // Returning None is that false wait, not proof the sampler
+                // hung. A TurnRunning turn with no completed-wait fallthrough
+                // still uses Waiting(Model) as the live sampler wait.
+                if self.has_running_foreground_subagent() {
+                    return Some(TurnActivity::Waiting(WaitingReason::subagent()));
+                }
+                return None;
             }
+            return Some(activity);
         }
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
@@ -1733,6 +1892,160 @@ mod resolve_turn_activity_tests {
         assert_eq!(
             view.resolve_turn_activity(),
             Some(TurnActivity::Waiting(WaitingReason::Model))
+        );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler)
+        );
+        assert!(
+            !view.session.state.is_idle(),
+            "live sampler wait is TurnRunning, not idle"
+        );
+    }
+
+    /// Named contract: `open_turn_wait_kind` must not treat any historical
+    /// nested finished as `FalseWaitAfterNestedCompleted`. Only nested ids
+    /// this turn waited on. First-token wait then paints Waiting for the
+    /// model via `WaitingReason::Model`.
+    #[test]
+    fn first_token_wait_with_old_nested_paints_waiting_for_the_model() {
+        let mut view = running_view();
+        let mut old = running_child("historical nested from a previous turn");
+        mark_specialist_completed(&mut old);
+        view.subagent_sessions.insert("old-l2".into(), old);
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "historical nested finished is not a this-turn wait, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        let activity = view.resolve_turn_activity();
+        assert_eq!(
+            activity,
+            Some(TurnActivity::Waiting(WaitingReason::Model)),
+            "first-token wait must stay Waiting(Model), got {activity:?}"
+        );
+        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        assert_eq!(
+            label.as_deref(),
+            Some("Waiting for the model…"),
+            "first-token wait must paint Waiting for the model, got {label:?}"
+        );
+        let text = crate::app::subagent::format_activity_label(
+            activity.as_ref().expect("first-token activity"),
+        );
+        assert!(
+            text.to_ascii_lowercase().contains("waiting for the model"),
+            "got {text}"
+        );
+    }
+
+    /// Named contract: first-token wait after a this-turn nested finish
+    /// that this turn did not wait on must stay `Waiting(Model)` /
+    /// Waiting for the model. `FalseWaitAfterNestedCompleted` only when
+    /// this turn actually waited on those ids (wait tool / spawn wait),
+    /// not every `SubagentFinished`.
+    #[test]
+    fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model() {
+        let mut view = running_view();
+        let mut nested = running_child("this-turn background nested this turn did not wait on");
+        nested.is_background = true;
+        nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
+        view.subagent_sessions.insert("l2-bg-nowait".into(), nested);
+        mark_specialist_completed(view.subagent_sessions.get_mut("l2-bg-nowait").unwrap());
+        view.note_finished_nested_wait_ids("l2-bg-nowait", "sa-bg-nowait");
+        assert!(
+            view.finished_nested_wait_ids.is_empty(),
+            "SubagentFinished without wait tool / spawn wait must not record finished_nested_wait_ids, got {:?}",
+            view.finished_nested_wait_ids
+        );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "unwaited this-turn nested finish is not FalseWaitAfterNestedCompleted, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        let activity = view.resolve_turn_activity();
+        assert_eq!(
+            activity,
+            Some(TurnActivity::Waiting(WaitingReason::Model)),
+            "first-token wait must stay Waiting(Model), got {activity:?}"
+        );
+        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        assert_eq!(
+            label.as_deref(),
+            Some("Waiting for the model…"),
+            "first-token wait must paint Waiting for the model, got {label:?}"
+        );
+    }
+
+    /// Live nested wait is not idle. Bare Waiting for the model is the
+    /// sampler string; do not treat this as a hang or as chrome idle.
+    #[test]
+    fn waiting_for_the_model_is_not_idle_when_nested_subagent_still_running() {
+        let mut view = running_view();
+        view.subagent_sessions
+            .insert("l2-live".into(), running_child("Land footer liveness"));
+        assert!(
+            !view.session.state.is_idle(),
+            "nested still running is not AgentState::Idle"
+        );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::NestedSubagentStillRunning)
+        );
+        let activity = view
+            .resolve_turn_activity()
+            .expect("live nested wait is not idle chrome");
+        assert!(
+            !matches!(activity, TurnActivity::Waiting(WaitingReason::Model)),
+            "live nested wait must not paint the sampler hang string, got {activity:?}"
+        );
+        let text = crate::app::subagent::format_activity_label(&activity);
+        assert!(
+            !text.to_ascii_lowercase().contains("waiting for the model"),
+            "live nested wait must name the subagent, got {text}"
+        );
+    }
+
+    /// Specs-class: 1 queued while nested is still running. That is live
+    /// work, not idle, and not a reason to auto-fire /unstick.
+    #[test]
+    fn waiting_for_the_model_is_not_idle_when_prompt_is_queued() {
+        use crate::app::agent::{QueueEntryKind, QueuedPrompt};
+        let mut view = running_view();
+        view.subagent_sessions
+            .insert("l2-live".into(), running_child("Land footer liveness"));
+        view.session.pending_prompts.push_back(QueuedPrompt::plain(
+            1,
+            "follow up while nested runs",
+            QueueEntryKind::Prompt,
+        ));
+        assert!(
+            !view.session.state.is_idle(),
+            "queued follow-up plus nested wait is not idle"
+        );
+        assert_eq!(
+            view.session.pending_prompts.len(),
+            1,
+            "specs-class: 1 queued"
+        );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::NestedSubagentStillRunning)
+        );
+        assert!(
+            view.resolve_turn_activity().is_some(),
+            "queued follow-up must not clear live nested wait chrome"
+        );
+        assert_eq!(
+            view.held_queue_count(),
+            1,
+            "specs-class: 1 queued while nested still running"
+        );
+        assert!(
+            !view.renders_parked(),
+            "foreground nested wait keeps running chrome, not parked idle"
         );
     }
     #[test]
@@ -2431,6 +2744,19 @@ mod resolve_turn_activity_tests {
             ),
             "wait chrome must end after the waited-on nested agent completed, got {activity:?}"
         );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted),
+            "pending wait on completed nested ids is the false wait, not live sampler"
+        );
+        assert!(
+            !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "Surmount / grok-oss fork: finished nested wait must not fall through to Waiting for the model, got {activity:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("waiting for the model"),
+            "parent overlay must not stay Waiting for the model after the child completed, got {text}"
+        );
         assert!(
             !text.contains("Waiting on task output"),
             "parent overlay must not stay Waiting on task output after the child completed, got {text}"
@@ -2494,6 +2820,56 @@ mod resolve_turn_activity_tests {
             ),
             "named wait chrome must end after that nested agent completed, got {activity:?}"
         );
+        assert!(
+            !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "Surmount / grok-oss fork: named finished nested wait must not paint Waiting for the model, got {activity:?}"
+        );
+    }
+
+    /// Occupied parent turn whose waited-on nested id already exited must
+    /// leave Waiting for the model. Falling through to Model wait is the
+    /// screenshot hang (17m timer after the host spawn already exited).
+    #[test]
+    fn parent_must_not_wait_for_the_model_after_waited_nested_already_completed() {
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("General Fix image token counting grok-4.6");
+        specialist.is_background = true;
+        specialist.subagent_id = Arc::from("sa-l2-done");
+        view.subagent_sessions.insert("l2-done".into(), specialist);
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["l2-done"],
+                "timeout_ms": 600_000,
+            }),
+        );
+        mark_specialist_completed(view.subagent_sessions.get_mut("l2-done").unwrap());
+        view.drop_satisfied_task_output_waits();
+        let activity = view.resolve_turn_activity();
+        let text = activity
+            .as_ref()
+            .map(crate::app::subagent::format_activity_label)
+            .unwrap_or_default();
+        assert_ne!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "completed nested wait must not be classified as live sampler, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        assert!(
+            activity.is_none()
+                || !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "Surmount / grok-oss fork: parent waiting on a completed nested id must not stay Waiting for the model, got {activity:?}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("waiting for the model"),
+            "got {text}"
+        );
+        assert!(
+            view.session.state.is_turn_running(),
+            "ACP wait tool may still be Pending; chrome idle is the contract, not a fake finish_turn"
+        );
     }
 
     /// A live wait tool that names an id not yet in bg_tasks / subagent maps
@@ -2552,6 +2928,50 @@ mod resolve_turn_activity_tests {
             ),
             "SubagentFinished must drop the pending wait tool chrome, got {:?}",
             view.session.turn_activity()
+        );
+    }
+
+    /// After nested exit, a completed id missing from the map must not keep
+    /// parent chrome waiting as if the child still ran.
+    #[test]
+    fn wait_on_completed_nested_id_missing_from_map_does_not_stay_running() {
+        use std::sync::Arc;
+        let mut view = running_view();
+        let mut specialist = running_child("General Fix image token counting grok-4.6");
+        specialist.is_background = true;
+        specialist.subagent_id = Arc::from("sa-l2-done");
+        view.subagent_sessions.insert("l2-done".into(), specialist);
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["l2-done", "sa-l2-done"],
+                "timeout_ms": 600_000,
+            }),
+        );
+        mark_specialist_completed(view.subagent_sessions.get_mut("l2-done").unwrap());
+        view.note_finished_nested_wait_ids("l2-done", "sa-l2-done");
+        view.complete_satisfied_task_output_wait_tools();
+        view.drop_satisfied_task_output_waits();
+        view.subagent_sessions.remove("l2-done");
+        pending_task_output_wait(
+            &mut view,
+            serde_json::json!({
+                "task_ids": ["l2-done", "sa-l2-done"],
+                "timeout_ms": 600_000,
+            }),
+        );
+        let activity = view.resolve_turn_activity();
+        assert!(
+            !matches!(
+                activity,
+                Some(TurnActivity::Waiting(WaitingReason::TaskOutput { .. }))
+            ),
+            "Surmount / grok-oss fork: completed nested id missing from the map must not stay waiting as if the child still ran, got {activity:?}"
+        );
+        assert_ne!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::NestedSubagentStillRunning),
+            "missing completed nested id is not a live nested wait"
         );
     }
 }
@@ -2853,5 +3273,279 @@ mod auto_recap_eligibility_tests {
         assert!(!agent.is_eligible_for_auto_recap());
         agent.session.scheduled_tasks.remove("loop-1");
         assert!(agent.is_eligible_for_auto_recap());
+    }
+}
+
+/// Resume / last-session restore occupancy. The operator prompt must appear
+/// once. Enter is send unless a live sampler turn is actually running.
+/// Waiting is a real sampler wait, not leftover occupancy.
+#[cfg(test)]
+mod resume_restore_occupancy_tests {
+    use super::*;
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::{Action, Effect, TaskResult};
+    use crate::app::agent::{AgentId, AgentState};
+    use crate::app::dispatch::dispatch;
+    use agent_client_protocol as acp;
+    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+
+    const BODY: &str = "resume occupancy operator prompt that must appear once";
+
+    fn enter_is_interject(agent: &AgentView) -> bool {
+        ActionRegistry::interjection_possible(
+            agent.session.state.is_turn_running(),
+            !agent.prompt.text().trim().is_empty(),
+        )
+    }
+
+    fn occupancy_count(agent: &AgentView, body: &str) -> usize {
+        let needle = body.trim();
+        let mut n = 0;
+        if agent.prompt.text().trim() == needle {
+            n += 1;
+        }
+        n += agent
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|p| p.text.trim() == needle)
+            .count();
+        n += agent
+            .shared_queue
+            .iter()
+            .filter(|w| w.text.trim() == needle)
+            .count();
+        n
+    }
+
+    fn write_unsent_draft(cwd: &str, sid: &str, body: &str) {
+        xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(cwd, sid, body)
+            .expect("write unsent draft");
+    }
+
+    fn write_queue_row(cwd: &str, sid: &str, body: &str) {
+        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+            cwd,
+            sid,
+            &[PersistedQueuedPrompt {
+                id: 1,
+                text: body.to_string(),
+                kind: "prompt".into(),
+            }],
+        )
+        .expect("write pending_prompts.json");
+    }
+
+    fn restore_from_disk(agent: &mut AgentView) {
+        agent.restore_unsent_composer_draft_from_disk();
+        agent.restore_pending_prompts_from_disk();
+        agent.restore_prompt_wal_from_disk();
+    }
+
+    fn session_loaded(
+        app: &mut crate::app::app_view::AppView,
+        sid: &str,
+        running_prompt_id: Option<String>,
+    ) -> Vec<Effect> {
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id,
+                scheduler_background_loops: None,
+            }),
+            app,
+        )
+    }
+
+    fn primed_resume_app(
+        cwd: std::path::PathBuf,
+        sid: &str,
+        leftover_running: bool,
+    ) -> crate::app::app_view::AppView {
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.to_string().into());
+        agent.session.cwd = cwd;
+        agent.prompt.set_text("");
+        agent.session.pending_prompts.clear();
+        agent.session.prompt_history.clear();
+        agent.session.loading_replay = true;
+        if leftover_running {
+            agent.session.state = AgentState::TurnRunning;
+        }
+        restore_from_disk(agent);
+        app
+    }
+
+    /// Named contract: after `--resume` / last-session restore, the operator
+    /// prompt appears once. Not composer plus queue #1 with the same body.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-once-occupancy";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+
+        let mut app = primed_resume_app(cwd, sid, false);
+        let _ = session_loaded(&mut app, sid, None);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            occupancy_count(agent, BODY),
+            1,
+            "the operator prompt must appear once after resume restore, not composer plus queue #1; composer={:?} queue={:?}",
+            agent.prompt.text(),
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            BODY,
+            "when not adopting a live sampler turn, keep the unsent body in the composer once"
+        );
+        assert!(
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .all(|p| p.text.trim() != BODY.trim()),
+            "queue #1 must not be a second copy of the composer body"
+        );
+    }
+
+    /// Named contract: resume must not arm Interject as the default Enter
+    /// binding unless a live turn is actually sampling. False-wait / idle
+    /// after resume: Enter is send, not interject.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-no-enter-interject";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+
+        let mut app = primed_resume_app(cwd, sid, true);
+        let effects = session_loaded(&mut app, sid, None);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            !enter_is_interject(agent),
+            "resume must not arm Enter:interject unless a live turn is sampling; state={:?} composer={:?}",
+            agent.session.state,
+            agent.prompt.text()
+        );
+        assert!(
+            agent.session.state.is_idle(),
+            "false-wait after resume is idle so Enter is send, got {:?}",
+            agent.session.state
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "unsent draft occupancy must not drain as a new sampler turn, got {effects:?}"
+        );
+    }
+
+    /// Named contract: Waiting after resume must be a real sampler wait, not
+    /// occupancy leftover. If nested and host work are gone, do not show
+    /// Waiting with a climbing timer.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-no-false-waiting";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+
+        let mut app = primed_resume_app(cwd, sid, true);
+        let _ = session_loaded(&mut app, sid, None);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let activity = agent.resolve_turn_activity();
+        assert_eq!(
+            agent.open_turn_wait_kind(),
+            None,
+            "nested and sampler are gone; resume must not classify leftover occupancy as a live wait, got {:?}",
+            agent.open_turn_wait_kind()
+        );
+        assert!(
+            !matches!(activity, Some(TurnActivity::Waiting(WaitingReason::Model))),
+            "Waiting after resume must be a real sampler wait, not occupancy leftover, got {activity:?}"
+        );
+        assert!(
+            !agent.session.state.is_turn_running(),
+            "no live sampler and no nested work: do not leave TurnRunning / Waiting timer, got {:?}",
+            agent.session.state
+        );
+    }
+
+    /// Named contract: unsent draft restore and queue restore must not both
+    /// rehydrate the same string. A WAL Send of that same body must not
+    /// enqueue a second copy either.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "resume-no-double-rehydrate";
+        write_unsent_draft(&cwd_str, sid, BODY);
+        write_queue_row(&cwd_str, sid, BODY);
+        let wal = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+            sid,
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            BODY,
+            Vec::new(),
+        );
+        xai_grok_shell::session::prompt_wal::append_prompt_wal(&cwd_str, sid, &wal)
+            .expect("write WAL send");
+
+        let mut app = primed_resume_app(cwd, sid, false);
+        let _ = session_loaded(&mut app, sid, None);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            occupancy_count(agent, BODY),
+            1,
+            "unsent draft restore and queue restore must not both rehydrate the same string; composer={:?} queue={:?}",
+            agent.prompt.text(),
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(agent.prompt.text(), BODY);
+        assert!(
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .all(|p| p.text.trim() != BODY.trim()),
+            "WAL Send restore must not enqueue a body already in the composer draft"
+        );
     }
 }

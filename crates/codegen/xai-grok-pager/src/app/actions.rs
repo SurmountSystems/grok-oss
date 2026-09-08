@@ -746,6 +746,10 @@ pub enum Action {
     ///
     /// `/start` only. Not `/resume` (session picker) and not a pause toggle.
     StartPausedOrInterruptedWork,
+    /// `/unstick`: resend the last L1 prompt as if the network dropped it.
+    ///
+    /// Not `/resume` (session picker) and not continue interrupted turn.
+    UnstickLastL1Prompt,
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.

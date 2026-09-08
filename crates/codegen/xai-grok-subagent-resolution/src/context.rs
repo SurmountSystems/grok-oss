@@ -6,7 +6,12 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use xai_grok_sampling_types::conversation::ConversationItem;
+use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
+
+use crate::nested_images::{
+    collect_named_saved_images, format_named_image_token, image_parts_for_named_spawn_prompt,
+    image_parts_from_numbers,
+};
 
 /// Maximum number of complete turns to render verbatim in the background context.
 /// Turns beyond this threshold (counting from the end) are summarized as metadata (message counts and tools used).
@@ -58,7 +63,7 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     if turns.len() <= MAX_VERBATIM_TURNS {
         // All turns fit, so render them verbatim
         for item in &parent_items {
-            render_item_to_background(&mut background, item);
+            render_item_to_background(&mut background, item, &catalog, &mut named_in_background);
         }
     } else {
         // Summarize early turns, keep last MAX_VERBATIM_TURNS verbatim.
@@ -87,7 +92,15 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     }
     background.push_str("</background_context>");
 
-    let conversation = vec![system, ConversationItem::user(&background)];
+    let image_parts = match spawn_prompt {
+        Some(prompt) => image_parts_for_named_spawn_prompt(prompt, &catalog),
+        None => image_parts_from_numbers(&named_in_background, &catalog),
+    };
+    let mut parts = vec![ContentPart::Text {
+        text: background.into(),
+    }];
+    parts.extend(image_parts);
+    let conversation = vec![system, ConversationItem::user_with_parts(parts)];
     (conversation, 2)
 }
 
@@ -271,22 +284,41 @@ fn trim_string_in_place(s: &mut String) {
 }
 
 /// Render a single conversation item into the background context string.
-fn render_item_to_background(out: &mut String, item: &ConversationItem) {
+///
+/// Text is kept. Saved images are named as `[Image #N]` plus the absolute
+/// path. `data:image` bytes are not copied into the string.
+fn render_item_to_background(
+    out: &mut String,
+    item: &ConversationItem,
+    catalog: &[crate::nested_images::NamedSavedImage],
+    named_here: &mut Vec<usize>,
+) {
     match item {
         ConversationItem::User(u) => {
-            let text: String = u
-                .content
-                .iter()
-                .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
-                        Some(text.as_ref())
+            let mut body = String::new();
+            for part in &u.content {
+                match part {
+                    ContentPart::Text { text } => {
+                        if !body.is_empty() && !body.ends_with('\n') {
+                            body.push('\n');
+                        }
+                        body.push_str(text);
                     }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+                    ContentPart::Image { url } => {
+                        if let Some(img) = catalog.iter().find(|n| n.matches_url(url)) {
+                            if !body.is_empty() && !body.ends_with('\n') {
+                                body.push('\n');
+                            }
+                            body.push_str(&format_named_image_token(img));
+                            if !named_here.contains(&img.number) {
+                                named_here.push(img.number);
+                            }
+                        }
+                    }
+                }
+            }
 
-            let text = strip_fork_noise(&text);
+            let text = strip_fork_noise(&body);
             if text.is_empty() {
                 tracing::debug!(
                     target: "fork_context",
@@ -316,6 +348,16 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
                 tr.content.as_ref().to_owned()
             };
             let _ = writeln!(out, "[Tool Result]: {preview}");
+            for part in &tr.images {
+                if let ContentPart::Image { url } = part
+                    && let Some(img) = catalog.iter().find(|n| n.matches_url(url))
+                {
+                    let _ = writeln!(out, "{}", format_named_image_token(img));
+                    if !named_here.contains(&img.number) {
+                        named_here.push(img.number);
+                    }
+                }
+            }
         }
         ConversationItem::System(_) => {}
         ConversationItem::BackendToolCall(b) => {
@@ -998,5 +1040,137 @@ This is a very long skill body with many lines of instructions.\n\n\
         );
         assert!(text.contains("Actual query"));
         assert!(!text.contains("Skill content"));
+    }
+
+    fn user_with_saved_image(text: &str, path: &std::path::Path) -> ConversationItem {
+        ConversationItem::user_with_parts(vec![
+            xai_grok_sampling_types::conversation::ContentPart::Text { text: text.into() },
+            xai_grok_sampling_types::conversation::ContentPart::Image {
+                url: format!("file://{}", path.display()).into(),
+            },
+        ])
+    }
+
+    fn extract_image_urls(item: &ConversationItem) -> Vec<String> {
+        match item {
+            ConversationItem::User(u) => u
+                .content
+                .iter()
+                .filter_map(|p| match p {
+                    xai_grok_sampling_types::conversation::ContentPart::Image { url } => {
+                        Some(url.as_ref().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fork_background_prompt_names_saved_path_and_omits_data_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = dir.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let path = images.join("shot-1.png");
+        std::fs::write(&path, b"png-bytes").unwrap();
+        let items = vec![
+            system_item("System"),
+            user_with_saved_image("look at this screenshot", &path),
+            assistant_item("ok"),
+        ];
+        let (result, prefix_len) = normalize_forked_context(items);
+        assert_eq!(prefix_len, 2);
+        let text = extract_background_text(&result[1]);
+        assert!(text.contains("[Image #1]"), "named token missing: {text}");
+        assert!(
+            text.contains(&path.display().to_string()),
+            "absolute path missing: {text}"
+        );
+        assert!(
+            !text.contains("data:image"),
+            "data URL leaked into spawn string"
+        );
+        assert!(
+            !text.contains("png-bytes"),
+            "raw bytes leaked into spawn string"
+        );
+        let data_items = vec![
+            system_item("System"),
+            ConversationItem::user_with_parts(vec![
+                xai_grok_sampling_types::conversation::ContentPart::Text {
+                    text: "inline crate".into(),
+                },
+                xai_grok_sampling_types::conversation::ContentPart::Image {
+                    url: "data:image/png;base64,QUJDRA==".into(),
+                },
+            ]),
+            assistant_item("ok"),
+        ];
+        let (data_result, _) = normalize_forked_context(data_items);
+        let data_text = extract_background_text(&data_result[1]);
+        assert!(data_text.contains("inline crate"));
+        assert!(!data_text.contains("data:image"));
+        assert!(!data_text.contains("QUJDRA=="));
+        assert!(extract_image_urls(&data_result[1]).is_empty());
+    }
+
+    #[test]
+    fn nested_fork_first_user_turn_attaches_file_image_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let path = assets.join("nested.png");
+        std::fs::write(&path, b"png-bytes").unwrap();
+        let items = vec![
+            system_item("System"),
+            user_with_saved_image("see screenshot", &path),
+            assistant_item("noted"),
+        ];
+        let (result, _) = normalize_forked_context(items);
+        let request =
+            xai_grok_sampling_types::conversation::ConversationRequest::from_items(result);
+        let user = &request.items[1];
+        let urls = extract_image_urls(user);
+        assert_eq!(
+            urls.len(),
+            1,
+            "nested first user turn must attach the named file"
+        );
+        assert_eq!(urls[0], format!("file://{}", path.display()));
+        assert!(!urls[0].contains("data:"));
+        let text = extract_background_text(user);
+        assert!(!text.contains("data:image"));
+        assert!(text.contains("[Image #1]"));
+        assert!(text.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn extra_parent_images_not_attached_unless_named_in_spawn_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = dir.path().join("images");
+        std::fs::create_dir_all(&images).unwrap();
+        let job = images.join("job.png");
+        let extra = images.join("unrelated.png");
+        std::fs::write(&job, b"job").unwrap();
+        std::fs::write(&extra, b"extra").unwrap();
+        let items = vec![
+            system_item("System"),
+            user_with_saved_image("job shot", &job),
+            assistant_item("ok 1"),
+            user_with_saved_image("unrelated shot", &extra),
+            assistant_item("ok 2"),
+        ];
+        let spawn = format!("Use [Image #1] {} for this job only.", job.display());
+        let (result, _) = normalize_forked_context_for_job(items, Some(&spawn));
+        let urls = extract_image_urls(&result[1]);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], format!("file://{}", job.display()));
+        assert!(
+            !urls.iter().any(|u| u.contains("unrelated.png")),
+            "unrelated parent image must not attach: {urls:?}"
+        );
+        let text = extract_background_text(&result[1]);
+        assert!(!text.contains("data:image"));
     }
 }

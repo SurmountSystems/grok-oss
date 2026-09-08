@@ -996,7 +996,11 @@ impl AgentView {
     }
 
     pub(crate) fn reopen_plan_approval(&mut self) {
-        self.snapshot_or_clear_plan_feedback_draft();
+        // Composer text typed while the plan pane was closed is the next
+        // user prompt. Do not snapshot it as plan review notes.
+        if self.line_viewer.is_some() {
+            self.snapshot_or_clear_plan_feedback_draft();
+        }
         let keep_draft =
             !self.prompt.text().trim().is_empty() && !self.composer_holds_view_plan_slash();
         let live_cursor = self.prompt.cursor();
@@ -1117,7 +1121,32 @@ impl AgentView {
         {
             return self.approve_plan();
         }
-        match self.prompt.route_enter(key) {
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        // Session Multiline: Enter inserts a newline. Preview must match
+        // the main Human box. `[ui] composer_multiline = false` never
+        // takes this arm (Enter still sends). Line-comment overlay
+        // footer is `Enter:save comment`; do not insert a newline there.
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.multiline_mode
+            && allow_newlines
+            && !is_commenting
+            && !self.prompt.file_search_visible()
+        {
+            self.prompt.textarea.insert_str("\n");
+            self.snapshot_or_clear_plan_feedback_draft();
+            self.persist_unsent_composer_draft();
+            return InputOutcome::Changed;
+        }
+        let mut enter_outcome = self.prompt.route_enter(key);
+        if matches!(enter_outcome, EnterOutcome::PassThrough)
+            && crate::input::is_mod_enter(key)
+            && self.multiline_mode
+            && allow_newlines
+        {
+            enter_outcome = EnterOutcome::Submit;
+        }
+        match enter_outcome {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => {
                 let panel_open = self.line_viewer.is_some();

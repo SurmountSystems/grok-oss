@@ -2176,6 +2176,7 @@ impl PromptWidget {
         // Backslash continuation: if the character before the cursor is `\`, replace it with a newline
         if key.code == KeyCode::Enter
             && key.modifiers.is_empty()
+            && allow_newlines
             && self.apply_backslash_continuation()
         {
             return EnterOutcome::NewlineInserted;

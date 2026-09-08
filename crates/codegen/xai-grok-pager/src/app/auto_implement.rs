@@ -586,6 +586,23 @@ more review notes";
             turn_src.contains("on_successful_turn_end"),
             "lost-RPC turn reconcile success must call on_successful_turn_end before drain"
         );
+        let compact_complete = prompt_src
+            .split("pub(super) fn handle_compact_complete")
+            .nth(1)
+            .and_then(|s| s.split("pub(super) fn ").next())
+            .expect("handle_compact_complete in prompt.rs");
+        assert!(
+            !compact_complete.contains("on_successful_turn_end"),
+            "compact complete must not auto-run /implement; compact is not an operator turn"
+        );
+        assert!(
+            !compact_complete.contains("maybe_enqueue_auto_implement"),
+            "compact complete must not enqueue occupancy or any operator prompt"
+        );
+        assert!(
+            !compact_complete.contains("enqueue_prompt"),
+            "compact complete must not copy occupancy onto pending_prompts"
+        );
     }
 
     #[test]

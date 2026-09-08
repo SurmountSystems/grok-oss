@@ -664,10 +664,85 @@ pub struct ConversationRequest {
     pub length_policy: LengthPolicy,
 }
 
+/// True when `url` is an `http(s)` URL or a nonempty `data:` base64 image
+/// the inference API accepts as `image_url`. Local paths, `file://`,
+/// `[Image #N]` tokens, and empty values are not accepted.
+pub fn image_url_is_api_accepted(url: &str) -> bool {
+    let url = url.trim();
+    if url.starts_with("https://") {
+        return url.len() > "https://".len();
+    }
+    if url.starts_with("http://") {
+        return url.len() > "http://".len();
+    }
+    let Some((header, payload)) = url.split_once(',') else {
+        return false;
+    };
+    if payload.is_empty() {
+        return false;
+    }
+    header.starts_with("data:") && header.ends_with(";base64")
+}
+
 impl ConversationRequest {
     /// Strip every image; returns the stripped URLs.
     pub fn strip_images(&mut self) -> Vec<Arc<str>> {
         strip_images_where(&mut self.items, |_| true)
+    }
+
+    /// Strip images whose `image_url` is not a data URL or `http(s)` URL.
+    ///
+    /// Path-shaped session assets, `[Image #N]` tokens, and empty values
+    /// 400 the API (`invalid_image`). Valid data/`http(s)` siblings stay so
+    /// a retry does not drop screenshots the API could have accepted.
+    pub fn strip_images_not_api_urls(&mut self) -> Vec<Arc<str>> {
+        strip_images_where(&mut self.items, |url| !image_url_is_api_accepted(url))
+    }
+}
+
+#[cfg(test)]
+mod image_url_is_api_accepted_tests {
+    use super::*;
+
+    /// Operator contract: compact and retry must not send a local session
+    /// asset path, an `[Image #N]` token, or an empty value as `image_url`.
+    #[test]
+    fn path_image_token_and_empty_are_not_api_image_urls() {
+        assert!(!image_url_is_api_accepted("[Image #1]"));
+        assert!(!image_url_is_api_accepted(
+            "/home/hunter/.grok/sessions/x/assets/image-1.jpg"
+        ));
+        assert!(!image_url_is_api_accepted("file:///tmp/x.jpg"));
+        assert!(!image_url_is_api_accepted(""));
+        assert!(!image_url_is_api_accepted("data:image/png;base64,"));
+        assert!(image_url_is_api_accepted("https://example.com/x.png"));
+        assert!(image_url_is_api_accepted("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn strip_images_not_api_urls_keeps_valid_data_url_siblings() {
+        let mut user = ConversationItem::user("see");
+        user.add_image("file:///tmp/session-asset.jpg");
+        user.add_image("data:image/png;base64,AAAA");
+        let mut req = ConversationRequest {
+            items: vec![user],
+            ..Default::default()
+        };
+        let stripped = req.strip_images_not_api_urls();
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].as_ref(), "file:///tmp/session-asset.jpg");
+        let ConversationItem::User(u) = &req.items[0] else {
+            panic!("expected user");
+        };
+        let remaining: Vec<_> = u
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Image { url } => Some(url.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remaining, ["data:image/png;base64,AAAA"]);
     }
 }
 

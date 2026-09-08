@@ -462,6 +462,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+        unstick_retry: bool,
     ) -> PromptTurnResult {
         self.signals_handle().increment_turn();
         self.handle_turn_input(TurnInputRequest {
@@ -1211,28 +1212,63 @@ impl SessionActor {
                 super::super::PromptOrigin::SchedulerFired => {
                     ConversationItem::scheduler_fired(user_message)
                 }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(
-                        self.maybe_apply_interrupt_envelope(user_message, verbatim),
-                    );
-                    if let Some(interrupt) = self
-                        .events
-                        .take_prior_interrupt_category()
-                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
-                    {
-                        item.set_prior_turn_interrupt(interrupt);
+                tracing::info!(
+                    session_id = %self.session_info.id.0,
+                    prompt_id = %prompt_id,
+                    "unstick retry: last user turn already matches; skipping append"
+                );
+            } else {
+                let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+                let mut user_chat = match &origin {
+                    super::super::PromptOrigin::TaskCompleted { .. } => {
+                        ConversationItem::task_completed(user_message)
                     }
-                    item
-                }
-            };
-            user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
-                for image in &user_images {
-                    user_chat.add_image(pick_user_image_url(image));
-                }
-                for image in &extra_images {
-                    user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
+                    super::super::PromptOrigin::SubagentCompleted { .. } => {
+                        ConversationItem::subagent_completed(user_message)
+                    }
+                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::NotificationDrain => {
+                        ConversationItem::notification_drain(user_message)
+                    }
+                    super::super::PromptOrigin::GoalSummary => {
+                        ConversationItem::goal_summary(user_message)
+                    }
+                    super::super::PromptOrigin::GoalClassifierNudge => {
+                        ConversationItem::goal_classifier_nudge(user_message)
+                    }
+                    super::super::PromptOrigin::SchedulerFired => {
+                        ConversationItem::scheduler_fired(user_message)
+                    }
+                    super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
+                    super::super::PromptOrigin::User => {
+                        let mut item = ConversationItem::user(
+                            self.maybe_apply_interrupt_envelope(user_message, verbatim),
+                        );
+                        if let Some(interrupt) =
+                            self.events.take_prior_interrupt_category().and_then(
+                                crate::session::events::prior_turn_interrupt_from_cancellation,
+                            )
+                        {
+                            item.set_prior_turn_interrupt(interrupt);
+                        }
+                        item
+                    }
+                };
+                user_chat.set_prompt_index(current_prompt_index);
+                if nested_grok_oss_inlines_images(
+                    self.is_cursor_harness(),
+                    self.tool_context.subagent_depth,
+                ) {
+                    let images_dir =
+                        xai_grok_shared::session::session_dir(&self.session_info).join("images");
+                    for image in &user_images {
+                        user_chat.add_image(conversation_image_handle(image, Some(&images_dir)));
+                    }
+                    for image in &extra_images {
+                        user_chat.add_image(conversation_image_handle(image, Some(&images_dir)));
+                    }
                 }
             }
             if self
@@ -3951,7 +3987,7 @@ impl SessionActor {
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,
-                    "L3 nested window is full after tools; ending child without compact"
+                    "nested window is full after tools; ending child without compact"
                 );
                 let snapshot = self
                     .finalize_turn_bookkeeping(

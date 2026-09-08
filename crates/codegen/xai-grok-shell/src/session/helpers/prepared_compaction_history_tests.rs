@@ -2,13 +2,6 @@ use super::*;
 use xai_chat_state::image_budget::IMAGE_COMPACT_TRIGGER_BYTES;
 use xai_grok_sampling_types::ContentPart;
 
-fn data_image(bytes: usize) -> ContentPart {
-    let prefix = "data:image/png;base64,";
-    ContentPart::Image {
-        url: format!("{prefix}{}", "A".repeat(bytes - prefix.len())).into(),
-    }
-}
-
 #[test]
 fn reserved_tool_headroom_triggers_small_history_once() {
     let source = vec![ConversationItem::user_with_parts(vec![data_image(500)])];
@@ -22,9 +15,10 @@ fn reserved_tool_headroom_triggers_small_history_once() {
     assert!(prepared.image_budget.needs_image_compaction);
     assert_eq!(prepared.image_budget.evicted, 1);
     assert_eq!(
-        prepared.image_budget.body_bytes_after,
-        serde_json::to_vec(&prepared.items).unwrap().len()
+        prepared.image_budget.inline_images, 0,
+        "stripped compact history has no inline images for the 47MB budget"
     );
+}
 
     let expected_items = serde_json::to_value(&prepared.items).unwrap();
     let expected_budget = prepared.image_budget;
@@ -34,6 +28,7 @@ fn reserved_tool_headroom_triggers_small_history_once() {
         serde_json::to_value(final_boundary.items).unwrap(),
         expected_items
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -795,6 +795,9 @@ pub fn current_value_for(
         "hide_header" => Some(SettingValue::Bool(
             crate::appearance::cache::load_hide_header(),
         )),
+        "composer_multiline" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_composer_multiline(),
+        )),
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
         )),

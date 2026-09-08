@@ -1,5 +1,6 @@
 //! Individual setting setters with persistence effects and toasts.
 
+use super::super::ctx::with_scrollback;
 use super::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::{Effect, ModelChoice};
 use crate::app::app_view::{ActiveView, AppView};
@@ -592,6 +593,33 @@ pub(in crate::app::dispatch) fn set_always_expand_thinking(
     set_always_expand_thinking_inner(app, new);
     refresh_open_settings_modals(app);
     app.show_toast(&save_success_toast("Always expand thinking", new));
+    vec![Effect::PersistSetting {
+        key: "always_expand_thinking",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Ctrl+T already updated the cache via `expand_all_thinking`. Persist
+/// `[ui] always_expand_thinking` and rematerialize other scrollbacks.
+/// No toast: the expand/collapse is the feedback.
+pub(in crate::app::dispatch) fn persist_always_expand_thinking_after_ctrl_t(
+    app: &mut AppView,
+    prev: bool,
+) -> Vec<Effect> {
+    let new = crate::appearance::cache::load_always_expand_thinking();
+    if prev == new {
+        return vec![];
+    }
+    app.current_ui.always_expand_thinking = Some(new);
+    for agent in app.agents.values_mut() {
+        agent.scrollback.apply_always_expand_thinking_flip(new);
+        for child in agent.subagent_views.values_mut() {
+            child.scrollback.apply_always_expand_thinking_flip(new);
+        }
+    }
+    with_scrollback(app, |s| s.apply_thinking_ctrl_t_groups(new));
+    refresh_open_settings_modals(app);
     vec![Effect::PersistSetting {
         key: "always_expand_thinking",
         value: crate::settings::SettingValue::Bool(new),

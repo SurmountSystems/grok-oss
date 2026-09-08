@@ -142,6 +142,7 @@ impl AgentView {
             PlanApprovalFocus::Commenting => {
                 vec![
                     HintItem::new(key!(Enter), "save comment"),
+                    HintItem::new(key!('y'), "copy"),
                     HintItem::new(key!(Esc), "cancel"),
                 ]
             }
@@ -350,6 +351,7 @@ impl AgentView {
         if self.is_casual_commenting() {
             return ShortcutsBarContent::Surface(vec![
                 HintItem::new(key!(Enter), "save comment"),
+                HintItem::new(key!('y'), "copy"),
                 HintItem::new(key!(Esc), "cancel"),
             ]);
         }
@@ -664,7 +666,9 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone() {
+        if let Some(ref child_sid) = self.active_subagent.clone()
+            && !self.child_is_auto_compacting(child_sid)
+        {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -3549,21 +3553,32 @@ impl AgentView {
             };
             // Isolated Preview still types in the Human box. Re-paint the
             // box caret after the plan pane so a right dock cannot hide it.
+            // If the prompt widget skipped caret_cell (unfocused layout),
+            // sit at the inner origin of the prompt pane.
             if self
                 .plan_approval_view
                 .as_ref()
                 .is_some_and(|p| p.focus == PlanApprovalFocus::Preview)
-                && let Some((cx, cy)) = prompt_caret_cell
             {
-                let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
-                crate::views::prompt_widget::paint_composer_box_cursor(
-                    buf,
-                    cx,
-                    cy,
-                    &theme,
-                    theme.bg_base,
-                    allow_block_glyph,
-                );
+                let caret = prompt_caret_cell.or_else(|| {
+                    let p = self.pane_areas.prompt;
+                    if p.width > 2 && p.height > 2 {
+                        Some((p.x.saturating_add(1), p.y.saturating_add(1)))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((cx, cy)) = caret {
+                    let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                    crate::views::prompt_widget::paint_composer_box_cursor(
+                        buf,
+                        cx,
+                        cy,
+                        &theme,
+                        theme.bg_base,
+                        allow_block_glyph,
+                    );
+                }
             }
             return (viewer_cursor, prompt_post_flush);
         }

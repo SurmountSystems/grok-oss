@@ -1115,6 +1115,24 @@ mod tests {
     }
 
     #[test]
+    fn osc12_named_ansi_green_is_doge_rgb_0_255_0() {
+        use ratatui::style::Color;
+        assert_eq!(osc12_rgb_for_accent(Color::Green), Some((0, 255, 0)));
+        assert_eq!(osc12_rgb_for_accent(Color::LightGreen), Some((0, 255, 0)));
+        assert_eq!(
+            osc12_rgb_for_accent(Color::Rgb(0, 255, 0)),
+            Some((0, 255, 0))
+        );
+        assert_eq!(osc12_rgb_for_accent(Color::Reset), None);
+        // Named ANSI Green must not keep xterm normal green (0, 128, 0).
+        assert_ne!(
+            crate::render::color::resolve_to_rgb(Color::Green),
+            Some((0, 255, 0)),
+            "precondition: resolve_to_rgb(Color::Green) is not spec green"
+        );
+    }
+
+    #[test]
     fn resolve_to_rgb_handles_rgb_indexed_named_and_reset() {
         use crate::render::color::{indexed_to_rgb, resolve_to_rgb};
         use ratatui::style::Color;

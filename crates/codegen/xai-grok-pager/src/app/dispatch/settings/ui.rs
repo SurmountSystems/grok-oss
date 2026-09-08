@@ -742,6 +742,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetAlwaysExpandThinking(*b))
         }
         ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
+        ("composer_multiline", SettingValue::Bool(b)) => Some(Action::SetComposerMultiline(*b)),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
         ("ulid_session_ids", SettingValue::Bool(b)) => Some(Action::SetUlidSessionIds(*b)),
         ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
@@ -1147,6 +1148,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_always_expand_thinking_inner(app, *b)
         }
         ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
+        ("composer_multiline", SettingValue::Bool(b)) => set_composer_multiline_inner(app, *b),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
         ("ulid_session_ids", SettingValue::Bool(b)) => set_ulid_session_ids_inner(app, *b),
         ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),

@@ -2340,6 +2340,11 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 .mode;
                 return xai_grok_pager::memory_cmd::run(memory_args, mode);
             }
+            Command::Rebuild { source } => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_rebuild_command(source).await;
+            }
             Command::Update {
                 check,
                 json,

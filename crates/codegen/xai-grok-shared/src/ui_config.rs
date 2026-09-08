@@ -329,6 +329,7 @@ impl Default for UiConfig {
             resume_canceled_turn_on_restart: None,
             cursor_blink: None,
             screen_mode: None,
+            composer_multiline: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -429,6 +430,16 @@ impl UiConfig {
     /// True when `exit_plan_mode` should open the plan modal immediately.
     pub fn plan_approval_force_modal(&self) -> bool {
         self.plan_approval_park_mode() == "modal"
+    }
+
+    /// Default for [`Self::composer_multiline`] when unset (on: Shift+Enter
+    /// may insert a newline; session Multiline still works).
+    pub const COMPOSER_MULTILINE_DEFAULT: bool = true;
+
+    /// Whether the Human box may insert newlines from Enter / Shift+Enter.
+    pub fn composer_multiline_enabled(&self) -> bool {
+        self.composer_multiline
+            .unwrap_or(Self::COMPOSER_MULTILINE_DEFAULT)
     }
 }
 
@@ -562,6 +573,27 @@ mod tests {
             ..Default::default()
         };
         assert!(!weird.plan_approval_force_modal());
+    }
+
+    #[test]
+    fn composer_multiline_defaults_on() {
+        assert!(UiConfig::default().composer_multiline_enabled());
+        let off = UiConfig {
+            composer_multiline: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.composer_multiline_enabled());
+        let on: UiConfig =
+            serde_json::from_value(serde_json::json!({ "composer_multiline": true }))
+                .expect("deserializes composer_multiline true");
+        assert!(on.composer_multiline_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.composer_multiline_enabled());
+        let off_parsed: UiConfig =
+            serde_json::from_value(serde_json::json!({ "composer_multiline": false }))
+                .expect("deserializes composer_multiline false");
+        assert!(!off_parsed.composer_multiline_enabled());
     }
 
     #[test]

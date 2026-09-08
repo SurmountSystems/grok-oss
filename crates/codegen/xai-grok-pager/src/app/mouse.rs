@@ -1450,7 +1450,7 @@ mod tests {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the send-now");
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -1466,10 +1466,10 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let outcome = click_send_now(&mut agent, *nth(&ids, 0));
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
@@ -1499,10 +1499,10 @@ mod tests {
         agent.prompt.set_text("local one EDITED");
         let outcome = click_send_now(&mut agent, *nth(&ids, 0));
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));

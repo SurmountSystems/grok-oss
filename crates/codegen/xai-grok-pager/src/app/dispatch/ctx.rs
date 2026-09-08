@@ -126,7 +126,7 @@ pub(super) fn active_subagent_view_mut(app: &mut AppView) -> Option<&mut AgentVi
         return None;
     };
     let agent = app.agents.get_mut(&id)?;
-    let child_sid = agent.active_subagent.clone()?;
+    let child_sid = agent.visible_nested_overlay_sid()?.to_owned();
     agent.subagent_views.get_mut(&child_sid).map(|b| &mut **b)
 }
 

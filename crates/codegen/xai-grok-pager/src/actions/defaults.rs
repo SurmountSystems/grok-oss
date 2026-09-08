@@ -655,7 +655,7 @@ pub(super) fn default_actions(
             id: ActionId::InterjectPrompt,
             // "send now" label: Enter queues a follow-up while a turn runs; this chord stops the current turn and runs the message as the next one
             label: "send now",
-            description: "Send now while running (cancels the current turn)",
+            description: "Send now while running (interjects; does not cancel)",
             default_key: if in_apple_terminal {
                 key!('o', CONTROL)
             } else if in_vscode_family {

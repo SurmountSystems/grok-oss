@@ -5469,6 +5469,9 @@ impl AppView {
             needs_redraw |= agent.prompt.poll_file_search();
             needs_redraw |= agent.prompt.history_search.poll();
             needs_redraw |= agent.poll_scrollback_search();
+            if let Some(viewer) = agent.line_viewer.as_mut() {
+                needs_redraw |= viewer.list_state.tick();
+            }
             needs_redraw |= agent.tick_toast();
             if !self.export_copy_slash_used
                 && let Some(child_sid) = agent.active_subagent.clone()
@@ -5752,7 +5755,10 @@ impl AppView {
                     || agent.prompt.file_search.context().is_some()
                     || agent.prompt.history_search.is_active()
                     || agent.scrollback_search.is_some()
-                    || agent.line_viewer.is_some()
+                    || agent
+                        .line_viewer
+                        .as_ref()
+                        .is_some_and(|v| v.list_state.needs_tick())
                     || agent.toast.is_some()
                     || agent
                         .extensions_modal

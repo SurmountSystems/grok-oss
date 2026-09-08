@@ -462,6 +462,9 @@ pub enum SessionCommand {
         /// Cancel-and-send: cancel the running turn and run this prompt next.
         /// Also derived server-side during an interruptible wait (see [`SessionActor::queue_input`]).
         send_now: bool,
+        /// `_meta.unstickRetry` from `/unstick`. Skip appending a user turn
+        /// when the last user query already matches, then sample again.
+        unstick_retry: bool,
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
         tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,

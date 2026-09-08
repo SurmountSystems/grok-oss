@@ -41,6 +41,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "auto_light_theme",
     "render_mermaid",
     "multiline_mode",
+    "composer_multiline",
     "permission_mode",
     "default_model",
     "default_reasoning_effort",
@@ -297,6 +298,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("multiline_mode", Action::SetMultilineMode(b)) => {
             assert_eq!(b, expected, "SetMultilineMode value differs from expected")
+        }
+        ("composer_multiline", Action::SetComposerMultiline(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetComposerMultiline value differs from expected"
+            )
         }
         ("vim_mode", Action::SetVimMode(b)) => {
             assert_eq!(b, expected, "SetVimMode value differs from expected")
@@ -2032,6 +2039,7 @@ fn registry_kind_membership_through_pr_14() {
             "invert_scroll",
             "display_refresh_auto_cadence",
             "multiline_mode",
+            "composer_multiline",
             "prompt_suggestions",
             "respect_manual_folds",
             "show_thinking_blocks",
@@ -2213,6 +2221,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     xai_grok_pager::appearance::cache::set_plan_approval_force_modal(false);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
     xai_grok_pager::appearance::cache::set_auto_run_implement(true);
     xai_grok_pager::appearance::cache::set_economic_mode(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
@@ -2257,6 +2266,7 @@ fn defaults_round_trip_through_registry() {
             "auto_light_theme" => SettingValue::Enum("grokday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
+            "composer_multiline" => SettingValue::Bool(true),
             "permission_mode" => SettingValue::Enum("ask"),
             "default_model" => SettingValue::String(String::new()),
             "default_reasoning_effort" => SettingValue::Enum("medium"),
@@ -2371,6 +2381,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
+            | SettingsKeyOutcome::Action(Action::SetComposerMultiline(_))
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
             | SettingsKeyOutcome::Action(Action::SetRememberToolApprovals(_))
             | SettingsKeyOutcome::Action(Action::SetAskUserQuestionTimeoutEnabled(_))
@@ -7527,7 +7538,8 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for prompt_suggestions, got {other:?}"),
     }
-    // Must sit immediately below multiline_mode in the registry order.
+    // Session Multiline, then persist composer_multiline, then prompt
+    // suggestions.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7538,14 +7550,24 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         .iter()
         .position(|k| *k == "multiline_mode")
         .expect("multiline_mode in Editor");
+    let composer_idx = keys
+        .iter()
+        .position(|k| *k == "composer_multiline")
+        .expect("composer_multiline in Editor");
     let prompt_idx = keys
         .iter()
         .position(|k| *k == "prompt_suggestions")
         .expect("prompt_suggestions in Editor");
     assert_eq!(
         multiline_idx + 1,
+        composer_idx,
+        "composer_multiline must sit immediately below multiline_mode; \
+         Editor order: {keys:?}"
+    );
+    assert_eq!(
+        composer_idx + 1,
         prompt_idx,
-        "prompt_suggestions must be immediately below multiline_mode; \
+        "prompt_suggestions must sit immediately below composer_multiline; \
          Editor order: {keys:?}"
     );
 }

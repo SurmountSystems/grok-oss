@@ -2,6 +2,8 @@
 //! Nothing here depends on `SessionActor`, so tests call these as plain functions.
 
 use super::*;
+use std::path::{Path, PathBuf};
+use xai_grok_sampling_types::ContentPart;
 use xai_grok_tools::util::base64_images::ExtractedImage;
 
 /// Drains the images the tool layer extracted from `output`, before truncation, so the session can attach them as vision content.
@@ -59,9 +61,11 @@ pub(super) fn split_tool_layer_for_harness(
 #[cfg(test)]
 mod tests {
     use super::{
-        DrainedToolSuccess, drain_tool_layer_extracted_images, split_tool_layer_for_harness,
+        DrainedToolSuccess, drain_tool_layer_extracted_images, extracted_image_followup,
+        persist_extracted_tool_image, split_tool_layer_for_harness,
     };
     use std::path::PathBuf;
+    use xai_grok_sampling_types::ContentPart;
     use xai_grok_tools::types::output::{
         FileContent, MCPOutput, ReadFileOutput, SearchToolOutput, ToolOutput, ToolRunResult,
     };
@@ -306,5 +310,51 @@ mod tests {
         };
         assert_eq!(one.mime_type, "image/png");
         assert_eq!(one.data, "existing");
+    }
+
+    #[test]
+    fn persist_extracted_tool_image_writes_session_file() {
+        let dir =
+            std::env::temp_dir().join(format!("grok-tool-img-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = persist_extracted_tool_image("image/png", "AAAA", &dir)
+            .expect("persist must write a session file");
+        assert!(
+            saved.is_file(),
+            "saved path must exist: {}",
+            saved.display()
+        );
+        assert!(
+            saved.starts_with(&dir),
+            "must persist under the session images dir"
+        );
+        let followup = extracted_image_followup(&saved, true);
+        match &followup {
+            xai_grok_sampling_types::ConversationItem::User(u) => {
+                assert!(
+                    u.content
+                        .iter()
+                        .all(|p| !matches!(p, ContentPart::Image { .. })),
+                    "parent follow-up must be text-only: {followup:?}"
+                );
+                let text = u
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.as_ref()),
+                        ContentPart::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    text.contains(&saved.display().to_string()),
+                    "parent reminder must name the saved path: {text}"
+                );
+                assert!(!text.contains("data:image"), "must not leak data URL text");
+            }
+            other => panic!("expected user reminder, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

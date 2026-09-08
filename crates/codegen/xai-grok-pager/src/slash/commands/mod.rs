@@ -73,6 +73,7 @@ pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
+pub mod unstick;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;

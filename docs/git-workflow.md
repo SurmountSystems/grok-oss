@@ -1,5 +1,10 @@
 # Git workflow for open PRs (Surmount Grok OSS)
 
+Git-flow-style **feature branches** (`feat/`, `fix/`, `docs/`) from `main`
+so collaborators can parallelize. Plan Approve and bug reports file GitHub
+issues; a signed operator push gets a PR. Canonical:
+[`github-tracking.md`](github-tracking.md).
+
 ## Rule (non-negotiable)
 
 **On a branch that already exists on `origin` with an open PR or running CI:

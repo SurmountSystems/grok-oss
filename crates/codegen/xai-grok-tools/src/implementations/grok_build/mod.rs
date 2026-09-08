@@ -28,6 +28,7 @@ pub mod lsp;
 pub mod media_bearer;
 pub mod monitor;
 pub mod plan_validate;
+pub mod pull_remote_tree;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
@@ -61,6 +62,9 @@ pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
 pub use plan_validate::{
     PLAN_VALIDATE_TOOL_NAME, PlanValidateInput, PlanValidateOutput, PlanValidateTool,
+};
+pub use pull_remote_tree::{
+    PULL_REMOTE_TREE_TOOL_NAME, PullRemoteTreeInput, PullRemoteTreeOutput, PullRemoteTreeTool,
 };
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{

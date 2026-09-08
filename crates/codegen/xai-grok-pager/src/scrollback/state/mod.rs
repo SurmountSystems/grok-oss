@@ -539,6 +539,7 @@ impl ScrollbackState {
         entry.id = id;
 
         self.apply_edit_default_display_mode(&mut entry);
+        self.apply_thinking_sticky_display_mode(&mut entry);
 
         // Always-expand-thinking: open new thinking fully (live Truncated default
         // would hide body until Ctrl+E). Sticky finish mode is Expanded too.
@@ -616,6 +617,7 @@ impl ScrollbackState {
         let mut entry = ScrollbackEntry::new(block);
         entry.id = id;
         self.apply_edit_default_display_mode(&mut entry);
+        self.apply_thinking_sticky_display_mode(&mut entry);
         if entry.is_running {
             self.running.insert(id);
         }
@@ -3374,18 +3376,100 @@ mod tests {
     }
 
     #[test]
-    fn always_expand_thinking_blocks_ctrl_t_collapse() {
+    fn ctrl_t_turns_always_expand_thinking_off_and_collapses() {
         std::thread::spawn(|| {
             crate::appearance::cache::set_always_expand_thinking(true);
             let mut state = ScrollbackState::new();
             let id = state.push_block(RenderBlock::thinking("open thought"));
             state.apply_always_expand_thinking_flip(true);
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Expanded
+            );
             state.expand_all_thinking();
             assert_eq!(
                 state.get_by_id(id).unwrap().display_mode,
-                DisplayMode::Expanded,
-                "Ctrl+T must not collapse thinking while always-expand is on"
+                DisplayMode::Collapsed,
+                "the last Ctrl+T collapse must be the default: always-expand turns off"
             );
+            assert!(
+                !crate::appearance::cache::load_always_expand_thinking(),
+                "Ctrl+T collapse writes [ui] always_expand_thinking = false"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn ctrl_t_expand_is_default_for_next_thinking_block() {
+        // Operator: last Ctrl+T expand/collapse is the default for the next thought.
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(false);
+            let mut state = ScrollbackState::new();
+            let first = state.push_block(RenderBlock::thinking("first thought"));
+            assert_eq!(
+                state.get_by_id(first).unwrap().display_mode,
+                DisplayMode::Collapsed
+            );
+            state.expand_all_thinking();
+            assert!(
+                crate::appearance::cache::load_always_expand_thinking(),
+                "Ctrl+T expand writes [ui] always_expand_thinking = true"
+            );
+            let next = state.push_block(RenderBlock::thinking_streaming());
+            assert_eq!(
+                state.get_by_id(next).unwrap().display_mode,
+                DisplayMode::Expanded,
+                "the next thinking block must start expanded after Ctrl+T expand"
+            );
+            crate::appearance::cache::set_always_expand_thinking(false);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn ctrl_t_collapse_is_default_for_next_thinking_block() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let mut state = ScrollbackState::new();
+            let _first = state.push_block(RenderBlock::thinking("open thought"));
+            state.expand_all_thinking();
+            assert!(!crate::appearance::cache::load_always_expand_thinking());
+            let next = state.push_block(RenderBlock::thinking_streaming());
+            assert_eq!(
+                state.get_by_id(next).unwrap().display_mode,
+                DisplayMode::Collapsed,
+                "the next thinking block must start collapsed after Ctrl+T collapse"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn apply_always_expand_thinking_flip_leaves_aborted_collapsed() {
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(false);
+            let mut state = ScrollbackState::new();
+            let id = state.push_block(RenderBlock::thinking("paused draft"));
+            state
+                .get_by_id_mut(id)
+                .unwrap()
+                .block
+                .as_thinking_mut()
+                .unwrap()
+                .mark_aborted();
+            state.get_by_id_mut(id).unwrap().display_mode = DisplayMode::Collapsed;
+            crate::appearance::cache::set_always_expand_thinking(true);
+            state.apply_always_expand_thinking_flip(true);
+            assert_eq!(
+                state.get_by_id(id).unwrap().display_mode,
+                DisplayMode::Collapsed,
+                "aborted thinking must stay collapsed even when always-expand turns on"
+            );
+            crate::appearance::cache::set_always_expand_thinking(false);
         })
         .join()
         .unwrap();

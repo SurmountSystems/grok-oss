@@ -2686,8 +2686,8 @@ fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() 
     }
     let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(
-        matches!(out, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "steer it"),
-        "running Apple-Terminal Ctrl+O with payload must send-now, got {out:?}"
+        matches!(out, InputOutcome::Action(Action::Interject { ref text, .. }) if text == "steer it"),
+        "running Apple-Terminal Ctrl+O with payload must interject, got {out:?}"
     );
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -2698,10 +2698,10 @@ fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() 
     assert!(
         matches!(
             out,
-            InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+            InputOutcome::Action(Action::Interject { ref text, .. })
                 if text == "queued follow-up"
         ),
-        "running + empty + queue: Apple-Terminal Ctrl+O must send-now, got {out:?}"
+        "running + empty + queue: Apple-Terminal Ctrl+O must interject, got {out:?}"
     );
     assert!(
         app.agents
@@ -3488,6 +3488,75 @@ fn prompt_page_actions_target_visible_fullscreen_child_scrollback() {
     assert!(
         after_down.1 > after_up.1,
         "PageDown must move the visible child scrollback"
+    );
+}
+
+/// Nested compact chrome must not steal parent TUI scroll. While the child
+/// is AutoCompacting, PageUp pages the parent even if the overlay flag is
+/// still set.
+#[test]
+fn nested_compact_chrome_must_not_steal_parent_tui_scroll() {
+    use crate::acp::tracker::TurnActivity;
+    fn make_pageable(agent: &mut AgentView) {
+        for i in 0..16 {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    format!("message {i}\ncontinued"),
+                ));
+        }
+        agent.scrollback.prepare_layout(40, 6);
+        agent.scrollback.goto_bottom();
+        assert!(
+            agent.scrollback.scroll_info().0 > 0,
+            "precondition: scrollback must have a page above"
+        );
+    }
+    let mut app = test_app_with_agent();
+    app.screen_mode = ScreenMode::Fullscreen;
+    let ActiveView::Agent(id) = app.active_view else {
+        panic!("test app must start on an agent");
+    };
+    let child_sid = "compact-no-steal-child";
+    let mut child = idle_child_view(&app, 1, child_sid);
+    child.session.state = AgentState::TurnRunning;
+    child
+        .session
+        .set_compaction_activity(Some(TurnActivity::AutoCompacting));
+    child.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+    make_pageable(&mut child);
+    {
+        let parent = app.agents.get_mut(&id).unwrap();
+        make_pageable(parent);
+        parent.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+        parent.subagent_views.insert(child_sid.to_owned(), child);
+        parent.active_subagent = Some(child_sid.to_owned());
+        assert!(
+            parent.visible_nested_overlay_sid().is_none(),
+            "compact chrome must not count as a fullscreen steal"
+        );
+    }
+    let offsets = |app: &AppView| {
+        let parent = &app.agents[&id];
+        (
+            parent.scrollback.scroll_info().0,
+            parent.subagent_views[child_sid].scrollback.scroll_info().0,
+        )
+    };
+    let before = offsets(&app);
+    let outcome = app.handle_input(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+    let InputOutcome::Action(action @ Action::PageUp) = outcome else {
+        panic!("parent prompt PageUp must emit PageUp during child compact, got {outcome:?}");
+    };
+    let _ = super::super::dispatch::dispatch(action, &mut app);
+    let after_up = offsets(&app);
+    assert!(
+        after_up.0 < before.0,
+        "PageUp must move the parent scrollback while the child is compacting"
+    );
+    assert_eq!(
+        after_up.1, before.1,
+        "child scrollback must not steal parent PageUp during compact chrome"
     );
 }
 #[test]

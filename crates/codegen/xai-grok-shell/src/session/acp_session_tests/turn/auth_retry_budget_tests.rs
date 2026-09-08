@@ -310,6 +310,7 @@ async fn run_prompt_with_cap(
             None,
             None,
             None,
+            false,
         ),
     )
     .await

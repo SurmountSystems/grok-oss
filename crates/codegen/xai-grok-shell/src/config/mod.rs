@@ -290,7 +290,15 @@ impl SubagentsConfig {
             return Self::clamp_max_depth(v, "config");
         }
         if let Some(v) = remote {
-            return Self::clamp_max_depth(i64::from(v), "remote");
+            let clamped = Self::clamp_max_depth(i64::from(v), "remote");
+            if clamped >= Self::DEFAULT_MAX_DEPTH {
+                return clamped;
+            }
+            tracing::warn!(
+                value = clamped,
+                default = Self::DEFAULT_MAX_DEPTH,
+                "remote subagents max_depth is below the L1→L2→L3 default; ignoring so a first-level nested coordinator can still spawn specialists"
+            );
         }
         Self::DEFAULT_MAX_DEPTH
     }

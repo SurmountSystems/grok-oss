@@ -5341,9 +5341,8 @@
     /// Focused composer paints a Human-green solid/empty block caret and hides
     /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
     ///
-    /// Wall-clock phase may land on solid or empty:
-    /// - Solid: full-cell Human accent plate + filled glyph.
-    /// - Empty: true empty cell (space, canvas bg) - no accent plate, no hole.
+    /// Pin the filled half so this test does not sleep on wall clock. Empty
+    /// half is a visible green `█` on canvas (phase-injected unit tests).
     /// Never the old hole-punch (`■` on accent plate).
     #[test]
     fn focused_composer_paints_human_green_box_caret_hides_terminal_cursor() {
@@ -5352,6 +5351,7 @@
 
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
+        let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
 
         let mut pw = PromptWidget::new();
         pw.set_text("");
@@ -5369,6 +5369,10 @@
         assert!(
             result.cursor_pos.is_none(),
             "software box caret hides the terminal cursor"
+        );
+        assert!(
+            result.caret_cell.is_some(),
+            "empty focused composer still has an insertion cell"
         );
 
         // Too narrow for the min label width (max_w < 6): plain border, no panic.

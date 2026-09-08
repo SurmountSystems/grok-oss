@@ -258,6 +258,8 @@ impl ChatStateActor {
             .state
             .omitted_spawn_prompt_tokens
             .saturating_add(omitted);
+        let _ = xai_grok_sampling_types::fold_tool_result_on_conversation_item(&mut item);
+        let _ = xai_grok_sampling_types::fold_task_completion_user_on_conversation_item(&mut item);
         let count_in_delta = !matches!(item, ConversationItem::Assistant(_));
         if count_in_delta {
             let estimated_tokens = super::state::estimate_item_tokens(&item);
@@ -323,6 +325,8 @@ impl ChatStateActor {
             }
         }
         self.ensure_conversation_integrity_with_reason(reason);
+        let mut item = item;
+        let _ = xai_grok_sampling_types::fold_task_completion_user_on_conversation_item(&mut item);
         let estimated_tokens = super::state::estimate_item_tokens(&item);
         self.state.estimated_tokens_since_model += estimated_tokens;
         tracing::debug!(
@@ -358,7 +362,8 @@ impl ChatStateActor {
             .iter()
             .filter(|i| matches!(i, ConversationItem::User(_)))
             .count();
-        let synthetic_count = total_user_items.saturating_sub(self.state.prompt_index);
+        let users_before_current = total_user_items.saturating_sub(1);
+        let synthetic_count = users_before_current.saturating_sub(self.state.prompt_index);
         let effective_threshold = self
             .pruning_config
             .hard_clear_age_turns
@@ -553,6 +558,7 @@ impl ChatStateActor {
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
         let mut items = items;
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut items);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut items);
         self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let estimated_tokens = self.reseed_total_tokens(base_estimate);
@@ -594,6 +600,7 @@ impl ChatStateActor {
         // intentionally survive a restore — see `replace_conversation`.
         let mut conversation = snap.conversation;
         xai_grok_sampling_types::fold_spawn_prompts_in_conversation(&mut conversation);
+        xai_grok_sampling_types::fold_tool_results_in_conversation(&mut conversation);
         self.state.conversation = conversation;
         self.rebase_turn_capture_offset();
         self.state.sampling_config = snap.sampling_config;

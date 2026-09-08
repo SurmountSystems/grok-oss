@@ -15,7 +15,8 @@ use std::path::Path;
 use super::{checksum_bytes, checksum_file_if_exists, ensure_bundle_dirs, write_bundle_file};
 
 /// Skill directory names shipped as Grok OSS defaults.
-pub const DEFAULT_PRODUCT_SKILL_NAMES: &[&str] = &["polish", "subagent", "what"];
+pub const DEFAULT_PRODUCT_SKILL_NAMES: &[&str] =
+    &["polish", "pull-remote-tree", "subagent", "what"];
 
 struct DefaultProductSkillFile {
     relative_path: &'static str,
@@ -43,6 +44,11 @@ const DEFAULT_PRODUCT_SKILL_FILES: &[DefaultProductSkillFile] = &[
     DefaultProductSkillFile {
         relative_path: "skills/what/SKILL.md",
         content: include_str!("../skills/what/SKILL.md"),
+        previous_checksums: &[],
+    },
+    DefaultProductSkillFile {
+        relative_path: "skills/pull-remote-tree/SKILL.md",
+        content: include_str!("../skills/pull-remote-tree/SKILL.md"),
         previous_checksums: &[],
     },
 ];
@@ -128,6 +134,10 @@ mod tests {
         assert!(
             read(root, "skills/what/SKILL.md").contains("name: what"),
             "install must write what"
+        );
+        assert!(
+            read(root, "skills/pull-remote-tree/SKILL.md").contains("name: pull-remote-tree"),
+            "install must write pull-remote-tree"
         );
         assert!(
             read(root, "skills/polish/references/incident-classes.md").contains("Incident classes"),

@@ -75,6 +75,12 @@ impl ChatStateActor {
         }
         items = crate::compaction_utils::ModelRequestHistory::from_raw(items).into_items();
 
+        // Inflate session file handles on this request clone only. Stored
+        // conversation keeps the handle so chat_history.jsonl does not grow
+        // by the data URL crate. Path-shaped, `[Image #N]`, and empty
+        // values are omitted rather than sent as `image_url`.
+        crate::image_handles::inflate_conversation_images_for_inference(&mut items);
+
         // Step 4: Assemble request
         ConversationRequest {
             items,

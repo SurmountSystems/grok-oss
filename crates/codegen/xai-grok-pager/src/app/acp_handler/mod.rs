@@ -716,9 +716,10 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     };
     let interjection_id = parsed.get("interjectionId").and_then(|v| v.as_str());
     let sid = acp::SessionId::new(session_id.to_string());
-    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
+    let Some(matched) = find_session_match(app, &sid) else {
         return false;
     };
+    let id = matched.agent_id();
     let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         return false;
@@ -748,7 +749,23 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(text));
-    is_active
+    true
+}
+
+fn last_scrollback_prompt_matches(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+    text: &str,
+) -> bool {
+    let Some(last) = scrollback.len().checked_sub(1) else {
+        return false;
+    };
+    let Some(entry) = scrollback.entry(last) else {
+        return false;
+    };
+    match &entry.block {
+        RenderBlock::UserPrompt(b) => crate::app::subagent::subagent_prompt_text_eq(&b.text, text),
+        _ => false,
+    }
 }
 fn handle_ext_method(ext: xai_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppView) -> bool {
     match ext.request.method.as_ref() {

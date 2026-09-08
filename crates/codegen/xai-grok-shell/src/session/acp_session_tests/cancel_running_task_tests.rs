@@ -402,6 +402,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1715,6 +1716,7 @@ fn handle_prompt_frames_interrupt_on_user_message() {
                                     None,
                                     Some(ack_tx),
                                     None,
+                                    false,
                                 )
                                 .await
                         });
@@ -1769,6 +1771,7 @@ fn handle_prompt_verbatim_skips_interrupt_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1865,6 +1868,7 @@ fn handle_prompt_send_now_frames_interjection_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });
@@ -1972,6 +1976,7 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                         None,
                         Some(ack_tx),
                         None,
+                        false,
                     )
                     .await
             });

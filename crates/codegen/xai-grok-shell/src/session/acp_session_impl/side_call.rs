@@ -111,6 +111,11 @@ impl SessionActor {
         } else {
             session_id.clone()
         };
+        let mut items = call.items;
+        // Recap / turn-summary replay the parent conversation. Stored
+        // handles are `file://` or session asset paths; the API rejects
+        // those as `image_url`. Convert or omit on this clone only.
+        let _ = xai_chat_state::repair_conversation_images_for_api(&mut items);
         ConversationRequest {
             items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
                 .into_items(),

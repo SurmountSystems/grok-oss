@@ -62,7 +62,7 @@ Control how entries are displayed in the scrollback.
 | `l` | `Right` | Expand selected entry |
 | `e` | | Toggle fold on selected entry |
 | `⇧E` | | Expand all / collapse all entries |
-| `Ctrl+T` | `-` | Expand or collapse all thinking blocks (the agent's chain of thought). Same chord on the main scrollback, a nested overlay, and while the composer is focused; it does not insert a character. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; it does not type a hyphen while the scrollback is focused. In the composer, `-` stays a typed hyphen. |
+| `Ctrl+T` | `-` | Expand or collapse all thinking blocks (the agent's chain of thought). The last toggle is the default for the next thought and is written to `[ui] always_expand_thinking` so the next session starts the same way. Same chord on the main scrollback, a nested overlay, and while the composer is focused; it does not insert a character. `-` is an extra scrollback chord and the advertised expand key when thoughts are collapsed; it does not type a hyphen while the scrollback is focused. In the composer, `-` stays a typed hyphen. Settings → Always expand thinking is the same option. |
 | `r` | | Toggle raw markdown on selected entry |
 
 Setting `respect_manual_folds = true` under `[scrollback.scroll]` in
@@ -371,6 +371,8 @@ Actions that affect the agent session, available from the agent screen.
 
 Non-image files insert their absolute path as text instead of a chip.
 
+Pasted screenshots are stored under the session `images/` directory and sent as vision content parts. They do not charge the context window as if the base64 data URL were ordinary text. Compact summaries keep a short `[image]` placeholder instead of copying those bytes. `view_image` is only for images found during web or X search.
+
 > **`Alt+V` on Windows** is grok-specific. Windows Terminal's default `Ctrl+V` only pastes plain text and silently drops image clipboards; `Alt+V` bypasses the interceptor. To use `Ctrl+V` for images too, add `{ "command": null, "keys": "ctrl+v" }` to `actions` in your Windows Terminal `settings.json`.
 
 ### Linux PRIMARY and CLIPBOARD
@@ -414,7 +416,7 @@ Empty `Enter` never approves a plan. Use the clickable **Approve** button.
 | Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Soft interject |
 | VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Soft interject (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
-In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.)
+In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.) When `[ui] composer_multiline = false`, both Enter and Shift+Enter send or interject and never insert a newline. Plan Preview uses the same Enter rules as the main Human box.
 
 To hand the agent a note **without** stopping it, queue with plain `Enter` or use the soft-interject chord.
 

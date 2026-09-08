@@ -10,6 +10,21 @@ Not the agents modal (`/config-agents` / `/agents` — definitions and
 personas), the session picker (`/resume` / `Ctrl+R`, past conversations on
 disk), or the workflows run UI (`/workflow runs`).
 
+**L0** is a Surmount GPUI window, not this pager. It is not `/dashboard`
+and not `/running`. Those three must not merge. L0 is a laptop
+coordinator. It is not a website on the mail host :443. Do not add an L0
+dashboard inside grok-oss. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db`
+(`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the
+**tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that
+GPUI window will call: parse `/running`-shaped JSON (safe fields only;
+local or remote host), hold the selected session, write a
+per-session enqueue drop file, and run the laptop-side action **set remote host console API key** (machine xAI console API key for host
+surmount-1; never prints the key; does not open git on the guest).
+Binary `surmount-coordinator-gui` reads
+that JSON from stdin or a file and prints safe JSON (no prompt), and
+accepts `set-remote-host-console-api-key`. It is
+not this TUI. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1).
+
 ---
 
 ## Opening the dashboard

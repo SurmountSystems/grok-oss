@@ -43,6 +43,8 @@ const GROUP_TOOL_VERBS_DEFAULT: bool = true;
 const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
 /// "Prompt suggestions" is the ghost text Tab autocompletes.
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
+/// Human-box newlines from Enter / Shift+Enter. Default ON when unset.
+const COMPOSER_MULTILINE_DEFAULT: bool = UiConfig::COMPOSER_MULTILINE_DEFAULT;
 /// Auto-run follow-up `/implement` from the prior prompt after a turn ends.
 const AUTO_RUN_IMPLEMENT_DEFAULT: bool = true;
 /// Soft-cap context at the 200K pricing tier; default ON when unset.
@@ -848,10 +850,14 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_scroll_lines();
     let _ = load_render_mermaid();
     let _ = load_show_thinking_blocks();
-    let _ = load_always_expand_thinking();
+    set_always_expand_thinking(
+        ui.always_expand_thinking
+            .unwrap_or(ALWAYS_EXPAND_THINKING_DEFAULT),
+    );
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
+    set_composer_multiline(ui.composer_multiline_enabled());
     let _ = load_auto_run_implement();
     let _ = load_economic_mode();
     // `default_selected_permission` owns its own cache in `permission_cursor`.
@@ -1121,6 +1127,44 @@ mod tests {
                 !load_ulid_session_ids(),
                 "prime must seed ulid_session_ids from UiConfig so disk false applies at launch"
             );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn prime_applies_composer_multiline_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                composer_multiline: Some(false),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                !load_composer_multiline(),
+                "prime must seed composer_multiline from UiConfig so disk false applies at launch"
+            );
+            set_composer_multiline(true);
+            assert!(load_composer_multiline());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn prime_applies_always_expand_thinking_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                always_expand_thinking: Some(true),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                load_always_expand_thinking(),
+                "prime must seed always_expand_thinking from UiConfig so disk true applies at launch"
+            );
+            set_always_expand_thinking(false);
+            assert!(!load_always_expand_thinking());
         })
         .join()
         .unwrap();

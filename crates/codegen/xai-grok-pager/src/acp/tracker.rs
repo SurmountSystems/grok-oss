@@ -544,7 +544,11 @@ impl AcpUpdateTracker {
         if self.current_thinking.is_some() {
             return Some(TurnActivity::Thinking);
         }
-        if let Some(tool) = self.pending_tools.values().next() {
+        if let Some(tool) = self
+            .pending_tools
+            .values()
+            .find(|tool| !is_stale_short_write(tool))
+        {
             let description = tool
                 .base
                 .raw_input
@@ -1012,13 +1016,24 @@ impl AcpUpdateTracker {
                     .and_then(|id| scrollback.get_by_id(id))
                     .is_some_and(|e| {
                         if let RenderBlock::Thinking(t) = &e.block {
-                            !t.text().is_empty()
+                            !t.is_empty_or_whitespace()
                         } else {
                             false
                         }
                     });
-                if thinking_has_content {
-                    self.finish_thinking(scrollback);
+                let thinking_is_instant = match self.last_thinking_elapsed_ms {
+                    Some(ms) => ms < crate::scrollback::blocks::INSTANT_THOUGHT_MS,
+                    None => self
+                        .current_thinking
+                        .and_then(|id| scrollback.get_by_id(id))
+                        .is_some_and(|e| {
+                            matches!(&e.block, RenderBlock::Thinking(t) if t.is_instant_so_far())
+                        }),
+                };
+                // Instant thoughts merge into the same block instead of
+                // painting a "Thought for 0.0s" header on stream-start rollover.
+                if thinking_has_content && !thinking_is_instant {
+                    self.finish_thinking(scrollback, false);
                 }
                 if let Some(agent_id) = self.current_agent_msg.take() {
                     scrollback.finish_running(agent_id);
@@ -1071,6 +1086,16 @@ impl AcpUpdateTracker {
     }
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.close_turn(scrollback, false);
+    }
+
+    /// Pause or cancel interrupted this turn. Collapse truncated thinking.
+    /// Do not leave an aborted user-facing draft expanded as the live turn.
+    pub fn abort_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.close_turn(scrollback, true);
+    }
+
+    fn close_turn(&mut self, scrollback: &mut ScrollbackState, aborted: bool) {
         self.epoch_at_last_finish = self.agent_output_epoch;
         self.finish_thinking(scrollback);
         scrollback.note_pin_reserve_turn_finished();
@@ -1109,10 +1134,31 @@ impl AcpUpdateTracker {
     /// Only blocks that received actual thinking tokens are kept.
     fn finish_thinking(&mut self, scrollback: &mut ScrollbackState) {
         if let Some(thinking_id) = self.current_thinking.take() {
-            let is_empty = scrollback.get_by_id(thinking_id).is_some_and(
-                |e| matches!(&e.block, RenderBlock::Thinking(t) if t.text().is_empty()),
-            );
-            if is_empty {
+            let mut omit = false;
+            if let Some(entry) = scrollback.get_by_id_mut(thinking_id)
+                && let RenderBlock::Thinking(t) = &mut entry.block
+            {
+                if aborted {
+                    let stripped = t.strip_trailing_user_facing_draft();
+                    if t.is_empty_or_whitespace() || (!stripped && t.is_user_facing_draft_only()) {
+                        omit = true;
+                    } else {
+                        t.mark_aborted();
+                    }
+                } else if t.is_empty_or_whitespace() || t.is_user_facing_draft_only() {
+                    // Successful agent-message start already peeled; a remaining
+                    // draft-only body is the reply, not reasoning.
+                    if t.is_user_facing_draft_only() {
+                        omit = true;
+                    } else {
+                        omit = t.is_empty_or_whitespace();
+                    }
+                }
+                if t.is_empty_or_whitespace() {
+                    omit = true;
+                }
+            }
+            if omit {
                 scrollback.remove_entry(thinking_id);
             } else {
                 scrollback.finish_running_with_time(thinking_id, self.last_thinking_elapsed_ms);
@@ -1158,7 +1204,8 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
-        self.finish_thinking(scrollback);
+        self.peel_user_facing_draft_from_current_thinking(scrollback);
+        self.finish_thinking(scrollback, false);
         let text = extract_text_from_content(&chunk.content);
         if text.is_empty() {
             return false;
@@ -1202,7 +1249,7 @@ impl AcpUpdateTracker {
             acp::ContentBlock::Text(t) => &t.text,
             _ => return false,
         };
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return false;
         }
         let is_replay = meta.is_replay;
@@ -1221,11 +1268,16 @@ impl AcpUpdateTracker {
         {
             self.last_thinking_elapsed_ms = Some(agent_ts - stream_start);
         }
-        if meta.is_replay {
+        let pushed = if meta.is_replay {
             scrollback.push_chunk_to_thinking_deferred(id, text)
         } else {
             scrollback.push_chunk_to_thinking(id, text)
-        }
+        };
+        // Contract D: a reply that leaked into thought chunks is not reasoning.
+        // Peel it while streaming so pause cannot freeze a half-apology as the
+        // expanded thought the operator reads as the answer.
+        self.peel_user_facing_draft_from_current_thinking(scrollback);
+        pushed
     }
     /// Handle a tool call start.
     fn handle_tool_call(
@@ -1234,7 +1286,7 @@ impl AcpUpdateTracker {
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) -> bool {
-        self.finish_thinking(scrollback);
+        self.finish_thinking(scrollback, false);
         self.current_agent_msg = None;
         if is_todo_tool(&tc)
             || is_bg_plumbing_tool(&tc)
@@ -1298,6 +1350,26 @@ impl AcpUpdateTracker {
             tc.status,
             acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
         );
+        if let Some(pending) = self.pending_tools.remove(&tc_id) {
+            if is_completed {
+                if let Some(entry_id) = pending.entry_id {
+                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    if scrollback.replace_tool_block(entry_id, block, pending.started_at)
+                        && let Some(entry) = scrollback.get_by_id(entry_id)
+                    {
+                        self.queue_edit_hl_if_needed(entry_id, &entry.block, is_replay);
+                    }
+                    scrollback.finish_running(entry_id);
+                    self.try_coalesce_edit(entry_id, scrollback, is_replay);
+                } else {
+                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    self.finish_completed_tool(block, scrollback, is_replay);
+                }
+                return true;
+            }
+            self.pending_tools.insert(tc_id, pending);
+            return true;
+        }
         if is_completed {
             let block = tool_call_to_block(
                 &tc,
@@ -1539,7 +1611,7 @@ impl AcpUpdateTracker {
         if text.is_empty() {
             return false;
         }
-        self.finish_thinking(scrollback);
+        self.finish_thinking(scrollback, false);
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
         }

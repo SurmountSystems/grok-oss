@@ -1033,6 +1033,7 @@ fn resume_initial_context(
 /// Apply `fork_filter_chat` then normalize; empty or System-only input (no `<background_context>` produced) fails open to `New`.
 fn forked_initial_context(
     mut items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    spawn_prompt: Option<&str>,
 ) -> InitialContext {
     crate::sampling::fork_filter_chat(&mut items);
     if items.is_empty() {
@@ -1046,7 +1047,10 @@ fn forked_initial_context(
         };
     }
     let (conversation, prefix_len) =
-        xai_grok_subagent_resolution::context::normalize_forked_context(items);
+        xai_grok_subagent_resolution::context::normalize_forked_context_for_job(
+            items,
+            spawn_prompt,
+        );
     if prefix_len < 2 {
         return InitialContext {
             source: InitialContextSource::New,
@@ -1081,8 +1085,9 @@ fn conversation_tail_is_complete(
 /// We deliberately do NOT run `fork_filter_chat` here. At planner spawn the conversation is between turns (the `/goal` user message is not yet pushed). (This is the ONLY path that filters; the verbatim path never does.)
 /// Input that is empty or only `System` item(s), before OR after filtering, inherited nothing, so it fails open to `New` rather than a hollow fork.
 fn verbatim_or_normalize_fork(
-    items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    mut items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
     child_context_window: u64,
+    spawn_prompt: Option<&str>,
 ) -> InitialContext {
     if !items
         .iter()
@@ -1097,10 +1102,14 @@ fn verbatim_or_normalize_fork(
             verbatim_fork: false,
         };
     }
+    xai_grok_sampling_types::fold_tool_results_in_conversation(&mut items);
     let estimated_tokens = xai_chat_state::estimate_conversation_tokens(&items);
     const SAFE_FORK_PERCENT: u64 = 80;
     let threshold = child_context_window * SAFE_FORK_PERCENT / 100;
     if estimated_tokens <= threshold && conversation_tail_is_complete(&items) {
+        if spawn_prompt.is_some() {
+            nested_spawn_prompt::drop_parent_image_parts_for_spawn_fork(&mut items);
+        }
         let prefix_len = items.len();
         return InitialContext {
             source: InitialContextSource::Forked,
@@ -1127,7 +1136,10 @@ fn verbatim_or_normalize_fork(
         };
     }
     let (conversation, prefix_len) =
-        xai_grok_subagent_resolution::context::normalize_forked_context(filtered);
+        xai_grok_subagent_resolution::context::normalize_forked_context_for_job(
+            filtered,
+            spawn_prompt,
+        );
     InitialContext {
         source: InitialContextSource::Forked,
         copy_error: None,
@@ -1394,7 +1406,10 @@ async fn bootstrap_initial_context(
                         );
                         vec![]
                     });
-                BootstrapInitialContext::Ready(forked_initial_context(items))
+                BootstrapInitialContext::Ready(forked_initial_context(
+                    items,
+                    Some(request.prompt.as_str()),
+                ))
             }
             Err(e) => {
                 let err_msg = format!("{e}");

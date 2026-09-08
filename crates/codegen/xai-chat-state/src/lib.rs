@@ -34,6 +34,7 @@ pub mod conversation_util;
 pub mod events;
 pub mod handle;
 pub mod image_budget;
+pub mod image_handles;
 pub mod persistence;
 pub mod types;
 pub mod usage;

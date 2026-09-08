@@ -448,6 +448,7 @@ async fn handle_notification(
                         traceparent: xai_grok_otel::current_traceparent(),
                         json_schema: None,
                         send_now: false,
+                        unstick_retry: false,
                         tool_overrides_update: None,
                         admission: Some(crate::session::commands::TaskWakeAdmission {
                             respond_to: admission_tx,

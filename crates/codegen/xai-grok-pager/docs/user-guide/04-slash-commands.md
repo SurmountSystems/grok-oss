@@ -135,7 +135,7 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **What we are doing**, **What is true right now**, **What you need to do** (or `nothing`), **What I will do next**. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
 
 This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 
@@ -144,6 +144,17 @@ This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-m
 ```
 /what
 /what the last status
+```
+
+### `/pull-remote-tree`
+
+Pull a remote project tree onto a local directory. This is a **default Grok OSS skill**. New grok-oss users get it without adding a project pack. Grok installs it from the product tree (`crates/codegen/xai-grok-bundle/skills/pull-remote-tree/`) into `~/.grok/bundled/skills/pull-remote-tree/` on startup. It is not a pager builtin and not a host overlay skill. It is not a project skill at `.agents/skills/pull-remote-tree/`.
+
+The named tool is `pull_remote_tree`. Direction is `HOST:SRC` (or a local source directory) onto a local dest only. Dest that looks like `HOST:PATH` is refused. Copy is a Rust walk plus `std::fs`. OpenSSH may fetch a remote tree. This is not a rsync tool id. Never git commit.
+
+```
+/pull-remote-tree
+/pull-remote-tree host:/var/src /tmp/dest
 ```
 
 ### `/metadata`
@@ -521,11 +532,13 @@ Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
 3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
 4. Verifies package version plus git SHA.
 5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. Nested agents resume the same way a network disconnect does, and the Subagents list must not go empty. Ctrl-C quits and does not re-exec peers.
+6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
+
+Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
 
 To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 
-CLI: `grok-oss rebuild`. Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
+CLI: `grok-oss rebuild` (optional `--source DIR`) compiles and signals live grok-oss instances the same way `/rebuild` does, without re-execing this process (there is no TUI here). Freshness only: `grok-oss update --check` (compare to Surmount `main`; no auto-install).
 
 ### `/release-notes`
 
@@ -623,7 +636,7 @@ Open the settings modal to view and change configuration interactively. Aliases:
 
 ### `/timestamps`
 
-Toggle message timestamps on or off.
+Toggle message timestamps on or off. When on, each message keeps its clock on the first visible row even if the original timestamp line has scrolled above the fold.
 
 ---
 

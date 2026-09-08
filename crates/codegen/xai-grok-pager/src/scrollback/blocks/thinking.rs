@@ -129,6 +129,9 @@ pub struct ThinkingBlock {
     elapsed_time_ms: Option<i64>,
     /// When the thinking block started (local timestamp for live elapsed).
     started_at: Option<std::time::Instant>,
+    /// Generation was paused or truncated while this thought was live.
+    /// Aborted thoughts collapse; they must not keep an expanded draft.
+    aborted: bool,
 }
 impl ThinkingBlock {
     /// Create a new thinking block with complete text.
@@ -137,6 +140,7 @@ impl ThinkingBlock {
             content: MarkdownContent::new(text),
             elapsed_time_ms: None,
             started_at: None,
+            aborted: false,
         }
     }
 
@@ -146,6 +150,7 @@ impl ThinkingBlock {
             content: MarkdownContent::streaming(),
             elapsed_time_ms: None,
             started_at: Some(std::time::Instant::now()),
+            aborted: false,
         }
     }
 
@@ -156,7 +161,55 @@ impl ThinkingBlock {
             content: MarkdownContent::streaming(),
             elapsed_time_ms: None,
             started_at: None,
+            aborted: false,
         }
+    }
+
+    /// Replace the markdown body (peel an aborted draft, keep elapsed).
+    pub fn replace_text(&mut self, text: impl Into<String>) {
+        self.content = MarkdownContent::new(text);
+    }
+
+    /// Mark this thought as paused or truncated. Collapses even when
+    /// `[ui] always_expand_thinking` is on.
+    pub fn mark_aborted(&mut self) {
+        self.aborted = true;
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    pub fn is_empty_or_whitespace(&self) -> bool {
+        self.content.text().trim().is_empty()
+    }
+
+    /// Local or frozen elapsed is still in the 0.0s bucket.
+    pub fn is_instant_so_far(&self) -> bool {
+        match self.elapsed_time_ms() {
+            Some(ms) => ms < INSTANT_THOUGHT_MS,
+            None => self.started_at.is_none(),
+        }
+    }
+
+    /// Drop a trailing user-facing draft. Returns true when the body changed.
+    pub fn strip_trailing_user_facing_draft(&mut self) -> bool {
+        let original = self.text();
+        let peeled = peel_trailing_user_facing_draft(&original);
+        if peeled == original {
+            return false;
+        }
+        self.replace_text(peeled);
+        true
+    }
+
+    /// Whole body is a user-facing reply, not reasoning (no peel point).
+    pub fn is_user_facing_draft_only(&self) -> bool {
+        let t = self.text();
+        let trimmed = t.trim();
+        !trimmed.is_empty()
+            && looks_like_user_facing_draft(trimmed)
+            && peel_trailing_user_facing_draft(&t) == t
     }
 
     /// Push a streaming chunk of markdown text.
@@ -235,14 +288,16 @@ impl ThinkingBlock {
 
     /// Format elapsed time for display.
     fn format_time(&self) -> Option<String> {
-        self.elapsed_time_ms.map(|ms| {
-            let elapsed = std::time::Duration::from_millis(ms.max(0) as u64);
-            if elapsed.as_secs() < 60 {
-                format!("{:.1}s", elapsed.as_secs_f64())
-            } else {
-                crate::util::format_duration(elapsed)
-            }
-        })
+        let ms = self.elapsed_time_ms?;
+        if ms < INSTANT_THOUGHT_MS {
+            return None;
+        }
+        let elapsed = std::time::Duration::from_millis(ms.max(0) as u64);
+        if elapsed.as_secs() < 60 {
+            Some(format!("{:.1}s", elapsed.as_secs_f64()))
+        } else {
+            Some(crate::util::format_duration(elapsed))
+        }
     }
 
     /// Build the header line: "Thinking." (running) or "Thought for Xs" (done). Respects muted_collapsed: when
@@ -542,7 +597,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            DisplayMode::Collapsed
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else if is_running {
             // Match `next_fold_mode`: skip Collapsed while streaming so
@@ -555,7 +612,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            DisplayMode::Collapsed
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else {
             DisplayMode::Collapsed
@@ -563,7 +622,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn finished_display_mode(&self) -> Option<DisplayMode> {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            Some(DisplayMode::Collapsed)
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             Some(DisplayMode::Expanded)
         } else {
             Some(DisplayMode::Collapsed)

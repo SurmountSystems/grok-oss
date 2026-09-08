@@ -174,10 +174,25 @@ impl crate::app::app_view::AppView {
     /// Session disconnect toast: pause honest work on every live/pending
     /// prompt_task. Nested pause at reload start keeps this first timestamp.
     pub(crate) fn handle_session_disconnect_toast(&mut self, attempt: u32) {
-        self.show_toast(&format!(
-            "Disconnected. Reconnecting... (attempt {attempt})"
-        ));
+        let msg = format!("Disconnected. Reconnecting... (attempt {attempt})");
+        self.show_toast(&msg);
+        for agent in self.agents.values_mut() {
+            agent.set_sticky_toast_recursive(Some(&msg));
+        }
         self.pause_live_prompt_reconnect();
+    }
+
+    /// Drop the reconnect sticky banner once the leader is back.
+    pub(crate) fn clear_session_reconnect_sticky(&mut self) {
+        for agent in self.agents.values_mut() {
+            let reconnect = agent
+                .sticky_toast
+                .as_deref()
+                .is_some_and(|m| m.contains("Reconnecting") || m.contains("Disconnected"));
+            if reconnect {
+                agent.set_sticky_toast_recursive(None);
+            }
+        }
     }
 
     /// Pause honest work clocks on every agent (and nested subagent view).

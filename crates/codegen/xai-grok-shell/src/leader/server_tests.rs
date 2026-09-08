@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use super::*;
@@ -841,6 +842,55 @@ fn rewrite_request_id_rewrites_requests() {
     assert_eq!(namespaced_id, "123|42");
     assert_eq!(j(&json, "/id"), "123|42");
     assert_eq!(j(&json, "/method"), "test");
+}
+
+#[test]
+fn session_prompt_is_unstick_retry_reads_params_meta() {
+    assert!(session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[],"_meta":{"unstickRetry":true}}}"#
+    )));
+    assert!(!session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#
+    )));
+    assert!(!session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/cancel","params":{"sessionId":"s1","_meta":{"unstickRetry":true}}}"#
+    )));
+}
+
+#[test]
+fn take_in_flight_session_prompts_for_unstick_leaves_other_sessions() {
+    let mut in_flight = InFlightSessionPrompts::new();
+    in_flight.insert("1|2".into(), (ClientId(1), "sess-hung".into()));
+    in_flight.insert("1|9".into(), (ClientId(1), "sess-other".into()));
+    in_flight.insert("2|2".into(), (ClientId(2), "sess-hung".into()));
+    let taken =
+        take_in_flight_session_prompts_for_unstick(&mut in_flight, ClientId(1), "sess-hung");
+    assert_eq!(taken, vec!["1|2".to_string()]);
+    assert!(in_flight.contains_key("1|9"));
+    assert!(in_flight.contains_key("2|2"));
+    assert!(!in_flight.contains_key("1|2"));
+}
+
+#[test]
+fn response_is_orphaned_for_unstick_while_client_connected() {
+    let mut marked = HashSet::new();
+    marked.insert("7|2".to_string());
+    assert!(
+        response_is_orphaned(true, "7|2", &mut marked),
+        "/unstick must drop the hung session/prompt while the pager stays connected"
+    );
+    assert!(
+        marked.is_empty(),
+        "the hung namespaced id is consumed so a later retry response is not dropped"
+    );
+    assert!(
+        !response_is_orphaned(true, "7|3", &mut HashSet::new()),
+        "a live retry RPC on the same connected client must still be delivered"
+    );
+    assert!(
+        response_is_orphaned(false, "7|2", &mut HashSet::new()),
+        "a disconnected client still orphans via the missing-client path"
+    );
 }
 
 #[test]

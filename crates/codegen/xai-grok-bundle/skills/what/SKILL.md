@@ -28,19 +28,23 @@ Follow Concise American Technical English (CATE), numbered specification
 accessed: 2026-08-27). CATE is not specification 0006.
 
 Reply with this shape only. Four labeled complete thoughts. Nothing
-fluffier. One idea per sentence when that stays clear.
+fluffier. One idea per sentence when that stays clear. Labels are
+**Job / State / Operator / Next**. Address the person as Operator,
+not Human. Do not say You or Human for the operator. Do not say Me
+or Grok for the assistant (Grok OSS and grok-oss stay product names).
+Do not rename the product composer Human box.
 
-1. **What we are doing:** one sentence. The real product outcome this
-   session is trying to finish right now.
-2. **What is true right now:** running, waiting, blocked, or done.
+1. **Job:** one sentence. The real product outcome this session is
+   trying to finish right now.
+2. **State:** running, waiting, blocked, or done.
    Name the real file, command, crate, or test. Do not use private
    labels. Translate leftover jargon from the last agent message into
    ordinary words.
-3. **What you need to do:** the operator action, or the word "nothing"
+3. **Operator:** the operator action, or the word "nothing"
    if they do not need to act. Then say why. Name evidence: who owns
    the next action, which command they asked to keep, which gate is
    unmet. Do not leave a bare "nothing."
-4. **What I will do next:** the next concrete agent step.
+4. **Next:** the next concrete agent step.
 
 ## Rules
 
@@ -51,13 +55,13 @@ fluffier. One idea per sentence when that stays clear.
   force the reader to decode). If the last message used those nicknames,
   translate them.
 - A guess is a guess: omit it or label it.
-- On **What you need to do**, evidence is required. "Nothing" is valid
-  only when you can say why (the next step is yours, a gate they set
-  is unmet, they did not ask for git or install).
+- On **Operator**, evidence is required. "Nothing" is valid
+  only when you can say why (the next step is the agent's, a gate they
+  set is unmet, they did not ask for git or install).
 - Do not put leftover board ids, hex run ids, or compacted codes in
   the body.
 - Do not ask them to say a magic word to continue when the next step
-  is already clear. Do that step, or name it under **What I will do next**.
+  is already clear. Do that step, or name it under **Next**.
 - Optional focus from `/what ...` is the part they did not understand.
   Answer it under the four labels. Do not add extra sections.
 - This is not `/recap`, not `/finish`, not `/reports`.
