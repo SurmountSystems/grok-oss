@@ -717,10 +717,15 @@ impl SessionActor {
         }
         self.drain_between_turn_completions().await;
         self.inject_workflow_status_reminder().await;
-        let user_message = if user_images.is_empty() {
+        let parent_grok_oss = !self.is_cursor_harness() && self.tool_context.subagent_depth == 0;
+        let mut describe_images = user_images.clone();
+        if parent_grok_oss {
+            describe_images.extend(extra_images.iter().cloned());
+        }
+        let user_message = if describe_images.is_empty() {
             user_message
-        } else if self.is_cursor_harness() {
-            self.transcribe_user_images(user_message, &user_images)
+        } else if self.is_cursor_harness() || parent_grok_oss {
+            self.transcribe_user_images(user_message, &describe_images)
                 .await?
         } else {
             let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
@@ -807,7 +812,10 @@ impl SessionActor {
                     }
                 };
                 user_chat.set_prompt_index(current_prompt_index);
-                if !self.is_cursor_harness() {
+                if nested_grok_oss_inlines_images(
+                    self.is_cursor_harness(),
+                    self.tool_context.subagent_depth,
+                ) {
                     let images_dir =
                         xai_grok_shared::session::session_dir(&self.session_info).join("images");
                     for image in &user_images {

@@ -309,10 +309,12 @@ impl ImageDescribeCache {
         if let Some(d) = self.inner.lock().get(&cache_key).cloned() {
             return Ok(d);
         }
+        let (bytes, mime) =
+            crate::session::image_normalize::reencode_for_describe(raw_bytes, mime_type)
+                .map_err(DescribeError::Sampling)?;
         let url = format!(
-            "data:{};base64,{}",
-            mime_type,
-            base64::engine::general_purpose::STANDARD.encode(raw_bytes)
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
         let prompt_text = build_describe_prompt(outline, current_query);
         let description =

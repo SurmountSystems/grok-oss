@@ -1968,11 +1968,17 @@ mod memory_config_tests;
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/parent_paste_describes_not_inline.rs"]
+mod parent_paste_describes_not_inline;
+#[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/tool_extracted_image_parent_tests.rs"]
+mod tool_extracted_image_parent_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;

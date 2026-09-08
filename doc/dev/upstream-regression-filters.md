@@ -193,6 +193,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   plan_approval_footer_paints_five_cta_vocabulary \
   y_copies_the_plan_while_the_comment_overlay_is_open \
   plan_approval_pane_has_a_clickable_copy_control \
+  plan_approval_cta_row_does_not_paint_copy \
   plan_approval_copy_button_click_copies_the_plan \
   selected_idle_cta_is_visually_marked \
   enter_submits_the_marked_idle_cta \
@@ -1530,7 +1531,8 @@ Do not call SuperGrok free.
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
 | `y_copies_the_plan_while_the_comment_overlay_is_open` | Comment overlay `y` copies the plan | **Keep** |
-| `plan_approval_pane_has_a_clickable_copy_control` | Copy is a clickable control, not a fifth idle CTA | **Keep** |
+| `plan_approval_pane_has_a_clickable_copy_control` | Copy is a clickable title-bar glyph left of `[↗]`, not a fifth idle CTA | **Keep** |
+| `plan_approval_cta_row_does_not_paint_copy` | Approve / Comment / Revise / Exit row must not paint copy | **Keep** |
 | `plan_approval_copy_button_click_copies_the_plan` | Clicking the copy control copies the plan | **Keep** |
 | `selected_idle_cta_is_visually_marked` | Selected CTA is marked; leftover recorded-choice is not | **Keep** |
 | `enter_submits_the_marked_idle_cta` | Enter submits the marked idle CTA; empty Enter never Approves | **Keep** |

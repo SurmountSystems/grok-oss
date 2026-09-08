@@ -79,6 +79,13 @@ pub(super) fn persist_inline_data_url(
     format!("file://{}", path.display())
 }
 
+/// Nested grok-oss may put image parts on the conversation item so the nested
+/// request can inflate `file://` to `input_image`. Parent grok-oss and Cursor
+/// transcribe instead and must not call `add_image`.
+pub(super) fn nested_grok_oss_inlines_images(is_cursor: bool, subagent_depth: u32) -> bool {
+    !is_cursor && subagent_depth > 0
+}
+
 /// Handle stored on the conversation item: file id, remote URL, or last-resort data URL.
 pub(super) fn conversation_image_handle(
     image: &agent_client_protocol::ImageContent,
@@ -1012,9 +1019,14 @@ impl SessionActor {
             &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let active_session_config = self.reconstruct_full_config().await;
-        let resolved_describe = self
-            .resolve_aux_sampler_config(&self.image_description_model)
-            .await;
+        // An empty slug is "use this session's sampler", not "look up '' in
+        // the catalog / XAI_API_KEY and hit production cli-chat-proxy".
+        let resolved_describe = if self.image_description_model.trim().is_empty() {
+            None
+        } else {
+            self.resolve_aux_sampler_config(&self.image_description_model)
+                .await
+        };
         let (describe_model, sampler_config) =
             crate::agent::config::finalize_image_describe_sampler_config(
                 resolved_describe,

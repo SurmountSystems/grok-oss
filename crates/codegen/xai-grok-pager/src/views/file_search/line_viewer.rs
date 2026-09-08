@@ -1662,9 +1662,10 @@ pub fn render_line_viewer(
     }
 
     // 6. Action buttons on the top border, right-aligned.
-    //    Layout: ... [↗][✗]  (rightmost buttons first; the two abut
-    //    flush — see the spacing notes on the close/fullscreen labels
-    //    below).
+    //    Layout: ... copy [↗][✗]  (rightmost buttons first; the two
+    //    abut flush. See the spacing notes on the close/fullscreen
+    //    labels below). Plan preview paints `copy_icon` immediately
+    //    left of `[↗]`.
     //    The close [✗] is omitted in plan-review (feedback) mode because
     //    the modal is not user-closeable in that state — clicking it
     //    would be a no-op (see the close-button branch of
@@ -1730,6 +1731,45 @@ pub fn render_line_viewer(
         viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
     } else {
         viewer.fullscreen_button_area = None;
+    }
+
+    // Plan preview: copy glyph immediately left of `[↗]` (the leading
+    // space of the fullscreen label). Shrink the enlarge hit rect so
+    // a copy click is not stolen by fullscreen.
+    if viewer.kind == LineViewerKind::PlanPreview {
+        let icon = crate::glyphs::copy_icon();
+        let copy_w: u16 = 1;
+        let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+        let copy_style = if copy_hovered {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.gray).bg(theme.bg_base)
+        };
+        let copy_x = match viewer.fullscreen_button_area {
+            Some(fs) if fs.width > copy_w => Some(fs.x),
+            _ if right_edge > popup_area.x + copy_w + 2 => Some(right_edge - copy_w),
+            _ => None,
+        };
+        if let Some(copy_x) = copy_x {
+            let copy_span = Span::styled(icon, copy_style);
+            buf.set_span(copy_x, popup_area.y, &copy_span, copy_w);
+            if let Some(fs) = viewer.fullscreen_button_area
+                && copy_x == fs.x
+            {
+                viewer.fullscreen_button_area = Some(Rect::new(
+                    fs.x.saturating_add(copy_w),
+                    fs.y,
+                    fs.width.saturating_sub(copy_w),
+                    fs.height,
+                ));
+            }
+            viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, popup_area.y, copy_w, 1));
+        } else {
+            viewer.plan_mut().copy_button_area = None;
+        }
     }
 
     // The legacy top-border "send" button is gone — both plan-approval
@@ -1810,7 +1850,8 @@ pub fn render_line_viewer(
     //
     //    - Plan idle (live present and `/view-plan`):  approve | comment | revise | exit
     //    - Plan comment flow:  approve | clarify | revise | exit
-    //    Copy / search / Esc stay on the main hint row, not as a fifth idle CTA.
+    //    Copy is the title-bar glyph, not a fifth idle CTA. Search / Esc
+    //    stay on the main hint row.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1847,7 +1888,7 @@ pub fn render_line_viewer(
             // prefixes. Narrow docks drop separators, then drop the badge.
             // Idle: Comment is the notes entry. After Comment / prompt
             // focus, Clarify replaces it so the typed comment can ride.
-            // Copy is a separate control (`y copy`), not a fifth idle CTA.
+            // Copy is the title-bar glyph, not a fifth idle CTA.
             let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
@@ -1866,8 +1907,6 @@ pub fn render_line_viewer(
                 send_hovered,
                 abandon_hovered,
             ];
-            let copy_spans = build_shortcut_button('y', "copy", copy_hovered, theme);
-            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
 
             let mut painted = false;
             for &(sep, sep_w_here, with_badge) in
@@ -1918,18 +1957,6 @@ pub fn render_line_viewer(
                     }
                 }
 
-                let cta_left = areas[0].map(|a| a.x).unwrap_or(inner.x);
-                let mut copy_area = None;
-                if copy_w > 0 && inner.x.saturating_add(copy_w) < cta_left {
-                    let mut cx = inner.x;
-                    for span in &copy_spans {
-                        let w = span.width() as u16;
-                        buf.set_span(cx, bottom_y, span, w);
-                        cx += w;
-                    }
-                    copy_area = Some(Rect::new(inner.x, bottom_y, copy_w, 1));
-                }
-
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = areas[0];
                 if comment_flow {
@@ -1942,7 +1969,6 @@ pub fn render_line_viewer(
                 plan.send_button_area = areas[2];
                 plan.abandon_button_area = areas[3];
                 plan.approve_notes_button_area = None;
-                plan.copy_button_area = copy_area;
                 painted = true;
                 break;
             }
@@ -1955,7 +1981,6 @@ pub fn render_line_viewer(
                 plan.send_button_area = None;
                 plan.abandon_button_area = None;
                 plan.comment_button_area = None;
-                plan.copy_button_area = None;
             }
         } else {
             let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
@@ -2148,6 +2173,34 @@ mod tests {
             row.push_str(buf[(x, y)].symbol());
         }
         row
+    }
+
+    /// Copy is the title-bar glyph immediately left of `[↗]`, not a footer CTA.
+    fn assert_title_bar_copy_left_of_enlarge(buf: &Buffer, plan: &PlanViewerExtras, footer_y: u16) {
+        let area = plan
+            .copy_button_area
+            .expect("copy must be a clickable hit target");
+        assert_ne!(
+            area.y, footer_y,
+            "copy glyph must not sit on the Approve CTA row"
+        );
+        let icon = crate::glyphs::copy_icon();
+        assert_eq!(
+            buf[(area.x, area.y)].symbol(),
+            icon,
+            "copy_button_area must cover the title-bar copy glyph"
+        );
+        let bracket_x = area.x.saturating_add(area.width);
+        assert_eq!(
+            buf[(bracket_x, area.y)].symbol(),
+            "[",
+            "copy glyph must sit immediately left of [↗]"
+        );
+        assert_eq!(
+            buf[(bracket_x.saturating_add(1), area.y)].symbol(),
+            crate::glyphs::enlarge(),
+            "copy glyph must sit immediately left of [↗]"
+        );
     }
 
     #[test]
@@ -2649,10 +2702,7 @@ mod tests {
         assert!(plan.comment_button_area.is_some());
         assert!(plan.send_button_area.is_some());
         assert!(plan.abandon_button_area.is_some());
-        assert!(
-            plan.copy_button_area.is_some(),
-            "copy is a clickable control, not a fifth idle CTA"
-        );
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, modal.y + modal.height.saturating_sub(1));
     }
 
     /// No selected CTA and no leftover recorded glyph means no choice dot.
@@ -2748,6 +2798,7 @@ mod tests {
     }
 
     /// Operator: plan approval pane has a clickable copy control.
+    /// Copy is the title-bar glyph left of `[↗]`, not a fifth idle CTA.
     #[test]
     fn plan_approval_pane_has_a_clickable_copy_control() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -2768,27 +2819,60 @@ mod tests {
         render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
 
         let modal = viewer.last_modal_area.expect("footer");
-        let footer = row_text(&buf, modal.y + modal.height.saturating_sub(1));
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
         let lower = footer.to_ascii_lowercase();
         assert!(
-            lower.contains("copy"),
-            "comment overlay must paint a copy control; got {footer:?}"
-        );
-        assert!(
-            !lower.contains("copy plan"),
-            "copy is not the casual copy-plan decision CTA; got {footer:?}"
+            !lower.contains("copy"),
+            "comment overlay must not paint copy on the CTA row; got {footer:?}"
         );
         let plan = viewer.plan_ref().expect("plan extras");
-        assert!(
-            plan.copy_button_area.is_some(),
-            "copy must be a clickable hit target while commenting"
-        );
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
         for needle in ["approve", "clarify", "revise", "exit"] {
             assert!(
                 lower.contains(needle),
                 "comment-flow CTAs must stay; missing {needle}; got {footer:?}"
             );
         }
+    }
+
+    /// Operator: the Approve / Comment / Revise / Exit row must not paint copy.
+    #[test]
+    fn plan_approval_cta_row_does_not_paint_copy() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nDo the thing\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer
+            .last_modal_area
+            .expect("approval footer needs a painted modal");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
+        let lower = footer.to_ascii_lowercase();
+        assert!(
+            !lower.contains("copy"),
+            "CTA row must not paint copy; got {footer:?}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "idle footer must name {needle}; got {footer:?}"
+            );
+        }
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
     }
 
     /// Comment-count badge (number + dot) is not the recorded-choice marker.

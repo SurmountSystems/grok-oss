@@ -21,6 +21,7 @@
 pub mod config;
 pub mod context;
 pub mod definition;
+pub mod nested_images;
 pub mod overrides;
 pub mod resume;
 pub mod types;
@@ -33,6 +34,11 @@ pub use definition::{
     render_subagent_initial_user_message, render_subagent_system_prompt, resolve_agent_definition,
     resolve_runtime_config, select_role, subagent_harness_flavor_is_representable,
     validate_agent_name,
+};
+pub use nested_images::{
+    NamedSavedImage, collect_named_saved_images, file_urls_for_named_spawn_prompt,
+    format_named_image_token, image_numbers_named_in_text, image_parts_for_named_spawn_prompt,
+    saved_local_image_path,
 };
 pub use overrides::{intersect_capability_modes, resolve_effective_overrides};
 pub use resume::{ResumeValidationError, validate_resume_identity};

@@ -10,7 +10,8 @@ pub const BYTES_PER_TOKEN: u64 = 4;
 
 /// Per-image approximate token cost on the **model path**.
 ///
-/// Pasted screenshots ride as content parts (`input_image` / `image_url`).
+/// Parent grok-oss pastes are described. Nested sessions and describe
+/// requests send `input_image` / `image_url`.
 /// The server decodes bytes and the vision encoder emits image tokens. The
 /// best public formula is 448×448 tiles, 256 tokens per tile, plus one
 /// overhead tile, cap 6 tiles: `(tiles + 1) * 256` = 256..1792 per image.

@@ -1,9 +1,77 @@
 //! Tool-layer extracted-image helpers for the session tool pipeline.
 //!
-//! Pure drain / harness split — no `SessionActor` dependency.
+//! Drain / harness split plus persist-to-session-dir for parent leak stop.
 
 use super::*;
+use std::path::{Path, PathBuf};
+use xai_grok_sampling_types::ContentPart;
 use xai_grok_tools::util::base64_images::ExtractedImage;
+
+/// Persist extracted tool-image bytes under session `images/`.
+///
+/// Returns the written path when the crate became a `file://` handle.
+/// Parent conversation must never keep a `data:` URL; a persist miss
+/// yields `None` so the caller can emit text only.
+pub(super) fn persist_extracted_tool_image(
+    mime_type: &str,
+    base64_data: &str,
+    session_images_dir: &Path,
+) -> Option<PathBuf> {
+    let data_url = format!("data:{mime_type};base64,{base64_data}");
+    let handle = persist_inline_data_url(data_url, Some(session_images_dir));
+    let path = handle.strip_prefix("file://")?;
+    let path = PathBuf::from(path);
+    path.is_file().then_some(path)
+}
+
+/// Parent follow-up is text (saved path). Nested may attach a `file://` handle.
+pub(super) fn extracted_image_followup(saved_path: &Path, parent: bool) -> ConversationItem {
+    if parent {
+        ConversationItem::system_reminder(format!(
+            "[Image extracted from tool result above. Saved to {}]",
+            saved_path.display()
+        ))
+    } else {
+        let mut item =
+            ConversationItem::system_reminder("[Image extracted from tool result above]");
+        item.add_image(format!("file://{}", saved_path.display()));
+        item
+    }
+}
+
+/// Parent persist miss: text only. Nested persist miss: keep a data-URL attach
+/// so the nested session can still see the image until nested-attach owns it.
+pub(super) fn extracted_image_persist_miss_followup(
+    mime_type: &str,
+    base64_data: &str,
+    parent: bool,
+) -> ConversationItem {
+    if parent {
+        ConversationItem::system_reminder(
+            "[Image extracted from tool result above could not be saved to the session images directory]",
+        )
+    } else {
+        let mut item =
+            ConversationItem::system_reminder("[Image extracted from tool result above]");
+        item.add_image(format!("data:{mime_type};base64,{base64_data}"));
+        item
+    }
+}
+
+/// Parent must not attach image parts on the tool result. Nested may attach
+/// a `file://` handle (inflate on the inference HTTP clone).
+pub(super) fn parent_or_nested_tool_image_part(
+    saved_path: &Path,
+    parent: bool,
+) -> Option<ContentPart> {
+    if parent {
+        None
+    } else {
+        Some(ContentPart::Image {
+            url: std::sync::Arc::<str>::from(format!("file://{}", saved_path.display())),
+        })
+    }
+}
 
 /// Drain pre-truncate image captures off the tool output for session vision.
 pub(super) fn drain_tool_layer_extracted_images(
@@ -61,9 +129,11 @@ pub(super) fn split_tool_layer_for_harness(
 #[cfg(test)]
 mod tests {
     use super::{
-        DrainedToolSuccess, drain_tool_layer_extracted_images, split_tool_layer_for_harness,
+        DrainedToolSuccess, drain_tool_layer_extracted_images, extracted_image_followup,
+        persist_extracted_tool_image, split_tool_layer_for_harness,
     };
     use std::path::PathBuf;
+    use xai_grok_sampling_types::ContentPart;
     use xai_grok_tools::types::output::{
         FileContent, MCPOutput, ReadFileOutput, SearchToolOutput, ToolOutput, ToolRunResult,
     };
@@ -290,5 +360,51 @@ mod tests {
         assert_eq!(vision.len(), 1);
         assert_eq!(vision[0].mime_type, "image/png");
         assert_eq!(vision[0].data, "existing");
+    }
+
+    #[test]
+    fn persist_extracted_tool_image_writes_session_file() {
+        let dir =
+            std::env::temp_dir().join(format!("grok-tool-img-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = persist_extracted_tool_image("image/png", "AAAA", &dir)
+            .expect("persist must write a session file");
+        assert!(
+            saved.is_file(),
+            "saved path must exist: {}",
+            saved.display()
+        );
+        assert!(
+            saved.starts_with(&dir),
+            "must persist under the session images dir"
+        );
+        let followup = extracted_image_followup(&saved, true);
+        match &followup {
+            xai_grok_sampling_types::ConversationItem::User(u) => {
+                assert!(
+                    u.content
+                        .iter()
+                        .all(|p| !matches!(p, ContentPart::Image { .. })),
+                    "parent follow-up must be text-only: {followup:?}"
+                );
+                let text = u
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.as_ref()),
+                        ContentPart::Image { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    text.contains(&saved.display().to_string()),
+                    "parent reminder must name the saved path: {text}"
+                );
+                assert!(!text.contains("data:image"), "must not leak data URL text");
+            }
+            other => panic!("expected user reminder, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

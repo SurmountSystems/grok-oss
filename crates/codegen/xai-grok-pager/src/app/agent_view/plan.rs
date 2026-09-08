@@ -699,8 +699,31 @@ impl AgentView {
         );
         pav.send_abandoned();
         self.close_plan_review(pav, "abandon");
+        // Exit ends the present wait locally. Dead park has no waiter, so
+        // send_abandoned is a no-op. Persist plan_decision_resolved so
+        // resume does not re-park. Pager plan_mode_pending is Some(false).
+        // That is not leave_plan_mode_to_default / deactivate_approved on
+        // a running shell.
+        self.finish_turn_idle_after_plan_park();
         InputOutcome::Changed
     }
+
+    /// Dead park or Exit: Idle, no Waiting, no timer.
+    pub(crate) fn finish_turn_idle_after_plan_park(&mut self) {
+        self.session.finish_turn(&mut self.scrollback);
+        self.mark_turn_finished();
+        self.activity_started_at = None;
+        self.last_activity = None;
+    }
+
+    /// Live `exit_plan_mode` still has a waiter. Isolated present stays
+    /// parked until Approve or Exit answers it.
+    pub(crate) fn plan_park_waiter_gone(&self) -> bool {
+        self.plan_approval_view
+            .as_ref()
+            .is_some_and(|p| p.response_tx.is_none())
+    }
+
     /// Shared teardown for the two plan-review decisions that end the
     /// review (approve and abandon). The shell leaves plan mode as a
     /// result, but its confirming `CurrentModeUpdate("default")` is

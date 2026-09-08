@@ -2999,3 +2999,330 @@ fn session_loaded_applies_cancel_resume_marker_and_toasts() {
         xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
     xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
 }
+
+fn install_dead_plan_park(agent: &mut AgentView, turn_running: bool) {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+
+    agent.plan_mode_active = true;
+    agent.plan_mode_pending = None;
+    agent.plan_decision_resolved = false;
+    if turn_running {
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(Instant::now());
+        agent.last_activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+        agent.session.current_prompt_id = Some("dead-park-turn".into());
+    } else {
+        agent.session.state = AgentState::Idle;
+        agent.turn_started_at = Some(Instant::now());
+        agent.last_activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+    }
+    agent.plan_approval_view = Some(
+        crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+            "# Dead park\n".into(),
+        )),
+    );
+}
+
+fn assert_plan_park_idle_no_wait(agent: &AgentView, why: &str) {
+    assert!(
+        agent.session.state.is_idle(),
+        "{why}: pager must be Idle, got {:?}",
+        agent.session.state
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "{why}: plan_approval_view must be cleared"
+    );
+    assert!(
+        agent.turn_started_at.is_none(),
+        "{why}: no turn timer after dead park ends"
+    );
+    assert!(
+        agent.turn_elapsed().is_none(),
+        "{why}: turn_elapsed must be gone with the timer"
+    );
+    assert!(
+        agent.resolve_turn_activity().is_none(),
+        "{why}: no Waiting chrome after dead park ends, got {:?}",
+        agent.resolve_turn_activity()
+    );
+}
+
+/// Named contract: Exit (`abandon_plan`) or cancel of a dead park (shell turn
+/// already ended / `response_tx` gone) must `finish_turn` so the pager is
+/// Idle: no Waiting, no timer. Clear `plan_approval_view`. Exit persists
+/// `plan_decision_resolved` and sets pager `plan_mode_pending` to
+/// `Some(false)`. That pager flag is not shell `leave_plan_mode_to_default`
+/// / `deactivate_approved`. Cancel of a live park stays in plan mode.
+#[test]
+fn plan_exit_or_cancel_of_dead_park_leaves_idle() {
+    let id = AgentId(0);
+
+    let mut app = test_app_with_agent();
+    install_dead_plan_park(app.agents.get_mut(&id).unwrap(), true);
+    app.agents.get_mut(&id).unwrap().abandon_plan();
+    let agent = app.agents.get(&id).unwrap();
+    assert_plan_park_idle_no_wait(agent, "Exit button");
+    assert!(
+        agent.plan_decision_resolved,
+        "Exit must persist plan_decision_resolved"
+    );
+    assert_eq!(
+        agent.plan_mode_pending,
+        Some(false),
+        "Exit must set pager plan_mode_pending to Some(false); that is not shell leave_plan_mode_to_default / deactivate_approved"
+    );
+
+    let mut app = test_app_with_agent();
+    install_dead_plan_park(app.agents.get_mut(&id).unwrap(), true);
+    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "dead-park cancel must not emit CancelTurn (no queued_after_cancel), got {effects:?}"
+    );
+    assert_plan_park_idle_no_wait(app.agents.get(&id).unwrap(), "cancel of running dead park");
+
+    let mut app = test_app_with_agent();
+    install_dead_plan_park(app.agents.get_mut(&id).unwrap(), false);
+    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "ended-turn dead-park cancel must not emit CancelTurn, got {effects:?}"
+    );
+    assert_plan_park_idle_no_wait(
+        app.agents.get(&id).unwrap(),
+        "cancel of ended-turn dead park",
+    );
+
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = false;
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(Instant::now());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "live-park".into(),
+            plan_content: Some("# Live park\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::new(
+                request,
+                crate::views::prompt_widget::StashedPrompt::default(),
+                tx,
+            ),
+        );
+    }
+    let _ = super::super::turn::do_cancel_turn(&mut app, true);
+    let agent = app.agents.get(&id).unwrap();
+    assert_ne!(
+        agent.plan_mode_pending,
+        Some(false),
+        "cancel of a live park stays in plan mode; only the Exit button leaves"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "live-park cancel must not persist plan_decision_resolved"
+    );
+}
+
+/// Named contract: after dead-park cancel, do not queued_after_cancel
+/// rebuild-flush WAL or PLAN_APPROVED_REVIEW_COMMENTS_LEAD. Fresh Human
+/// Enter still starts a turn. Live park (`response_tx` present) still
+/// emits `CancelTurn`; do not skip `queued_after_cancel` for that live
+/// typed cancel-then-send path.
+#[test]
+fn cancel_dead_park_does_not_queued_after_cancel_rebuild_flush() {
+    let id = AgentId(0);
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        install_dead_plan_park(agent, true);
+        agent.prompt.set_text("composer leftover");
+        agent.prompt_wal_append_count.set(0);
+    }
+
+    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "dead-park cancel must not queued_after_cancel via CancelTurn, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| match e {
+            Effect::SendPrompt { text, .. } => {
+                text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+            }
+            Effect::SendPromptBlocks { .. } => true,
+            _ => false,
+        }),
+        "dead-park cancel must not inject PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert_eq!(
+        agent.prompt_wal_append_count.get(),
+        0,
+        "dead-park cancel must not rebuild-flush WAL"
+    );
+    assert_plan_park_idle_no_wait(agent, "dead-park cancel before fresh Enter");
+
+    let effects = dispatch(Action::SendPrompt("fresh human enter".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "fresh human enter")),
+        "fresh Human Enter must still start a turn, got {effects:?}"
+    );
+    assert!(
+        app.agents[&id].session.state.is_turn_running(),
+        "fresh Enter after dead-park cancel must start a turn, got {:?}",
+        app.agents[&id].session.state
+    );
+
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = false;
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("live-park-turn".into());
+        agent.turn_started_at = Some(Instant::now());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "live-park-cancel-then-send".into(),
+            plan_content: Some("# Live park\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::new(
+                request,
+                crate::views::prompt_widget::StashedPrompt::default(),
+                tx,
+            ),
+        );
+    }
+    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "live park (response_tx present) must still emit CancelTurn so typed cancel-then-send can queued_after_cancel, got {effects:?}"
+    );
+    let queued = dispatch(
+        Action::SendPrompt("typed after live cancel".into()),
+        &mut app,
+    );
+    assert!(
+        queued.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == "typed after live cancel"
+        )) || !app.agents[&id].session.pending_prompts.is_empty(),
+        "typed cancel-then-send on a live park must still queue or send, got {queued:?} pending={:?}",
+        app.agents[&id].session.pending_prompts
+    );
+}
+
+/// Named contract: `open_turn_wait_kind` must not treat any historical
+/// nested finished as `FalseWaitAfterNestedCompleted`. Only nested ids
+/// this turn waited on. First-token wait then paints Waiting for the
+/// model via `WaitingReason::Model`.
+#[test]
+fn first_token_wait_with_old_nested_paints_waiting_for_the_model() {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let mut old = crate::app::agent_view::test_fixtures::running_subagent_info("old-l2");
+        old.description = std::sync::Arc::from("historical nested from a previous turn");
+        old.finished = true;
+        old.status = Some(std::sync::Arc::from("completed"));
+        old.duration_ms = Some(1_500);
+        old.activity_label = None;
+        agent.subagent_sessions.insert("old-l2".into(), old);
+    }
+    let agent = app.agents.get(&id).unwrap();
+    assert_eq!(
+        format!("{:?}", agent.open_turn_wait_kind()),
+        "Some(LiveSampler)",
+        "historical nested finished is not a this-turn wait, got {:?}",
+        agent.open_turn_wait_kind()
+    );
+    let activity = agent.resolve_turn_activity();
+    assert_eq!(
+        activity,
+        Some(TurnActivity::Waiting(WaitingReason::Model)),
+        "first-token wait must stay Waiting(Model), got {activity:?}"
+    );
+    let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+    assert_eq!(
+        label.as_deref(),
+        Some("Waiting for the model…"),
+        "first-token wait must paint Waiting for the model, got {label:?}"
+    );
+}
+
+/// Named contract: a this-turn `SubagentFinished` that this turn did not
+/// wait on (no wait tool, no spawn wait) must still paint Waiting for
+/// the model. `FalseWaitAfterNestedCompleted` only when this turn
+/// actually waited on those ids.
+#[test]
+fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model() {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let mut nested =
+            crate::app::agent_view::test_fixtures::running_subagent_info("l2-bg-nowait");
+        nested.description =
+            std::sync::Arc::from("this-turn background nested this turn did not wait on");
+        nested.is_background = true;
+        nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
+        nested.finished = true;
+        nested.status = Some(std::sync::Arc::from("completed"));
+        nested.duration_ms = Some(1_500);
+        nested.activity_label = None;
+        agent
+            .subagent_sessions
+            .insert("l2-bg-nowait".into(), nested);
+        agent.note_finished_nested_wait_ids("l2-bg-nowait", "sa-bg-nowait");
+    }
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.finished_nested_wait_ids.is_empty(),
+        "SubagentFinished without wait tool / spawn wait must not record finished_nested_wait_ids, got {:?}",
+        agent.finished_nested_wait_ids
+    );
+    assert_eq!(
+        format!("{:?}", agent.open_turn_wait_kind()),
+        "Some(LiveSampler)",
+        "unwaited this-turn nested finish is not FalseWaitAfterNestedCompleted, got {:?}",
+        agent.open_turn_wait_kind()
+    );
+    let activity = agent.resolve_turn_activity();
+    assert_eq!(
+        activity,
+        Some(TurnActivity::Waiting(WaitingReason::Model)),
+        "first-token wait must stay Waiting(Model), got {activity:?}"
+    );
+    let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+    assert_eq!(
+        label.as_deref(),
+        Some("Waiting for the model…"),
+        "first-token wait must paint Waiting for the model, got {label:?}"
+    );
+}

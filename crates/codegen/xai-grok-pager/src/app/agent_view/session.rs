@@ -1126,6 +1126,7 @@ impl AgentView {
         }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
+        self.finished_nested_wait_ids.clear();
         self.session.start_turn(&mut self.scrollback);
         crate::app::active_session_heartbeat::write_from_agent(self);
     }
@@ -1535,8 +1536,7 @@ impl AgentView {
                 WaitingReason::Subagent { .. } | WaitingReason::TaskOutput { waits: true, .. },
             )) => Some(OpenTurnWaitKind::NestedSubagentStillRunning),
             Some(TurnActivity::Waiting(WaitingReason::Model)) => {
-                let finished_nested = self.subagent_sessions.values().any(|s| s.finished);
-                if finished_nested && self.running_live_specialists().next().is_none() {
+                if self.this_turn_waited_nested_already_finished() {
                     Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted)
                 } else {
                     Some(OpenTurnWaitKind::LiveSampler)
@@ -1545,6 +1545,15 @@ impl AgentView {
             None => Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted),
             Some(_) => None,
         }
+    }
+
+    /// Nested ids this turn waited on, now finished. Historical leftover
+    /// rows in `subagent_sessions` are not this turn.
+    fn this_turn_waited_nested_already_finished(&self) -> bool {
+        if self.running_live_specialists().next().is_some() {
+            return false;
+        }
+        !self.finished_nested_wait_ids.is_empty()
     }
 
     /// Fill in a `TaskOutput` / `Subagent` wait's display subject.
@@ -1698,13 +1707,17 @@ impl AgentView {
         }
     }
 
-    /// Record host `SubagentFinished` ids so wait chrome cannot hang after
-    /// the nested row is dropped from [`Self::subagent_sessions`].
+    /// Record nested ids this turn waited on (wait tool / spawn wait) so
+    /// wait chrome cannot hang after the nested row is dropped from
+    /// [`Self::subagent_sessions`]. Do not record every `SubagentFinished`.
     pub(crate) fn note_finished_nested_wait_ids(
         &mut self,
         child_session_id: &str,
         subagent_id: &str,
     ) {
+        if !self.this_turn_waited_on_nested(child_session_id, subagent_id) {
+            return;
+        }
         if !child_session_id.is_empty() {
             self.finished_nested_wait_ids
                 .insert(child_session_id.to_string());
@@ -1712,6 +1725,28 @@ impl AgentView {
         if !subagent_id.is_empty() {
             self.finished_nested_wait_ids
                 .insert(subagent_id.to_string());
+        }
+    }
+
+    /// Wait tool (`get_command_or_subagent_output`) targeting these ids, or
+    /// spawn wait / `wait_commands_or_subagents`. Background nested finish
+    /// with no wait is not a this-turn wait.
+    fn this_turn_waited_on_nested(&self, child_session_id: &str, subagent_id: &str) -> bool {
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        match self.session.tracker.activity() {
+            Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
+            | Some(TurnActivity::Waiting(WaitingReason::TasksComplete)) => true,
+            _ => self
+                .session
+                .tracker
+                .task_output_blocking_waits()
+                .iter()
+                .any(|(_, ids)| {
+                    ids.is_empty()
+                        || ids
+                            .iter()
+                            .any(|id| id == child_session_id || id == subagent_id)
+                }),
         }
     }
 
@@ -1749,12 +1784,19 @@ impl AgentView {
     /// tool call is still Pending.
     pub(crate) fn drop_satisfied_task_output_waits(&mut self) {
         let waits = self.session.tracker.task_output_blocking_waits();
-        let drop: Vec<String> = waits
+        let drop: Vec<(String, Vec<String>)> = waits
             .into_iter()
             .filter(|(_, ids)| !self.waited_work_still_running(ids))
-            .map(|(key, _)| key)
             .collect();
-        self.session.tracker.remove_blocking_waits(&drop);
+        for (_, ids) in &drop {
+            for id in ids {
+                if !id.is_empty() {
+                    self.finished_nested_wait_ids.insert(id.clone());
+                }
+            }
+        }
+        let keys: Vec<String> = drop.into_iter().map(|(key, _)| key).collect();
+        self.session.tracker.remove_blocking_waits(&keys);
     }
 
     /// Whether a foreground subagent (`task`/`spawn_subagent`, not
@@ -2509,6 +2551,82 @@ mod resolve_turn_activity_tests {
         assert!(
             !view.session.state.is_idle(),
             "live sampler wait is TurnRunning, not idle"
+        );
+    }
+
+    /// Named contract: `open_turn_wait_kind` must not treat any historical
+    /// nested finished as `FalseWaitAfterNestedCompleted`. Only nested ids
+    /// this turn waited on. First-token wait then paints Waiting for the
+    /// model via `WaitingReason::Model`.
+    #[test]
+    fn first_token_wait_with_old_nested_paints_waiting_for_the_model() {
+        let mut view = running_view();
+        let mut old = running_child("historical nested from a previous turn");
+        mark_specialist_completed(&mut old);
+        view.subagent_sessions.insert("old-l2".into(), old);
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "historical nested finished is not a this-turn wait, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        let activity = view.resolve_turn_activity();
+        assert_eq!(
+            activity,
+            Some(TurnActivity::Waiting(WaitingReason::Model)),
+            "first-token wait must stay Waiting(Model), got {activity:?}"
+        );
+        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        assert_eq!(
+            label.as_deref(),
+            Some("Waiting for the model…"),
+            "first-token wait must paint Waiting for the model, got {label:?}"
+        );
+        let text = crate::app::subagent::format_activity_label(
+            activity.as_ref().expect("first-token activity"),
+        );
+        assert!(
+            text.to_ascii_lowercase().contains("waiting for the model"),
+            "got {text}"
+        );
+    }
+
+    /// Named contract: first-token wait after a this-turn nested finish
+    /// that this turn did not wait on must stay `Waiting(Model)` /
+    /// Waiting for the model. `FalseWaitAfterNestedCompleted` only when
+    /// this turn actually waited on those ids (wait tool / spawn wait),
+    /// not every `SubagentFinished`.
+    #[test]
+    fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model() {
+        let mut view = running_view();
+        let mut nested = running_child("this-turn background nested this turn did not wait on");
+        nested.is_background = true;
+        nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
+        view.subagent_sessions.insert("l2-bg-nowait".into(), nested);
+        mark_specialist_completed(view.subagent_sessions.get_mut("l2-bg-nowait").unwrap());
+        view.note_finished_nested_wait_ids("l2-bg-nowait", "sa-bg-nowait");
+        assert!(
+            view.finished_nested_wait_ids.is_empty(),
+            "SubagentFinished without wait tool / spawn wait must not record finished_nested_wait_ids, got {:?}",
+            view.finished_nested_wait_ids
+        );
+        assert_eq!(
+            view.open_turn_wait_kind(),
+            Some(OpenTurnWaitKind::LiveSampler),
+            "unwaited this-turn nested finish is not FalseWaitAfterNestedCompleted, got {:?}",
+            view.open_turn_wait_kind()
+        );
+        let activity = view.resolve_turn_activity();
+        assert_eq!(
+            activity,
+            Some(TurnActivity::Waiting(WaitingReason::Model)),
+            "first-token wait must stay Waiting(Model), got {activity:?}"
+        );
+        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        assert_eq!(
+            label.as_deref(),
+            Some("Waiting for the model…"),
+            "first-token wait must paint Waiting for the model, got {label:?}"
         );
     }
 

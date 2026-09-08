@@ -380,6 +380,20 @@ fn cancel_agent_turn(
             /* rewind_if_no_output */ false,
         )];
     }
+    // Dead park: shell turn already ended / response_tx gone. Finish Idle.
+    // Do not CancelTurn (queued_after_cancel) or rebuild-flush WAL.
+    // Live park cancel stays below and stays in plan mode.
+    if agent.plan_park_waiter_gone() {
+        if let Some(mut pav) = agent.plan_approval_view.take() {
+            let _ = pav.send_stale_cancel();
+            agent.plan_next_comment_id = pav.next_comment_id;
+            agent.prompt.restore(pav.stashed_prompt);
+            agent.line_viewer = None;
+        }
+        agent.finish_turn_idle_after_plan_park();
+        agent.clear_send_now_expectation();
+        return vec![];
+    }
     if !agent.session.state.is_turn_running() {
         return vec![];
     }

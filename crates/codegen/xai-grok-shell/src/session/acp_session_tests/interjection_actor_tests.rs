@@ -101,15 +101,30 @@ async fn goal_send_now_routes_text_and_image_as_planner_steering_and_interjectio
         .await;
 }
 
-/// Draining an image-bearing interjection injects structured
-/// `ContentPart::Image` parts (base64 data URL) on the synthetic user
-/// message, preserving `SyntheticReason::Interjection`.
+fn user_image_urls(item: &xai_grok_sampling_types::conversation::UserItem) -> Vec<&str> {
+    item.content
+        .iter()
+        .filter_map(|p| match p {
+            xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parent drain of an image-bearing interjection must not attach
+/// `ContentPart::Image`. `[Image #1]` stays in the wrapped query.
+/// This test actor does not stub describe, so the envelope may be a
+/// failed-transcription notice rather than `<image_files>`.
 #[tokio::test]
-async fn drain_interjection_with_images_attaches_image_parts() {
+async fn drain_interjection_with_images_does_not_attach_image_parts_on_parent() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            assert_eq!(
+                actor.tool_context.subagent_depth, 0,
+                "this contract is the parent (main) grok-oss session"
+            );
             actor.pending_interjections.push(PendingInterjection {
                 text: "look at [Image #1]".to_string(),
                 attachments: vec![test_image_content()],
@@ -126,37 +141,61 @@ async fn drain_interjection_with_images_attaches_image_parts() {
                 user_item.synthetic_reason,
                 Some(SyntheticReason::Interjection)
             );
-            let image_urls: Vec<&str> = user_item
-                .content
-                .iter()
-                .filter_map(|p| match p {
-                    xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(image_urls.len(), 1, "image part must be attached");
+            assert!(
+                user_image_urls(user_item).is_empty(),
+                "parent interjection must not attach ContentPart::Image, got {user_item:?}"
+            );
+            let text = conversation.last().unwrap().text_content();
+            assert!(
+                text.contains("[Image #1]") && text.contains("<user_query>"),
+                "placeholder text must survive in the wrapped query, got: {text}"
+            );
+            assert!(
+                !text.contains("data:image"),
+                "parent interjection text must not inline a data URL crate, got: {text}"
+            );
+        })
+        .await;
+}
+
+/// Nested drain still attaches `file://` image parts so the nested request
+/// can inflate to `input_image`.
+#[tokio::test]
+async fn drain_interjection_with_images_attaches_file_parts_on_nested() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut actor, _gateway_rx) = build_actor().await;
+            std::sync::Arc::get_mut(&mut actor)
+                .expect("unique test actor")
+                .tool_context
+                .subagent_depth = 1;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "look at [Image #1]".to_string(),
+                attachments: vec![test_image_content()],
+            });
+
+            assert!(actor.drain_pending_interjections().await);
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let user_item = match conversation.last() {
+                Some(ConversationItem::User(u)) => u,
+                other => panic!("conversation tail must be a user item, got: {other:?}"),
+            };
+            assert_eq!(
+                user_item.synthetic_reason,
+                Some(SyntheticReason::Interjection)
+            );
+            let image_urls = user_image_urls(user_item);
+            assert_eq!(
+                image_urls.len(),
+                1,
+                "nested interjection must attach a file handle"
+            );
             assert!(
                 image_urls[0].starts_with("file://"),
-                "conversation must persist a session file handle, not the data URL crate, got {}",
+                "nested conversation must persist a session file handle, got {}",
                 &image_urls[0][..image_urls[0].len().min(32)]
-            );
-            let mut clone = conversation.clone();
-            xai_chat_state::inflate_conversation_images_for_inference(&mut clone);
-            let inflated = match clone.last() {
-                Some(ConversationItem::User(u)) => u
-                    .content
-                    .iter()
-                    .find_map(|p| match p {
-                        xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
-                        _ => None,
-                    })
-                    .expect("inflated image part"),
-                _ => panic!("clone tail must stay a user item"),
-            };
-            assert!(
-                inflated.starts_with("data:image/"),
-                "inference inflate must restore a data URL, got {}",
-                &inflated[..inflated.len().min(32)]
             );
             let text = conversation.last().unwrap().text_content();
             assert!(
@@ -276,8 +315,8 @@ async fn drain_interjection_expands_skill_slash_reference() {
         .await;
 }
 
-/// `format_interjection`'s large-prompt truncation applies to the TEXT only —
-/// image data rides structurally and is never truncated or inlined.
+/// `format_interjection`'s large-prompt truncation applies to the TEXT only.
+/// Parent drain still must not attach `ContentPart::Image` or inline bytes.
 #[tokio::test]
 async fn drain_interjection_truncation_never_touches_image_data() {
     let local = tokio::task::LocalSet::new();
@@ -301,35 +340,13 @@ async fn drain_interjection_truncation_never_touches_image_data() {
             };
             let text = conversation.last().unwrap().text_content();
             assert!(text.contains("[truncated]"), "oversized text must truncate");
-            let image_url = user_item
-                .content
-                .iter()
-                .find_map(|p| match p {
-                    xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
-                    _ => None,
-                })
-                .expect("image part must survive truncation");
             assert!(
-                image_url.starts_with("file://"),
-                "conversation must persist a session file handle through truncation, got {}",
-                &image_url[..image_url.len().min(32)]
+                user_image_urls(user_item).is_empty(),
+                "parent truncation path must not attach ContentPart::Image"
             );
-            let mut clone = conversation.clone();
-            xai_chat_state::inflate_conversation_images_for_inference(&mut clone);
-            let inflated = match clone.last() {
-                Some(ConversationItem::User(u)) => u
-                    .content
-                    .iter()
-                    .find_map(|p| match p {
-                        xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
-                        _ => None,
-                    })
-                    .expect("inflated image part"),
-                _ => panic!("clone tail must stay a user item"),
-            };
             assert!(
-                inflated.ends_with(&original_image.data),
-                "inference inflate must keep image bytes identical (never truncated)"
+                !text.contains(&original_image.data),
+                "truncated parent text must not inline image bytes"
             );
         })
         .await;

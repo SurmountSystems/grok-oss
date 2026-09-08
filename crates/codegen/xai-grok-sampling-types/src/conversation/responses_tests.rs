@@ -891,6 +891,78 @@ fn test_tool_choice_to_responses_api() {
 }
 
 #[test]
+fn user_attachment_describe_responses_input_image_is_high_detail_jpeg_or_png_without_file_id() {
+    let png = "data:image/png;base64,iVBORw0KGgo=";
+    let mut user = ConversationItem::user("describe this image");
+    user.add_image(png);
+    let req = ConversationRequest::from_items(vec![user]).with_model("grok-4");
+    let responses_req: rs::CreateResponse = (&req).into();
+    assert_eq!(
+        responses_req.store,
+        Some(false),
+        "describe must not store image request history on the server"
+    );
+
+    let rs::InputParam::Items(items) = responses_req.input else {
+        panic!("expected Items input");
+    };
+    let image = items.iter().find_map(|item| match item {
+        rs::InputItem::EasyMessage(msg) => match &msg.content {
+            rs::EasyInputContent::ContentList(parts) => parts.iter().find_map(|part| match part {
+                rs::InputContent::InputImage(img) => Some(img),
+                _ => None,
+            }),
+            _ => None,
+        },
+        _ => None,
+    });
+    let image = image.expect("describe conversion must emit Responses input_image");
+    assert_eq!(
+        image.detail,
+        rs::ImageDetail::High,
+        "user-attachment describe uses ImageDetail::High"
+    );
+    assert_eq!(image.file_id, None, "describe must not send file_id");
+    let url = image
+        .image_url
+        .as_deref()
+        .expect("describe input_image must carry a data URL");
+    assert!(
+        url.starts_with("data:image/png;") || url.starts_with("data:image/jpeg;"),
+        "describe input_image must be a jpeg or png data URL, got {url}"
+    );
+}
+
+#[test]
+fn jpeg_user_attachment_describe_keeps_jpeg_data_url() {
+    let mut user = ConversationItem::user("describe this image");
+    user.add_image("data:image/jpeg;base64,/9j/4AAQ");
+    let req = ConversationRequest::from_items(vec![user]);
+    let responses_req: rs::CreateResponse = (&req).into();
+    let rs::InputParam::Items(items) = responses_req.input else {
+        panic!("expected Items input");
+    };
+    let image = items.iter().find_map(|item| match item {
+        rs::InputItem::EasyMessage(msg) => match &msg.content {
+            rs::EasyInputContent::ContentList(parts) => parts.iter().find_map(|part| match part {
+                rs::InputContent::InputImage(img) => Some(img),
+                _ => None,
+            }),
+            _ => None,
+        },
+        _ => None,
+    });
+    let image = image.expect("jpeg user image must convert to input_image");
+    assert_eq!(image.detail, rs::ImageDetail::High);
+    assert_eq!(image.file_id, None);
+    let url = image.image_url.as_deref().expect("jpeg data URL");
+    assert!(
+        url.starts_with("data:image/jpeg;"),
+        "jpeg user attachment must stay jpeg, got {url}"
+    );
+}
+
+#[test]
 fn test_malformed_tool_arguments_sanitized_in_responses_api() {
     let bad_args = r#"{"file_path": "/testbed/cxx_polynomial/include/emsr/remez.h", "old_string": "", new_string": "x"}"#;
 

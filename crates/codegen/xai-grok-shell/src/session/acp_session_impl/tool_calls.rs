@@ -2627,6 +2627,8 @@ impl SessionActor {
             tool_layer_images,
         );
         let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), extraction.text);
+        let images_dir = xai_grok_shared::session::session_dir(&self.session_info).join("images");
+        let parent = self.tool_context.subagent_depth == 0;
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
                 result.output
@@ -2649,36 +2651,77 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                    prompt_text = format!("Read image file: {path}");
+                    match persist_extracted_tool_image(
+                        &image_content.mime_type,
+                        &image_content.data,
+                        &images_dir,
+                    ) {
+                        Some(saved) => {
+                            prompt_text =
+                                format!("Read image file: {path}. Saved to {}", saved.display());
+                            if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
+                                inline_images.push(part);
+                            }
+                        }
+                        None if parent => {
+                            prompt_text = format!(
+                                "Read image file: {path}. Image was not attached to the parent conversation."
+                            );
+                        }
+                        None => {
+                            let url = format!(
+                                "data:{};base64,{}",
+                                image_content.mime_type, image_content.data
+                            );
+                            inline_images.push(ContentPart::Image {
+                                url: std::sync::Arc::<str>::from(url),
+                            });
+                            prompt_text = format!("Read image file: {path}");
+                        }
+                    }
                 }
             }
         }
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
+            let mut saved_paths = Vec::new();
             for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
+                match persist_extracted_tool_image(&page.mime_type, &page.data, &images_dir) {
+                    Some(saved) => {
+                        if let Some(part) = parent_or_nested_tool_image_part(&saved, parent) {
+                            inline_images.push(part);
+                        }
+                        saved_paths.push(saved.display().to_string());
+                    }
+                    None if parent => {}
+                    None => {
+                        let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                    }
+                }
             }
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            prompt_text = format!(
-                "Read PDF file: {path} ({} pages rendered, {} total)",
-                pdf.pages.len(),
-                pdf.total_pages,
-            );
+            prompt_text = if saved_paths.is_empty() {
+                format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                )
+            } else {
+                format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total). Saved to: {}",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                    saved_paths.join(", "),
+                )
+            };
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2725,11 +2768,18 @@ impl SessionActor {
                     .await;
             }
             for norm in norm_result.images {
-                let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                let mut image_msg =
-                    ConversationItem::system_reminder("[Image extracted from tool result above]");
-                image_msg.add_image(url);
-                deferred_followups.push(image_msg);
+                match persist_extracted_tool_image(&norm.mime_type, &norm.data, &images_dir) {
+                    Some(saved) => {
+                        deferred_followups.push(extracted_image_followup(&saved, parent));
+                    }
+                    None => {
+                        deferred_followups.push(extracted_image_persist_miss_followup(
+                            &norm.mime_type,
+                            &norm.data,
+                            parent,
+                        ));
+                    }
+                }
             }
         }
         Ok(deferred_followups)

@@ -543,6 +543,11 @@ pub(crate) async fn run_shell_child(
     let task_prompt_text = prompt.clone();
     let (mut forked_conversation, mut inherited_prefix_len) =
         (forked_conversation, inherited_prefix_len.unwrap_or(0));
+    if verbatim_mirror_fork {
+        super::nested_spawn_prompt::drop_parent_image_parts_for_spawn_fork(
+            &mut forked_conversation,
+        );
+    }
     if context_source != InitialContextSource::Resumed
         && !verbatim_mirror_fork
         && let Some(ref pi) = effective_runtime.persona_instructions
@@ -1233,11 +1238,19 @@ pub(crate) async fn run_shell_child(
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
+    let parent_items_for_named_images = match ctx.parent_chat_state.as_ref() {
+        Some(chat_state) => chat_state.get_conversation().await,
+        None => Vec::new(),
+    };
+    let prompt_blocks = super::nested_spawn_prompt::nested_spawn_prompt_blocks(
+        &prompt_text,
+        &parent_items_for_named_images,
+    );
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let _ = child_handle.cmd_tx.send(SessionCommand::Prompt {
         prompt_id: child_prompt_id.clone(),
-        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
+        prompt_blocks,
         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
         artifact_upload_ctx: ctx.gcs_bucket_url.as_ref().and_then(|_| {
             ctx.gcs_upload_method.as_ref().map(|method| {

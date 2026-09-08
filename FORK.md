@@ -393,20 +393,46 @@ identifier that has no matching `fn`.
   a per-model undercut; Settings commit live-applies to open sessions.
   FORK claims; not a land class. Detail:
   `docs/dev/research/rca-auto-compact-early-fire.md`
-- [x] **Pasted images are image tokens, not data-URL text**: the model
-  path is a content part (`input_image` / `image_url`); public tile
-  formula 256..1792 tokens per image. See
+- [x] **Pasted images are image tokens, not data-URL text**: the main
+  (parent) session model request must not include image content parts.
+  Files live under the session directory (`images/`). History, the prompt
+  write-ahead log, and `pending_prompts` keep `[Image #N]` and file ids,
+  not `data:image/...;base64` crates. Understanding a paste uses public
+  SpaceXAI Responses `input_image` (jpeg/png data URL or https), `detail`
+  high, no `file_id`. That path is not Files API, not Collections, and
+  not Imagine. See
   [xAI image understanding](https://docs.x.ai/docs/guides/image-understanding)
-  (accessed: 2026-09-01). `view_image` is the tool path for search-found
-  images only. The harness must not count or persist `data:image/...;base64`
-  as text against the 500k sampling window. Count via
-  `estimate_item_tokens` (`IMAGE_TOKEN_ESTIMATE` 765). Persist a session
-  `images/` file handle; inflate only on the inference HTTP clone.
-  Compact/recap and `compaction_requests` use `strip_images` (`[image]`).
-  Tests: `estimate_item_tokens_ignores_data_url_byte_length`,
+  (accessed: 2026-09-07). A nested agent may send `input_image` on its
+  own request from those session files. The parent spawn prompt is text
+  (paths and `[Image #N]`), never a data URL. The nested report is text.
+  Compact/recap and `compaction_requests` still use `strip_images`
+  (`[image]`). `image_edit` still uses `AttachedImages`. `view_image` is
+  the tool path for search-found images only. Count via
+  `estimate_item_tokens` (`IMAGE_TOKEN_ESTIMATE` 765) only for
+  `ContentPart::Image`; a parent text-only item after persist does not
+  add 765. Tests: `estimate_item_tokens_ignores_data_url_byte_length`,
   `strip_images_does_not_serialize_the_data_url_crate`,
   `compact_history_does_not_copy_the_data_url_crate`,
-  `persist_inline_data_url_writes_session_file_and_drops_crate`.
+  `persist_inline_data_url_writes_session_file_and_drops_crate`,
+  `tool_extracted_image_does_not_leave_data_url_on_parent_conversation`,
+  `parent_text_only_user_item_after_describe_does_not_add_image_token_charge`,
+  `read_file_image_does_not_leave_data_url_on_parent_conversation`,
+  `parent_grok_oss_paste_conversation_request_has_no_image_part`,
+  `nested_grok_oss_paste_conversation_request_keeps_image_part`
+  (`xai-grok-shell` `session/acp_session_tests/parent_paste_describes_not_inline.rs`),
+  `drain_interjection_with_images_does_not_attach_image_parts_on_parent`,
+  `drain_interjection_with_images_attaches_file_parts_on_nested`
+  (`xai-grok-shell` `session/acp_session_tests/interjection_actor_tests.rs`),
+  `spawn_prompt_string_names_path_and_omits_data_url`,
+  `nested_user_turn_attaches_file_image_not_data_url`
+  (`xai-grok-subagent-resolution` `nested_images.rs`),
+  `nested_fork_first_user_turn_attaches_file_image_part`,
+  `extra_parent_images_not_attached_unless_named_in_spawn_prompt`
+  (`xai-grok-subagent-resolution` `context.rs`),
+  `nested_first_user_turn_has_content_part_image_file_for_named_file_not_unnamed_extra`,
+  `nested_fork_first_user_turn_has_content_part_image_file_for_named_file_not_unnamed_extra`
+  (`xai-grok-shell` `agent/subagent/nested_spawn_prompt.rs`),
+  `verbatim_fork_with_spawn_prompt_drops_parent_image_parts`.
 - [x] **Footer context chip names sampling vs catalog when they differ**:
   AUTO compact gates on the sampling window. L1 sampling is the catalog
   500k window. AUTO compact on L1 uses that window, not 200k. Nested L2
@@ -1705,7 +1731,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
-| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` including the line-comment overlay. Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
+| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` including the line-comment overlay. Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
 | [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. L0 is Surmount GPUI, not this pager, and must not merge with either. L0 action set remote host console API key is laptop-side, not this pager. Session todos stay in this TUI. | Cite `omits_prompt_text`, `set_remote_host_console_api_key_is_not_pager_dashboard`, `user_guide_machine_console_api_key_for_surmount_1`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
