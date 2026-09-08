@@ -117,6 +117,11 @@ fn paint_and_send_interject(
         paint_target.abort_cancellable_cancel();
     }
     record_interject_prompt_history(paint_target, &text);
+    paint_target.append_prompt_wal(
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+        &text,
+        &images,
+    );
 
     // Push a standard user prompt block locally for instant feedback, and
     // record its id so the broadcast echo (`x.ai/session/interjection`) is
@@ -272,7 +277,11 @@ mod tests {
     use crate::app::dispatch::tests::test_app_with_agent;
     use crate::input::key::KeyShortcut;
     use agent_client_protocol as acp;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     /// Composer-clear ownership: dispatch NEVER touches the composer. The
     /// only composer-text producer (the InterjectPrompt registry arm) clears
@@ -446,6 +455,318 @@ mod tests {
             effects.as_slice(),
             [Effect::SendInterject { blocks: None, .. }]
         ));
+    }
+
+    /// Surmount / grok-oss fork; tests are contracts.
+    /// Mid-turn `x.ai/interject` appends the operator text to the WAL before
+    /// the interject effect is returned.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn prompt_wal_appends_on_mid_turn_interject() {
+        use crate::app::agent::AgentState;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-mid-turn-interject";
+        let body = "mid-turn interject that must hit the WAL";
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::TurnRunning;
+        }
+
+        let effects = dispatch(
+            Action::Interject {
+                text: body.into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendInterject { text, .. } if text == body)),
+            "interject must still fire; WAL is extra durability, got {effects:?}"
+        );
+        let rows =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            rows.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::Interject
+                    && r.text == body
+            }),
+            "prompt_wal.jsonl must contain the mid-turn interject, got {rows:?}"
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Mid-turn Ctrl+Enter must dispatch `SendInterject` (`x.ai/interject`).
+    /// It must not drop the composer text, queue-only, no-op, or cancel-and-send
+    /// (`SendPromptNow`). This is the explicit send-now chord; Enter is the
+    /// separate soft-interject path. Grok OSS 1.0.3 is not last-known-good.
+    ///
+    /// Red before product (code reading): `agent_view/prompt.rs` InterjectPrompt
+    /// arm returned `Action::SendPromptNow`, so dispatch emitted
+    /// `Effect::SendPromptNow` instead of `Effect::SendInterject`.
+    #[test]
+    fn ctrl_enter_mid_turn_dispatches_send_interject() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "steer this running turn";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "Ctrl+Enter mid-turn must emit Interject, not drop or queue-only, got {other:?}"
+                ),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "Ctrl+Enter must be Action::Interject, not SendPromptNow, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "must not serial-queue or cancel-and-send, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "composer must clear at the InterjectPrompt call site"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "must not land in pending_prompts as the next serial prompt"
+        );
+        assert!(
+            app.agents[&id].session.state.is_turn_running(),
+            "current turn must keep running"
+        );
+    }
+
+    /// Named contract: mid-turn Interject paints and returns SendInterject
+    /// without waiting a minute and without cancel-and-send. Dispatch is
+    /// local; the ACP send is an effect, not a join on this thread.
+    #[test]
+    fn interject_does_not_wait_minutes_or_block_paint() {
+        use std::time::{Duration, Instant};
+
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("live-turn".into());
+        }
+        let started = Instant::now();
+        let effects = dispatch(
+            Action::Interject {
+                text: "steer now".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, "steer now"),
+            other => panic!("expected SendInterject, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "interject must not wait on cancel-and-send, got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "interject must not sit on Cancelling, got {:?}",
+            agent.session.state
+        );
+        assert!(
+            agent
+                .scrollback
+                .entries_in_range(0..agent.scrollback.len())
+                .iter()
+                .any(|e| matches!(&e.block, RenderBlock::UserPrompt(p) if p.text.contains("steer now"))),
+            "interject must paint locally before the ACP send"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "interject dispatch must not wait minutes; elapsed={:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Empty composer + Ctrl+Enter must not send an empty interject.
+    #[test]
+    fn empty_ctrl_enter_mid_turn_does_not_send() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let outcome = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.pending_prompts.clear();
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text("");
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+        };
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::SendPrompt(_))
+            ),
+            "empty composer must not send, got {outcome:?}"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "empty Ctrl+Enter must not invent a queued row"
+        );
+    }
+
+    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
+    /// Queue `#1 [Send now]` mouse Down must send a local queued row as
+    /// `SendInterject`. Key and click must not diverge.
+    ///
+    /// Red before product (code reading): `force_interject_queue_row` returned
+    /// `Action::SendPromptNow` for local rows (`agent_view/queue.rs`). Mouse
+    /// Down on `[Send now]` (`app/mouse.rs`) calls that function, so a click
+    /// would have dispatched `SendPromptNow` instead of `SendInterject`.
+    #[test]
+    fn queue_send_now_click_dispatches_send_interject() {
+        use crate::app::agent::AgentState;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "queued follow-up";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.enqueue_prompt(body.into());
+            agent.sync_queue_pane();
+            let row_id = *agent
+                .queue
+                .entry_ids()
+                .first()
+                .expect("queued row must paint");
+            agent.queue.list_state.select_by_id(row_id);
+            let area = Rect::new(0, 0, 80, 6);
+            let mut buf = Buffer::empty(area);
+            let layout_cfg = crate::appearance::LayoutConfig::default();
+            agent
+                .queue
+                .render(area, &mut buf, true, &layout_cfg, None, true);
+            agent.pane_areas.queue = area;
+            let mut found = None;
+            'find: for row in area.y..area.y + area.height {
+                for col in area.x..area.x + area.width {
+                    if agent.queue.send_now_click(col, row) == Some(row_id) {
+                        found = Some((col, row));
+                        break 'find;
+                    }
+                }
+            }
+            let (col, row) = found.expect("queue [Send now] must paint on the local row");
+            match agent.handle_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            }) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Send now on a local queue row must emit Interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "Send now must be Action::Interject, not SendPromptNow, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject from Send now, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "Send now must not cancel-and-send, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].session.pending_prompts.is_empty(),
+            "queued row must be consumed"
+        );
+        assert!(
+            app.agents[&id].session.state.is_turn_running(),
+            "current turn must keep running"
+        );
+    }
+
+    /// After a successful image interject, the sent prompt is in scrollback
+    /// once and is not leftover in pending_prompts.
+    #[test]
+    fn image_interject_leaves_one_prompt_and_empty_queue() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let mut img = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![1, 2, 3],
+            mime_type: "image/png".into(),
+        });
+        img.display_number = 1;
+        let _ = dispatch(
+            Action::Interject {
+                text: "Also why am I waiting here? [Image #1]".into(),
+                images: vec![img],
+            },
+            &mut app,
+        );
+        let agent = app.agents.get(&id).unwrap();
+        let count = (0..agent.scrollback.len())
+            .filter(|i| {
+                matches!(
+                    agent.scrollback.get(*i).map(|e| &e.block),
+                    Some(crate::scrollback::block::RenderBlock::UserPrompt(b))
+                        if b.text.contains("[Image #1]")
+                )
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "Surmount / grok-oss fork: after send the image prompt must appear once, got {count}"
+        );
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "successful interject must not leave a leftover queued prompt remaining"
+        );
     }
 
     fn overlay_info(

@@ -149,8 +149,8 @@ pub struct UiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_blocks: Option<bool>,
     /// Keep thinking blocks fully expanded (no collapsed one-liner by default).
-    /// When on, the footer also hides the Ctrl+T expand-thinking affordance.
-    /// `None` = off (client default). Written by the pager's settings modal.
+    /// Ctrl+T writes this same setting. `None` = off (client default).
+    /// Written by the pager's settings modal and by Ctrl+T.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_expand_thinking: Option<bool>,
     /// Fold runs of consecutive non-destructive tool calls (reads, searches,
@@ -199,6 +199,13 @@ pub struct UiConfig {
     /// `"fullscreen"` | `"minimal"`; unset → product default fullscreen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
+    /// When false, the Human box never inserts a newline from Enter,
+    /// Shift+Enter, or Alt+Enter. Those keys send (or interject if a
+    /// turn is running). Session Multiline (`Ctrl+M` / `/multiline`)
+    /// cannot turn newline-on-Enter on. `None` = on (client default:
+    /// Shift+Enter still inserts a newline; Ctrl+M still works).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_multiline: Option<bool>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line
     /// selection. Superseded by `keep_text_selection = "word_select"`. Still
     /// read only when `keep_text_selection` is unset; Settings clears this on
@@ -373,6 +380,7 @@ impl Default for UiConfig {
             resume_canceled_turn_on_restart: None,
             cursor_blink: None,
             screen_mode: None,
+            composer_multiline: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -471,6 +479,16 @@ impl UiConfig {
     pub fn plan_approval_force_modal(&self) -> bool {
         self.plan_approval_park_mode() == "modal"
     }
+
+    /// Default for [`Self::composer_multiline`] when unset (on: Shift+Enter
+    /// may insert a newline; session Multiline still works).
+    pub const COMPOSER_MULTILINE_DEFAULT: bool = true;
+
+    /// Whether the Human box may insert newlines from Enter / Shift+Enter.
+    pub fn composer_multiline_enabled(&self) -> bool {
+        self.composer_multiline
+            .unwrap_or(Self::COMPOSER_MULTILINE_DEFAULT)
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +552,27 @@ mod tests {
             ..Default::default()
         };
         assert!(!weird.plan_approval_force_modal());
+    }
+
+    #[test]
+    fn composer_multiline_defaults_on() {
+        assert!(UiConfig::default().composer_multiline_enabled());
+        let off = UiConfig {
+            composer_multiline: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.composer_multiline_enabled());
+        let on: UiConfig =
+            serde_json::from_value(serde_json::json!({ "composer_multiline": true }))
+                .expect("deserializes composer_multiline true");
+        assert!(on.composer_multiline_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.composer_multiline_enabled());
+        let off_parsed: UiConfig =
+            serde_json::from_value(serde_json::json!({ "composer_multiline": false }))
+                .expect("deserializes composer_multiline false");
+        assert!(!off_parsed.composer_multiline_enabled());
     }
 
     #[test]

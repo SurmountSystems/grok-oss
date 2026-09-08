@@ -45,6 +45,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "auto_light_theme",
     "render_mermaid",
     "multiline_mode",
+    "composer_multiline",
     "permission_mode",
     "default_model",
     "default_reasoning_effort",
@@ -303,6 +304,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("multiline_mode", Action::SetMultilineMode(b)) => {
             assert_eq!(b, expected, "SetMultilineMode value differs from expected")
+        }
+        ("composer_multiline", Action::SetComposerMultiline(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetComposerMultiline value differs from expected"
+            )
         }
         ("vim_mode", Action::SetVimMode(b)) => {
             assert_eq!(b, expected, "SetVimMode value differs from expected")
@@ -1983,6 +1990,7 @@ fn registry_kind_membership_through_pr_14() {
             "invert_scroll",
             "display_refresh_auto_cadence",
             "multiline_mode",
+            "composer_multiline",
             "prompt_suggestions",
             "respect_manual_folds",
             "show_thinking_blocks",
@@ -2161,6 +2169,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     xai_grok_pager::appearance::cache::set_plan_approval_force_modal(false);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
     xai_grok_pager::appearance::cache::set_auto_run_implement(true);
     xai_grok_pager::appearance::cache::set_economic_mode(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
@@ -2199,6 +2208,7 @@ fn defaults_round_trip_through_registry() {
             "auto_light_theme" => SettingValue::Enum("grokday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
+            "composer_multiline" => SettingValue::Bool(true),
             "permission_mode" => SettingValue::Enum("ask"),
             "default_model" => SettingValue::String(String::new()),
             "default_reasoning_effort" => SettingValue::Enum("medium"),
@@ -2316,6 +2326,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
+            | SettingsKeyOutcome::Action(Action::SetComposerMultiline(_))
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
             | SettingsKeyOutcome::Action(Action::SetRememberToolApprovals(_))
             | SettingsKeyOutcome::Action(Action::SetAskUserQuestionTimeoutEnabled(_))
@@ -3170,6 +3181,73 @@ fn pr5_multiline_mode_renders_under_editor_category() {
         SettingOwner::Pager,
         "multiline_mode must be PAGER-owned"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `composer_multiline` (SHELL-owned persist; default on)
+//
+// Distinct from session `multiline_mode`. When off, Enter and Shift+Enter
+// never insert a newline. Space on the default-on row dispatches false.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn composer_multiline_space_dispatches_typed_setter() {
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
+    let mut s = make_state();
+    navigate_to(&mut s, "composer_multiline");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "composer_multiline", false);
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
+}
+
+#[test]
+fn composer_multiline_mouse_click_two_stage_toggles() {
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "composer_multiline") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "first click on a different row body should only select, got: {outcome:?}"
+    );
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(outcome, "composer_multiline", false);
+    xai_grok_pager::appearance::cache::set_composer_multiline(true);
+}
+
+#[test]
+fn composer_multiline_renders_under_editor_category_shell_owned() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("composer_multiline")
+        .expect("composer_multiline must be registered");
+    assert_eq!(
+        meta.category,
+        SettingCategory::Editor,
+        "composer_multiline must live under Editor"
+    );
+    assert_eq!(
+        meta.owner,
+        SettingOwner::Shell,
+        "composer_multiline must be SHELL-owned so it persists"
+    );
+    match &meta.kind {
+        SettingKind::Bool { default } => {
+            assert!(*default, "composer_multiline must default ON")
+        }
+        other => panic!("expected Bool kind for composer_multiline, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7878,7 +7956,8 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for prompt_suggestions, got {other:?}"),
     }
-    // Must sit immediately below multiline_mode in the registry order.
+    // Session Multiline, then persist composer_multiline, then prompt
+    // suggestions.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7889,14 +7968,24 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         .iter()
         .position(|k| *k == "multiline_mode")
         .expect("multiline_mode in Editor");
+    let composer_idx = keys
+        .iter()
+        .position(|k| *k == "composer_multiline")
+        .expect("composer_multiline in Editor");
     let prompt_idx = keys
         .iter()
         .position(|k| *k == "prompt_suggestions")
         .expect("prompt_suggestions in Editor");
     assert_eq!(
         multiline_idx + 1,
+        composer_idx,
+        "composer_multiline must sit immediately below multiline_mode; \
+         Editor order: {keys:?}"
+    );
+    assert_eq!(
+        composer_idx + 1,
         prompt_idx,
-        "prompt_suggestions must be immediately below multiline_mode; \
+        "prompt_suggestions must sit immediately below composer_multiline; \
          Editor order: {keys:?}"
     );
 }

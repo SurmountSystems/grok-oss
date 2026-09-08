@@ -932,7 +932,7 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        if self.is_l3_session() {
+        if self.never_auto_compact() {
             if let Some(cw) = error
                 .model_metadata
                 .as_ref()
@@ -945,7 +945,7 @@ impl SessionActor {
                         session_id = %self.session_info.id,
                         estimated_total,
                         context_window = cw,
-                        "L3 nested window is full; ending child without compact"
+                        "nested window is full; ending child without compact"
                     );
                     return Ok(SamplerFailureRecovery::EndChildWithoutCompact);
                 }

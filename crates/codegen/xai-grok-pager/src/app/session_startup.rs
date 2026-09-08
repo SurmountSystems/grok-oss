@@ -802,18 +802,23 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| process_cwd.to_string())
 }
+/// Operator-facing miss when `--continue` / bare `--resume` finds no cwd session.
+/// Always names `grok-oss`, never bare `grok`.
+fn no_session_found_for_cwd_message() -> String {
+    format!(
+        "No session found for current directory. \
+         Use '{}' to start a new session.",
+        crate::client_identity::PRODUCT_CLI_NAME
+    )
+}
+
 /// Resolve most-recent session id for cwd, or error.
 async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
     summaries
         .first()
         .map(|first| (first.info.id.to_string(), first.display_title_opt()))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No session found for current directory. \
-             Use 'grok' to start a new session."
-            )
-        })
+        .ok_or_else(|| anyhow::anyhow!("{}", no_session_found_for_cwd_message()))
 }
 /// Most recent local session for `cwd`, if any. Missing or unlistable is `None`
 /// so interactive start can stay on welcome.
@@ -1537,6 +1542,44 @@ mod tests {
                 session_id: Some("abc".into()),
                 most_recent_for_cwd: false,
             }
+        );
+    }
+
+    /// Operator report 2026-09-01: `grok-oss --resume <id>` must attach that
+    /// session. Last-session-on-start is not this path. argv0 `grok` still
+    /// parses as this product's `--resume`.
+    #[test]
+    fn explicit_resume_id_is_not_open_last_session_on_start() {
+        let id = "01a027e0-20ad-7a62-ab05-5d65b99e34b1";
+        for argv0 in ["grok-oss", "grok"] {
+            assert_eq!(
+                parse(&[argv0, "--resume", id])
+                    .session_startup_intent()
+                    .unwrap(),
+                SessionStartupIntent::Resume {
+                    session_id: Some(id.into()),
+                    most_recent_for_cwd: false,
+                },
+                "argv0 {argv0} --resume {id} must be explicit resume, not last-session-on-start"
+            );
+        }
+        assert_eq!(
+            parse(&["grok-oss"]).session_startup_intent().unwrap(),
+            SessionStartupIntent::NewAuto
+        );
+    }
+
+    #[test]
+    fn no_session_found_for_cwd_message_names_grok_oss_not_bare_grok() {
+        let msg = no_session_found_for_cwd_message();
+        assert_eq!(
+            msg,
+            "No session found for current directory. Use 'grok-oss' to start a new session."
+        );
+        assert!(!msg.contains("'grok'"), "{msg}");
+        assert_ne!(
+            msg,
+            "No session found for current directory. Use 'grok' to start a new session."
         );
     }
     #[test]

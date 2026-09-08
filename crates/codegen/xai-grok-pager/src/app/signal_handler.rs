@@ -68,6 +68,14 @@ pub(crate) fn take_peer_rebuild_relaunch() -> bool {
     PEER_REBUILD_RELAUNCH.swap(false, Ordering::AcqRel)
 }
 
+/// Read the peer-rebuild flag without consuming it.
+///
+/// Arm must peek first and take only after re-exec is armed. Consuming on a
+/// failed arm (no request file yet) made peers print a resume hint and die.
+pub(crate) fn peek_peer_rebuild_relaunch() -> bool {
+    PEER_REBUILD_RELAUNCH.load(Ordering::Acquire)
+}
+
 /// Arm the peer-rebuild flag (Unix `SIGUSR1` listener and tests).
 pub(crate) fn mark_peer_rebuild_relaunch_from_sigusr1() {
     PEER_REBUILD_RELAUNCH.store(true, Ordering::Release);
@@ -368,6 +376,14 @@ mod tests {
     fn sigusr1_sets_peer_rebuild_flag_once() {
         let _ = take_peer_rebuild_relaunch();
         mark_peer_rebuild_relaunch_from_sigusr1();
+        assert!(
+            peek_peer_rebuild_relaunch(),
+            "SIGUSR1 must set the cooperative re-exec flag (peek must not consume)"
+        );
+        assert!(
+            peek_peer_rebuild_relaunch(),
+            "peek must leave the flag so a later arm retry still sees SIGUSR1"
+        );
         assert!(
             take_peer_rebuild_relaunch(),
             "SIGUSR1 must set the cooperative re-exec flag"

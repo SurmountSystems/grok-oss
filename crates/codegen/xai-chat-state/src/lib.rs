@@ -31,6 +31,7 @@ pub mod conversation_util;
 pub mod events;
 pub mod handle;
 pub mod image_budget;
+pub mod image_handles;
 pub mod persistence;
 pub mod types;
 pub mod usage;
@@ -46,6 +47,9 @@ pub use commands::{ModelMetadata, StrictAppendAck, StrictAppendError};
 pub use compaction_mode::CompactionMode;
 pub use events::ChatStateEvent;
 pub use handle::{ChatStateActorUnreachable, ChatStateHandle};
+pub use image_handles::{
+    ImageRepairStats, inflate_conversation_images_for_inference, repair_conversation_images_for_api,
+};
 pub use persistence::{
     ChatPersistence, MockChatPersistence, MockPersistenceReceiver, NullChatPersistence,
     PersistenceRecord, StripOutcome,

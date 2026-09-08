@@ -469,11 +469,16 @@ impl SubagentsConfig {
             raw as u32
         }
     }
-    /// Precedence: env > TOML > remote > [`Self::DEFAULT_MAX_DEPTH`].
+    /// Precedence: env > TOML > remote (only when it still allows L2→L3) >
+    /// [`Self::DEFAULT_MAX_DEPTH`].
     ///
     /// Depth 0 is the top-level session; a child is parent+1. Spawn is rejected
     /// when `depth >= max`. So `max = 1` allows only top-level spawns; nested
     /// spawns from a first-level subagent need `max >= 2`.
+    ///
+    /// Operator env / TOML may still set `1`. A remote `grok_build_settings`
+    /// value below the L1→L2→L3 default must not strip `spawn_subagent` from
+    /// a first-level nested coordinator.
     pub(crate) fn resolve_max_depth(
         env: Option<&str>,
         config: Option<i64>,
@@ -494,7 +499,15 @@ impl SubagentsConfig {
             return Self::clamp_max_depth(v, "config");
         }
         if let Some(v) = remote {
-            return Self::clamp_max_depth(i64::from(v), "remote");
+            let clamped = Self::clamp_max_depth(i64::from(v), "remote");
+            if clamped >= Self::DEFAULT_MAX_DEPTH {
+                return clamped;
+            }
+            tracing::warn!(
+                value = clamped,
+                default = Self::DEFAULT_MAX_DEPTH,
+                "remote subagents max_depth is below the L1→L2→L3 default; ignoring so a first-level nested coordinator can still spawn specialists"
+            );
         }
         Self::DEFAULT_MAX_DEPTH
     }

@@ -50,6 +50,91 @@ fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> 
     line
 }
 
+/// Elapsed below this is not a real thought duration. `{:.1}s` would paint
+/// `0.0s` for anything under 50ms. Contract B: never paint that as a thought.
+pub(crate) const INSTANT_THOUGHT_MS: i64 = 50;
+
+/// Openers of a user-facing assistant draft, not model reasoning.
+/// Used to peel an aborted reply out of thinking chrome (contracts A, C, D).
+const USER_FACING_DRAFT_PREFIXES: &[&str] = &[
+    "hey,",
+    "hey ",
+    "hey\n",
+    "hi,",
+    "hi ",
+    "hello",
+    "sorry",
+    "yeah,",
+    "yeah ",
+    "operator",
+    "agent:",
+    "looks like",
+];
+
+/// True when `text` reads as an assistant reply, not internal reasoning.
+pub(crate) fn looks_like_user_facing_draft(text: &str) -> bool {
+    let line = text
+        .trim_start()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if line.is_empty() {
+        return false;
+    }
+    USER_FACING_DRAFT_PREFIXES
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        || line == "hey"
+        || line == "hi"
+}
+
+fn looks_like_internal_reasoning(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("the user")
+        || lower.contains("i need to")
+        || lower.contains("let me ")
+        || lower.contains("let me\n")
+}
+
+/// Keep model reasoning. Drop a trailing user-facing draft so thinking chrome
+/// is not the thing the operator reads as the answer.
+pub(crate) fn peel_trailing_user_facing_draft(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut cut: Option<usize> = None;
+    for marker in [
+        "\nhey,",
+        "\nhey ",
+        "\nhey\n",
+        "\nhello",
+        "\nsorry",
+        "\nyeah,",
+        "\nyeah ",
+        "\noperator",
+        "\nagent:",
+        "\nlooks like",
+    ] {
+        if let Some(i) = lower.rfind(marker) {
+            if i >= 20 {
+                cut = Some(cut.map_or(i, |c| c.min(i)));
+            }
+        }
+    }
+    if cut.is_none()
+        && let Some(i) = text.rfind('\n')
+        && i >= 20
+        && looks_like_internal_reasoning(&text[..i])
+        && looks_like_user_facing_draft(&text[i + 1..])
+    {
+        cut = Some(i);
+    }
+    match cut {
+        Some(i) => text[..i].trim_end().to_string(),
+        None => text.to_string(),
+    }
+}
+
 /// The de-emphasis patch applied to every reasoning body span when
 /// [`crate::appearance::ThinkingConfig::body_dim_italic`] is on.
 ///
@@ -88,6 +173,9 @@ pub struct ThinkingBlock {
     elapsed_time_ms: Option<i64>,
     /// When the thinking block started (local timestamp for live elapsed).
     started_at: Option<std::time::Instant>,
+    /// Generation was paused or truncated while this thought was live.
+    /// Aborted thoughts collapse; they must not keep an expanded draft.
+    aborted: bool,
 }
 impl ThinkingBlock {
     /// Create a new thinking block with complete text.
@@ -96,6 +184,7 @@ impl ThinkingBlock {
             content: MarkdownContent::new(text),
             elapsed_time_ms: None,
             started_at: None,
+            aborted: false,
         }
     }
 
@@ -105,6 +194,7 @@ impl ThinkingBlock {
             content: MarkdownContent::streaming(),
             elapsed_time_ms: None,
             started_at: Some(std::time::Instant::now()),
+            aborted: false,
         }
     }
 
@@ -123,7 +213,55 @@ impl ThinkingBlock {
             content: MarkdownContent::streaming(),
             elapsed_time_ms: None,
             started_at: None,
+            aborted: false,
         }
+    }
+
+    /// Replace the markdown body (peel an aborted draft, keep elapsed).
+    pub fn replace_text(&mut self, text: impl Into<String>) {
+        self.content = MarkdownContent::new(text);
+    }
+
+    /// Mark this thought as paused or truncated. Collapses even when
+    /// `[ui] always_expand_thinking` is on.
+    pub fn mark_aborted(&mut self) {
+        self.aborted = true;
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    pub fn is_empty_or_whitespace(&self) -> bool {
+        self.content.text().trim().is_empty()
+    }
+
+    /// Local or frozen elapsed is still in the 0.0s bucket.
+    pub fn is_instant_so_far(&self) -> bool {
+        match self.elapsed_time_ms() {
+            Some(ms) => ms < INSTANT_THOUGHT_MS,
+            None => self.started_at.is_none(),
+        }
+    }
+
+    /// Drop a trailing user-facing draft. Returns true when the body changed.
+    pub fn strip_trailing_user_facing_draft(&mut self) -> bool {
+        let original = self.text();
+        let peeled = peel_trailing_user_facing_draft(&original);
+        if peeled == original {
+            return false;
+        }
+        self.replace_text(peeled);
+        true
+    }
+
+    /// Whole body is a user-facing reply, not reasoning (no peel point).
+    pub fn is_user_facing_draft_only(&self) -> bool {
+        let t = self.text();
+        let trimmed = t.trim();
+        !trimmed.is_empty()
+            && looks_like_user_facing_draft(trimmed)
+            && peel_trailing_user_facing_draft(&t) == t
     }
 
     /// Push a streaming chunk of markdown text.
@@ -207,14 +345,16 @@ impl ThinkingBlock {
 
     /// Format elapsed time for display.
     fn format_time(&self) -> Option<String> {
-        self.elapsed_time_ms.map(|ms| {
-            let elapsed = std::time::Duration::from_millis(ms.max(0) as u64);
-            if elapsed.as_secs() < 60 {
-                format!("{:.1}s", elapsed.as_secs_f64())
-            } else {
-                crate::util::format_duration(elapsed)
-            }
-        })
+        let ms = self.elapsed_time_ms?;
+        if ms < INSTANT_THOUGHT_MS {
+            return None;
+        }
+        let elapsed = std::time::Duration::from_millis(ms.max(0) as u64);
+        if elapsed.as_secs() < 60 {
+            Some(format!("{:.1}s", elapsed.as_secs_f64()))
+        } else {
+            Some(crate::util::format_duration(elapsed))
+        }
     }
 
     /// Build the header line: "Thinking..." (running) or "Thought for Xs" (done).
@@ -496,7 +636,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            DisplayMode::Collapsed
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else if is_running {
             // Match `next_fold_mode`: skip Collapsed while streaming so
@@ -509,7 +651,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            DisplayMode::Collapsed
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             DisplayMode::Expanded
         } else {
             DisplayMode::Collapsed
@@ -517,7 +661,9 @@ impl BlockContent for ThinkingBlock {
     }
 
     fn finished_display_mode(&self) -> Option<DisplayMode> {
-        if crate::appearance::cache::load_always_expand_thinking() {
+        if self.aborted {
+            Some(DisplayMode::Collapsed)
+        } else if crate::appearance::cache::load_always_expand_thinking() {
             Some(DisplayMode::Expanded)
         } else {
             Some(DisplayMode::Collapsed)
@@ -724,6 +870,104 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    fn collapsed_header_text(block: &ThinkingBlock) -> String {
+        let out = block.output(&ctx(DisplayMode::Collapsed, 80));
+        out.lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_header_never_paints_thought_for_zero_point_zero_seconds() {
+        // Contract B: Thought for 0.0s must not paint as a real thought block.
+        let mut block = ThinkingBlock::new("tiny");
+        block.set_elapsed_time_ms(Some(0));
+        let text = collapsed_header_text(&block);
+        assert!(
+            !text.contains("0.0s"),
+            "must not paint Thought for 0.0s, got {text:?}"
+        );
+        block.set_elapsed_time_ms(Some(49));
+        let text = collapsed_header_text(&block);
+        assert!(
+            !text.contains("0.0s"),
+            "sub-50ms must not paint Thought for 0.0s, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn aborted_thinking_finished_display_mode_is_collapsed_even_when_always_expand_is_on() {
+        // Contracts A and C: paused or truncated thinking collapses. It is not
+        // an expanded half-apology stuck on screen.
+        std::thread::spawn(|| {
+            crate::appearance::cache::set_always_expand_thinking(true);
+            let mut block = ThinkingBlock::new("The user is asking me to acknowledge them.");
+            block.mark_aborted();
+            assert_eq!(
+                block.finished_display_mode(),
+                Some(DisplayMode::Collapsed),
+                "aborted thinking must collapse even when always_expand_thinking is on"
+            );
+            assert_eq!(block.collapse_mode(false), DisplayMode::Collapsed);
+            assert_eq!(block.default_display_mode(), DisplayMode::Collapsed);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn peel_trailing_user_facing_draft_keeps_internal_reasoning() {
+        // Contract D: internal "the user is asking me..." is reasoning. The
+        // aborted "Hey, sorry..." draft is not the answer.
+        let mixed = "The user is asking me to acknowledge them - they sent a screenshot of the session.\nHey, sorry about that -- I see the screenshot and the weird state you're in. Looks like the resume pulled up a session where the prompt is stuck in both the";
+        let peeled = peel_trailing_user_facing_draft(mixed);
+        assert!(
+            peeled.contains("The user is asking me"),
+            "reasoning must stay, got {peeled:?}"
+        );
+        assert!(
+            !peeled.contains("Hey, sorry about that"),
+            "user-facing draft must not stay in thinking chrome, got {peeled:?}"
+        );
+        assert!(looks_like_user_facing_draft(
+            "Hey, sorry about that -- I see the screenshot"
+        ));
+        assert!(!looks_like_user_facing_draft(
+            "The user is asking me to acknowledge them"
+        ));
+    }
+
+    #[test]
+    fn aborted_mixed_thought_expanded_body_omits_user_facing_draft() {
+        // Contracts A and C: paused or truncated thinking must not keep a
+        // half-apology in the body the operator can still expand.
+        let mixed = "The user is asking me to acknowledge them - they sent a screenshot of the session.\nHey, sorry about that -- I see the screenshot and the weird state you're in.";
+        let mut block = ThinkingBlock::new(mixed);
+        assert!(block.strip_trailing_user_facing_draft());
+        block.mark_aborted();
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.thinking.header = false;
+        let ctx = BlockContext {
+            appearance,
+            ..ctx(DisplayMode::Expanded, 80)
+        };
+        let out = block.output(&ctx);
+        let text: String = out
+            .lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("The user is asking me"),
+            "reasoning may remain in thinking chrome, got {text:?}"
+        );
+        assert!(
+            !text.contains("Hey, sorry about that"),
+            "user-facing draft must not stay in thinking chrome, got {text:?}"
+        );
     }
 
     #[test]

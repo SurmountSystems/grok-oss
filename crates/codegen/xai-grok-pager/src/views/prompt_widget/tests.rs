@@ -4782,9 +4782,8 @@
     /// Focused composer paints a Human-green solid/empty block caret and hides
     /// the terminal hardware cursor (`cursor_pos` is None so draw does not Show it).
     ///
-    /// Wall-clock phase may land on solid or empty:
-    /// - Solid: full-cell Human accent plate + filled glyph.
-    /// - Empty: true empty cell (space, canvas bg) - no accent plate, no hole.
+    /// Pin the filled half so this test does not sleep on wall clock. Empty
+    /// half is a visible green `█` on canvas (phase-injected unit tests).
     /// Never the old hole-punch (`■` on accent plate).
     #[test]
     fn focused_composer_paints_human_green_box_caret_hides_terminal_cursor() {
@@ -4793,6 +4792,7 @@
 
         let _pin = cache::pin_theme();
         cache::set(crate::theme::ThemeKind::Doge);
+        let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
 
         let mut pw = PromptWidget::new();
         pw.set_text("");
@@ -4810,6 +4810,10 @@
         assert!(
             result.cursor_pos.is_none(),
             "software box caret hides the terminal cursor"
+        );
+        assert!(
+            result.caret_cell.is_some(),
+            "empty focused composer still has an insertion cell"
         );
 
         let filled = crate::glyphs::cursor_box_filled();
@@ -4846,11 +4850,109 @@
                 }
             }
         }
-        // Empty half is plain space on canvas, not scannable as a unique
-        // glyph. When wall-clock lands on solid, the accent plate must be
-        // present; phase-injected unit tests cover both halves always.
-        let _ = found_solid_plate;
-        // Hardware cursor stays hidden whenever the software caret paints.
+        assert!(
+            found_solid_plate,
+            "empty focused composer must paint the filled Human-green box caret"
+        );
+    }
+
+    /// Named contract: the DOGE Human box caret plate is spec green
+    /// `Color::Rgb(0, 255, 0)` (`#00FF00`). Named ANSI `Color::Green` follows
+    /// the terminal palette (xterm `#00cd00`) and is not 0001_DOGE green.
+    /// Production still blinks on wall clock; this test only pins the filled
+    /// half so it does not sleep. Empty Enter is unrelated and never Approves.
+    #[test]
+    fn doge_human_box_caret_plate_is_rgb_0_255_0() {
+        use crate::theme::cache;
+        use crate::theme::color_support::{self, ColorLevel};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        // After pin (TrueColor), force Basic so Theme::current() would hand
+        // the painter Color::LightGreen without the DOGE RGB upgrade.
+        color_support::force_for_test(ColorLevel::Basic);
+        cache::set(crate::theme::ThemeKind::Doge);
+        let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+
+        let theme = crate::theme::Theme::current();
+        assert_ne!(
+            theme.accent_user,
+            Color::Rgb(0, 255, 0),
+            "precondition: Basic quantize must not leave accent_user as truecolor RGB"
+        );
+
+        let mut pw = PromptWidget::new();
+        pw.set_text("");
+        let style = PromptStyle {
+            focused: true,
+            chrome: true,
+            show_borders: true,
+            show_prefix: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        let result = pw.draw(&mut buf, area, None, &style, None, None);
+        assert!(
+            result.cursor_pos.is_none(),
+            "software box caret hides the terminal cursor"
+        );
+
+        let filled = crate::glyphs::cursor_box_filled();
+        let spec_green = Color::Rgb(0, 255, 0);
+        let mut found_solid_plate = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y))
+                    && cell.symbol() == filled
+                {
+                    assert_eq!(
+                        cell.bg, spec_green,
+                        "filled Human box caret plate must be DOGE #00FF00"
+                    );
+                    assert_eq!(
+                        cell.fg, spec_green,
+                        "filled Human box caret ink must be DOGE #00FF00"
+                    );
+                    assert_ne!(cell.bg, Color::Green, "must not use named ANSI Green");
+                    assert_ne!(
+                        cell.bg, Color::LightGreen,
+                        "must not use named ANSI LightGreen"
+                    );
+                    assert_ne!(
+                        cell.bg, theme.accent_running,
+                        "caret must not use agent magenta"
+                    );
+                    found_solid_plate = true;
+                }
+            }
+        }
+        assert!(
+            found_solid_plate,
+            "empty focused DOGE composer must paint the filled Human box caret"
+        );
+    }
+
+    /// Direct paint: a DOGE theme whose `accent_user` is named ANSI Green
+    /// still fills the caret cell with `Color::Rgb(0, 255, 0)`.
+    #[test]
+    fn paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb() {
+        use ratatui::style::Color;
+
+        let mut theme = crate::theme::Theme::doge();
+        theme.accent_user = Color::Green;
+        let canvas = theme.bg_base;
+        let spec_green = Color::Rgb(0, 255, 0);
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        super::paint_composer_box_cursor_phase(&mut buf, 1, 0, &theme, canvas, true, true);
+        let cell = buf.cell((1, 0)).expect("caret cell");
+        assert_eq!(cell.bg, spec_green, "plate is DOGE RGB green");
+        assert_eq!(cell.fg, spec_green, "ink is DOGE RGB green");
+        assert_ne!(cell.bg, Color::Green);
+        assert_ne!(cell.bg, Color::LightGreen);
+        assert_ne!(cell.bg, theme.accent_running);
     }
 
     /// Composer box caret colour is Human green (`accent_user`), not agent
@@ -4917,15 +5019,16 @@
         assert_eq!(empty.bg, canvas, "empty grapheme keeps canvas bg");
     }
 
-    /// Blank-cell solid vs empty: classic full-cell block on/off.
+    /// Blank-cell solid vs empty: classic full-cell block, both halves visible.
     ///
-    /// Named contract (operator dogfood: hole-punch `■` on accent plate looked
-    /// like a mini badge with a void, not a terminal block caret):
+    /// Named contract (operator: empty Isolated Preview caret must not vanish;
+    /// hole-punch `■` on accent plate looked like a mini badge with a void):
     /// - Silhouette for **both** phases is the terminal **cell** itself.
     /// - Solid (full): Human accent plate + ink (`█`), full cell height, no DIM.
-    /// - Empty (off): plain space, **canvas** bg (true empty cell), **no**
-    ///   accent plate, no DIM. Not an accent frame with a dark center.
-    /// - Symbols and styles differ so the blink is visible.
+    /// - Empty (off): same `█` with Human-green ink on **canvas** bg (no accent
+    ///   plate). Not a true empty cell (that vanished on an empty Human box).
+    ///   Not an accent frame with a dark center.
+    /// - Styles differ so the blink is plate on vs glyph-on-canvas.
     #[test]
     fn paint_composer_box_cursor_blank_phases_are_visually_distinct() {
         use crate::theme::cache;
@@ -4940,12 +5043,6 @@
 
         let area = Rect::new(0, 0, 4, 2);
         let filled_glyph = crate::glyphs::cursor_box_filled();
-        let empty_glyph = crate::glyphs::cursor_box_hollow();
-        assert_ne!(
-            filled_glyph, empty_glyph,
-            "glyph helpers must already differ (solid block vs empty space)"
-        );
-        assert_eq!(empty_glyph, " ", "empty half glyph is plain space");
 
         let mut solid_buf = Buffer::empty(area);
         super::paint_composer_box_cursor_phase(&mut solid_buf, 1, 0, &theme, canvas, true, true);
@@ -4966,27 +5063,21 @@
         let empty = empty_buf.cell((1, 0)).expect("empty cell");
         assert_eq!(
             empty.symbol(),
-            empty_glyph,
-            "empty half uses plain space (true empty cell)"
-        );
-        assert_ne!(
-            empty.symbol(),
             filled_glyph,
-            "empty must not paint the solid full-block glyph"
+            "empty half keeps the full-block glyph so the caret stays visible"
         );
         assert_ne!(
             empty.symbol(),
             "\u{25a0}",
             "empty must not be black-square hole-punch"
         );
-        // True empty: canvas plate, no accent outer frame.
         assert_eq!(
             empty.bg, canvas,
             "empty half has canvas bg (no accent plate / no green frame)"
         );
         assert_eq!(
-            empty.fg, canvas,
-            "empty half has canvas ink (no hole-punch accent frame)"
+            empty.fg, accent,
+            "empty half keeps Human green ink (not canvas-on-canvas vanish)"
         );
         assert_ne!(
             empty.bg, accent,
@@ -4994,22 +5085,16 @@
         );
         assert!(
             !empty.modifier.contains(Modifier::DIM),
-            "empty must not be DIM of solid - blink is plate on vs off"
+            "empty must not be DIM of solid - blink is plate on vs glyph on canvas"
         );
 
-        // Same cell silhouette via on/off fill; styles and symbols differ.
         assert_ne!(
             solid.bg, empty.bg,
-            "solid fills the cell plate; empty is canvas (on/off block)"
+            "solid fills the cell plate; empty is green block on canvas"
         );
-        assert_ne!(
+        assert_eq!(
             solid.fg, empty.fg,
-            "solid accent ink vs empty canvas ink"
-        );
-        assert_ne!(
-            solid.symbol(),
-            empty.symbol(),
-            "solid and empty blank symbols must differ"
+            "both halves use Human green ink"
         );
         assert!(
             solid.fg != empty.fg

@@ -8,9 +8,9 @@ use crate::scrollback::selection::SelectionBox;
 use crate::scrollback::types::DisplayMode;
 use crate::theme::Theme;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
-use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem};
+use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem, SelectedPlanCta};
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,20 +18,56 @@ use ratatui::style::Style;
 
 /// Bare typing while plan.md is open: letters and delete keys go to the
 /// composer. Ctrl+Backspace / Alt+Backspace / Ctrl+Delete are word-edit
-/// on that composer. Other Ctrl/Alt/Super chords stay with the viewer
-/// (fullscreen, quit, worktree).
-fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+/// on that composer. Left/Right, Ctrl/Alt word-move, and Ctrl-A/E stay
+/// on that composer too. Ctrl/Cmd+Z (undo) and Shift+Z (redo) stay on
+/// that composer so a wiped Human box can come back while Preview is
+/// focused. Enter, Shift+Enter, and Alt+Enter stay on that composer so
+/// Preview matches the main Human box (newline or send). Other
+/// Ctrl/Alt/Super chords stay with the viewer (fullscreen, quit,
+/// worktree).
+pub(super) fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
+    if matches!(key.code, KeyCode::Char('z' | 'Z'))
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+    {
+        return true;
+    }
+    // Shift+Enter / Alt+Enter (and Apple Terminal rescued Enter) must
+    // reach the Human box. Without this, Preview forwards them to the
+    // plan list, so the overlay can steal copy / clarify / row walk.
+    if crate::input::is_mod_enter(key) {
+        return true;
+    }
+    if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+        return true;
+    }
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        return false;
+    }
     let word_edit = matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
         && key
             .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && !key.modifiers.contains(KeyModifiers::SUPER);
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     if word_edit {
+        return true;
+    }
+    let composer_cursor = match key.code {
+        KeyCode::Left | KeyCode::Right => {
+            key.modifiers.is_empty()
+                || key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        }
+        KeyCode::Char('a' | 'e') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    };
+    if composer_cursor {
         return true;
     }
     if key
         .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
         return false;
     }
@@ -92,9 +128,92 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    fn mark_selected_plan_cta(&mut self, choice: SelectedPlanCta) {
+        if let Some(viewer) = self.line_viewer.as_mut() {
+            viewer.plan_mut().selected_cta = Some(choice);
+        }
+    }
+
+    fn selected_plan_cta(&self) -> Option<SelectedPlanCta> {
+        self.line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .and_then(|p| p.selected_cta)
+    }
+
+    fn plan_cta_has_comment_payload(&self) -> bool {
+        !self.prompt.text().trim().is_empty()
+            || self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| !pav.comments.is_empty())
+    }
+
+    /// Click marks the CTA and runs it. Enter also submits the marked CTA.
+    /// First click on Approve still Approves. Letter keys type; they do
+    /// not steal Approve. A second click on an already-marked CTA still
+    /// runs that action.
+    fn click_plan_cta(&mut self, choice: SelectedPlanCta) -> InputOutcome {
+        self.activate_selected_plan_cta(choice)
+    }
+
+    /// Enter (and a second click) run the marked idle CTA.
+    fn activate_selected_plan_cta(&mut self, choice: SelectedPlanCta) -> InputOutcome {
+        self.mark_selected_plan_cta(choice);
+        match choice {
+            SelectedPlanCta::Approve => self.approve_plan(),
+            SelectedPlanCta::Comment => self.focus_plan_prompt(PlanPromptIntent::Comment),
+            SelectedPlanCta::Clarify => {
+                if self.plan_cta_has_comment_payload() {
+                    let text = self.prompt.text().to_string();
+                    let freeform = if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    };
+                    self.send_plan_questions(freeform)
+                } else {
+                    self.focus_plan_prompt(PlanPromptIntent::Questions)
+                }
+            }
+            SelectedPlanCta::Revise => {
+                if self.plan_cta_has_comment_payload() {
+                    let text = self.prompt.text().to_string();
+                    let freeform = if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    };
+                    self.send_plan_feedback(freeform)
+                } else {
+                    self.focus_plan_prompt(PlanPromptIntent::Revise)
+                }
+            }
+            SelectedPlanCta::Exit => self.abandon_plan(),
+        }
+    }
+
+    /// Empty Preview Enter submits the marked CTA. Empty Enter never Approves.
+    fn submit_marked_idle_plan_cta(&mut self) -> InputOutcome {
+        match self.selected_plan_cta() {
+            None | Some(SelectedPlanCta::Approve) => self.send_composer_as_normal_prompt(),
+            Some(choice) => self.activate_selected_plan_cta(choice),
+        }
+    }
+
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let in_plan_approval = self.plan_approval_view.is_some();
+        let plan_present = in_plan_approval || self.is_plan_viewer();
+
+        // Idle or cancelling plan present: `x`/`e`/`j`/`k` type in the Human
+        // box. They must not become list capture (delete / edit / row walk).
+        if plan_present
+            && matches!(key.code, KeyCode::Char('x' | 'e' | 'j' | 'k'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return self.handle_plan_feedback_key(key);
+        }
 
         let input_bar_active = self
             .line_viewer
@@ -125,8 +244,10 @@ impl AgentView {
 
         // Isolated plan.md / side panel is visual. Printable keys and
         // Backspace stay on the composer so present never steals typing.
-        // Letter CTA keys type. `?` still arms Clarify. Empty-prompt `c`
-        // is the line-comment gesture (clicking a row is not). A live
+        // Letter CTA keys type. Empty Preview `?` still arms Clarify. A
+        // live draft or Prompt focus inserts `?`. Empty Preview `y` copies
+        // the plan (footer `y:copy`). A live draft inserts `y`. Empty-prompt
+        // `c` is the line-comment gesture (clicking a row is not). A live
         // draft types `c` so Preview does not stash-and-wipe the Human box.
         if in_plan_approval && key!('c').matches(key) {
             let already_commenting = self
@@ -135,6 +256,33 @@ impl AgentView {
                 .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
             if !already_commenting && self.prompt.text().trim().is_empty() {
                 return self.enter_plan_commenting();
+            }
+        }
+        if in_plan_approval && key!('y').matches(key) {
+            let commenting = self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+            let empty = self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
+            // Empty Preview `y` copies (footer `y:copy`). Comment overlay
+            // `y` copies even with a line-comment draft. A live Prompt or
+            // Preview draft still types `y`.
+            if commenting || empty {
+                return self.copy_plan_full();
+            }
+        }
+        if in_plan_approval && key!(Enter).matches(key) && !crate::input::is_mod_enter(key) {
+            let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
+            if focus == Some(PlanApprovalFocus::Commenting)
+                || focus == Some(PlanApprovalFocus::Prompt)
+            {
+                return self.handle_plan_feedback_key(key);
+            }
+            if !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty() {
+                return self.handle_plan_feedback_key(key);
+            }
+            if self.selected_plan_cta().is_some() {
+                return self.submit_marked_idle_plan_cta();
             }
         }
         if in_plan_approval && plan_preview_key_is_composer_text(key) {
@@ -186,6 +334,7 @@ impl AgentView {
         if in_plan_approval
             && key.code == KeyCode::Char('?')
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            && self.prompt.text().trim().is_empty()
         {
             return self
                 .focus_plan_prompt(crate::views::plan_approval_view::PlanPromptIntent::Questions);
@@ -518,36 +667,18 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    return self.abandon_plan();
+                    return self.click_plan_cta(SelectedPlanCta::Exit);
                 }
                 if approve_notes_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()))
                 {
-                    return self.focus_plan_prompt(
-                        crate::views::plan_approval_view::PlanPromptIntent::ApproveNotes,
-                    );
+                    return self.focus_plan_prompt(PlanPromptIntent::ApproveNotes);
                 }
                 if questions_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    let has_comment = !self.prompt.text().trim().is_empty()
-                        || self
-                            .plan_approval_view
-                            .as_ref()
-                            .is_some_and(|pav| !pav.comments.is_empty());
-                    if has_comment {
-                        let text = self.prompt.text().to_string();
-                        let freeform = if text.trim().is_empty() {
-                            None
-                        } else {
-                            Some(text)
-                        };
-                        return self.send_plan_questions(freeform);
-                    }
-                    return self.focus_plan_prompt(
-                        crate::views::plan_approval_view::PlanPromptIntent::Questions,
-                    );
+                    return self.click_plan_cta(SelectedPlanCta::Clarify);
                 }
                 if approve_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.approve_plan();
+                        return self.click_plan_cta(SelectedPlanCta::Approve);
                     } else if is_plan_preview && !self.plan_comments.is_empty() {
                         // Casual mode: the only action button shown is
                         // `s send` (when there are comments to send).
@@ -557,9 +688,7 @@ impl AgentView {
                 }
                 if comment_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        return self.focus_plan_prompt(
-                            crate::views::plan_approval_view::PlanPromptIntent::Comment,
-                        );
+                        return self.click_plan_cta(SelectedPlanCta::Comment);
                     }
                     if is_plan_preview {
                         return self.enter_casual_plan_commenting();
@@ -576,23 +705,7 @@ impl AgentView {
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
-                        let has_comment = !self.prompt.text().trim().is_empty()
-                            || self
-                                .plan_approval_view
-                                .as_ref()
-                                .is_some_and(|pav| !pav.comments.is_empty());
-                        if has_comment {
-                            let text = self.prompt.text().to_string();
-                            let freeform = if text.trim().is_empty() {
-                                None
-                            } else {
-                                Some(text)
-                            };
-                            return self.send_plan_feedback(freeform);
-                        }
-                        return self.focus_plan_prompt(
-                            crate::views::plan_approval_view::PlanPromptIntent::Revise,
-                        );
+                        return self.click_plan_cta(SelectedPlanCta::Revise);
                     }
                     return self.send_casual_plan_comments();
                 }

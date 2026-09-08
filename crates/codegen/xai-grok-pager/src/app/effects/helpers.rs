@@ -1412,6 +1412,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "composer_multiline" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("composer_multiline", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_composer_multiline(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "scrub_ascii_punct" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("scrub_ascii_punct", "Bool", &value));

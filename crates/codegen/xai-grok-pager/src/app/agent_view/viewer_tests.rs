@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 use crate::actions::ActionRegistry;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 
 const POPUP: Rect = Rect {
     x: 0,
@@ -424,6 +424,69 @@ fn plan_row_click_does_not_enter_commenting() {
     );
 }
 
+/// Idle or cancelling plan present must not steal `x`/`e`/`j`/`k` into list
+/// capture. Empty Enter never Approves. Clickable CTAs stay.
+#[test]
+fn plan_present_xejk_type_in_human_box_even_while_cancelling() {
+    use crate::app::agent::AgentState;
+    use crate::app::app_view::InputOutcome;
+    use crate::app::queue_edit::PromptMode;
+
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    agent.session.state = AgentState::TurnCancelling;
+    agent.prompt_mode = PromptMode::EditingQueued {
+        id: 1,
+        original: "queued #1".into(),
+        server_id: None,
+        kind: crate::app::agent::QueueEntryKind::Prompt,
+    };
+    let registry = ActionRegistry::defaults();
+    let pane_before = plan_pane_nav(&agent);
+
+    for ch in ['x', 'e', 'j', 'k'] {
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+            &registry,
+        );
+    }
+    assert_eq!(
+        agent.prompt.text(),
+        "xejk",
+        "idle/cancelling plan present must type x/e/j/k in the Human box, got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        plan_pane_nav(&agent),
+        pane_before,
+        "those letters must not walk the plan list"
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "clickable plan CTAs must stay"
+    );
+
+    agent.prompt.set_text("");
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &registry,
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "empty Enter must never Approve"
+    );
+
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let outcome = agent.handle_input(&ctrl_c, &registry);
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Action(crate::app::actions::Action::CancelTurn)
+        ),
+        "queue #1 plus plan row editor plus Cancelling must still stop, got {outcome:?}"
+    );
+}
+
 /// Empty Enter on the default parked Preview stays on Preview.
 /// Commenting is explicit `c` only.
 #[test]
@@ -701,6 +764,203 @@ fn plan_md_preview_ctrl_backspace_deletes_word_in_composer() {
     );
 }
 
+fn plan_pane_nav(agent: &AgentView) -> (Option<usize>, usize) {
+    let viewer = agent
+        .line_viewer
+        .as_ref()
+        .expect("isolated present keeps plan.md open");
+    (
+        viewer.list_state.selected_index(),
+        viewer.list_state.scroll_offset(),
+    )
+}
+
+fn press_plan_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers) {
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(code, modifiers)),
+        &ActionRegistry::defaults(),
+    );
+}
+
+fn assert_plan_prompt_cursor_keys_stay_in_composer(
+    agent: &AgentView,
+    draft: &str,
+    pane_before: (Option<usize>, usize),
+    intent_before: PlanPromptIntent,
+) {
+    assert_eq!(
+        agent.prompt.text(),
+        draft,
+        "cursor keys must not rewrite the Human box, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "cursor keys must not Approve or Exit the parked plan"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "cursor keys must not decide the plan"
+    );
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("plan review stays parked");
+    assert_eq!(
+        pav.prompt_intent, intent_before,
+        "cursor keys must not arm Clarify or switch the box intent"
+    );
+    assert!(
+        agent.active_modal.is_none(),
+        "cursor keys must not open help or the command palette"
+    );
+    assert_eq!(
+        plan_pane_nav(agent),
+        pane_before,
+        "cursor keys must not scroll or retarget the plan pane"
+    );
+}
+
+/// Isolated plan.md Preview with a live Human-box draft: Left/Right move
+/// the composer cursor, not the plan pane.
+#[test]
+fn plan_prompt_cursor_keys_preview_arrows() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end.saturating_sub(1),
+        "Left must move the Human box caret, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end,
+        "Right must move the Human box caret back, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Same isolated Preview Human box: Ctrl-Left / Ctrl-Right move by word,
+/// matching Ctrl+Backspace staying on that composer.
+#[test]
+fn plan_prompt_cursor_keys_preview_ctrl_arrows() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
+    let after_word_left = agent.prompt.cursor();
+    assert!(
+        after_word_left < end,
+        "Ctrl-Left must jump left by a word, cursor stayed at {after_word_left}"
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        end,
+        "Ctrl-Right must jump right by a word, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Same isolated Preview Human box: Ctrl-A / Ctrl-E are line start / end
+/// in the composer, not help, Clarify, or plan-pane nav.
+#[test]
+fn plan_prompt_cursor_keys_preview_ctrl_a_e() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+
+    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        0,
+        "Ctrl-A must go to the start of the Human box line, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.cursor(),
+        DRAFT.len(),
+        "Ctrl-E must go to the end of the Human box line, got {}",
+        agent.prompt.cursor()
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
+/// Tab has focused the plan prompt: the same cursor keys edit the box,
+/// including when the isolated present Preview path is not the owner.
+#[test]
+fn plan_prompt_cursor_keys_tab_focus() {
+    const DRAFT: &str = "hello world";
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text(DRAFT);
+    agent.prompt.set_cursor(DRAFT.len());
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Comment;
+    }
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    let end = agent.prompt.cursor();
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(agent.prompt.cursor(), end.saturating_sub(1));
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Prompt,
+        "arrows must not steal Tab focus back to the plan pane"
+    );
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+
+    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
+    assert!(agent.prompt.cursor() < end.saturating_sub(1));
+    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), 0);
+    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), DRAFT.len());
+    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
+    assert_eq!(agent.prompt.cursor(), DRAFT.len());
+    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
+}
+
 fn type_plan_chars(agent: &mut AgentView, text: &str) {
     let registry = ActionRegistry::defaults();
     for ch in text.chars() {
@@ -813,6 +1073,330 @@ fn plan_preview_typed_text_survives_c_reopen_without_wipe_undo() {
     assert_eq!(agent.prompt.text(), "because");
 }
 
+/// Isolated Preview (footer `Tab:prompt`): Ctrl+Z must restore a wiped Human
+/// box. The chord used to stay with the plan list, so undo never ran.
+#[test]
+fn plan_preview_ctrl_z_restores_wiped_human_box() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.prompt.clear_history();
+    type_plan_chars(&mut agent, "please keep this prompt");
+    assert_eq!(agent.prompt.text(), "please keep this prompt");
+
+    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(
+        agent.prompt.text().is_empty(),
+        "Ctrl+C must wipe the Human box first, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "first Ctrl+C is wipe, not Exit"
+    );
+
+    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.text(),
+        "please keep this prompt",
+        "Ctrl+Z while Preview is focused must restore the wiped Human box, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Tab-focused Prompt box: same Ctrl+Z restore after a wipe.
+#[test]
+fn plan_prompt_ctrl_z_restores_wiped_human_box() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Comment;
+    }
+    agent.prompt.set_text("");
+    agent.prompt.clear_history();
+    type_plan_chars(&mut agent, "revise notes that vanished");
+    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(agent.prompt.text().is_empty());
+    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(
+        agent.prompt.text(),
+        "revise notes that vanished",
+        "Ctrl+Z on the Prompt-focused Human box must restore the wipe, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Ctrl/Cmd+Z is composer undo even while the plan list owns Preview.
+#[test]
+fn plan_preview_key_treats_ctrl_z_as_composer_text() {
+    let undo = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert!(
+        super::plan_preview_key_is_composer_text(&undo),
+        "Ctrl+Z must reach the Human box, not the plan list"
+    );
+    let redo = KeyEvent::new(
+        KeyCode::Char('Z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    assert!(
+        super::plan_preview_key_is_composer_text(&redo),
+        "Ctrl+Shift+Z redo must reach the Human box"
+    );
+    let fullscreen = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+    assert!(
+        !super::plan_preview_key_is_composer_text(&fullscreen),
+        "Ctrl+F stays with the plan viewer"
+    );
+}
+
+/// Operator: Shift+Enter in plan Preview must reach the Human box.
+/// Overlay copy / clarify / approve must not steal it.
+#[test]
+fn plan_preview_key_treats_shift_enter_as_composer_text() {
+    let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+    assert!(
+        super::plan_preview_key_is_composer_text(&shift_enter),
+        "Shift+Enter must reach the Human box, not y:copy / ?:clarify / Approve"
+    );
+    let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+    assert!(
+        super::plan_preview_key_is_composer_text(&alt_enter),
+        "Alt+Enter must reach the Human box the same way Shift+Enter does"
+    );
+    let bare_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        super::plan_preview_key_is_composer_text(&bare_enter),
+        "bare Enter must reach the Human box"
+    );
+}
+
+/// Default composer: Shift+Enter inserts a newline in Preview, matching
+/// the main Human box. The parked plan must stay; copy/clarify must not fire.
+#[test]
+fn plan_preview_shift_enter_inserts_newline_when_composer_multiline_on() {
+    crate::appearance::cache::set_composer_multiline(true);
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.multiline_mode = false;
+    agent.prompt.set_text("hello");
+    agent.prompt.set_cursor(5);
+    let pane_before = plan_pane_nav(&agent);
+    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::SHIFT);
+    assert!(
+        agent.prompt.text().contains('\n'),
+        "Preview Shift+Enter must insert a newline when composer multiline is on, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.text().contains("hello"),
+        "Preview Shift+Enter must keep the draft, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Preview Shift+Enter must not Approve or Exit"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "Preview Shift+Enter must not decide the plan"
+    );
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("plan review stays parked");
+    assert_eq!(
+        pav.prompt_intent, intent_before,
+        "Preview Shift+Enter must not arm Clarify"
+    );
+    assert!(
+        agent.active_modal.is_none(),
+        "Preview Shift+Enter must not open help or the command palette"
+    );
+    assert_eq!(
+        plan_pane_nav(&agent),
+        pane_before,
+        "Preview Shift+Enter must not scroll or retarget the plan pane"
+    );
+    crate::appearance::cache::set_composer_multiline(true);
+}
+
+/// `[ui] composer_multiline = false`: Shift+Enter must not open a second
+/// line in Preview. It sends like the main composer.
+#[test]
+fn plan_preview_shift_enter_sends_when_composer_multiline_off() {
+    crate::appearance::cache::set_composer_multiline(false);
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.multiline_mode = false;
+    agent.prompt.set_text("hello");
+    agent.prompt.set_cursor(5);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !agent.prompt.text().contains('\n'),
+        "Preview Shift+Enter must not insert a newline when composer multiline is off, got {:?}",
+        agent.prompt.text()
+    );
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::SendPrompt(
+            text,
+        )) => {
+            assert_eq!(text, "hello", "Preview Shift+Enter must send the draft");
+        }
+        other => panic!("Preview Shift+Enter with composer multiline off must send, got {other:?}"),
+    }
+    crate::appearance::cache::set_composer_multiline(true);
+}
+
+/// Session Multiline on Preview: Shift+Enter sends, matching the main
+/// Human box. Enter still inserts a newline when composer multiline is on.
+#[test]
+fn plan_preview_session_multiline_shift_enter_sends() {
+    crate::appearance::cache::set_composer_multiline(true);
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.multiline_mode = true;
+    agent.prompt.set_text("hello");
+    agent.prompt.set_cursor(5);
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        agent.prompt.text().contains('\n'),
+        "Preview Enter in session Multiline must insert a newline, got {:?}",
+        agent.prompt.text()
+    );
+    agent.prompt.set_text("hello");
+    agent.prompt.set_cursor(5);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        &ActionRegistry::defaults(),
+    );
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::SendPrompt(
+            text,
+        )) => {
+            assert_eq!(
+                text, "hello",
+                "Preview Shift+Enter in session Multiline must send"
+            );
+        }
+        other => panic!("Preview Shift+Enter in session Multiline must send, got {other:?}"),
+    }
+    crate::appearance::cache::set_composer_multiline(true);
+}
+
+/// Operator: typing, cancel, and interject stay responsive. A keystroke
+/// burst must not fsync WAL N times and must not rewrite pending_prompts.
+#[test]
+fn plan_human_box_keystroke_burst_does_not_append_prompt_wal() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.prompt_wal_append_count.set(0);
+    agent.pending_prompts_persist_count.set(0);
+    type_plan_chars(&mut agent, "twelve chars!");
+    assert_eq!(
+        agent.prompt_wal_append_count.get(),
+        0,
+        "keystroke burst must not fsync WAL N times, got {} WAL appends",
+        agent.prompt_wal_append_count.get()
+    );
+    assert_eq!(
+        agent.pending_prompts_persist_count.get(),
+        0,
+        "keystroke burst must not rewrite pending_prompts.json, got {} snapshots",
+        agent.pending_prompts_persist_count.get()
+    );
+}
+
+/// Main composer shares the no-WAL-on-letters contract.
+#[test]
+fn main_composer_keystroke_burst_does_not_append_prompt_wal() {
+    let mut agent = make_agent();
+    agent.prompt.set_text("");
+    agent.prompt_wal_append_count.set(0);
+    agent.pending_prompts_persist_count.set(0);
+    type_plan_chars(&mut agent, "hello world");
+    assert_eq!(
+        agent.prompt_wal_append_count.get(),
+        0,
+        "main prompt typing must not append prompt_wal.jsonl, got {} WAL appends",
+        agent.prompt_wal_append_count.get()
+    );
+    assert_eq!(
+        agent.pending_prompts_persist_count.get(),
+        0,
+        "main prompt typing must not rewrite pending_prompts.json, got {} snapshots",
+        agent.pending_prompts_persist_count.get()
+    );
+}
+
+/// A burst of Human-box keystrokes must not flush the unsent draft on every
+/// character (that path used to `sync_all` per key).
+#[test]
+fn plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    agent.unsent_draft_persist_flush_count.set(0);
+    agent.unsent_draft_persist_skip_count.set(0);
+    agent.last_unsent_draft_persist.set(None);
+
+    type_plan_chars(&mut agent, "twelve chars!");
+    let flushes = agent.unsent_draft_persist_flush_count.get();
+    let skips = agent.unsent_draft_persist_skip_count.get();
+    assert_eq!(
+        flushes, 1,
+        "a burst must write the unsent draft once, got {flushes} flushes and {skips} skips"
+    );
+    assert!(
+        skips >= 12,
+        "remaining keystrokes must coalesce, got {skips} skips and {flushes} flushes"
+    );
+}
+
+/// Main composer (no plan pane) shares the coalesced persist path.
+#[test]
+fn main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char() {
+    let mut agent = make_agent();
+    agent.prompt.set_text("");
+    agent.unsent_draft_persist_flush_count.set(0);
+    agent.unsent_draft_persist_skip_count.set(0);
+    agent.last_unsent_draft_persist.set(None);
+    type_plan_chars(&mut agent, "hello world");
+    let flushes = agent.unsent_draft_persist_flush_count.get();
+    let skips = agent.unsent_draft_persist_skip_count.get();
+    assert_eq!(
+        flushes, 1,
+        "main prompt typing must not persist every character, got {flushes} flushes and {skips} skips"
+    );
+    assert!(
+        skips >= 10,
+        "burst after the first key must skip, got {skips} skips"
+    );
+}
+
 /// Tab leaving Commenting must restore the pre-comment Human-box draft, not
 /// leave an empty wipe that takes several Ctrl-Z to undo.
 #[test]
@@ -849,5 +1433,228 @@ fn tab_leave_commenting_restores_stashed_composer() {
         "live draft",
         "leaving Commenting without save must restore the stashed Human box, got {:?}",
         agent.prompt.text()
+    );
+}
+
+/// Operator: `y` copies the plan while the comment overlay is open.
+#[test]
+fn y_copies_the_plan_while_the_comment_overlay_is_open() {
+    let mut agent = agent_with_scrollable_plan();
+    let _ = agent.enter_plan_commenting();
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Commenting
+    );
+    type_plan_chars(&mut agent, "line note");
+    agent.toast = None;
+    press_plan_key(&mut agent, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.text(),
+        "line note",
+        "y while commenting copies the plan; it must not type y into the line comment, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.toast.is_some(),
+        "y while commenting must copy the plan (clipboard toast)"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "y while commenting must not Approve or Exit"
+    );
+}
+
+/// Operator: clickable copy control copies the plan.
+#[test]
+fn plan_approval_copy_button_click_copies_the_plan() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().copy_button_area = Some(Rect::new(2, 11, 6, 1));
+    }
+    agent.toast = None;
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 3, 11),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        agent.toast.is_some(),
+        "clicking copy must copy the plan (clipboard toast)"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "copy click must not Approve or Exit"
+    );
+}
+
+/// Operator: Enter while composing a comment still saves the comment.
+/// Footer is `Enter:save comment`. Session Multiline must not turn that
+/// Enter into a newline.
+#[test]
+fn enter_while_composing_a_comment_still_saves_the_comment() {
+    crate::appearance::cache::set_composer_multiline(true);
+    let mut agent = agent_with_scrollable_plan();
+    agent.multiline_mode = true;
+    let _ = agent.enter_plan_commenting();
+    type_plan_chars(&mut agent, "keep this line note");
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    let pav = agent.plan_approval_view.as_ref().expect("plan stays");
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+    assert!(
+        pav.comments
+            .iter()
+            .any(|c| c.text.contains("keep this line note")),
+        "Enter while commenting must save the line comment; got {:?}",
+        pav.comments
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "saving a line comment must not Approve"
+    );
+    crate::appearance::cache::set_composer_multiline(true);
+}
+
+/// Operator: empty Enter never Approves, even when Approve is marked.
+#[test]
+fn empty_enter_never_approves_even_when_approve_is_marked() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Approve);
+    }
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "empty Enter must never Approve a parked plan"
+    );
+}
+
+/// Operator: Enter submits the marked idle CTA.
+#[test]
+fn enter_submits_the_marked_idle_cta() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+    }
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "Enter on marked Exit must abandon the parked plan"
+    );
+}
+
+/// Operator: click marks a CTA and runs it; first click on Approve still
+/// Approves. Comment focuses the composer. Exit abandons.
+#[test]
+fn click_selects_a_cta_and_first_click_approve_still_submits() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().comment_button_area = Some(Rect::new(20, 11, 8, 1));
+        viewer.plan_mut().approve_button_area = Some(Rect::new(10, 11, 8, 1));
+        viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    }
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 22, 11),
+        &ActionRegistry::defaults(),
+    );
+    let selected = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.plan_ref())
+        .and_then(|p| p.selected_cta);
+    assert_eq!(
+        selected,
+        Some(crate::views::file_search::line_viewer::SelectedPlanCta::Comment),
+        "clicking Comment must mark it selected"
+    );
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Prompt,
+        "first Comment click focuses the composer"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "first Comment click must not Approve or Exit"
+    );
+    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Prompt,
+        "Enter on marked Comment keeps the composer focused"
+    );
+
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().abandon_button_area = Some(Rect::new(40, 11, 6, 1));
+        viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    }
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 42, 11),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "first Exit click must abandon the parked plan"
+    );
+
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().approve_button_area = Some(Rect::new(10, 11, 8, 1));
+        viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    }
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        agent.plan_decision_resolved || agent.plan_approval_view.is_none(),
+        "first click on Approve must still Approve"
+    );
+}
+
+/// Operator: second click on an already-selected CTA still submits.
+#[test]
+fn second_click_on_already_selected_cta_still_submits() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().abandon_button_area = Some(Rect::new(40, 11, 6, 1));
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+        viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    }
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 42, 11),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "second click on already-selected Exit must still submit Exit"
+    );
+}
+
+/// Operator: letter keys type; they are not the only submit.
+#[test]
+fn letter_key_types_and_is_not_the_only_submit() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(
+        agent.prompt.text(),
+        "a",
+        "letter a types; it must not Approve, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "letters are not the only submit"
     );
 }

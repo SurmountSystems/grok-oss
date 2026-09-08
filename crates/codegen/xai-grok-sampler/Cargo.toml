@@ -32,7 +32,10 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 # Mock HTTP server for actor / request_task integration tests.
 axum = { workspace = true }
+futures-util = { workspace = true }
+grok-rate-limit = { workspace = true }
 tempfile = { workspace = true }
+xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 # Shared SSE generators for the happy-path mock payloads.
 xai-grok-test-support = { workspace = true }
 # `start_paused = true` for deterministic timeout testing; `net` for

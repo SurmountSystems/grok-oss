@@ -105,6 +105,36 @@ See [Slash Commands → `/limits`](04-slash-commands.md#limits) and [Configurati
 
 ---
 
+## Machine console API key for host surmount-1
+
+Use a **machine** xAI console API key when grok-oss runs on a remote host such as **surmount-1**. That key spends **console API credits / console team prepaid**. It is not included SuperGrok period limits. It is not SuperGrok dollar credits.
+
+Create the key yourself at [console.x.ai](https://console.x.ai). Label it for host surmount-1 only. This product does not create the key. Never commit the key. Do not put the key in Nix or git. Do not copy a laptop SuperGrok OAuth login (`auth.json` session tokens) onto the guest as the machine identity.
+
+Install the key under that host's grok home. Grok home is `$GROK_HOME` when that variable is set on the host. Otherwise it is `~/.grok` for user grok, typically `/home/grok/.grok`. Typical files on that host:
+
+| Path | What it is |
+|------|------------|
+| `$GROK_HOME/console.env` | Owner-only (`0600`) file with `XAI_API_KEY=...`. Source it before starting grok-oss. Never commit this file. |
+| `$GROK_HOME/config.toml` | Merge `[auth] preferred_method = "api_key"` so sampling uses the console key. This snippet does not contain the key. |
+
+Git and GitHub SSH stay **unconfigured** on surmount-1. Code is edited on the laptop. Commits are GPG-signed on the laptop. The guest must not git push. Do not `git init`, `git remote`, or `ssh-keygen` on the guest for this workflow.
+
+Attach remains **SSH + tmux as user grok**. There is no boot TUI.
+
+The laptop coordinator (L0, crate `surmount-coordinator-gui`) has the action **set remote host console API key**. Paste the key on that laptop (stdin, never argv). It writes staging files under the laptop grok home (`$GROK_HOME/l0-remote-console-key/surmount-1/` when `GROK_HOME` is set, otherwise `~/.grok/l0-remote-console-key/surmount-1/`). You copy those files, or you let L0 print or run `scp` as the existing deploy user. L0 never prints the key. L0 is a laptop coordinator. It is not a website on the mail host :443. It is not pager `/dashboard`. It is not `/running`. Those three must not merge.
+
+```bash
+# On the laptop. Paste the key on stdin. Do not put the key on the command line.
+surmount-coordinator-gui set-remote-host-console-api-key --host surmount-1
+# Optional: print scp as the existing deploy user (still does not print the key)
+surmount-coordinator-gui set-remote-host-console-api-key --host surmount-1 --ssh deploy@surmount-1
+```
+
+On surmount-1, start grok-oss in tmux as user grok after sourcing `$GROK_HOME/console.env`.
+
+---
+
 ## OIDC (Customer SSO)
 
 Authenticate developers through your own Identity Provider (IdP) -- such as Okta, Azure AD, or Auth0 -- instead of grok.com.

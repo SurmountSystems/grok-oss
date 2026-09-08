@@ -1346,7 +1346,7 @@ pub fn parse_invocation(line: &str) -> Option<SlashInvocation<'_>> {
             break;
         }
     }
-    let token = remainder[..command_end].trim();
+    let token = remainder[..command_end].trim().trim_end_matches('/');
     if token.is_empty() {
         return None;
     }
@@ -1608,6 +1608,13 @@ mod tests {
     fn parses_invocation_no_args() {
         let inv = parse_invocation("/exit").expect("parsed");
         assert_eq!(inv.token, "exit");
+        assert_eq!(inv.args, "");
+    }
+
+    #[test]
+    fn parses_view_plan_with_trailing_slash() {
+        let inv = parse_invocation("/view-plan/").expect("parsed");
+        assert_eq!(inv.token, "view-plan");
         assert_eq!(inv.args, "");
     }
 
@@ -2153,6 +2160,7 @@ mod tests {
             "/session-info",
             "/find",
             "/doctor",
+            "/unstick",
         ] {
             assert!(
                 !names.contains(&hide),
@@ -2178,6 +2186,10 @@ mod tests {
         assert!(names.iter().any(|d| d == "/compact"));
         assert!(names.iter().any(|d| d == "/fork"));
         assert!(names.iter().any(|d| d == "/doctor"));
+        assert!(
+            names.iter().any(|d| d == "/unstick"),
+            "/unstick must stay on the agent view, got {names:?}"
+        );
     }
 
     /// `/cd` is dashboard-only: it appears in the dropdown on the

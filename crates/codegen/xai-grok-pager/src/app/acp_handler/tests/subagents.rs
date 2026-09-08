@@ -1831,5 +1831,308 @@
             child.session.tracker.activity(),
             Some(crate::acp::tracker::TurnActivity::Responding)
         );
+        let first = draw_nested_overlay_text(&mut app);
+        let second = draw_nested_overlay_text(&mut app);
+        assert_eq!(
+            first, second,
+            "Surmount / grok-oss fork: finished nested overlay must freeze elapsed; climbing 1h14m after exit is FAIL"
+        );
+        let lower = second.to_ascii_lowercase();
+        assert!(
+            !lower.contains("waiting for the model"),
+            "finished nested overlay must not keep Waiting for the model:\n{second}"
+        );
+    }
+
+    /// Surmount / grok-oss fork: overlay title elapsed after `SubagentFinished`
+    /// must equal host `duration_ms` (54m34s), not a later spawn-wall clock
+    /// (1h14m). Two redraws must match that host duration.
+    #[test]
+    fn nested_overlay_title_elapsed_matches_host_subagent_finished_duration() {
+        use std::time::{Duration, Instant};
+
+        let host_ms = 3_274_000u64;
+        let host_label = crate::util::format_duration(Duration::from_millis(host_ms));
+        assert_eq!(host_label, "54m34s");
+
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-image-token";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get_mut(child_sid).unwrap();
+            info.description = std::sync::Arc::from("General Fix image token counting grok-4.6");
+            info.started_at = Instant::now() - Duration::from_secs(74 * 60);
+            let child = agent.subagent_views.get_mut(child_sid).unwrap();
+            child.session.state = AgentState::TurnRunning;
+            agent.active_subagent = Some(child_sid.into());
+        }
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                XaiSessionUpdate::SubagentFinished {
+                    subagent_id: child_sid.into(),
+                    child_session_id: child_sid.into(),
+                    status: "completed".into(),
+                    error: None,
+                    tool_calls: 1,
+                    turns: 1,
+                    duration_ms: host_ms,
+                    tokens_used: 0,
+                    output: None,
+                    will_wake: false,
+                },
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let child = agent.subagent_views.get_mut(child_sid).unwrap();
+            child.session.state = AgentState::TurnRunning;
+        }
+
+        let first = draw_nested_overlay_text(&mut app);
+        let second = draw_nested_overlay_text(&mut app);
+        assert_eq!(
+            first, second,
+            "Surmount / grok-oss fork: host-duration overlay must freeze; climbing 1h14m after exit is FAIL:\n{first}"
+        );
+        assert!(
+            first.contains(&host_label),
+            "overlay title elapsed must equal host SubagentFinished duration {host_label}, not spawn-wall 1h14m:\n{first}"
+        );
+        assert!(
+            !first.contains("1h14m"),
+            "overlay title must not keep spawn-wall 1h14m after host stamped {host_label}:\n{first}"
+        );
+    }
+
+    /// Surmount / grok-oss fork: reopening a finished nested overlay must
+    /// finalize, not `TurnRunning`, so the title clock cannot climb.
+    #[test]
+    fn reopening_finished_nested_overlay_does_not_start_climbing_title_clock() {
+        use std::time::{Duration, Instant};
+
+        let host_ms = 3_274_000u64;
+        let host_label = crate::util::format_duration(Duration::from_millis(host_ms));
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-reopen-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get_mut(child_sid).unwrap();
+            info.description = std::sync::Arc::from("General Fix image token counting grok-4.6");
+            info.started_at = Instant::now() - Duration::from_secs(74 * 60);
+        }
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                XaiSessionUpdate::SubagentFinished {
+                    subagent_id: child_sid.into(),
+                    child_session_id: child_sid.into(),
+                    status: "completed".into(),
+                    error: None,
+                    tool_calls: 1,
+                    turns: 1,
+                    duration_ms: host_ms,
+                    tokens_used: 0,
+                    output: None,
+                    will_wake: false,
+                },
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.active_subagent = None;
+            let child = agent.subagent_views.get_mut(child_sid).unwrap();
+            child.session.state = AgentState::TurnRunning;
+            child.turn_started_at = Some(Instant::now() - Duration::from_secs(74 * 60));
+            agent.open_subagent_fullscreen(child_sid.into());
+        }
+
+        let first = draw_nested_overlay_text(&mut app);
+        let second = draw_nested_overlay_text(&mut app);
+        assert_eq!(
+            first, second,
+            "reopening a finished nested overlay must not start a climbing title clock:\n{first}"
+        );
+        assert!(
+            first.contains(&host_label),
+            "reopened finished overlay title must stay at host duration {host_label}:\n{first}"
+        );
+        assert!(
+            !first.contains("1h14m"),
+            "reopened finished overlay must not show spawn-wall 1h14m:\n{first}"
+        );
+        let child = app.agents[&AgentId(0)]
+            .subagent_views
+            .get(child_sid)
+            .unwrap();
+        assert!(
+            !child.session.state.is_busy(),
+            "opening a finished overlay must idle the child view, got {:?}",
+            child.session.state
+        );
+    }
+
+    /// Surmount / grok-oss fork: Subagents live list must not show Responding
+    /// after `SubagentFinished`.
+    #[test]
+    fn subagents_live_list_drops_responding_after_subagent_finished() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-list-done";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "still streaming", "p-child", None),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).len(),
+                1,
+                "precondition: live list shows the running row"
+            );
+            assert_eq!(
+                agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .unwrap()
+                    .activity_label
+                    .as_deref(),
+                Some("Responding")
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "live Subagents list must not keep a SubagentFinished row as running"
+        );
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(info.finished);
+        assert_ne!(
+            info.activity_label.as_deref(),
+            Some("Responding"),
+            "list must not keep painting Responding after SubagentFinished"
+        );
+    }
+
+    /// Surmount / grok-oss fork: L2 finish must surface to L1 without opening
+    /// the nested overlay. After `SubagentFinished` for a waited id, the parent
+    /// is not stuck waiting as if the child were live.
+    #[test]
+    fn l2_finish_surfaces_to_l1_without_opening_nested_overlay() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::scrollback::block::RenderBlock;
+        use std::sync::Arc;
+
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-report-back";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.active_subagent = None;
+            let meta = NotificationMeta::default();
+            agent.session.handle_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(
+                        acp::ToolCallId::new(Arc::from("wait-l2")),
+                        "get_command_or_subagent_output",
+                    )
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .raw_input(Some(serde_json::json!({
+                        "task_ids": [child_sid],
+                        "timeout_ms": 600_000,
+                    })))
+                    .locations(vec![]),
+                ),
+                &meta,
+                &mut agent.scrollback,
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.active_subagent.is_none(),
+            "report-back must not require opening the nested overlay"
+        );
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "parent live list must not keep the finished L2 as running"
+        );
+        let activity = agent.resolve_turn_activity();
+        assert!(
+            !matches!(
+                activity,
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::TaskOutput { .. }
+                ))
+            ),
+            "parent must not stay waiting on task output after SubagentFinished, got {activity:?}"
+        );
+        assert!(
+            !matches!(
+                activity,
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::Model
+                ))
+            ),
+            "parent must not stay Waiting for the model after the waited L2 finished, got {activity:?}"
+        );
+        let has_completed = agent.scrollback.iter_entries().any(|(_, entry)| {
+            matches!(
+                &entry.block,
+                RenderBlock::Subagent(sb)
+                    if matches!(sb.kind, SubagentBlockKind::Completed { .. })
+                        && sb.child_session_id == child_sid
+            )
+        });
+        assert!(
+            has_completed,
+            "L2 finish must surface a completed subagent block on the parent session without opening the overlay"
+        );
+        assert!(
+            agent
+                .session
+                .tracker
+                .task_output_blocking_waits()
+                .is_empty(),
+            "wait tool must complete after SubagentFinished so the parent turn can continue"
+        );
     }
 

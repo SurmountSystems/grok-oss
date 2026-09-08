@@ -24,7 +24,7 @@ pub(super) fn with_active_agent(app: &mut AppView, f: impl FnOnce(&mut AgentView
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        if let Some(child_sid) = agent.active_subagent.clone()
+        if let Some(child_sid) = agent.visible_nested_overlay_sid().map(str::to_owned)
             && let Some(child) = agent.subagent_views.get_mut(&child_sid)
         {
             f(child);
@@ -63,7 +63,7 @@ pub(super) fn get_active_agent(app: &AppView) -> Option<&AgentView> {
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        if let Some(ref child_sid) = agent.active_subagent
+        if let Some(child_sid) = agent.visible_nested_overlay_sid()
             && let Some(child) = agent.subagent_views.get(child_sid)
         {
             return Some(child);
@@ -78,7 +78,7 @@ pub(super) fn get_active_agent_mut(app: &mut AppView) -> Option<&mut AgentView> 
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        if let Some(child_sid) = agent.active_subagent.clone()
+        if let Some(child_sid) = agent.visible_nested_overlay_sid().map(str::to_owned)
             && agent.subagent_views.contains_key(&child_sid)
         {
             return agent.subagent_views.get_mut(&child_sid).map(|b| &mut **b);
@@ -97,7 +97,7 @@ pub(super) fn active_subagent_view_mut(app: &mut AppView) -> Option<&mut AgentVi
         return None;
     };
     let agent = app.agents.get_mut(&id)?;
-    let child_sid = agent.active_subagent.clone()?;
+    let child_sid = agent.visible_nested_overlay_sid()?.to_owned();
     agent.subagent_views.get_mut(&child_sid).map(|b| &mut **b)
 }
 

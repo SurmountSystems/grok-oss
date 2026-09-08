@@ -15,6 +15,11 @@ use crate::theme::Theme;
 
 const EXECUTE_STDOUT_RANGE_BASE: u16 = 1;
 
+/// Head/tail for wrapped expanded stdout. Folded nix copy lines still wrap to
+/// two host rows each; paint must stay strictly under MAX_TERMINAL_PARSE_LINES.
+const EXECUTE_PAINT_HEAD_LINES: usize = 32;
+const EXECUTE_PAINT_TAIL_LINES: usize = 192;
+
 /// Execute tool call - runs a shell command.
 #[derive(Debug, Clone)]
 pub struct ExecuteToolCallBlock {
@@ -69,7 +74,8 @@ impl ExecuteToolCallBlock {
 
     /// Set output.
     pub fn with_output(mut self, output: impl Into<String>) -> Self {
-        self.output = Some(output.into());
+        self.output =
+            Some(crate::render::terminal_output::bound_terminal_raw(&output.into()).into_owned());
         self
     }
 
@@ -78,6 +84,12 @@ impl ExecuteToolCallBlock {
         match &mut self.output {
             Some(o) => o.push_str(chunk),
             None => self.output = Some(chunk.to_string()),
+        }
+        if let Some(o) = &mut self.output
+            && let std::borrow::Cow::Owned(folded) =
+                crate::render::terminal_output::bound_terminal_raw(o)
+        {
+            *o = folded;
         }
     }
 
@@ -566,6 +578,19 @@ impl ExecuteToolCallBlock {
             let (wrapped, joiners) =
                 word_wrap_lines_with_joiners(styled_lines, width.saturating_sub(2).max(20));
             let total = wrapped.len();
+            let paint_cap = crate::render::terminal_output::MAX_TERMINAL_PARSE_LINES;
+            // Expanded `!` passes `truncate: None` (full output vs the tiny
+            // Truncated 2+3 window). Wrap of a huge nix dump still must not
+            // paint hundreds of `copying path` rows into host scrollback.
+            let truncate = truncate.or_else(|| {
+                if total >= paint_cap {
+                    let tail = EXECUTE_PAINT_TAIL_LINES
+                        .min(paint_cap.saturating_sub(EXECUTE_PAINT_HEAD_LINES + 1));
+                    Some((EXECUTE_PAINT_HEAD_LINES, tail))
+                } else {
+                    None
+                }
+            });
 
             // Apply truncation if specified and content exceeds limits
             if let Some((first, last)) = truncate {
@@ -1046,6 +1071,191 @@ mod tests {
         block.push_output("world");
         block.finish();
         assert_eq!(block.output, Some("hello world".to_string()));
+    }
+
+    fn nix_copy_dump(lines: usize) -> String {
+        let mut raw = String::from("\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b]0;nix\x07");
+        raw.push('\0');
+        for i in 0..lines {
+            raw.push_str(&format!(
+                "copying path '/nix/store/{i:064}-cargo-package' to 'ssh-ng://builder'...\n"
+            ));
+        }
+        raw.push_str("\x1b[?1003l\x1b[?1000l\x1b[?1049l");
+        raw
+    }
+
+    fn execute_ctx(mode: DisplayMode) -> BlockContext {
+        BlockContext {
+            mode,
+            is_running: false,
+            width: 100,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    /// Parent grok-oss TUI still scrolls after a shell tool dumps huge
+    /// binary/ANSI nix progress. Do not paint raw `copying path` logs as
+    /// unbounded host scrollback. User `!` expand stays bounded; agent
+    /// execute stays collapsed.
+    #[test]
+    fn parent_tui_still_scrolls_after_huge_ansi_nix_shell_dump() {
+        let dump = nix_copy_dump(400);
+        let mut bash = ExecuteToolCallBlock::new("just check-remote");
+        bash.bash_mode = true;
+        bash = bash.with_output(dump.clone());
+        assert!(
+            bash.output.as_ref().is_some_and(|o| o.len() < dump.len()),
+            "user ! must not keep an unbounded raw CSI/nix dump in the block"
+        );
+        let painted = bash.output(&execute_ctx(DisplayMode::Expanded));
+        let copy_rows = painted
+            .lines
+            .iter()
+            .filter(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .any(|s| s.content.contains("copying path"))
+            })
+            .count();
+        assert!(
+            copy_rows < crate::render::terminal_output::MAX_TERMINAL_PARSE_LINES,
+            "expanded ! bash must not paint 400 nix copy rows into host scrollback, got {copy_rows}"
+        );
+        let joined: String = painted
+            .lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            !joined.contains("\x1b["),
+            "painted execute spans must not dump raw CSI onto the host tty"
+        );
+        assert!(!joined.contains('\0'), "NUL must not reach painted spans");
+        assert!(
+            joined.contains("copying path"),
+            "folded paint still shows nix copy progress"
+        );
+
+        let agent = ExecuteToolCallBlock::new("just check-remote")
+            .with_description("check remote")
+            .with_output(dump.clone());
+        assert_eq!(agent.default_display_mode(), DisplayMode::Collapsed);
+        let collapsed = agent.output(&execute_ctx(DisplayMode::Collapsed));
+        assert!(
+            collapsed.lines.len() <= 2,
+            "agent execute stays collapsed; dump must not expand into parent scrollback, got {}",
+            collapsed.lines.len()
+        );
+
+        let mut state = crate::scrollback::state::ScrollbackState::new();
+        for i in 0..16 {
+            state.push_block(crate::scrollback::block::RenderBlock::agent_message(
+                format!("message {i}\ncontinued"),
+            ));
+        }
+        state.push(
+            crate::scrollback::entry::ScrollbackEntry::new(
+                crate::scrollback::block::RenderBlock::ToolCall(
+                    crate::scrollback::blocks::tool::ToolCallBlock::Execute(bash),
+                ),
+            )
+            .with_display_mode(DisplayMode::Expanded),
+        );
+        state.prepare_layout(80, 6);
+        state.goto_bottom();
+        let (before, _, total) = state.scroll_info();
+        assert!(
+            total > 6,
+            "parent scrollback must remain taller than the viewport after a huge dump"
+        );
+        assert!(
+            before > 0,
+            "precondition: parent must have a page above after the dump"
+        );
+        state.page_up();
+        let (after, _, _) = state.scroll_info();
+        assert!(
+            after < before,
+            "parent TUI must still page up after a huge ANSI/nix dump (before={before} after={after})"
+        );
+    }
+
+    /// Streaming `output_delta` must fold the same way as `with_output`.
+    /// A live nix copy stream must not grow the execute block without bound.
+    #[test]
+    fn streamed_huge_ansi_nix_dump_stays_bounded_and_parent_still_pages() {
+        let dump = nix_copy_dump(400);
+        let mut bash = ExecuteToolCallBlock::new("just check-remote");
+        bash.bash_mode = true;
+        for chunk in dump.split_inclusive('\n') {
+            bash.push_output(chunk);
+        }
+        let stored = bash.output.as_deref().unwrap_or("");
+        assert!(
+            stored.len() < dump.len(),
+            "streaming user ! must fold the dump in the block, stored {} dump {}",
+            stored.len(),
+            dump.len()
+        );
+        assert!(
+            stored.matches("copying path").count() < 400,
+            "streamed block must not keep every copying-path row"
+        );
+        let painted = bash.output(&execute_ctx(DisplayMode::Expanded));
+        let copy_rows = painted
+            .lines
+            .iter()
+            .filter(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .any(|s| s.content.contains("copying path"))
+            })
+            .count();
+        assert!(
+            copy_rows < crate::render::terminal_output::MAX_TERMINAL_PARSE_LINES,
+            "streamed expand must not paint 400 nix rows, got {copy_rows}"
+        );
+        let joined: String = painted
+            .lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            !joined.contains("\x1b["),
+            "streamed paint must not dump raw CSI onto the host tty"
+        );
+        assert!(!joined.contains('\0'), "NUL must not reach painted spans");
+
+        let mut state = crate::scrollback::state::ScrollbackState::new();
+        for i in 0..16 {
+            state.push_block(crate::scrollback::block::RenderBlock::agent_message(
+                format!("message {i}\ncontinued"),
+            ));
+        }
+        state.push(
+            crate::scrollback::entry::ScrollbackEntry::new(
+                crate::scrollback::block::RenderBlock::ToolCall(
+                    crate::scrollback::blocks::tool::ToolCallBlock::Execute(bash),
+                ),
+            )
+            .with_display_mode(DisplayMode::Expanded),
+        );
+        state.prepare_layout(80, 6);
+        state.goto_bottom();
+        let (before, _, _) = state.scroll_info();
+        state.page_up();
+        let (after, _, _) = state.scroll_info();
+        assert!(
+            after < before,
+            "parent TUI must still page up after a streamed ANSI/nix dump (before={before} after={after})"
+        );
     }
 
     #[test]

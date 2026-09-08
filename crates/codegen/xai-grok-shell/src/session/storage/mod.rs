@@ -385,6 +385,8 @@ pub(crate) mod chat_rebuild {
             out.extend(self.flush_agent());
 
             let content = extract_tool_result_text(fields);
+            let content =
+                xai_grok_sampling_types::fold_tool_result_text(&content).unwrap_or(content);
             let item = ConversationItem::tool_result(id.to_string(), content);
             self.item_count += 1;
             out.push(item);

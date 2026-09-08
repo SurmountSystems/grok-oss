@@ -542,7 +542,25 @@ pub(super) fn render_rows(
         }
     }
 
-    let end = total_visible.min(state.scroll_offset + visible_h);
+    // Walk visual heights (plus the blank line above a non-first
+    // header) so the slice does not include a later section header
+    // that would have to squeeze onto the last leftover line.
+    let mut end = state.scroll_offset;
+    let mut lines_used = 0usize;
+    while end < total_visible {
+        let h = row_heights.get(end).copied().unwrap_or(1) as usize;
+        let row_idx = state.filtered_cache[end];
+        let is_header = matches!(state.rows.get(row_idx), Some(RowEntry::Header { .. }));
+        let gap = usize::from(is_header && end > state.scroll_offset);
+        if lines_used.saturating_add(gap).saturating_add(h) > visible_h {
+            break;
+        }
+        lines_used += gap + h;
+        end += 1;
+    }
+    if end == state.scroll_offset && total_visible > state.scroll_offset {
+        end = state.scroll_offset + 1;
+    }
 
     let max_label_w = compute_settings_max_label_w(state.registry.all(), area.width);
 
@@ -573,10 +591,14 @@ pub(super) fn render_rows(
             continue;
         };
 
-        if matches!(row, RowEntry::Header { .. })
-            && rendered_any
-            && y_cursor.saturating_add(1) < area_end
-        {
+        if matches!(row, RowEntry::Header { .. }) && rendered_any {
+            // Non-first headers always keep a blank line above. If
+            // the leftover viewport cannot hold that gap plus the
+            // header, stop instead of painting the header on the
+            // last setting row.
+            if y_cursor.saturating_add(2) > area_end {
+                break;
+            }
             y_cursor = y_cursor.saturating_add(1);
         }
         if y_cursor >= area_end {

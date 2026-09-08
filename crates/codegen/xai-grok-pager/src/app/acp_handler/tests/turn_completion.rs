@@ -263,6 +263,37 @@
         );
     }
 
+    /// Surmount / grok-oss fork: L2 finish must surface to L1. A silent
+    /// `subagent-completed-*` wake is not a no-op that looks like a hang.
+    #[test]
+    fn silent_subagent_completed_wake_surfaces_turn_completed() {
+        let mut app = make_app_with_agent("sess-wake");
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+
+        let affected = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "subagent-completed-sa-l2", None),
+            &mut app,
+        );
+        assert!(
+            affected,
+            "subagent-completed wake must redraw so L1 sees the finish"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.session.state.is_idle(),
+            "a wake turn is never adopted"
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before + 1,
+            "silent subagent-completed wake must surface a TurnCompleted marker"
+        );
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCompleted { .. })
+        ));
+    }
+
     #[test]
     fn chatty_wake_turn_completed_pushes_one_marker() {
         use crate::app::agent_view::test_fixtures::count_turn_markers;

@@ -91,4 +91,25 @@ mod tests {
             "grok-oss --minimal --resume 01"
         );
     }
+
+    /// Operator report 2026-09-01: quit / rebuild handoff taught `grok --resume`.
+    /// Pasteable resume is always this product CLI, including when argv0 is `grok`.
+    #[test]
+    fn resume_session_command_never_teaches_bare_grok_resume() {
+        let id = "01a027e0-20ad-7a62-ab05-5d65b99e34b1";
+        let full = resume_session_command(id, false);
+        let minimal = resume_session_command(id, true);
+        assert_eq!(full, format!("grok-oss --resume {id}"));
+        assert_eq!(minimal, format!("grok-oss --minimal --resume {id}"));
+        for out in [&full, &minimal] {
+            assert!(
+                !out.contains("grok --resume"),
+                "must not tell operators to run upstream grok --resume: {out}"
+            );
+            assert!(
+                out.starts_with("grok-oss "),
+                "resume paste must start with grok-oss, got {out}"
+            );
+        }
+    }
 }

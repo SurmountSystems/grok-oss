@@ -674,21 +674,27 @@ impl Theme {
 /// non-truecolor terminals `accent_user` may be `Color::Indexed` or a
 /// named ANSI variant. OSC 12 accepts an RGB triple regardless of the
 /// terminal's normal SGR color depth, so we resolve every variant back
-/// to RGB via [`crate::render::color::resolve_to_rgb`]. Reset (when
-/// `NO_COLOR` is set) yields `None` — we skip emission entirely so the
-/// terminal keeps its profile-defined cursor color.
+/// to RGB via [`osc12_rgb_for_accent`]. Named ANSI green is upgraded to
+/// DOGE `#00FF00` first so the hardware cursor is not xterm `#00cd00`.
+/// Reset (when `NO_COLOR` is set) yields `None` — we skip emission
+/// entirely so the terminal keeps its profile-defined cursor color.
 ///
 /// Escape sequence: `\x1b]12;rgb:RR/GG/BB\x07`.
 pub fn apply_cursor_color() {
     use std::io::Write;
     let theme = Theme::current();
-    let Some((r, g, b)) = crate::render::color::resolve_to_rgb(theme.accent_user) else {
+    let Some((r, g, b)) = osc12_rgb_for_accent(theme.accent_user) else {
         return;
     };
     xai_grok_shared::stderr::with_locked_stderr(|stderr| {
         let _ = write!(stderr, "\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x07");
         let _ = stderr.flush();
     });
+}
+
+/// RGB triple written by [`apply_cursor_color`], or `None` for `Reset`.
+pub fn osc12_rgb_for_accent(accent_user: ratatui::style::Color) -> Option<(u8, u8, u8)> {
+    crate::render::color::resolve_to_rgb(doge::as_doge_human_green(accent_user))
 }
 
 /// Reset the terminal cursor color to the terminal's default via OSC 112.
@@ -1181,6 +1187,24 @@ mod tests {
     #[test]
     fn auto_does_not_require_truecolor() {
         assert!(!ThemeKind::Auto.requires_truecolor());
+    }
+
+    #[test]
+    fn osc12_named_ansi_green_is_doge_rgb_0_255_0() {
+        use ratatui::style::Color;
+        assert_eq!(osc12_rgb_for_accent(Color::Green), Some((0, 255, 0)));
+        assert_eq!(osc12_rgb_for_accent(Color::LightGreen), Some((0, 255, 0)));
+        assert_eq!(
+            osc12_rgb_for_accent(Color::Rgb(0, 255, 0)),
+            Some((0, 255, 0))
+        );
+        assert_eq!(osc12_rgb_for_accent(Color::Reset), None);
+        // Named ANSI Green must not keep xterm normal green (0, 128, 0).
+        assert_ne!(
+            crate::render::color::resolve_to_rgb(Color::Green),
+            Some((0, 255, 0)),
+            "precondition: resolve_to_rgb(Color::Green) is not spec green"
+        );
     }
 
     #[test]

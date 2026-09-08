@@ -1240,14 +1240,7 @@ impl AgentView {
                     }
                 }
                 TaskEntryId::Agent(sid) => {
-                    if let Some(child_sid) = self
-                        .subagent_sessions
-                        .iter()
-                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                        .map(|(k, _)| k.clone())
-                        && self.subagent_views.contains_key(&child_sid)
-                    {
-                        self.open_subagent_fullscreen(child_sid);
+                    if self.open_listed_subagent(&sid) {
                         return Some(InputOutcome::Changed);
                     }
                 }
@@ -1418,11 +1411,11 @@ mod tests {
         let ids = agent.queue.entry_ids();
         let outcome = click_send_now(&mut agent, ids[1]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::Interject { text, images }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the send-now");
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert_eq!(agent.shared_queue.len(), 1);
@@ -1439,10 +1432,10 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(!agent.queue.overlay.visible);
@@ -1474,10 +1467,10 @@ mod tests {
         agent.prompt.set_text("local one EDITED");
         let outcome = click_send_now(&mut agent, ids[0]);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert_eq!(text, "local one")
             }
-            other => panic!("expected SendPromptNow action, got {other:?}"),
+            other => panic!("expected Interject action, got {other:?}"),
         }
         assert!(agent.session.pending_prompts.is_empty());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));

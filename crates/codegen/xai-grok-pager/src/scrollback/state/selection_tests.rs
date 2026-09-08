@@ -870,8 +870,8 @@ fn thinking_fold_label_expands_when_any_thinking_is_collapsed_or_truncated() {
     let mut state = ScrollbackState::new();
     assert_eq!(
         state.thinking_fold_label(),
-        "collapse thinking",
-        "no thinking blocks: next Ctrl+T/hyphen would collapse (none)"
+        "expand thinking",
+        "no thinking blocks and always-expand off: next Ctrl+T expands so the next thought starts open"
     );
     let collapsed = push_thought(&mut state, "hidden thought");
     assert_eq!(state.thinking_fold_label(), "expand thinking");

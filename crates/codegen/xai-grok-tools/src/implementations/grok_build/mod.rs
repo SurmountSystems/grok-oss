@@ -25,6 +25,7 @@ pub mod list_dir;
 pub mod lsp;
 pub mod monitor;
 pub mod plan_validate;
+pub mod pull_remote_tree;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
@@ -63,6 +64,9 @@ pub use monitor::tool::MonitorTool;
 pub use plan_validate::{
     PLAN_VALIDATE_TOOL_NAME, PlanValidateInput, PlanValidateOutput, PlanValidateTool,
 };
+pub use pull_remote_tree::{
+    PULL_REMOTE_TREE_TOOL_NAME, PullRemoteTreeInput, PullRemoteTreeOutput, PullRemoteTreeTool,
+};
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
@@ -83,3 +87,9 @@ pub use video_gen::{
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};
+
+/// Register grok-build tools that this module adds beyond the historical
+/// [`crate::registry::types::ToolRegistryBuilder::new`] list.
+pub fn register_all(builder: &mut crate::registry::types::ToolRegistryBuilder) {
+    builder.register::<PullRemoteTreeTool>();
+}

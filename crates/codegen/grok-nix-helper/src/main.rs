@@ -18,6 +18,8 @@ mod git_cmd;
 mod hermetic_path;
 mod import_upstream;
 mod join_main;
+mod print_rsync_pull;
+mod print_submodule_adds;
 mod put_history;
 mod recon_status;
 mod remote_named_cargo;
@@ -27,6 +29,8 @@ mod sync_upstream;
 
 #[cfg(test)]
 mod justfile_contracts;
+#[cfg(test)]
+mod nixos_workers;
 
 use std::env;
 use std::ffi::OsString;
@@ -55,11 +59,14 @@ Usage:
   grok-nix-helper sync-upstream
   grok-nix-helper extract-debug-sidecar <binary>
   grok-nix-helper generate-announcements [--crate-dir PATH] [--dest PATH]
+  grok-nix-helper print-submodule-adds [--parent PATH]
+  grok-nix-helper print-rsync-pull --from HOST:SRC --to DEST
 
 retry classifies quality miss vs SSH miss vs flake 502 and execs argv.
 GROK_NIX_FORCE_REMOTE=1 appends --option max-jobs 0, --cores 64,
 --store ssh-ng, --eval-store auto. Banner redacts --store as <builder>.
-Recon helpers prepare git state. Humans sign: git commit -S.
+print-submodule-adds and print-rsync-pull print argv only; they do not
+run git or rsync. Recon helpers prepare git state. Humans sign: git commit -S.
 "
 }
 
@@ -153,6 +160,14 @@ fn main() -> ExitCode {
             args.remove(0);
             generate_announcements::run(&to_strings(&args))
         }
+        "print-submodule-adds" => {
+            args.remove(0);
+            print_submodule_adds::run(&to_strings(&args))
+        }
+        "print-rsync-pull" => {
+            args.remove(0);
+            print_rsync_pull::run(&to_strings(&args))
+        }
         other => {
             let _ = writeln!(io::stderr(), "grok-nix-helper: unknown subcommand {other}");
             usage();
@@ -177,7 +192,27 @@ mod tests {
         assert!(text.contains("put-history-on-xai"));
         assert!(text.contains("import-upstream-export"));
         assert!(text.contains("join-main-into-onto"));
+        assert!(text.contains("print-submodule-adds"));
+        assert!(text.contains("print-rsync-pull"));
         assert!(!text.contains(".sh"));
         assert!(!text.contains("scripts/"));
+    }
+
+    #[test]
+    fn helper_subcommand_names_never_contain_commit() {
+        for line in usage_text().lines() {
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix("grok-nix-helper ") else {
+                continue;
+            };
+            let sub = rest.split_whitespace().next().unwrap_or("");
+            if sub.starts_with('-') {
+                continue;
+            }
+            assert!(
+                !sub.contains("commit"),
+                "subcommand name must not contain commit: {sub}"
+            );
+        }
     }
 }

@@ -6,8 +6,8 @@ use super::setters::{
     set_auto_compact_threshold_tokens_inner, set_auto_dark_theme_inner, set_auto_light_theme_inner,
     set_auto_run_implement_inner, set_auto_update_inner, set_bubble_copy_buttons_inner,
     set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
-    set_compact_mode_inner, set_confirm_before_rewind_inner, set_contextual_hint_inner,
-    set_default_model_inner, set_default_reasoning_effort_inner,
+    set_compact_mode_inner, set_composer_multiline_inner, set_confirm_before_rewind_inner,
+    set_contextual_hint_inner, set_default_model_inner, set_default_reasoning_effort_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_economic_mode_inner, set_features_session_recap_inner, set_fork_secondary_model_inner,
     set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
@@ -868,6 +868,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
             Some(Action::SetAlwaysExpandThinking(*b))
         }
         ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
+        ("composer_multiline", SettingValue::Bool(b)) => Some(Action::SetComposerMultiline(*b)),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
         ("ulid_session_ids", SettingValue::Bool(b)) => Some(Action::SetUlidSessionIds(*b)),
         ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
@@ -1294,6 +1295,7 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             set_always_expand_thinking_inner(app, *b)
         }
         ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
+        ("composer_multiline", SettingValue::Bool(b)) => set_composer_multiline_inner(app, *b),
         ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
         ("ulid_session_ids", SettingValue::Bool(b)) => set_ulid_session_ids_inner(app, *b),
         ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),

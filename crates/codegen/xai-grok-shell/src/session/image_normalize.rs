@@ -507,6 +507,40 @@ fn compute_normalized_blocking(
 fn fail(index: usize, error: String) -> Outcome {
     Outcome::Failed { index, error }
 }
+
+/// Describe accepts jpeg and png only. GIF/WebP (and other decodeable
+/// formats) are re-encoded to PNG before the vision call.
+pub(crate) fn reencode_for_describe(bytes: &[u8], mime: &str) -> Result<(Vec<u8>, String), String> {
+    let mime_l = mime.to_ascii_lowercase();
+    let guessed = image::guess_format(bytes).ok();
+    let already_jpeg_or_png = matches!(
+        guessed,
+        Some(image::ImageFormat::Jpeg | image::ImageFormat::Png)
+    ) || (guessed.is_none()
+        && matches!(mime_l.as_str(), "image/jpeg" | "image/jpg" | "image/png"));
+    if already_jpeg_or_png
+        && !matches!(
+            guessed,
+            Some(image::ImageFormat::Gif | image::ImageFormat::WebP)
+        )
+    {
+        let out_mime = if mime_l.contains("jpeg")
+            || mime_l.contains("jpg")
+            || matches!(guessed, Some(image::ImageFormat::Jpeg))
+        {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        return Ok((bytes.to_vec(), out_mime.to_owned()));
+    }
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| format!("describe re-encode decode failed: {e}"))?;
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(|e| format!("describe re-encode png failed: {e}"))?;
+    Ok((buf, "image/png".to_owned()))
+}
 #[cfg(test)]
 #[path = "image_normalize_tests.rs"]
 mod tests;

@@ -61,9 +61,10 @@ const AUTO_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const AUTO_UPDATE_FLUSH_GRACE: Duration = crate::agent::activity::SESSION_FLUSH_GRACE;
 /// Consecutive busy deferrals after which an installed update proceeds
 /// anyway (with the graceful flush). Bounds how long a permanently-"busy"
-/// signal — an orphaned parked interaction, a wedged turn — can pin the
-/// leader to an old binary: ~24h at the default 1h check interval. Mirrors
-/// the bounded-grace semantics of the `RelaunchForUpdate` drain.
+/// signal (an orphaned parked interaction, a wedged turn) can pin the
+/// leader to an old binary: ~24h at the default 1h check interval. This is
+/// the periodic auto-update checker, not `/rebuild` `RelaunchForUpdate`
+/// (that drain stays up until nested ids and the parent turn are idle).
 const MAX_AUTO_UPDATE_BUSY_DEFERRALS: u32 = 24;
 /// Bounded wait for the leader flock when it is held but no socket is bound yet
 /// (a spawner mid-handoff, an old-flow client holding the flock across its ~10s

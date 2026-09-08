@@ -499,6 +499,7 @@ impl SessionActor {
             items.push(ConversationItem::user(
                 "Now write the memory summary as described in the system prompt.",
             ));
+            let _ = xai_chat_state::repair_conversation_images_for_api(&mut items);
 
             let model = match self.memory.flush_config.flush_model.clone() {
                 Some(m) => m,

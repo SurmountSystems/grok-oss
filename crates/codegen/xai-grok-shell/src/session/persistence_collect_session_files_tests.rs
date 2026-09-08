@@ -78,6 +78,29 @@ fn empty_directory_returns_empty() {
 }
 
 #[test]
+fn skips_prompt_wal_jsonl_because_it_is_not_conversation() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("chat_history.jsonl"), b"user line\n").unwrap();
+    fs::write(
+        dir.path().join("prompt_wal.jsonl"),
+        b"{\"kind\":\"send\"}\n",
+    )
+    .unwrap();
+
+    let mut files = Vec::new();
+    collect_session_files_recursive(dir.path(), dir.path(), &mut files);
+
+    assert!(
+        files.iter().any(|f| f.name == "chat_history.jsonl"),
+        "conversation transcript must still copy"
+    );
+    assert!(
+        files.iter().all(|f| f.name != "prompt_wal.jsonl"),
+        "prompt_wal.jsonl must stay session-local and must not count as conversation, got {files:?}"
+    );
+}
+
+#[test]
 fn skips_empty_subdirectories() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join("empty_subdir")).unwrap();

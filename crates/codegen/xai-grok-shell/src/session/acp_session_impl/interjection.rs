@@ -88,6 +88,7 @@ impl SessionActor {
             // Send-now semantics (see doc): a later real send-now must not
             // leapfrog this fallback in `queue_input`'s FIFO scan.
             send_now: front,
+            unstick_retry: false,
         };
         let mut state = self.state.lock().await;
         if front {
@@ -133,18 +134,26 @@ impl SessionActor {
         let images = self
             .normalize_images_with_notices(wrapped, images, is_cursor)
             .await;
-        if !is_cursor {
+        if nested_grok_oss_inlines_images(is_cursor, self.tool_context.subagent_depth) {
             return images;
         }
         if !images.is_empty() {
             match self.transcribe_user_images(wrapped.clone(), &images).await {
                 Ok(new_text) => *wrapped = new_text,
                 Err(e) => {
-                    tracing::warn!(?e, "interjection image processing failed; dropping images");
-                    wrapped.push_str(
-                        "\n\n[Note: the user attached image(s) to this message, but they could \
-                         not be processed in this session and were dropped.]",
-                    );
+                    if !is_cursor && self.tool_context.subagent_depth == 0 {
+                        tracing::error!(?e, "parent grok-oss interjection image describe failed");
+                        wrapped.push_str(&format!(
+                            "\n\n[Note: the user attached image(s) to this message, but image \
+                             transcription failed: {e}]"
+                        ));
+                    } else {
+                        tracing::warn!(?e, "interjection image processing failed; dropping images");
+                        wrapped.push_str(
+                            "\n\n[Note: the user attached image(s) to this message, but they could \
+                             not be processed in this session and were dropped.]",
+                        );
+                    }
                 }
             }
         }
@@ -319,8 +328,17 @@ impl SessionActor {
                 None => wrapped.clone(),
             };
             let mut item = ConversationItem::interjection(model_text);
-            for img in &images {
-                item.add_image(pick_user_image_url(img));
+            // Nested grok-oss may attach `file://` parts. Parent must not
+            // (`prepare_interjection_images` already returns empty there).
+            if nested_grok_oss_inlines_images(
+                self.is_cursor_harness(),
+                self.tool_context.subagent_depth,
+            ) {
+                let images_dir =
+                    xai_grok_shared::session::session_dir(&self.session_info).join("images");
+                for img in &images {
+                    item.add_image(conversation_image_handle(img, Some(&images_dir)));
+                }
             }
             self.inject_synthetic_user_message(&wrapped, item, false, &images)
                 .await;

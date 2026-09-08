@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use super::*;
@@ -54,6 +55,103 @@ async fn relaunch_drain_waits_for_agent_activity_and_flushes_sessions() {
         .await
         .expect("drain should cancel once the agent goes idle");
     actor.await.expect("session actor should get Shutdown");
+}
+
+/// Surmount / grok-oss fork; tests are contracts.
+/// Nested ids on this leader must still exist after `/rebuild` relaunch
+/// intent. A TUI disconnect leaves the leader up; this drain must too.
+/// Fails if nested ids die (cancel / AutoUpdate) while the gauge is live.
+/// After nested ids finish, the same drain may relaunch (not a `/rebuild`
+/// start gate).
+#[tokio::test]
+async fn relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect() {
+    let (shutdown_tx, shutdown_rx) = watch::channel(super::super::protocol::ShutdownReason::Manual);
+    let cancel = CancellationToken::new();
+    let agent_busy = Arc::new(AtomicBool::new(false));
+    let activity = AgentActivity::default();
+    activity.subagent_gauge().store(1, Ordering::Relaxed);
+
+    spawn_relaunch_drain_with_grace(
+        shutdown_tx,
+        cancel.clone(),
+        agent_busy,
+        activity.clone(),
+        Duration::from_millis(80),
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !cancel.is_cancelled(),
+        "must not exec-replace this leader while nested ids are still live"
+    );
+    assert_eq!(
+        *shutdown_rx.borrow(),
+        super::super::protocol::ShutdownReason::Manual,
+        "must stay up like a TUI disconnect; AutoUpdate would end nested ids"
+    );
+    assert_eq!(
+        activity.subagent_gauge().load(Ordering::Relaxed),
+        1,
+        "nested ids must still exist after rebuild/relaunch intent"
+    );
+
+    activity.subagent_gauge().store(0, Ordering::Relaxed);
+    tokio::time::timeout(Duration::from_secs(2), cancel.cancelled())
+        .await
+        .expect(
+            "once nested ids finish, the drain may relaunch; this is not a /rebuild start gate",
+        );
+    assert_eq!(
+        *shutdown_rx.borrow(),
+        super::super::protocol::ShutdownReason::AutoUpdate,
+        "idle nested gauge must allow AutoUpdate once the parent turn is idle"
+    );
+}
+
+/// Surmount / grok-oss fork; tests are contracts.
+/// Parent-turn busy must keep this leader process the same way a TUI
+/// disconnect does: no wall-clock AutoUpdate while
+/// [`AgentActivity::is_busy`] (or IPC `agent_busy`) for that parent turn.
+/// The former five-second kill is not this contract. Nested ids are not
+/// this test. Fails if relaunch happens while the parent turn is still busy.
+#[tokio::test]
+async fn relaunch_drain_keeps_parent_turn_until_idle_like_disconnect() {
+    let (shutdown_tx, shutdown_rx) = watch::channel(super::super::protocol::ShutdownReason::Manual);
+    let cancel = CancellationToken::new();
+    let agent_busy = Arc::new(AtomicBool::new(true));
+    let activity = AgentActivity::default();
+    let (_cmd_rx, prompt_id, _pending) = activity.register_for_test("s1");
+    *prompt_id.lock().unwrap() = Some("prompt-parent".to_string());
+
+    spawn_relaunch_drain_with_grace(
+        shutdown_tx,
+        cancel.clone(),
+        agent_busy.clone(),
+        activity,
+        Duration::from_millis(80),
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !cancel.is_cancelled(),
+        "must not exec-replace this leader while the parent turn is still busy"
+    );
+    assert_eq!(
+        *shutdown_rx.borrow(),
+        super::super::protocol::ShutdownReason::Manual,
+        "must stay up like a TUI disconnect; AutoUpdate while the parent turn is busy is the old five-second kill"
+    );
+
+    agent_busy.store(false, Ordering::Relaxed);
+    *prompt_id.lock().unwrap() = None;
+    tokio::time::timeout(Duration::from_secs(2), cancel.cancelled())
+        .await
+        .expect("once the parent turn is idle, the drain may relaunch");
+    assert_eq!(
+        *shutdown_rx.borrow(),
+        super::super::protocol::ShutdownReason::AutoUpdate,
+        "idle parent turn must allow AutoUpdate"
+    );
 }
 
 /// `ServerMessageRef::Acp` (the borrowed serialize-only mirror the client
@@ -798,6 +896,55 @@ fn rewrite_request_id_rewrites_requests() {
     assert_eq!(namespaced_id, "123|42");
     assert_eq!(json["id"], "123|42");
     assert_eq!(json["method"], "test");
+}
+
+#[test]
+fn session_prompt_is_unstick_retry_reads_params_meta() {
+    assert!(session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[],"_meta":{"unstickRetry":true}}}"#
+    )));
+    assert!(!session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#
+    )));
+    assert!(!session_prompt_is_unstick_retry(&pv(
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/cancel","params":{"sessionId":"s1","_meta":{"unstickRetry":true}}}"#
+    )));
+}
+
+#[test]
+fn take_in_flight_session_prompts_for_unstick_leaves_other_sessions() {
+    let mut in_flight = InFlightSessionPrompts::new();
+    in_flight.insert("1|2".into(), (ClientId(1), "sess-hung".into()));
+    in_flight.insert("1|9".into(), (ClientId(1), "sess-other".into()));
+    in_flight.insert("2|2".into(), (ClientId(2), "sess-hung".into()));
+    let taken =
+        take_in_flight_session_prompts_for_unstick(&mut in_flight, ClientId(1), "sess-hung");
+    assert_eq!(taken, vec!["1|2".to_string()]);
+    assert!(in_flight.contains_key("1|9"));
+    assert!(in_flight.contains_key("2|2"));
+    assert!(!in_flight.contains_key("1|2"));
+}
+
+#[test]
+fn response_is_orphaned_for_unstick_while_client_connected() {
+    let mut marked = HashSet::new();
+    marked.insert("7|2".to_string());
+    assert!(
+        response_is_orphaned(true, "7|2", &mut marked),
+        "/unstick must drop the hung session/prompt while the pager stays connected"
+    );
+    assert!(
+        marked.is_empty(),
+        "the hung namespaced id is consumed so a later retry response is not dropped"
+    );
+    assert!(
+        !response_is_orphaned(true, "7|3", &mut HashSet::new()),
+        "a live retry RPC on the same connected client must still be delivered"
+    );
+    assert!(
+        response_is_orphaned(false, "7|2", &mut HashSet::new()),
+        "a disconnected client still orphans via the missing-client path"
+    );
 }
 
 #[test]

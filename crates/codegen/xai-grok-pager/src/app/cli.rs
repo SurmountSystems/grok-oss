@@ -110,6 +110,13 @@ See ~/.grok/README.md for more information.
     Export(crate::export_cmd::ExportArgs),
     /// Export or upload session trace data
     Trace(crate::trace_cmd::TraceArgs),
+    /// Rebuild this checkout's grok-oss binary and relaunch live instances
+    Rebuild {
+        /// Source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
+        /// Default: current directory.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        source: Option<PathBuf>,
+    },
     /// Check for updates or install a specific version
     Update {
         /// Check for updates without installing.
@@ -1095,6 +1102,25 @@ mod tests {
         assert_eq!(plain.version_only_json(), Some(false));
         let json = PagerArgs::try_parse_from(["grok", "version", "--json"]).unwrap();
         assert_eq!(json.version_only_json(), Some(true));
+    }
+    #[test]
+    fn rebuild_subcommand_parses() {
+        let bare = PagerArgs::try_parse_from(["grok-oss", "rebuild"])
+            .expect("grok-oss rebuild must parse");
+        assert!(
+            matches!(bare.command, Some(Command::Rebuild { source: None })),
+            "bare rebuild must be Command::Rebuild with default source, got {:?}",
+            bare.command
+        );
+        let with_source =
+            PagerArgs::try_parse_from(["grok-oss", "rebuild", "--source", "/tmp/grok-oss-tree"])
+                .expect("grok-oss rebuild --source must parse");
+        match with_source.command {
+            Some(Command::Rebuild { source: Some(path) }) => {
+                assert_eq!(path, PathBuf::from("/tmp/grok-oss-tree"));
+            }
+            other => panic!("expected Rebuild with source, got {other:?}"),
+        }
     }
     #[test]
     fn update_semver_flag_is_not_version_only() {

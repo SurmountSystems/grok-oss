@@ -1280,6 +1280,29 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "composer_multiline",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Composer multiline",
+            description: "When off, the Human box stays single-line. Enter and Shift+Enter send \
+                          (or interject if a turn is running) and never insert a newline. Session \
+                          Multiline cannot turn newline-on-Enter back on. Default on.",
+            keywords: &[
+                "multiline",
+                "newline",
+                "composer",
+                "input",
+                "editor",
+                "enter",
+                "shift",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.composer_multiline_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned. Reads from `pager.current_model_name` (not
         // `cfg.models.default`) so the modal reflects `/model` switches.
         // Empty-string default = "no opinion" / use shell's resolution.
@@ -1461,8 +1484,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shell,
             label: "Always expand thinking",
-            description: "Keep thinking fully expanded (including nested overlays) and hide \
-                          the Ctrl+T hint. Off paints collapsed Thought-for headers only. \
+            description: "Keep thinking fully expanded (including nested overlays). Off paints \
+                          collapsed Thought-for headers only. Ctrl+T writes this same setting \
+                          so the next thought and the next session match the last toggle. \
                           Distinct from showing thinking blocks at all.",
             keywords: &[
                 "thinking",

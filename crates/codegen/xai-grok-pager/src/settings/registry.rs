@@ -738,6 +738,9 @@ pub fn current_value_for(
         "hide_header" => Some(SettingValue::Bool(
             crate::appearance::cache::load_hide_header(),
         )),
+        "composer_multiline" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_composer_multiline(),
+        )),
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
         )),
@@ -1318,6 +1321,14 @@ mod tests {
                         *default, ui.hide_header,
                         "hide_header default drifts from UiConfig::default()"
                     );
+                }
+                ("composer_multiline", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.composer_multiline_enabled(),
+                        "composer_multiline default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "composer_multiline must default ON");
                 }
                 ("scrub_ascii_punct", SettingKind::Bool { default }) => {
                     assert_eq!(

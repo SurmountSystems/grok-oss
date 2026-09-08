@@ -92,6 +92,7 @@ obfstr = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 tokio-retry = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5", "v7"] }
+ulid = { workspace = true }
 xai-acp-lib = { workspace = true }
 axum = { workspace = true, features = ["ws", "multipart"] }
 backon = { workspace = true }

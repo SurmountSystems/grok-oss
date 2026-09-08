@@ -149,7 +149,11 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             }),
             safety_identifier: None,
             service_tier: None,
-            store: None,
+            store: if request_contains_images(req) {
+                Some(false)
+            } else {
+                None
+            },
             stream: None,
             stream_options: None,
             temperature: req.temperature,
@@ -291,6 +295,20 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
     }
 }
 
+fn request_contains_images(req: &ConversationRequest) -> bool {
+    req.items.iter().any(|item| match item {
+        ConversationItem::User(u) => u
+            .content
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. })),
+        ConversationItem::ToolResult(t) => t
+            .images
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. })),
+        _ => false,
+    })
+}
+
 fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputContent {
     if parts.len() == 1
         && let ContentPart::Text { text } = &parts[0]
@@ -307,7 +325,7 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
             ContentPart::Image { url } => rs::InputContent::InputImage(rs::InputImageContent {
                 image_url: Some(url.as_ref().to_owned()),
                 file_id: None,
-                detail: rs::ImageDetail::default(),
+                detail: rs::ImageDetail::High,
             }),
         })
         .collect();

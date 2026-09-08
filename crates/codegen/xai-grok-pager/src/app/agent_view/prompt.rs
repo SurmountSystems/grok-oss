@@ -529,7 +529,11 @@ impl AgentView {
         //    This must come BEFORE the action registry lookup so that
         //    Shift+Enter triggers send instead of inserting a newline.
         //    Apple Terminal: bare Enter may actually be Cmd/Opt+Enter.
-        if self.multiline_mode && crate::input::is_mod_enter(key) {
+        //    `[ui] composer_multiline = false`: Shift+Enter also sends
+        //    (never a second line).
+        if crate::input::is_mod_enter(key)
+            && (self.multiline_mode || !crate::appearance::cache::load_composer_multiline())
+        {
             if let Some(text) = self.prompt.try_send() {
                 let action = self.prompt_input_mode.send_action(text);
                 self.prompt_input_mode = PromptInputMode::Normal;
@@ -550,6 +554,7 @@ impl AgentView {
                     if key.code == KeyCode::Enter
                         && self.prompt_input_mode != PromptInputMode::Bash
                         && !slash_accepted_send
+                        && crate::appearance::cache::load_composer_multiline()
                         && crate::input::is_apple_terminal_newline_modifier_held()
                     {
                         self.prompt.textarea.insert_str("\n");
@@ -565,6 +570,7 @@ impl AgentView {
                     //    (send-now discoverability). Inserting a blank line on an
                     //    empty prompt is never useful here; same path as normal mode.
                     if self.multiline_mode
+                        && crate::appearance::cache::load_composer_multiline()
                         && self.prompt_input_mode != PromptInputMode::Bash
                         && !slash_accepted_send
                     {
@@ -622,9 +628,10 @@ impl AgentView {
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
                     }
-                    // Mid-turn send-now (cancel-and-send):
-                    // 1) Non-empty composer → cancel the running turn and send
-                    //    that text as the next prompt.
+                    // Mid-turn send-now is explicit `x.ai/interject` (never
+                    // cancel-and-send). Enter with text is the soft-interject
+                    // path in `dispatch_send_prompt`. This chord:
+                    // 1) Non-empty composer → `Action::Interject`.
                     // 2) Empty composer + a visible follow-up in the queue →
                     //    same as bare Enter: send the top row now.
                     // 3) Idle / nothing to send → no-op (not send-like-Enter).
@@ -644,7 +651,7 @@ impl AgentView {
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SendPromptNow { text, images });
+                        return InputOutcome::Action(Action::Interject { text, images });
                     }
                     if turn_running && let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -1146,6 +1153,46 @@ mod shift_tab_cycle_mode_tests {
                 "draft must not be consumed by Shift+Tab"
             );
         }
+    }
+
+    /// `[ui] composer_multiline = false`: Shift+Enter sends, never a second line.
+    #[test]
+    fn composer_multiline_off_shift_enter_sends_not_newline() {
+        crate::appearance::cache::set_composer_multiline(false);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = false;
+        agent.prompt.set_text("hello");
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "hello");
+            }
+            other => panic!("Shift+Enter with composer multiline off must send, got {other:?}"),
+        }
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Default: Shift+Enter inserts a newline when session Multiline is off.
+    #[test]
+    fn composer_multiline_on_shift_enter_inserts_newline() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = false;
+        agent.prompt.set_text("hello");
+        agent.prompt.set_cursor(5);
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Shift+Enter with composer multiline on must insert a newline, got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().contains('\n'),
+            "got {:?}",
+            agent.prompt.text()
+        );
+        crate::appearance::cache::set_composer_multiline(true);
     }
 
     #[test]

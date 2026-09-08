@@ -11,6 +11,11 @@ pub const ENV_DISPLAY_REFRESH_AUTO_CADENCE: &str = "GROK_DISPLAY_REFRESH_AUTO_CA
 /// Default motion paint cadence (~60 Hz) when env and auto-cadence do not apply.
 pub const DISPLAY_REFRESH_DEFAULT_CADENCE_MS: u64 = 16;
 
+/// SSH / remote TUI default when the display-refresh probe is skipped.
+/// 16ms full redraws saturate a high-latency SSH link. ~30Hz is still live
+/// chrome without flooding the wire. Env `GROK_MIN_DRAW_MS` still wins.
+pub const DISPLAY_REFRESH_SSH_CADENCE_MS: u64 = 33;
+
 /// Client defaults for [`DisplayRefreshPolicy`].
 /// Auto on + max_hz 240: `display_refresh_probe` telemetry showed ~0.4% error
 /// and common 120/144/165/180/240 Hz rates that clamp cleanly to 8–16 ms.
@@ -331,13 +336,25 @@ pub fn resolve_motion_cadence(
     min_draw_env: Option<u64>,
     scroll_env: Option<u64>,
 ) -> MotionCadence {
+    resolve_motion_cadence_for_session(policy, probe_hz, min_draw_env, scroll_env, false)
+}
+
+/// Same as [`resolve_motion_cadence`], with a slower default when this TUI is
+/// an SSH / remote session and the probe cannot supply Hz.
+pub fn resolve_motion_cadence_for_session(
+    policy: &DisplayRefreshPolicy,
+    probe_hz: Option<u32>,
+    min_draw_env: Option<u64>,
+    scroll_env: Option<u64>,
+    remote_session: bool,
+) -> MotionCadence {
+    let default_ms = if remote_session {
+        DISPLAY_REFRESH_SSH_CADENCE_MS
+    } else {
+        DISPLAY_REFRESH_DEFAULT_CADENCE_MS
+    };
     let auto = decide_auto_cadence(policy, probe_hz);
-    merge_motion_cadence(
-        auto,
-        min_draw_env,
-        scroll_env,
-        DISPLAY_REFRESH_DEFAULT_CADENCE_MS,
-    )
+    merge_motion_cadence(auto, min_draw_env, scroll_env, default_ms)
 }
 
 #[cfg(test)]
@@ -659,6 +676,29 @@ mod tests {
         assert_eq!((c.min_draw_ms, c.scroll_ms), (10, 12));
         assert!(!c.auto_applied);
         assert_eq!(c.reason, "env_override");
+    }
+
+    /// Named contract: SSH / remote TUI must not default to 16ms redraws when
+    /// the display-refresh probe is skipped. Env knobs still win.
+    #[test]
+    fn ssh_probe_skip_uses_slower_default_cadence() {
+        let p = DisplayRefreshPolicy::default();
+        let local = resolve_motion_cadence_for_session(&p, None, None, None, false);
+        let ssh = resolve_motion_cadence_for_session(&p, None, None, None, true);
+        assert_eq!(local.min_draw_ms, DISPLAY_REFRESH_DEFAULT_CADENCE_MS);
+        assert_eq!(ssh.min_draw_ms, DISPLAY_REFRESH_SSH_CADENCE_MS);
+        assert!(
+            ssh.min_draw_ms > local.min_draw_ms,
+            "remote TUI default must be slower than local 16ms; ssh={} local={}",
+            ssh.min_draw_ms,
+            local.min_draw_ms
+        );
+        let env_wins = resolve_motion_cadence_for_session(&p, None, Some(10), Some(12), true);
+        assert_eq!(
+            (env_wins.min_draw_ms, env_wins.scroll_ms),
+            (10, 12),
+            "GROK_MIN_DRAW_MS / GROK_SCROLL_CADENCE_MS still win on SSH"
+        );
     }
 
     #[test]

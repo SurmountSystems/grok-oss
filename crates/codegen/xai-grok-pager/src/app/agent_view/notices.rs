@@ -149,7 +149,7 @@ impl AgentView {
             || self.privacy_banner.active
             // Subagent fullscreen takeover: draw early-returns into
             // draw_subagent_fullscreen and never paints the parent banner.
-            || self.active_subagent.is_some()
+            || self.visible_nested_overlay_sid().is_some()
             // Fullscreen viewers render after the banner paints: image/video/
             // block dim the whole region down to the shortcuts row (banner
             // included). line_viewer's overlay stops at turn_status.y when a

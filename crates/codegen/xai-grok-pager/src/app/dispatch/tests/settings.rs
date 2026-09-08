@@ -1582,6 +1582,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "multiline_mode" => {
             let _ = dispatch(Action::SetMultilineMode(true), app);
         }
+        "composer_multiline" => {
+            let _ = dispatch(Action::SetComposerMultiline(false), app);
+        }
         "render_mermaid" => {
             let _ = dispatch(
                 Action::SetRenderMermaid(crate::appearance::RenderMermaid::Off),
@@ -2663,6 +2666,70 @@ fn set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay
             .display_mode,
         DisplayMode::Collapsed,
         "Settings off must collapse nested overlay thinking immediately"
+    );
+    crate::appearance::cache::set_always_expand_thinking(false);
+}
+
+/// Ctrl+T persist is the same `[ui] always_expand_thinking` key Settings writes.
+#[test]
+fn ctrl_t_expand_persists_always_expand_thinking() {
+    use crate::scrollback::block::RenderBlock;
+    crate::appearance::cache::set_always_expand_thinking(false);
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let parent = app.agents.get_mut(&id).unwrap();
+        parent
+            .scrollback
+            .push_block(RenderBlock::thinking("collapsed thought"));
+    }
+    let effects = dispatch(Action::ExpandAllThinking, &mut app);
+    assert!(
+        crate::appearance::cache::load_always_expand_thinking(),
+        "Ctrl+T expand must set the always-expand cache so the next thought starts open"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "always_expand_thinking",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            }]
+        ),
+        "Ctrl+T expand must persist [ui] always_expand_thinking = true, got {effects:?}"
+    );
+    crate::appearance::cache::set_always_expand_thinking(false);
+}
+
+#[test]
+fn ctrl_t_collapse_persists_always_expand_thinking_off() {
+    use crate::scrollback::block::RenderBlock;
+    crate::appearance::cache::set_always_expand_thinking(true);
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let parent = app.agents.get_mut(&id).unwrap();
+        parent.scrollback.apply_always_expand_thinking_flip(true);
+        parent
+            .scrollback
+            .push_block(RenderBlock::thinking("open thought"));
+    }
+    let effects = dispatch(Action::ExpandAllThinking, &mut app);
+    assert!(
+        !crate::appearance::cache::load_always_expand_thinking(),
+        "Ctrl+T collapse must clear the always-expand cache so the next thought starts collapsed"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "always_expand_thinking",
+                value: crate::settings::SettingValue::Bool(false),
+                rollback_value: crate::settings::SettingValue::Bool(true),
+            }]
+        ),
+        "Ctrl+T collapse must persist [ui] always_expand_thinking = false, got {effects:?}"
     );
     crate::appearance::cache::set_always_expand_thinking(false);
 }

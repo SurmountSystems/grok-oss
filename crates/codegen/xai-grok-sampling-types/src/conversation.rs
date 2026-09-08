@@ -122,6 +122,132 @@ pub fn fold_spawn_prompts_in_conversation(items: &mut [ConversationItem]) -> u64
         .sum()
 }
 
+/// Parent-ingest cap for ToolResult bodies and auto-wake task-completion
+/// user text. Same 40k policy as spawn prompts and bash completed-poll
+/// ToolResults. A 2MB nix/ANSI dump is ~500k estimated tokens if stored
+/// verbatim; nested sampling is 200k.
+pub const TOOL_RESULT_PARENT_INGEST_BYTES: usize = 40_000;
+
+/// Replace a huge ToolResult body with a head/tail pointer.
+///
+/// Returns `Some` rewritten text when `content` exceeded
+/// [`TOOL_RESULT_PARENT_INGEST_BYTES`].
+pub fn fold_tool_result_text(content: &str) -> Option<String> {
+    if content.len() <= TOOL_RESULT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    Some(tool_result_ingest_pointer(content))
+}
+
+/// Fold a ToolResult item in place. Returns omitted token estimate (bytes/4).
+pub fn fold_tool_result_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::ToolResult(tr) = item else {
+        return 0;
+    };
+    let Some(folded) = fold_tool_result_text(tr.content.as_ref()) else {
+        return 0;
+    };
+    let omitted = (tr.content.len().saturating_sub(folded.len()) as u64) / 4;
+    tr.content = Arc::<str>::from(folded);
+    omitted
+}
+
+/// Fold auto-wake TaskCompleted / SubagentCompleted user text in place.
+pub fn fold_task_completion_user_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::User(user) = item else {
+        return 0;
+    };
+    if !matches!(
+        user.synthetic_reason,
+        Some(SyntheticReason::TaskCompleted | SyntheticReason::SubagentCompleted)
+    ) {
+        return 0;
+    }
+    let mut omitted = 0_u64;
+    for part in &mut user.content {
+        let ContentPart::Text { text } = part else {
+            continue;
+        };
+        let Some(folded) = fold_tool_result_text(text.as_ref()) else {
+            continue;
+        };
+        omitted += (text.len().saturating_sub(folded.len()) as u64) / 4;
+        *text = Arc::<str>::from(folded);
+    }
+    omitted
+}
+
+/// Fold ToolResult bodies and auto-wake task-completion user text.
+/// Returns omitted token estimate (bytes/4).
+pub fn fold_tool_results_in_conversation(items: &mut [ConversationItem]) -> u64 {
+    items
+        .iter_mut()
+        .map(|item| {
+            fold_tool_result_on_conversation_item(item)
+                + fold_task_completion_user_on_conversation_item(item)
+        })
+        .sum()
+}
+
+fn tool_result_ingest_pointer(content: &str) -> String {
+    const HEAD: usize = 8_000;
+    const TAIL: usize = 8_000;
+    let head = utf8_prefix(content, HEAD);
+    let tail = utf8_suffix(content, TAIL);
+    let mut out = String::with_capacity(head.len() + tail.len() + 320);
+    out.push_str(head);
+    out.push_str("\n\n[truncated: ");
+    out.push_str(&content.len().to_string());
+    out.push_str(" bytes of shell/nix tool output were not ingested into sampling. ");
+    if let Some(path) = tool_result_log_path(content) {
+        out.push_str("Full log path: ");
+        out.push_str(path);
+        out.push_str(". ");
+    }
+    out.push_str("Use read_file on the log path if you need more.]\n\n");
+    out.push_str(tail);
+    out
+}
+
+fn utf8_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn utf8_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+fn tool_result_log_path(content: &str) -> Option<&str> {
+    for needle in ["full output at: ", "Full log path: ", "output_file: "] {
+        let Some(idx) = content.find(needle) else {
+            continue;
+        };
+        let rest = content[idx + needle.len()..].trim_start();
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, ']' | ')' | '"' | '\''))
+            .unwrap_or(rest.len());
+        let path = rest[..end].trim_end_matches(['.', ',', ';']);
+        if path.starts_with('/') || path.contains(".log") {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn spawn_prompt_parent_pointer(
     prompt_chars: usize,
     description: &str,
@@ -741,10 +867,85 @@ pub struct ConversationRequest {
     pub estimated_input_tokens: Option<u64>,
 }
 
+/// True when `url` is an `http(s)` URL or a nonempty `data:` base64 image
+/// the inference API accepts as `image_url`. Local paths, `file://`,
+/// `[Image #N]` tokens, and empty values are not accepted.
+pub fn image_url_is_api_accepted(url: &str) -> bool {
+    let url = url.trim();
+    if url.starts_with("https://") {
+        return url.len() > "https://".len();
+    }
+    if url.starts_with("http://") {
+        return url.len() > "http://".len();
+    }
+    let Some((header, payload)) = url.split_once(',') else {
+        return false;
+    };
+    if payload.is_empty() {
+        return false;
+    }
+    header.starts_with("data:") && header.ends_with(";base64")
+}
+
 impl ConversationRequest {
     /// Strip every image; returns the stripped URLs.
     pub fn strip_images(&mut self) -> Vec<Arc<str>> {
         strip_images_where(&mut self.items, |_| true)
+    }
+
+    /// Strip images whose `image_url` is not a data URL or `http(s)` URL.
+    ///
+    /// Path-shaped session assets, `[Image #N]` tokens, and empty values
+    /// 400 the API (`invalid_image`). Valid data/`http(s)` siblings stay so
+    /// a retry does not drop screenshots the API could have accepted.
+    pub fn strip_images_not_api_urls(&mut self) -> Vec<Arc<str>> {
+        strip_images_where(&mut self.items, |url| !image_url_is_api_accepted(url))
+    }
+}
+
+#[cfg(test)]
+mod image_url_is_api_accepted_tests {
+    use super::*;
+
+    /// Operator contract: compact and retry must not send a local session
+    /// asset path, an `[Image #N]` token, or an empty value as `image_url`.
+    #[test]
+    fn path_image_token_and_empty_are_not_api_image_urls() {
+        assert!(!image_url_is_api_accepted("[Image #1]"));
+        assert!(!image_url_is_api_accepted(
+            "/home/hunter/.grok/sessions/x/assets/image-1.jpg"
+        ));
+        assert!(!image_url_is_api_accepted("file:///tmp/x.jpg"));
+        assert!(!image_url_is_api_accepted(""));
+        assert!(!image_url_is_api_accepted("data:image/png;base64,"));
+        assert!(image_url_is_api_accepted("https://example.com/x.png"));
+        assert!(image_url_is_api_accepted("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn strip_images_not_api_urls_keeps_valid_data_url_siblings() {
+        let mut user = ConversationItem::user("see");
+        user.add_image("file:///tmp/session-asset.jpg");
+        user.add_image("data:image/png;base64,AAAA");
+        let mut req = ConversationRequest {
+            items: vec![user],
+            ..Default::default()
+        };
+        let stripped = req.strip_images_not_api_urls();
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].as_ref(), "file:///tmp/session-asset.jpg");
+        let ConversationItem::User(u) = &req.items[0] else {
+            panic!("expected user");
+        };
+        let remaining: Vec<_> = u
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Image { url } => Some(url.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remaining, ["data:image/png;base64,AAAA"]);
     }
 }
 
@@ -2415,6 +2616,114 @@ mod fold_spawn_prompt_parent_ingest_tests {
         })
         .to_string();
         assert!(fold_spawn_prompt_arguments("read_file", &args).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fold_tool_result_parent_ingest_tests {
+    use super::*;
+
+    /// Operator contract A: a 2MB ANSI/nix-looking tool result must not add
+    /// ~200k tokens to the conversation estimate.
+    fn nix_ansi_dump(len: usize) -> String {
+        let chunk = "\u{1b}[31merror:\u{1b}[0m building '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-workspace-cargo-quality'\n";
+        let mut s = String::with_capacity(len + 64);
+        while s.len() < len {
+            s.push_str(chunk);
+        }
+        s.truncate(len);
+        let mid = s.len() / 2;
+        s.replace_range(mid..mid + 28, "UNIQUE_NIX_DUMP_MIDDLE_MARK");
+        s
+    }
+
+    #[test]
+    fn two_megabyte_nix_ansi_tool_result_does_not_add_200k_tokens() {
+        let dump = nix_ansi_dump(2_000_000);
+        assert!(
+            dump.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+            "test dump must contain the middle needle before fold"
+        );
+        let mut item = ConversationItem::tool_result("bash-check-remote", dump.clone());
+        let omitted = fold_tool_result_on_conversation_item(&mut item);
+        assert!(
+            omitted > 200_000,
+            "fold must omit the ~500k-token dump; omitted {omitted}"
+        );
+        let ConversationItem::ToolResult(tr) = &item else {
+            panic!("expected tool result");
+        };
+        let tokens = (tr.content.len() as u64) / 4;
+        assert!(
+            tokens < 20_000,
+            "owed: a 2MB ANSI/nix-looking tool result does not add ~200k tokens \
+             to the conversation estimate; got {tokens}"
+        );
+        let ConversationItem::ToolResult(tr) = &item else {
+            panic!("expected tool result");
+        };
+        assert!(
+            !tr.content.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+            "folded ingest must drop the middle of the nix dump"
+        );
+        assert!(
+            tr.content.contains(&dump.len().to_string()),
+            "pointer must name the omitted byte size ({}): {}",
+            dump.len(),
+            tr.content
+        );
+    }
+
+    #[test]
+    fn small_tool_result_stays() {
+        let mut item = ConversationItem::tool_result("bash-1", "ok");
+        assert_eq!(fold_tool_result_on_conversation_item(&mut item), 0);
+        let ConversationItem::ToolResult(tr) = &item else {
+            panic!("expected tool result");
+        };
+        assert_eq!(tr.content.as_ref(), "ok");
+    }
+
+    #[test]
+    fn tool_result_pointer_keeps_log_path() {
+        let dump = format!(
+            "head\n [truncated: showing first/last 20k of 2MB - full output at: /tmp/check-remote.log]\n{}",
+            "N".repeat(50_000)
+        );
+        let folded = fold_tool_result_text(&dump).expect("fold");
+        assert!(
+            folded.contains("/tmp/check-remote.log"),
+            "pointer must keep the log path: {folded}"
+        );
+    }
+
+    #[test]
+    fn two_megabyte_task_completed_user_is_folded() {
+        let dump = nix_ansi_dump(2_000_000);
+        let mut item = ConversationItem::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: dump.clone().into(),
+            }],
+            synthetic_reason: Some(SyntheticReason::TaskCompleted),
+            ..Default::default()
+        });
+        let omitted = fold_tool_results_in_conversation(std::slice::from_mut(&mut item));
+        assert!(
+            omitted > 200_000,
+            "fold must omit the ~500k-token task-completion dump; omitted {omitted}"
+        );
+        let ConversationItem::User(user) = &item else {
+            panic!("expected user");
+        };
+        let text = match &user.content[0] {
+            ContentPart::Text { text } => text.as_ref(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            !text.contains("UNIQUE_NIX_DUMP_MIDDLE_MARK"),
+            "folded task-completion ingest must drop the middle of the nix dump"
+        );
+        assert!((text.len() as u64) / 4 < 20_000);
     }
 }
 

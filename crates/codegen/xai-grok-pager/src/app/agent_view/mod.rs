@@ -163,6 +163,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
@@ -1187,6 +1188,17 @@ pub struct AgentView {
     /// rapid clicks so we don't spawn a redundant `session/info` request
     /// per double-click.
     pub last_context_click_at: Option<Instant>,
+    /// Last time the unsent composer draft was written. Keystroke persist
+    /// coalesces inside [`xai_grok_shell::session::unsent_prompt_draft::UNSENT_DRAFT_PERSIST_DEBOUNCE`].
+    pub(crate) last_unsent_draft_persist: Cell<Option<Instant>>,
+    /// Test counter: durable writes that actually ran (disk still skipped in tests).
+    pub(crate) unsent_draft_persist_flush_count: Cell<u32>,
+    /// Test counter: keystroke persists skipped by the debounce.
+    pub(crate) unsent_draft_persist_skip_count: Cell<u32>,
+    /// Test counter: WAL appends (send/interject/queue). Keystrokes must stay 0.
+    pub(crate) prompt_wal_append_count: Cell<u32>,
+    /// Test counter: `pending_prompts.json` snapshots. Keystrokes must stay 0.
+    pub(crate) pending_prompts_persist_count: Cell<u32>,
     /// Whether the mouse is hovering over the prompt widget.
     pub hovered_prompt: bool,
     pub hit_badge: HitArea,
@@ -1551,6 +1563,10 @@ pub struct AgentView {
     /// `SubagentSpawned` notifications, used for permission routing
     /// (which agent owns a session) and provenance display.
     pub subagent_sessions: HashMap<String, SubagentInfo>,
+    /// Nested ids that already got `SubagentFinished` (`child_session_id`
+    /// and `subagent_id`). Wait chrome must not treat a completed id as
+    /// still running if the row was dropped from [`Self::subagent_sessions`].
+    pub(crate) finished_nested_wait_ids: HashSet<String>,
     /// Child subagent views. Keyed by child_session_id.
     /// Created eagerly on SubagentSpawned so updates are tracked from the start.
     pub subagent_views: HashMap<String, Box<AgentView>>,
@@ -1564,6 +1580,11 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
+    /// Overlay title wait chrome that names a live L3. Click opens that
+    /// specialist session view. Empty when the overlay is not showing one.
+    pub hit_overlay_nested_status: HitArea,
+    /// Child session id the overlay nested-status hit opens.
+    pub overlay_nested_status_child_sid: Option<String>,
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
@@ -1688,8 +1709,9 @@ pub struct AgentView {
     /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
     pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
     /// Send-now cancel expectation: the client-minted id of an explicit
-    /// cancel-and-send this client dispatched into a running turn (send-now
-    /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
+    /// cancel-and-send this client dispatched into a running turn (parked
+    /// sendable-wait `SendPromptNow`, not the InterjectPrompt chord or queue
+    /// `[Send now]`, which are `x.ai/interject`). The running turn's
     /// imminent cancel is the silent half of cancel-and-send, so the turn-end
     /// rails suppress the "Turn cancelled by user …" marker.
     ///

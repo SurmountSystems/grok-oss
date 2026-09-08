@@ -508,27 +508,55 @@ impl ScrollbackState {
         }
     }
 
+    /// True when the next Ctrl+T should expand thinking (and persist
+    /// `[ui] always_expand_thinking = true`). False means collapse and persist
+    /// off.
+    ///
+    /// Aborted thoughts stay collapsed and do not steer the toggle. With no
+    /// live thinking rows, the cached setting is the default for the next
+    /// thought: off expands, on collapses.
+    pub fn next_thinking_should_expand(&self) -> bool {
+        let mut saw_foldable = false;
+        let mut any_not_expanded = false;
+        for entry in self.entries.values() {
+            if !matches!(entry.block, RenderBlock::Thinking(_)) || !entry.block.is_foldable() {
+                continue;
+            }
+            if matches!(&entry.block, RenderBlock::Thinking(t) if t.is_aborted()) {
+                continue;
+            }
+            saw_foldable = true;
+            if entry.display_mode != DisplayMode::Expanded {
+                any_not_expanded = true;
+                break;
+            }
+        }
+        if !saw_foldable {
+            !crate::appearance::cache::load_always_expand_thinking()
+        } else {
+            any_not_expanded
+        }
+    }
+
     /// Toggle expand/collapse for all thinking blocks only.
     ///
-    /// If ANY thinking block is not expanded (collapsed or truncated), expand
-    /// all thinking blocks. Otherwise collapse all thinking blocks.
+    /// If ANY non-aborted thinking block is not expanded (collapsed or
+    /// truncated), expand all thinking blocks. Otherwise collapse all.
+    /// Always-expand does not block collapse: Ctrl+T is how that preference
+    /// turns off. The chosen mode is written to the always-expand cache so
+    /// the next thinking block (and the next session, once dispatch persists)
+    /// starts the same way.
     ///
-    /// Also sets `thinking_display_mode` so that future thinking blocks
-    /// adopt the chosen mode when they finish running.
+    /// Also sets `thinking_display_mode` so later finishes follow Ctrl+T.
     pub fn expand_all_thinking(&mut self) {
-        let any_not_expanded = self.entries.values().any(|entry| {
-            matches!(entry.block, RenderBlock::Thinking(_))
-                && entry.block.is_foldable()
-                && entry.display_mode != DisplayMode::Expanded
-        });
+        let expand = self.next_thinking_should_expand();
+        let target_mode = if expand {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Collapsed
+        };
 
-        let target_mode =
-            if crate::appearance::cache::load_always_expand_thinking() || any_not_expanded {
-                DisplayMode::Expanded
-            } else {
-                DisplayMode::Collapsed
-            };
-
+        crate::appearance::cache::set_always_expand_thinking(expand);
         self.thinking_display_mode = target_mode;
 
         let mut changed_ids = Vec::new();
@@ -536,33 +564,52 @@ impl ScrollbackState {
             // Only expand/collapse thinking blocks — tool calls stay
             // collapsed as one-liners. Group truncation is handled
             // separately below (all hidden entries become visible).
-            if matches!(entry.block, RenderBlock::Thinking(_)) && entry.block.is_foldable() {
-                entry.display_mode = target_mode;
-                entry.display_mode_pinned = false;
-                entry.invalidate_cache();
-                changed_ids.push(*id);
+            if !matches!(entry.block, RenderBlock::Thinking(_)) || !entry.block.is_foldable() {
+                continue;
             }
+            if matches!(&entry.block, RenderBlock::Thinking(t) if t.is_aborted()) {
+                if entry.display_mode != DisplayMode::Collapsed {
+                    entry.display_mode = DisplayMode::Collapsed;
+                    entry.display_mode_pinned = false;
+                    entry.invalidate_cache();
+                    changed_ids.push(*id);
+                }
+                continue;
+            }
+            entry.display_mode = target_mode;
+            entry.display_mode_pinned = false;
+            entry.invalidate_cache();
+            changed_ids.push(*id);
         }
         for &id in &changed_ids {
             self.dirty_heights.insert(id);
         }
-        // When expanding: also expand all truncated groups so everything
-        // is visible. When collapsing: clear expansions so groups re-truncate.
-        if target_mode == DisplayMode::Expanded {
+        self.apply_thinking_ctrl_t_groups(expand);
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
+    /// After Ctrl+T rematerializes thoughts, expand or refold tool groups
+    /// on this scrollback. Settings rematerialize may have cleared groups.
+    pub(crate) fn apply_thinking_ctrl_t_groups(&mut self, expand: bool) {
+        if expand {
+            let thinking_ids: Vec<EntryId> = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| matches!(entry.block, RenderBlock::Thinking(_)))
+                .map(|(id, _)| *id)
+                .collect();
             // Opened thoughts go transparent, so a keyed thought-anchored
             // run re-anchors on its first tool; migrate the keys.
-            for id in &changed_ids {
+            for id in &thinking_ids {
                 if let Some(idx) = self.entries.get_index_of(id) {
                     self.rekey_verb_group_expansion(idx);
                 }
             }
-            // Mark all group-start entries as expanded so truncation is skipped.
             self.expand_all_groups();
         } else {
             self.expanded_groups.clear();
         }
-        self.gaps_may_be_dirty = true;
-        self.bump_generation();
     }
 
     /// Expand all truncated groups (add every group-start ID to
@@ -610,16 +657,12 @@ impl ScrollbackState {
 
     /// Returns "expand thinking" or "collapse thinking" based on current state.
     ///
-    /// Uses the same logic as `expand_all_thinking`: if ANY thinking block is
-    /// not expanded (collapsed or truncated) the next toggle will expand, so
-    /// the label is "expand thinking".
+    /// Uses the same logic as `expand_all_thinking`: if ANY non-aborted
+    /// thinking block is not expanded the next toggle will expand, so the
+    /// label is "expand thinking". With no thinking rows, the cached
+    /// `[ui] always_expand_thinking` value is the next-thought default.
     pub fn thinking_fold_label(&self) -> &'static str {
-        let any_not_expanded = self.entries.values().any(|entry| {
-            matches!(entry.block, RenderBlock::Thinking(_))
-                && entry.block.is_foldable()
-                && entry.display_mode != DisplayMode::Expanded
-        });
-        if any_not_expanded {
+        if self.next_thinking_should_expand() {
             "expand thinking"
         } else {
             "collapse thinking"

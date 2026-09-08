@@ -324,6 +324,8 @@ header = true               # Show "Thinking..." header
 header_bright = false       # Bright header style (vs dim/muted)
 ```
 
+Whether a new thought starts as a collapsed Thought-for header or as a full body is `[ui] always_expand_thinking` in `config.toml` (see [05-configuration](05-configuration.md)), not this theme table. Ctrl+T writes that same key.
+
 ### Block Styling: Tool Calls
 
 ```toml

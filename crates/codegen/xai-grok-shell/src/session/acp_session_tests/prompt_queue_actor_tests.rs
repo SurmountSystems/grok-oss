@@ -2661,6 +2661,7 @@ async fn promoter_clears_committed_flag_and_handle_prompt_sets_it() {
                         /* json_schema */ None,
                         Some(ack_tx),
                         /* parsed_prompt_tx */ None,
+                        /* unstick_retry */ false,
                     )
                     .await
             });

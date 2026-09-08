@@ -381,9 +381,11 @@ pub fn striped_accent_bar_frame(tick: u64, row: u16) -> &'static str {
 /// Composer caret: **solid** half of the classic full-cell block blink.
 ///
 /// Paired with [`cursor_box_hollow`] as one **box/block caret family**: solid
-/// filled cell ↔ true empty cell of the **same terminal-cell silhouette**
-/// (Alacritty-style block on/off). Outer height is the cell itself via the
-/// background plate on the solid half — not outline glyph metrics.
+/// filled cell ↔ visible off-half of the **same terminal-cell silhouette**.
+/// Outer height is the cell itself via the background plate on the solid
+/// half — not outline glyph metrics. Live blank-insertion paint keeps this
+/// glyph on the off-half (Human-green ink, canvas bg) so the caret does not
+/// vanish.
 ///
 /// Glyph (paint pairs with `fg = bg = accent` solid plate):
 /// - `█` U+2588 FULL BLOCK (classic solid block ink on the plate).
@@ -402,19 +404,16 @@ pub fn cursor_box_filled() -> &'static str {
     }
 }
 
-/// Composer caret: **empty** half of the classic full-cell block blink.
+/// Composer caret: **empty** half helper (plain space).
 ///
-/// Mate of [`cursor_box_filled`]: **true empty cell** — a single space with
-/// **no** accent plate (paint: `fg = bg = canvas`). Blink is solid plate
-/// on/off of the same cell rectangle, not a green frame with a dark hole
-/// and not a dimmed solid.
-///
-/// Glyph:
-/// - ` ` U+0020 SPACE (empty cell; silhouette is the terminal cell itself).
-/// - Legacy ConHost: same space (no ASCII stand-in hole).
+/// The blank-insertion **paint** path does not use this glyph for the live
+/// off-half: it keeps [`cursor_box_filled`] with Human-green ink on canvas
+/// so an empty Human box still shows a caret. This helper stays a space
+/// for phase tests and for `cursor_box_glyph`.
 ///
 /// Rejected empty shapes: `■` hole-punch on accent plate, dim `█`, skinny
-/// `▯`, medium `◻`/`◼`, tiny `□`, short APL quad `⎕`.
+/// `▯`, medium `◻`/`◼`, tiny `□`, short APL quad `⎕`, and a true empty
+/// cell (space + canvas plate) that vanished until the next key.
 pub fn cursor_box_hollow() -> &'static str {
     // Classic block empty half: plain space. Paint path must not put an
     // accent background plate behind this glyph.

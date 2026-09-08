@@ -1121,6 +1121,12 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("sendNow"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let unstick_retry = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("unstickRetry"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if let Some(ctx) = trace_context.clone() {
             let (tx, parsed_prompt_rx) = oneshot::channel::<ParsedPromptInfo>();
             parsed_prompt_tx = Some(tx);
@@ -1299,6 +1305,7 @@ impl acp::Agent for MvpAgent {
                 traceparent: xai_file_utils::trace_context::current_traceparent(),
                 json_schema,
                 send_now,
+                unstick_retry,
                 admission: None,
                 tool_overrides_update,
                 respond_to: tx,

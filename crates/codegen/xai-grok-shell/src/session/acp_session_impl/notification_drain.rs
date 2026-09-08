@@ -312,6 +312,7 @@ impl SessionActor {
             origin,
             running_display,
             tool_overrides_update,
+            unstick_retry,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
@@ -333,6 +334,7 @@ impl SessionActor {
                 front.origin.clone(),
                 running_display,
                 front.tool_overrides_update.take(),
+                front.unstick_retry,
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
@@ -411,6 +413,7 @@ impl SessionActor {
             completion_tx,
             persist_ack,
             parsed_prompt_tx,
+            unstick_retry,
         ));
     }
 
@@ -744,6 +747,7 @@ impl SessionActor {
             parsed_prompt_tx: None,
             queue_meta: None,
             send_now: false,
+            unstick_retry: false,
         });
 
         tracing::info!(

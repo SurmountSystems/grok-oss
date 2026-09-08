@@ -41,7 +41,7 @@ fn feedback_notice(app: &mut AppView, message: &str) {
 
 /// Why the bare `/feedback` pane refuses to open, if anything blocks it.
 fn feedback_pane_blocked(agent: &AgentView) -> Option<&'static str> {
-    if agent.active_subagent.is_some() {
+    if agent.visible_nested_overlay_sid().is_some() {
         // A fullscreen subagent view hides the prompt, so the pane would have nowhere to draw while still swallowing every key.
         Some("Close the subagent view before sending feedback")
     } else if agent.question_view.is_some() {

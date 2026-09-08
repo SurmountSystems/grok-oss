@@ -14,25 +14,84 @@ use super::*;
 pub(super) fn is_remote_image_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
-/// Pick the URL value sent to the upstream API for a user-attached image.
+/// Persist handle for a user-attached image in conversation items.
 ///
-/// The remote API accepts a base64 `data:` URL or an HTTP(S) URL only;
-/// `file://` and other local schemes return 400. Inline bytes win when
-/// present (the canonical payload); `uri` is forwarded directly only
-/// when it is a remote URL with no inline bytes available.
-///
-/// Extracted so production and the regression tests assert against the
-/// same selector — a future change to the production rule cannot drift
-/// past the tests.
+/// Prefer a session `file://` URI or a remote HTTP(S) URL. Do **not** copy
+/// the base64 crate into `chat_history.jsonl`. Inflate to a `data:` URL only
+/// when building the inference HTTP body (`inflate_conversation_images_for_inference`).
+/// The model still receives a content part, not `view_image`.
 pub(super) fn pick_user_image_url(image: &agent_client_protocol::ImageContent) -> String {
-    if let Some(uri) = image.uri.as_deref()
-        && image.data.is_empty()
-        && is_remote_image_url(uri)
-    {
-        uri.to_owned()
-    } else {
-        format!("data:{};base64,{}", image.mime_type, image.data)
+    if let Some(uri) = image.uri.as_deref() {
+        if uri.starts_with("file://") || is_remote_image_url(uri) {
+            return uri.to_owned();
+        }
     }
+    format!("data:{};base64,{}", image.mime_type, image.data)
+}
+
+/// If `url` is still an inline data URL, write bytes under session `images/`
+/// and return a `file://` handle. Missing dir or decode failure keeps the
+/// data URL (legacy / tests without a session).
+pub(super) fn persist_inline_data_url(
+    url: String,
+    session_images_dir: Option<&std::path::Path>,
+) -> String {
+    let Some(dir) = session_images_dir else {
+        return url;
+    };
+    let Some((header, b64)) = url.split_once(',') else {
+        return url;
+    };
+    if !header.starts_with("data:") || !header.ends_with(";base64") || b64.is_empty() {
+        return url;
+    }
+    let mime = header
+        .trim_start_matches("data:")
+        .trim_end_matches(";base64");
+    let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) else {
+        return url;
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!(error = %e, "failed to create session images dir");
+        return url;
+    }
+    let ext = match mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    };
+    let path = dir.join(format!("image-{}.{ext}", uuid::Uuid::new_v4()));
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    let write = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return url;
+    }
+    format!("file://{}", path.display())
+}
+
+/// Nested grok-oss may put image parts on the conversation item so the nested
+/// request can inflate `file://` to `input_image`. Parent grok-oss and Cursor
+/// transcribe instead and must not call `add_image`.
+pub(super) fn nested_grok_oss_inlines_images(is_cursor: bool, subagent_depth: u32) -> bool {
+    !is_cursor && subagent_depth > 0
+}
+
+/// Handle stored on the conversation item: file id, remote URL, or last-resort data URL.
+pub(super) fn conversation_image_handle(
+    image: &agent_client_protocol::ImageContent,
+    session_images_dir: Option<&std::path::Path>,
+) -> String {
+    persist_inline_data_url(pick_user_image_url(image), session_images_dir)
 }
 fn partition_rules_by_scope(
     files: Vec<xai_grok_agent::prompt::agents_md::AgentConfigFile>,
@@ -960,9 +1019,14 @@ impl SessionActor {
             &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let active_session_config = self.reconstruct_full_config().await;
-        let resolved_describe = self
-            .resolve_aux_sampler_config(&self.image_description_model)
-            .await;
+        // An empty slug is "use this session's sampler", not "look up '' in
+        // the catalog / XAI_API_KEY and hit production cli-chat-proxy".
+        let resolved_describe = if self.image_description_model.trim().is_empty() {
+            None
+        } else {
+            self.resolve_aux_sampler_config(&self.image_description_model)
+                .await
+        };
         let (describe_model, sampler_config) =
             crate::agent::config::finalize_image_describe_sampler_config(
                 resolved_describe,
