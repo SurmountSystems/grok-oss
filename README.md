@@ -148,7 +148,11 @@ cargo fmt --all               # rustfmt only; does not invoke rustc
 ## Contributing
 
 PRs against **this** repository are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).  
-Normal git flow: feature branch → PR → `main`.
+Git-flow-style feature branches (`feat/` / `fix/` / `docs/`) → signed commit
+on a TTY → PR → `main`. Plan Approve and bug reports file GitHub issues
+(screenshots on bugs). Agents never GPG-sign. After the operator pushes,
+the agent opens or updates the PR. Canonical:
+[`docs/github-tracking.md`](docs/github-tracking.md).
 
 ## License
 

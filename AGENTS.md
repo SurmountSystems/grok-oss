@@ -53,6 +53,19 @@ less than product code and tests. Do not invent long essays or git nags.
    the commit.” Leave the index alone; report paths and hand `git add …` if
    useful. Exception only when the operator clearly ordered staging (e.g. “stage
    these files,” “git add the fix”).
+1b. **GitHub tracking (pinned 2026-09-08).** Plan **Approve** → new GitHub
+   issue on this origin with the full `plan.md` body, same turn. Operator
+   **bug report** → new GitHub issue on the appropriate origin, with
+   screenshots. After the operator **signs** (`git commit -S`) **and
+   pushes**, open or update the GitHub PR that describes all the work.
+   Never GPG-sign. Never `git commit`. Canonical:
+   [`docs/github-tracking.md`](docs/github-tracking.md). Host dual-pin:
+   `~/.grok/AGENTS.md` § *GitHub tracking and git-flow*.
+1c. **Git-flow feature branches (pinned 2026-09-08).** Collaborative work
+   uses `feat/<slug>` / `fix/<slug>` / `docs/<slug>` from `main` so peers
+   can parallelize. Catch up published branches with merge, not rebase.
+   See [`docs/git-workflow.md`](docs/git-workflow.md) and
+   [`docs/github-tracking.md`](docs/github-tracking.md).
 2. **Never bypass GPG** (`commit.gpgsign=false`, `--no-gpg-sign`, fake
    `gpg.program`, hook disables, etc.).
 3. **Never bulk find-and-replace.** Bulk **find** (`rg`) is fine. Edits must
