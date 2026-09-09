@@ -121,14 +121,37 @@ pub fn run_cli(json: bool) -> Result<()> {
 ///
 /// Not `/dashboard` and not `/running`. Feeds `/running --json` into
 /// `surmount-coordinator-gui` and prints safe JSON (no prompt).
-pub fn run_gui_cli(host: Option<&str>) -> Result<()> {
-    let rows = list_running_sessions()?;
-    let json = format_json(&rows)?;
+pub fn run_gui_cli(host: Option<&str>, ssh: Option<&str>) -> Result<()> {
+    let json = if let Some(user_at_host) = ssh.map(str::trim).filter(|s| !s.is_empty()) {
+        let argv = surmount_coordinator_gui::fetch_remote_running_ssh_argv(user_at_host)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .map_err(|e| anyhow::anyhow!("could not ssh to {user_at_host}: {e}"))?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "ssh grok-oss running --json failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|e| anyhow::anyhow!("remote running json is not utf-8: {e}"))?
+    } else {
+        let rows = list_running_sessions()?;
+        format_json(&rows)?
+    };
     let default_host = match host.map(str::trim).filter(|h| !h.is_empty()) {
         Some(name) if !name.eq_ignore_ascii_case("local") => {
             surmount_coordinator_gui::SessionHost::Remote(name.to_string())
         }
-        _ => surmount_coordinator_gui::SessionHost::Local,
+        _ => {
+            if ssh.is_some() {
+                surmount_coordinator_gui::SessionHost::Remote("surmount-1".to_string())
+            } else {
+                surmount_coordinator_gui::SessionHost::Local
+            }
+        }
     };
     let rendered = surmount_coordinator_gui::safe_json_from_running(&json, default_host)
         .map_err(|e| anyhow::anyhow!("{e}"))?;

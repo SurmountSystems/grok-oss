@@ -81,6 +81,9 @@ pub enum Command {
         /// Tag rows as this remote host. Default is local.
         #[arg(long)]
         host: Option<String>,
+        /// Fetch `/running --json` from this SSH target (`grok@surmount-1`).
+        #[arg(long)]
+        ssh: Option<String>,
     },
     /// Fetch and install managed configuration
     Setup {
