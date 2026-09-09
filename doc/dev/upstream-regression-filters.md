@@ -1072,6 +1072,12 @@ occupancy tests in the table below.
 | `prompt_wal_appends_on_queue_enqueue` | Queue enqueue (L0 drain and mid-turn `pending_prompts` enqueue) appends `kind=queue`. Catalog contract. Not operator-verified known good (2026-09-02): a live session wrote `pending_prompts.json` without `prompt_wal.jsonl`. |
 | `prompt_wal_appends_on_approve_notes` | Plan Human-box notes that ride Approve append a `PlanNotes` WAL line. Operator-verified known good (2026-09-02): live `plan-notes` records. |
 | `session_load_restores_wal_send_missing_from_prompt_history` | Missing WAL send restores as a pending Human turn. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `wal_goal_slash_is_already_recorded_when_history_has_a_goal_has_been_set` | WAL `/goal <rest>` is already recorded when parsed user text has `A goal has been set: <rest>` after unwrapping `<user_query>`. Catalog contract. |
+| `wal_body_with_real_quotes_is_already_recorded_when_jsonl_has_escaped_quotes` | WAL body with real quotes is already recorded when JSONL has escaped quotes. Catalog contract. |
+| `wal_send_whose_body_is_truly_absent_from_parsed_user_text_still_restores` | A WAL send whose body is not a parsed user turn still restores. Assistant substring is not a match. Catalog contract. |
+| `wal_sends_missing_from_history_skips_goal_and_quoted_and_keeps_absent` | Combined helper: skip `/goal` and quoted committed sends, restore a truly absent send. Catalog contract. |
+| `restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send` | Pager bind must not enqueue those two committed WAL sends; a missing send still restores. Catalog contract. |
+| `restore_pending_prompts_skips_bodies_already_recorded_in_chat_history` | `pending_prompts.json` rows already in chat history must not restore after `/rebuild`. Catalog contract. |
 | `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Rebuild flush also writes a WAL line (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
 | `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Rebuild flush WAL line for queued bodies (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
 | `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue` | Resume restore: operator prompt appears once, not composer plus queue #1. Catalog contract, not operator-verified known good from 2026-09-02. |
@@ -1088,6 +1094,8 @@ cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
   session_load_restores_wal_send_missing_from_prompt_history \
+  restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send \
+  restore_pending_prompts_skips_bodies_already_recorded_in_chat_history \
   handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it \
   handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
@@ -1096,7 +1104,11 @@ cargo test -p xai-grok-pager --lib -- \
   resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string
 cargo test -p xai-grok-shell --lib -- \
   append_fsyncs_a_line_and_does_not_rewrite_prior_lines \
-  skips_prompt_wal_jsonl_because_it_is_not_conversation
+  skips_prompt_wal_jsonl_because_it_is_not_conversation \
+  wal_goal_slash_is_already_recorded_when_history_has_a_goal_has_been_set \
+  wal_body_with_real_quotes_is_already_recorded_when_jsonl_has_escaped_quotes \
+  wal_send_whose_body_is_truly_absent_from_parsed_user_text_still_restores \
+  wal_sends_missing_from_history_skips_goal_and_quoted_and_keeps_absent
 ```
 
 #### Interject Ctrl+Enter and Send now
@@ -1863,6 +1875,8 @@ cargo test -p xai-grok-pager --lib -- \
   empty_ctrl_enter_mid_turn_does_not_send \
   interject_does_not_wait_minutes_or_block_paint \
   session_load_restores_wal_send_missing_from_prompt_history \
+  restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send \
+  restore_pending_prompts_skips_bodies_already_recorded_in_chat_history \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
   resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
   resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone \

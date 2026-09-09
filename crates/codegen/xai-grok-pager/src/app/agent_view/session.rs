@@ -277,13 +277,38 @@ impl AgentView {
         live.to_string()
     }
 
+    /// Chat JSONL for this session, when present. Used to skip already-sent
+    /// queue rows on rebuild persist and restore.
+    fn chat_history_blob_for_session(&self) -> Option<String> {
+        let session_id = self.session.session_id.as_ref()?;
+        let cwd = self.session.cwd.to_string_lossy();
+        let path =
+            xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, session_id.0.as_ref())?;
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn operator_queue_text_already_in_history(&self, text: &str, chat_blob: Option<&str>) -> bool {
+        xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
+            text,
+            &self.session.prompt_history,
+            &[],
+            chat_blob,
+        )
+    }
+
     /// Force-write unsent draft and pager queue for `/rebuild` re-exec.
     /// Always hits disk, including in unit tests that set `GROK_HOME`.
+    ///
+    /// Do not persist queue rows (or rebuild-flush WAL copies of them) that
+    /// are already committed Human turns. A second `/rebuild` must not write
+    /// stale `#1` / `#2` WAL/queue logs for `/goal` and quoted sends that
+    /// already ran.
     pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
         let Some(session_id) = self.session.session_id.as_ref() else {
             return;
         };
         let cwd = self.session.cwd.to_string_lossy();
+        let chat_blob = self.chat_history_blob_for_session();
         let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
             &cwd,
             session_id.0.as_ref(),
@@ -296,6 +321,12 @@ impl AgentView {
             self.expect_send_now_cancel.as_deref(),
             &self.send_now_painted_blocks,
         );
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| {
+                !self.operator_queue_text_already_in_history(&row.text, chat_blob.as_deref())
+            })
+            .collect();
         let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts(
             &cwd,
             session_id.0.as_ref(),
@@ -312,6 +343,9 @@ impl AgentView {
         }
         for prompt in &self.session.pending_prompts {
             if prompt.text.trim().is_empty() && prompt.images.is_empty() {
+                continue;
+            }
+            if self.operator_queue_text_already_in_history(&prompt.text, chat_blob.as_deref()) {
                 continue;
             }
             self.append_prompt_wal_inner(
@@ -360,6 +394,10 @@ impl AgentView {
     }
 
     /// Load `pending_prompts.json` into an empty local queue.
+    ///
+    /// Skip rows already committed as Human turns in chat history (including
+    /// `/goal` rewrites and JSON-escaped quotes). Rebuild persist can leave
+    /// those issued bodies in `pending_prompts.json`.
     pub(crate) fn restore_pending_prompts_from_disk(&mut self) {
         if !self.session.pending_prompts.is_empty() || !self.shared_queue.is_empty() {
             return;
@@ -368,12 +406,24 @@ impl AgentView {
             return;
         };
         let cwd = self.session.cwd.to_string_lossy();
-        let Ok(rows) = xai_grok_shell::session::pending_prompts::load_pending_prompts(
-            &cwd,
-            session_id.0.as_ref(),
-        ) else {
+        let sid = session_id.0.as_ref();
+        let Ok(rows) = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd, sid)
+        else {
             return;
         };
+        let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, sid)
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| {
+                !xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
+                    &row.text,
+                    &self.session.prompt_history,
+                    &[],
+                    chat_blob.as_deref(),
+                )
+            })
+            .collect();
         apply_persisted_pending_prompts(&mut self.session, rows);
         self.sync_queue_pane();
     }

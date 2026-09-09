@@ -355,6 +355,7 @@ pub(crate) mod slash_commands;
 pub use slash_commands::PAGER_COMMAND_KEYS;
 pub use unsent_prompt_draft::pending_prompts;
 pub use unsent_prompt_draft::prompt_wal;
+pub mod prompt_wal_recorded;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod summary;

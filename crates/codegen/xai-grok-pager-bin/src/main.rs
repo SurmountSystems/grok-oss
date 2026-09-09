@@ -1908,6 +1908,10 @@ async fn async_main() -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::running_sessions::run_cli(json);
             }
+            Command::Gui { host } => {
+                init_tracing_simple("cli");
+                return xai_grok_pager::running_sessions::run_gui_cli(host.as_deref());
+            }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();

@@ -30,6 +30,8 @@ mod permissions;
 mod prompt;
 mod queue;
 pub(crate) mod rebuild;
+#[cfg(test)]
+mod rebuild_wal_already_issued;
 mod rewind;
 mod router;
 mod running;

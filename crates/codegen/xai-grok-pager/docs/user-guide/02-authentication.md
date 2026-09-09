@@ -122,7 +122,7 @@ Git and GitHub SSH stay **unconfigured** on surmount-1. Code is edited on the la
 
 Attach remains **SSH + tmux as user grok**. There is no boot TUI.
 
-The laptop coordinator (L0, crate `surmount-coordinator-gui`) has the action **set remote host console API key**. Paste the key on that laptop (stdin, never argv). It writes staging files under the laptop grok home (`$GROK_HOME/l0-remote-console-key/surmount-1/` when `GROK_HOME` is set, otherwise `~/.grok/l0-remote-console-key/surmount-1/`). You copy those files, or you let L0 print or run `scp` as the existing deploy user. L0 never prints the key. L0 is a laptop coordinator. It is not a website on the mail host :443. It is not pager `/dashboard`. It is not `/running`. Those three must not merge.
+The laptop coordinator (L0, **`grok-oss gui`**, crate `surmount-coordinator-gui`) has the action **set remote host console API key**. Paste the key on that laptop (stdin, never argv). It writes staging files under the laptop grok home (`$GROK_HOME/l0-remote-console-key/surmount-1/` when `GROK_HOME` is set, otherwise `~/.grok/l0-remote-console-key/surmount-1/`). You copy those files, or you let L0 print or run `scp` as the existing deploy user. L0 never prints the key. L0 is a laptop coordinator. It is not a website on the mail host :443. It is not pager `/dashboard`. It is not `/running`. Those three must not merge.
 
 ```bash
 # On the laptop. Paste the key on stdin. Do not put the key on the command line.

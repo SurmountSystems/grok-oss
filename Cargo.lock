@@ -13743,6 +13743,7 @@ dependencies = [
  "signal-hook 0.3.18",
  "similar",
  "strip-ansi-escapes",
+ "surmount-coordinator-gui",
  "syntect",
  "tar",
  "tempfile",

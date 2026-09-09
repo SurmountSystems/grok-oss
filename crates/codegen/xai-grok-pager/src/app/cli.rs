@@ -76,6 +76,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Laptop L0 coordinator (not `/dashboard`, not `/running`)
+    Gui {
+        /// Tag rows as this remote host. Default is local.
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;
