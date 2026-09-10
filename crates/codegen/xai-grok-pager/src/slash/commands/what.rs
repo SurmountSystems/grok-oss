@@ -192,26 +192,35 @@ mod tests {
         assert_operator_agent_speaker_labels(&text);
         let models = ModelState::default();
         let mut ctx = crate::slash::commands::tests::make_ctx(&models);
-        let injected = text_of(&WhatCommand.run(&mut ctx, ""));
+        let injected_result = WhatCommand.run(&mut ctx, "");
+        let injected = text_of(&injected_result);
         assert_operator_agent_speaker_labels(injected);
         let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../xai-grok-bundle/skills/what/SKILL.md");
         let skill = std::fs::read_to_string(&skill_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_path.display()));
+        // Load path is the in-tree bundle skill (CARGO_MANIFEST_DIR sibling
+        // xai-grok-bundle/skills/what/SKILL.md). Nix quality uses that same
+        // source. Speaker-label contracts live in the markdown body after
+        // YAML frontmatter, not in the `---` block.
+        let skill_body = skill
+            .split_once("\n---\n")
+            .map(|(_, body)| body)
+            .unwrap_or(skill.as_str());
         assert!(
-            skill.contains("Prefer Operator and Agent as speaker labels"),
+            skill_body.contains("Prefer Operator and Agent as speaker labels"),
             "what skill must prefer Operator and Agent; got {skill}"
         );
         assert!(
-            skill.contains("Do not say You or Human for the operator"),
+            skill_body.contains("Do not say You or Human for the operator"),
             "what skill must forbid You or Human; got {skill}"
         );
         assert!(
-            skill.contains("Do not say Me or Grok as the speaker label for the machine"),
+            skill_body.contains("Do not say Me or Grok as the speaker label for the machine"),
             "what skill must forbid Me or Grok as the speaker label; got {skill}"
         );
         assert!(
-            skill.contains("Job / State / Operator / Next"),
+            skill_body.contains("Job / State / Operator / Next"),
             "what skill must keep Job / State / Operator / Next; got {skill}"
         );
     }

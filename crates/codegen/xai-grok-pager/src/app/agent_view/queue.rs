@@ -336,7 +336,11 @@ impl AgentView {
                 // the intent; the confirming `x.ai/queue/changed` broadcast
                 // fires it with the row's authoritative version (see
                 // `resolve_send_now_awaiting_confirm`).
-                if self.optimistic_queue_ids.contains(&server_id) {
+                // Version 0 is the unconfirmed echo. A confirming
+                // `x.ai/queue/changed` stamps an authoritative version;
+                // send-now must target that row even if the optimistic
+                // set was not cleared.
+                if self.optimistic_queue_ids.contains(&server_id) && row.version == 0 {
                     self.send_now_awaiting_confirm = Some(server_id);
                     return InputOutcome::Changed;
                 }

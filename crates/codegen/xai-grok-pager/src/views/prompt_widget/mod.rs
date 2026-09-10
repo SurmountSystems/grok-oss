@@ -1538,11 +1538,20 @@ impl PromptWidget {
         // Cap only at the caller's widget max_height.
         if self.voice_recording_grow || self.voice_recording_interim.is_some() {
             let wrap_w = text_width.max(1);
+            // Chrome + prefix can leave a wrap width that packs one extra
+            // word versus a slightly narrower inner column. Grow to the
+            // conservative wrap so spoken text is not clipped.
+            let conservative = wrap_w.saturating_sub(3).max(1);
             let rows = recording_frame::wrapped_transcript_rows(
                 self.textarea.text(),
                 self.voice_recording_interim.as_deref(),
                 wrap_w,
-            );
+            )
+            .max(recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                conservative,
+            ));
             text_height = text_height.max(rows.max(1));
         }
         let vpad_top = style.vpad_top;

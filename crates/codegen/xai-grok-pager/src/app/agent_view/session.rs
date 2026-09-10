@@ -458,6 +458,11 @@ impl AgentView {
         last_compact_stuck_index(&self.scrollback)
     }
 
+    /// Compact-fail unstick: a later HTTP 502 is not the stale-`/implement` skip.
+    pub(crate) fn compact_fail_followed_by_http_502(&self) -> bool {
+        http_502_after_compact_fail(&self.scrollback, self.last_compact_stuck_index())
+    }
+
     /// True when `text` already issued as a Human turn in scrollback, chat
     /// history, or WAL Send/Interject. Compact-fail unstick and `/start`
     /// must not requeue that text as a Prompt.
@@ -479,12 +484,13 @@ impl AgentView {
     /// used: composer send records history at enqueue time, before the row
     /// becomes a Human turn.
     ///
-    /// `include_wal` is for restore, persist, unstick, and `/rebuild`: WAL
-    /// Send/Interject after compact can still mean the Human turn issued.
-    /// Live drain must not pass `include_wal`. Idle Enter writes WAL Send
-    /// before enqueue as durability, then drains that same row. Treating
-    /// that WAL line as occupancy leftover drops the row and returns no
-    /// `Effect::SendPrompt`.
+    /// `include_wal` is for unstick / `/start` "already issued" checks:
+    /// WAL Send/Interject after compact can still mean the Human turn
+    /// issued. Occupancy drop for persist, restore, paint, and live drain
+    /// must not pass `include_wal`. Idle Enter and immediate send write
+    /// WAL Send as durability before the row is a Human turn. Treating
+    /// that WAL line as occupancy leftover drops a restored missing send
+    /// and a live confirmed queue row.
     fn committed_human_turn_texts(
         &self,
         include_chat_history: bool,
@@ -548,9 +554,14 @@ impl AgentView {
     }
 
     /// Occupancy drop for persist, restore, rebuild, and queue-pane paint.
-    /// Includes Human turns in `chat_history.jsonl` and WAL Send/Interject.
+    /// Includes Human turns in live scrollback and `chat_history.jsonl`.
+    /// Does not treat WAL Send/Interject as occupancy: that line is
+    /// durability before the row is a Human turn. Restore of a missing
+    /// WAL send, and a live confirmed queue row after immediate send,
+    /// must keep the row. Compact occupancy still uses parsed chat
+    /// history when scrollback was emptied.
     pub(crate) fn drop_stale_queue_occupancy_with_chat_history(&mut self) {
-        self.drop_stale_queue_occupancy_inner(true, true, None);
+        self.drop_stale_queue_occupancy_inner(true, false, None);
     }
 
     fn drop_stale_queue_occupancy_inner(
@@ -837,7 +848,10 @@ impl AgentView {
             }
             self.session.enqueue_prompt(rec.text);
         }
-        self.drop_stale_queue_occupancy_with_chat_history();
+        // Chat history / scrollback occupancy only. WAL Send/Interject is how
+        // a missing Human turn is restored; treating that same WAL as
+        // "already issued" drops the row we just restored.
+        self.drop_stale_queue_occupancy();
         self.sync_queue_pane();
     }
 

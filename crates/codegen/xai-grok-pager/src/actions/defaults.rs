@@ -673,12 +673,11 @@ pub(super) fn default_actions(
             } else {
                 key!('i', CONTROL)
             },
-            // VS Code family: no alts (Ctrl+L sole chord; OpenExtensions unbound).
-            // Apple Terminal: Ctrl+I alt. Ctrl+Enter is composer newline, not send-now.
+            // VS Code family and default: no alts (Ctrl+L sole chord in VS Code;
+            // OpenExtensions unbound). Apple Terminal: Ctrl+I alt.
+            // Ctrl+Enter is composer newline, not send-now.
             alt_keys: if in_apple_terminal {
                 vec![key!('i', CONTROL)]
-            } else if in_vscode_family {
-                vec![]
             } else {
                 vec![]
             },

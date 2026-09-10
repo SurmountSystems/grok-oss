@@ -965,22 +965,12 @@ pub(super) fn dispatch_send_prompt_inner(
             }
             CommandResult::PassThrough(pass_text) => {
                 // Mid-turn Enter: slash PassThrough that is not a named hold
-                // merges into this turn. `/goal ...` is a shell GoalSet: queue
-                // it so Send now is a real goal action, not an interjected
-                // composer string. `/queue /finish` is QueueLater above.
-                if consume_input
-                    && agent.session.state.is_turn_running()
-                    && crate::slash::queue_schedule::is_goal_slash(&pass_text)
-                {
-                    agent.append_prompt_wal(
-                        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
-                        &pass_text,
-                        &agent.prompt.images,
-                    );
-                    agent.start_pending_live_prompt_task(&pass_text);
-                    agent.session.enqueue_prompt(pass_text);
-                    skip_drain = true;
-                } else if consume_input && agent.session.state.is_turn_running() {
+                // (including `/goal ...`) merges into this turn via
+                // `x.ai/interject`. Named `/queue /finish` is QueueLater
+                // above. Send now of an already-queued `/goal` row is
+                // GoalSet (`SendPromptNow` in `force_interject_queue_row`),
+                // a different path. Idle `/goal` still enqueues as GoalSet.
+                if consume_input && agent.session.state.is_turn_running() {
                     let images = agent.prompt.drain_images();
                     return enqueue_if_interject_dropped(app, id, pass_text, images);
                 } else {
@@ -1325,7 +1315,8 @@ pub(super) fn dispatch_send_prompt_inner(
             ) || matches!(
                 e,
                 Effect::SendInterject { text: t, .. } if t == &text
-            )
+            ) || matches!(e, Effect::Compact { .. })
+                || matches!(e, Effect::SendBashCommand { .. })
         });
         if !sent && let Some(agent) = app.agents.get_mut(&id) {
             let enqueued = agent.session.pending_prompts.iter().any(|p| p.text == text);

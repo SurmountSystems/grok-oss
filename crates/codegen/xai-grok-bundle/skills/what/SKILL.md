@@ -29,10 +29,10 @@ accessed: 2026-08-27). CATE is not specification 0006.
 
 Reply with this shape only. Four labeled complete thoughts. Nothing
 fluffier. One idea per sentence when that stays clear. Labels are
-**Job / State / Operator / Next**. Prefer Operator and Agent as speaker
-labels. Address the person as Operator, not Human. Do not say You or
-Human for the operator. Do not say Me or Grok as the speaker label for
-the machine (Grok OSS and grok-oss stay product names).
+**Job / State / Operator / Next**. Prefer Operator and Agent as speaker labels.
+Address the person as Operator, not Human. Do not say You or Human for the operator.
+Do not say Me or Grok as the speaker label for the machine
+(Grok OSS and grok-oss stay product names).
 Do not rename the product composer Human box.
 
 1. **Job:** one sentence. The real product outcome this session is

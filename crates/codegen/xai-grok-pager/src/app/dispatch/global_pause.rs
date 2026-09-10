@@ -156,7 +156,12 @@ fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
     if is_compact_slash(&text) {
         return None;
     }
-    if agent.operator_prompt_already_issued_as_human_turn(&text) {
+    // Scrollback still has that leftover `/implement` as a Human turn.
+    // After HTTP 502 that is unfinished work to continue, not the
+    // compact-fail stale-slash skip.
+    if agent.operator_prompt_already_issued_as_human_turn(&text)
+        && !agent.compact_fail_followed_by_http_502()
+    {
         return None;
     }
     Some(text)

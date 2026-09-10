@@ -1310,6 +1310,9 @@ mod tests {
 
     /// Operator queued `/goal` (green queue row): after Send now it must be a
     /// real goal action, not a stuck composer string.
+    /// Composer Enter of `/goal` while a turn is running is `SendInterject`
+    /// (`mid_turn_goal_passthrough_interjects_and_does_not_local_queue`).
+    /// This path is Send now of an already-queued row.
     #[test]
     fn queued_goal_send_now_is_goal_action_not_stuck_composer_string() {
         use crate::app::agent::AgentState;
@@ -1322,22 +1325,16 @@ mod tests {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.set_active_pane(ActivePane::Prompt, true);
-            agent.prompt.set_text(body);
+            agent.session.enqueue_prompt(body.into());
+            agent.prompt.set_text("");
         }
-        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::SendInterject { .. })),
-            "queued /goal must not interject the slash as chat, got {effects:?}"
-        );
         assert!(
             app.agents[&id]
                 .session
                 .pending_prompts
                 .iter()
                 .any(|p| p.text == body),
-            "mid-turn /goal must land as a queue row, pending={:?}",
+            "queued /goal must be a queue row before Send now, pending={:?}",
             app.agents[&id]
                 .session
                 .pending_prompts

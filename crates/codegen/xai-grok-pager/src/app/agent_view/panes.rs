@@ -14,15 +14,23 @@ impl AgentView {
     /// yet `is_foldable` (read_file without content still paints Collapsed).
     /// Group headers keep Enter as OpenBlockViewer (toggles the group).
     fn selected_hidden_foldable(&self) -> bool {
-        if self.scrollback.is_selected_group_header() {
-            return false;
-        }
         self.scrollback
             .selected()
             .and_then(|idx| self.scrollback.entry(idx))
             .is_some_and(|e| {
-                e.display_mode != DisplayMode::Expanded
-                    && (e.is_foldable() || e.block.is_tool_call())
+                if e.display_mode == DisplayMode::Expanded {
+                    return false;
+                }
+                // Collapsed tool rows Expand even when layout tagged the
+                // slot as a group header. Subagent / "N more" headers are
+                // not tool rows and stay OpenBlockViewer.
+                if e.block.is_tool_call() {
+                    return true;
+                }
+                if self.scrollback.is_selected_group_header() {
+                    return false;
+                }
+                e.is_foldable()
             })
     }
     /// Scrollback-focused key handling.

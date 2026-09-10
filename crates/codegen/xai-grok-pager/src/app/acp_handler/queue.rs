@@ -150,11 +150,13 @@ pub(crate) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             // Live [Send now] paint reads this mirror. Drop issued Human
             // turns before the next layout so a queue/changed broadcast
             // cannot resurrect occupancy that Compact emptied from scrollback.
-            agent.drop_stale_queue_occupancy_with_chat_history();
+            // Do not treat WAL Send as occupancy: live Enter writes WAL
+            // before the row is a Human turn.
+            agent.drop_stale_queue_occupancy();
             let kept: std::collections::HashSet<String> =
                 agent.shared_queue.iter().map(|e| e.id.clone()).collect();
             for pid in &incoming_ids {
-                if !kept.contains(pid) {
+                if !kept.contains(pid) && !agent.is_send_now_awaiting_interjection_claim(pid) {
                     agent.retire_send_now_painted_block(pid);
                 }
             }
