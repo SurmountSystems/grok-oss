@@ -205,16 +205,21 @@ pub fn goal_instruction(objective: &str) -> String {
     format!(
         "# /goal -- pursue an objective\n\n\
          A goal has been set: {objective}\n\n\
-         Work directly on this goal and carry it as far as you can. Deliver \
-         everything the user asked for yourself: no follow-up questions, no \
-         manual steps left for the user. If the conversation continues, keep \
-         pursuing the goal until it is complete.\n\n\
+         You are the L1 parent. Coordinate only: status, spawn L2, wait, \
+         short reports, board. Do not fill this parent with tool work and do \
+         not show raw edits. Spawn an L2 coordinator. That L2 MUST spawn L3 \
+         for tools. L3 does the actual tools. Do not spawn L4. Hierarchical \
+         fast path stays on L1 (one-command host question, one already-named \
+         path, read the asked-for report). Deliver everything the user asked \
+         for: no follow-up questions, no manual steps left for the user. If \
+         the conversation continues, keep pursuing the goal until it is \
+         complete.\n\n\
          TRACKING: break the objective into concrete steps and track them \
          (use your todo tool if one is available), marking each done as you \
          finish it.\n\n\
-         VERIFY AS YOU GO: test each change on the real path before moving on. \
-         A completion claim must be backed by evidence produced in this \
-         session, not assumptions.\n\n\
+         VERIFY AS YOU GO: L3 tests each change on the real path before \
+         moving on. A completion claim must be backed by evidence produced \
+         in this session, not assumptions. L1 reads the short on-disk report.\n\n\
          Call update_goal(completed: true, message: \"summary\") ONLY when the \
          goal is fully achieved. Call update_goal(blocked_reason: \"reason\") \
          only when truly stuck after 3+ consecutive failed attempts at the \
@@ -305,6 +310,32 @@ mod tests {
             "expansions ride as user messages and must not claim reminder authority"
         );
         assert!(goal_usage_message().contains("Usage: /goal"));
+    }
+
+    #[test]
+    fn goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools() {
+        let text = goal_instruction("ship the widget");
+        assert!(
+            text.contains("ship the widget"),
+            "injected /goal prompt must still carry the objective"
+        );
+        assert!(text.contains("spawn L2"), "L1 must spawn an L2 coordinator");
+        assert!(
+            text.contains("Do not fill this parent"),
+            "L1 must not fill itself with tool work"
+        );
+        assert!(
+            text.contains("MUST spawn L3 for tools"),
+            "L2 must spawn L3 for tools on /goal"
+        );
+        assert!(
+            !text.contains("for yourself"),
+            "upstream 'Deliver everything ... yourself' fills L1: {text}"
+        );
+        assert!(
+            !text.contains("Work directly on this goal"),
+            "L1 coordinates; it does not work the goal as the implementer: {text}"
+        );
     }
 
     #[test]

@@ -130,7 +130,8 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 force_finish_local_cancel(agent);
             } else {
                 effects.extend(cancel_agent_turn(
-                    agent, /* cancel_rewind_enabled */ false, /* cancel_subagents */ true,
+                    agent, /* cancel_rewind_enabled */ false,
+                    /* cancel_subagents */ true, /* allow_local_rewind */ false,
                 ));
             }
         }
@@ -329,26 +330,32 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
 
 /// Cancel a specific agent's turn (global pause / rebuild).
 ///
-/// `allow_local_rewind` is reserved for Surmount pause/rebuild callers that
-/// already stashed the in-flight prompt; 1.0.3 cancel still uses the
-/// session `cancel_rewind_enabled` flag.
+/// Pause passes `allow_local_rewind = false`: resume re-queues the stashed
+/// prompt once. Esc / rebuild keep local rewind when
+/// `cancel_rewind_enabled` is on.
 pub(super) fn do_cancel_turn_for(
     app: &mut AppView,
     id: crate::app::agent::AgentId,
     cancel_subagents: bool,
-    _allow_local_rewind: bool,
+    allow_local_rewind: bool,
 ) -> Vec<Effect> {
     let cancel_rewind_enabled = app.cancel_rewind_enabled;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    cancel_agent_turn(agent, cancel_rewind_enabled, cancel_subagents)
+    cancel_agent_turn(
+        agent,
+        cancel_rewind_enabled,
+        cancel_subagents,
+        allow_local_rewind,
+    )
 }
 
 fn cancel_agent_turn(
     agent: &mut AgentView,
     cancel_rewind_enabled: bool,
     cancel_subagents: bool,
+    allow_local_rewind: bool,
 ) -> Vec<Effect> {
     if agent.session.state.is_compact_running() {
         agent.session.cancel_compact_command();
@@ -436,7 +443,8 @@ fn cancel_agent_turn(
     // non-empty composer holds a NEWER draft the rewind would clobber.
     // Trigger-agnostic on purpose: fall back to the standard cancel.
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
-    let rewinding = agent.shared_queue.is_empty()
+    let rewinding = allow_local_rewind
+        && agent.shared_queue.is_empty()
         && cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()

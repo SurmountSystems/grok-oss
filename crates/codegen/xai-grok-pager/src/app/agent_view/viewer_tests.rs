@@ -12,7 +12,9 @@ use ratatui::layout::Rect;
 use crate::actions::ActionRegistry;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+use crate::views::plan_approval_view::{
+    PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PlanApprovalFocus, PlanPromptIntent,
+};
 
 const POPUP: Rect = Rect {
     x: 0,
@@ -1656,5 +1658,143 @@ fn letter_key_types_and_is_not_the_only_submit() {
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "letters are not the only submit"
+    );
+}
+
+/// Isolated Preview Enter stashes the Human-box critique. It must not
+/// become SendPrompt Waiting. Empty Enter never Approves.
+#[test]
+fn isolated_preview_enter_stashes_review_comment_not_send_prompt() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    const CRITIQUE: &str = "keep the join order from the archive index";
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    type_plan_chars(&mut agent, CRITIQUE);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "Isolated Preview Enter must stash comments, not start a Prompt; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Isolated Preview Enter must not Approve"
+    );
+    assert!(
+        agent.prompt.text().contains(CRITIQUE),
+        "composer must keep the critique for Approve, got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.feedback_draft.as_deref()),
+        Some(CRITIQUE)
+    );
+}
+
+/// Held Isolated Preview critique rides Approve with the review-comments
+/// lead. Empty Enter never Approves; this path is non-empty then Approve.
+#[test]
+fn isolated_preview_enter_then_approve_wraps_review_lead() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    const CRITIQUE: &str = "keep the join order from the archive index";
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    type_plan_chars(&mut agent, CRITIQUE);
+    let enter = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            enter,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "hold must happen before Approve; got {enter:?}"
+    );
+    match agent.approve_plan() {
+        InputOutcome::Action(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve must wrap with PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {text:?}"
+            );
+            assert!(
+                text.contains(CRITIQUE),
+                "Approve must carry the held critique, got {text:?}"
+            );
+        }
+        other => panic!("Approve after Isolated Preview Enter must Interject; got {other:?}"),
+    }
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "Approve must decide the parked plan"
+    );
+}
+
+/// Keep-draft from before live present still SendPrompt. Isolated Preview
+/// comments typed after park still stash (see
+/// `isolated_preview_enter_stashes_review_comment_not_send_prompt`).
+/// Empty Enter never Approves.
+#[test]
+fn isolated_preview_keep_draft_from_before_present_enter_sends_prompt() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    const DRAFT: &str = "oh you interrupted my typing";
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        pav.stashed_prompt.text = DRAFT.to_string();
+    }
+    agent.prompt.set_text(DRAFT);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match outcome {
+        InputOutcome::Action(Action::SendPrompt(text)) => {
+            assert!(
+                text.contains(DRAFT),
+                "keep-draft from before present must SendPrompt, got {text:?}"
+            );
+        }
+        other => panic!("keep-draft from before present must SendPrompt, got {other:?}"),
+    }
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "keep-draft Enter must not Approve"
+    );
+    assert_ne!(
+        agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.feedback_draft.as_deref()),
+        Some(DRAFT),
+        "keep-draft Enter must not stash the pre-present composer as review comments"
     );
 }

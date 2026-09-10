@@ -217,7 +217,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
-    let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+    let sid = agent.session.session_id.as_ref().map(|s| s.0.to_string());
     let queue_depth = agent.session.pending_prompts.len();
 
     let log_blocked = |reason: &str, sid: Option<&str>| {
@@ -230,18 +230,20 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         }
     };
 
+    agent.drop_stale_queue_occupancy();
+
     if !agent.session.state.is_idle() {
-        log_blocked("turn_running", sid);
+        log_blocked("turn_running", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Hold the drain during an in-flight model switch. See the
     // `model_switch_pending` field doc for why a reconnect must clear it.
     if agent.session.model_switch_pending {
-        log_blocked("model_switch_pending", sid);
+        log_blocked("model_switch_pending", sid.as_deref());
         return QueueDrain::blocked();
     }
     if agent.session.loading_replay {
-        log_blocked("loading_replay", sid);
+        log_blocked("loading_replay", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Server-owned next turn: a non-running server row (including this
@@ -257,7 +259,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         .iter()
         .any(|e| Some(e.id.as_str()) != running)
     {
-        log_blocked("server_queue_owns_next_turn", sid);
+        log_blocked("server_queue_owns_next_turn", sid.as_deref());
         return QueueDrain::blocked();
     }
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -354,7 +356,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         agent.note_self_originated_prompt(&prompt_id);
     }
 
-    match queued.kind {
+    let drain = match queued.kind {
         QueueEntryKind::Prompt => {
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
@@ -614,7 +616,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: flip.then_some(prompt_entry_id),
             }
         }
-    }
+    };
+    agent.drop_stale_queue_occupancy();
+    drain
 }
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e.

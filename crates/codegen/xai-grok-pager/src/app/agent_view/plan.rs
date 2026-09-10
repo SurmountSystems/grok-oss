@@ -310,11 +310,12 @@ impl AgentView {
     }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request (inline plan-creation or
-    /// the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path
-    /// resolution fails or the file disappears between intercept and open.
-    pub(super) fn plan_body_for_preview(&self) -> Option<String> {
+    /// Isolated Preview / present reads SQL first, then a parked request or
+    /// latest inline body, then disk `plan.md`.
+    pub(crate) fn plan_body_for_preview(&self) -> Option<String> {
+        if let Some(content) = self.session_plan_body_from_sql() {
+            return Some(content);
+        }
         if let Some(content) = self
             .plan_approval_view
             .as_ref()
@@ -333,6 +334,51 @@ impl AgentView {
         self.plan_file_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
+    }
+
+    fn session_plan_body_from_sql(&self) -> Option<String> {
+        let sid = self.session.session_id.as_ref()?.0.to_string();
+        let store = self.grok_oss_store_for_plan_choice()?;
+        match store.load_session_plan_body(&sid, xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY) {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::debug!(error = %e, "session_plans load failed (fail-open)");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn persist_session_plan_dock_open(&self, open: bool) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        if let Err(e) = store.set_session_plan_dock_open(
+            &sid,
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+            open,
+        ) {
+            tracing::debug!(error = %e, "session_plans dock_open write failed (fail-open)");
+        }
+    }
+
+    /// Present / Isolated Preview: persist the live body without requiring a
+    /// markdown write lock on session `plan.md`.
+    pub(crate) fn persist_session_plan_body(&self, body: &str) {
+        if body.trim().is_empty() {
+            return;
+        }
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        if let Err(e) = store.upsert_session_plan_body(&sid, body) {
+            tracing::debug!(error = %e, "session_plans body write failed (fail-open)");
+        }
     }
     /// `/view-plan` and the plan status / chip click.
     ///
@@ -1126,7 +1172,8 @@ impl AgentView {
                         self.show_toast(toast);
                         return InputOutcome::Changed;
                     }
-                    if !panel_open && !text.trim().is_empty() {
+                    if intent != PlanPromptIntent::Comment && !panel_open && !text.trim().is_empty()
+                    {
                         return self.send_composer_as_normal_prompt();
                     }
                     let freeform = if text.trim().is_empty() {
@@ -1138,7 +1185,12 @@ impl AgentView {
                         PlanPromptIntent::Questions => self.send_plan_questions(freeform),
                         PlanPromptIntent::ApproveNotes => self.approve_plan(),
                         PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
-                        PlanPromptIntent::Comment => self.send_composer_as_normal_prompt(),
+                        PlanPromptIntent::Comment => {
+                            if self.hold_parked_plan_review_comments_from_enter() {
+                                return InputOutcome::Changed;
+                            }
+                            self.send_composer_as_normal_prompt()
+                        }
                     };
                 }
                 return self.send_composer_as_normal_prompt();
@@ -2047,6 +2099,66 @@ mod plan_approval_enter_tests {
                 agent.prompt.text()
             ),
         }
+    }
+
+    /// Comment Prompt Enter stashes parked comments. It must not
+    /// SendPrompt. Empty Enter never Approves.
+    #[test]
+    fn comment_prompt_enter_stashes_review_comments_not_send_prompt() {
+        use crate::app::actions::Action;
+
+        const CRITIQUE: &str = "please keep the join order from the archive index";
+        let mut empty = agent_with_revise_prompt();
+        empty.plan_mode_active = true;
+        if let Some(ref mut pav) = empty.plan_approval_view {
+            pav.prompt_intent = PlanPromptIntent::Comment;
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        empty.prompt.set_text("");
+        let empty_outcome = empty.handle_plan_feedback_key(&enter_key());
+        assert!(matches!(empty_outcome, InputOutcome::Changed));
+        assert!(
+            empty.plan_approval_view.is_some(),
+            "empty Comment Enter never Approves"
+        );
+        assert_eq!(
+            empty.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Type a comment, then click Approve, Clarify, or Revise.")
+        );
+
+        let mut agent = agent_with_revise_prompt();
+        agent.plan_mode_active = true;
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.prompt_intent = PlanPromptIntent::Comment;
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.prompt.set_text(CRITIQUE);
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::Interject { .. })
+            ),
+            "Comment Prompt Enter must stash, not SendPrompt; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "Comment Prompt Enter must not Approve"
+        );
+        assert!(
+            agent.prompt.text().contains(CRITIQUE),
+            "composer must keep the critique for Approve, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.as_deref()),
+            Some(CRITIQUE)
+        );
     }
 }
 /// The mode indicator renders
@@ -4530,5 +4642,53 @@ mod plan_rebuild_resume_and_esc_dismiss_tests {
         );
         assert!(agent.plan_approval_view.is_some());
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod session_plan_sql_preview_tests {
+    use crate::app::agent_view::test_agent_view;
+
+    /// Named contract: Isolated Preview reads SQL first, then disk `plan.md`.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn isolated_preview_reads_sql_first_then_disk_plan_md_fallback() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "sql-preview-sess";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+        let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).unwrap();
+        store
+            .upsert_session_plan(
+                session_id,
+                xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+                Some("SQL title"),
+                "# SQL Isolated Preview\nlive sql body\n",
+                true,
+                "[]",
+            )
+            .unwrap();
+        let encoded = urlencoding::encode(&cwd);
+        let plan_md = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(session_id)
+            .join("plan.md");
+        std::fs::create_dir_all(plan_md.parent().unwrap()).unwrap();
+        std::fs::write(&plan_md, "# Disk leftover\nnot the live plan\n").unwrap();
+
+        let agent = test_agent_view(Some(session_id), std::path::PathBuf::from(&cwd));
+        let body = agent
+            .plan_body_for_preview()
+            .expect("Isolated Preview must resolve a body");
+        assert!(
+            body.contains("live sql body"),
+            "Isolated Preview must prefer SQL over disk; got {body:?}"
+        );
+        assert!(
+            !body.contains("Disk leftover"),
+            "disk must not win when SQL has a body; got {body:?}"
+        );
     }
 }

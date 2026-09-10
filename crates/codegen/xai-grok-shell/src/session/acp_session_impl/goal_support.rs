@@ -906,6 +906,76 @@ mod fold_tokens_by_model_tests {
     }
 }
 
+#[cfg(test)]
+mod goal_rules_depth_tests {
+    use super::super::{
+        GOAL_RULES_TEMPLATE, GOAL_RULES_TEMPLATE_LEGACY, GOAL_TASK_DISCIPLINE_TEMPLATE,
+    };
+
+    fn assert_l1_coordinates(text: &str) {
+        assert!(
+            text.contains("{OBJECTIVE}"),
+            "goal-rules template must still carry the objective slot"
+        );
+        assert!(text.contains("spawn L2"), "L1 must spawn an L2 coordinator");
+        assert!(
+            text.contains("Do not fill this parent"),
+            "L1 must not fill itself with tool work"
+        );
+        assert!(
+            text.contains("MUST spawn L3 for tools"),
+            "L2 must spawn L3 for tools on /goal"
+        );
+        assert!(
+            text.contains("TEST PROACTIVELY: L3"),
+            "TEST PROACTIVELY must name L3 as the tester, not the parent: {text}"
+        );
+        assert!(
+            !text.contains("TEST PROACTIVELY: run targeted tests"),
+            "L1 must not be told to run tests: {text}"
+        );
+        assert!(
+            !text.contains("for yourself"),
+            "upstream 'Deliver everything ... yourself' fills L1: {text}"
+        );
+        assert!(
+            !text.contains("implement it yourself"),
+            "L3 implements; L1 does not: {text}"
+        );
+        assert!(
+            !text.contains("working directly on this goal"),
+            "L1 coordinates; it does not work the goal as the implementer: {text}"
+        );
+    }
+
+    #[test]
+    fn goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools() {
+        assert_l1_coordinates(GOAL_RULES_TEMPLATE);
+        assert_l1_coordinates(GOAL_RULES_TEMPLATE_LEGACY);
+    }
+
+    #[test]
+    fn goal_task_discipline_parent_spawns_l2_not_product_tools() {
+        let text = GOAL_TASK_DISCIPLINE_TEMPLATE;
+        assert!(
+            text.contains("Tool-call first"),
+            "live /goal still injects discipline; keep tool-call-first for spawn"
+        );
+        assert!(
+            text.contains("spawn L2"),
+            "L1's tool on /goal is spawn L2: {text}"
+        );
+        assert!(
+            !text.contains("I'm now reading"),
+            "reading is product tool work on L1: {text}"
+        );
+        assert!(
+            !text.contains("just do it"),
+            "just do it fills L1 with the goal work: {text}"
+        );
+    }
+}
+
 /// Resolved per-role `/goal` model selection, cached on the actor.
 ///
 /// `Default` (every role `InheritCurrent`, empty skeptic pool) reproduces

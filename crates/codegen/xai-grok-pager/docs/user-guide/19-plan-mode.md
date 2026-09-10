@@ -46,6 +46,16 @@ You can enter plan mode yourself in two ways:
 
 After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen the pane. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy lives on `y` and a title-bar control, not as a fifth idle CTA on the Approve row. On this Surmount fork, **Approve** also files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)). A clickable **copy** control (`y`) copies the plan, including while a line-comment overlay is open. A dot marks the **selected** CTA (the one Enter will submit). That mark is live selection, not a leftover grok-oss.db recorded row. Present, empty Enter, and always-approve tool permissions do not Approve. Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
 
+### Isolated Preview (`/plan --soft`)
+
+**`/plan --soft`** docks Isolated Preview on the right without a covering exclusive present. Isolated Preview is the existing plan present surface on the right of the transcript. Nested subagents stay Working. `/plan --soft add feature` also enters plan mode with that description. Present is not Approve. Empty Enter never Approves. `--soft` is not the queue hold token (`queue` / `later`). Approve still files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)).
+
+When the main session (L1) shows that plan pane, nested L2 subagents keep running. Those sessions stay Working. Docking Isolated Preview does not cancel them and does not paint Cancelling.
+
+If Approve still needs a live waiter, that waiter must not send cancel to nested sessions. Clicking Approve remains a real Approve only while that waiter is parked.
+
+**`/rebuild`** with Isolated Preview open restores that pane after relaunch. Resume does not auto-dock leftover `plan.md` when the pane was not open at persist.
+
 ---
 
 ## The Plan File
@@ -68,7 +78,7 @@ When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool r
 
 ### Present is not Approve
 
-A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve.
+A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve. When Isolated Preview is docked on L1, nested L2 subagents keep running. If a waiter is required for Approve, that waiter must not send cancel to those nested sessions.
 
 The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Click a button to mark it and run it (the selected one is marked). Enter submits the marked CTA. A first click on **Approve** still Approves. A first click on **Comment** focuses the comment composer. A first click on idle **Revise** focuses the box and waits; after a comment is typed, Revise rewrites. A first click on **Exit** abandons. After **Comment**, **Clarify** sends questions (not a rewrite). A second click on an already-selected CTA still submits that action. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` never Approves. When the Human box is composing a line comment or revise draft, Enter still saves or sends that draft (`Enter:save comment` on the line-comment overlay, including while session Multiline is on).
 
@@ -139,7 +149,7 @@ Active      --> ExitPending (you toggle plan mode off while a turn is in-flight)
 ExitPending --> Inactive (after the turn completes)
 ```
 
-Plan mode state is persisted to disk and survives process restarts. Transient states (`Pending`, `ExitPending`) are collapsed to `Inactive` on restart since they depend on in-flight interactions.
+Plan mode state is persisted to disk and survives process restarts. Transient states (`Pending`, `ExitPending`) are collapsed to `Inactive` on restart since they depend on in-flight interactions. **`/rebuild`** with Isolated Preview open restores that pane after relaunch. That restore does not cancel nested L2 subagents.
 
 ---
 

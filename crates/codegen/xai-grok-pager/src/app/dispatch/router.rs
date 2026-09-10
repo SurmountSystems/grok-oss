@@ -1070,7 +1070,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::UnstickLastL1Prompt => super::unstick::dispatch_unstick_last_l1_prompt(app),
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
-        Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
+        Action::EnterPlanMode { description, soft } => {
+            dispatch_enter_plan_mode(app, description, soft)
+        }
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
         Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),

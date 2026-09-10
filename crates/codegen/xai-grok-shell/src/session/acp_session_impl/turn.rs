@@ -2532,6 +2532,24 @@ impl SessionActor {
                 .assistant()
                 .and_then(|a| a.model_fingerprint.clone())
             {
+                let from_item = response
+                    .assistant()
+                    .and_then(|a| a.model_id.clone())
+                    .filter(|s| !s.is_empty());
+                let model_id = match from_item {
+                    Some(id) => id,
+                    None => {
+                        let id = self.current_model_id().await;
+                        if id.is_empty() || id == "unknown" {
+                            String::new()
+                        } else {
+                            id
+                        }
+                    }
+                };
+                if !model_id.is_empty() {
+                    crate::grok_oss::record_completion_system_fingerprint_fail_open(&model_id, &fp);
+                }
                 model_fingerprint = Some(fp);
             }
             let fallback_text = response.fallback_text();

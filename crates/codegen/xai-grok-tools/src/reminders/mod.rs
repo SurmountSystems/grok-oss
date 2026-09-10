@@ -10,17 +10,20 @@
 //!   registry that fire after every tool call.
 //!
 //! This module contains the cross-cutting reminders:
-//! - [`LspDiagnosticsReminder`], [`SkillDiscoveryReminder`], [`TaskCompletionReminder`]
+//! - [`LspDiagnosticsReminder`], [`SkillDiscoveryReminder`], [`TaskCompletionReminder`],
+//!   [`WritePathsAssignmentReminder`]
 //!
 //! All reminders are collected and appended in `call_new_tool()`.
 
 pub mod lsp_diagnostics;
 pub mod skill_discovery;
 pub mod task_completion;
+pub mod write_paths_assignment;
 
 pub use lsp_diagnostics::LspDiagnosticsReminder;
 pub use skill_discovery::SkillDiscoveryReminder;
 pub use task_completion::TaskCompletionReminder;
+pub use write_paths_assignment::WritePathsAssignmentReminder;
 
 /// The default system-reminder tag name (hyphen).
 pub const DEFAULT_REMINDER_TAG: &str = "system-reminder";

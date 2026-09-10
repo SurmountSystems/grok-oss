@@ -350,6 +350,43 @@ These are not classes 8 through 14. Land still walks them because this catalog
 lists the named tests. Paint-only bubble copy is already a failed land under
 class 2 (click-to-copy rows).
 
+#### Official serving-path fingerprints
+
+Consumer Grok shows Grok 4.6 with no public checkpoint ID. grok-oss logs and
+`/metadata` show Chat Completions `system_fingerprint` and
+`GET /v1/language-models` `{id, fingerprint, version, created}`. Fingerprint
+is serving-path configuration, not a SHA of the weights. Additive
+`grok_oss.db` schema v7. Not on the status bar. Do not invent dated slugs.
+**Upstream** owns the Chat Completions JSON field. **Surmount** owns persist,
+flip history, language-models snapshot, `/metadata` serving lines, and
+user-guide copy.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `show_session_metadata_includes_fingerprint_fields_from_stored_samples` | `/metadata` includes fingerprint fields from stored samples |
+| `xai-grok-pager` `format_includes_stored_serving_fingerprint_fields` | Format lists public id, last `system_fingerprint`, language-models fields, observed times |
+| `xai-grok-sampling-types` `parse_language_models_json_reads_id_fingerprint_version_created` | Parse language-models JSON for id, fingerprint, version, created |
+| `xai-grok-sampling-types` `parse_language_models_json_does_not_invent_dated_slugs` | Parser does not invent dated slugs such as `grok-4.6-20260812` |
+| `xai-grok-sampling-types` `chat_completion_response_deserializes_system_fingerprint` | Chat Completions JSON exposes `system_fingerprint` |
+| `xai-grok-sampler` `chat_completions_stream_copies_system_fingerprint_onto_assistant` | Stream copies late-chunk `system_fingerprint` onto the assistant item |
+| `xai-grok-shell` `record_completion_fingerprint_persists_a_flip` | Persist a flip when completion `system_fingerprint` changes |
+| `xai-grok-shell` `persist_language_models_list_upserts_and_records_flip` | Persist language-models JSON and record a fingerprint flip |
+| `xai-grok-shell` `migrate_v6_file_to_v7_adds_serving_tables_without_dropping_spend` | Additive v7 does not drop `/spend` schema v1 tables |
+| `xai-grok-pager` `user_guide_metadata_documents_serving_fingerprints` | User-guide `/metadata` names fingerprints, not-a-SHA, not status bar |
+
+```bash
+cargo test -p xai-grok-pager --lib -- show_session_metadata_includes_fingerprint_fields_from_stored_samples \
+  format_includes_stored_serving_fingerprint_fields \
+  user_guide_metadata_documents_serving_fingerprints
+cargo test -p xai-grok-sampling-types --lib -- parse_language_models_json_reads_id_fingerprint_version_created \
+  parse_language_models_json_does_not_invent_dated_slugs \
+  chat_completion_response_deserializes_system_fingerprint
+cargo test -p xai-grok-sampler --lib -- chat_completions_stream_copies_system_fingerprint_onto_assistant
+cargo test -p xai-grok-shell --lib -- record_completion_fingerprint_persists_a_flip \
+  persist_language_models_list_upserts_and_records_flip \
+  migrate_v6_file_to_v7_adds_serving_tables_without_dropping_spend
+```
+
 #### L0 machine console API key for host surmount-1
 
 Laptop coordinator crate `surmount-coordinator-gui`. Action **set remote
@@ -479,6 +516,49 @@ teaching "MUST spawn L3 for all tool work" after a restack.
 ```bash
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
 cargo test -p xai-grok-tools --lib -- default_max_allows_l2_to_spawn_l3
+```
+
+#### `/goal` parent coordinates (Surmount fork of the injected prompt)
+
+Upstream `goal_instruction` tells the parent to deliver everything itself.
+Surmount `/goal` keeps the objective and `update_goal` contract, and tells
+L1 to coordinate (spawn L2; L2 MUST spawn L3 for tools). Distinct from
+`CHILD_TASK_DESCRIPTION`. There is no bundled goal skill.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-tools-api` `goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools` | Injected `/goal` prompt carries the objective, spawn L2, L1 does not fill itself, L2 MUST spawn L3 for tools |
+| `xai-grok-tools-api` `goal_instruction_carries_objective_and_contract_tokens` | Objective plus `update_goal` contract tokens; not a `system-reminder` |
+| `xai-grok-shell` `goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools` | Live `goal_rules.md` / `goal_rules_legacy.md` match that depth law |
+| `xai-grok-shell` `goal_task_discipline_parent_spawns_l2_not_product_tools` | Live `{DISCIPLINE_BLOCK}` tells L1 to spawn L2, not to read or "just do it" |
+
+```bash
+cargo test -p xai-grok-tools-api --lib -- \
+  goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools \
+  goal_instruction_carries_objective_and_contract_tokens
+cargo test -p xai-grok-shell --lib -- \
+  goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools \
+  goal_task_discipline_parent_spawns_l2_not_product_tools
+```
+
+#### Parent fire-and-return spawn (no blocking 10-minute wait)
+
+A nested L2 that is a long builder (compile, lake, mill) must not occupy the
+parent as a blocking 10-minute `get_command_or_subagent_output` wait loop.
+Parent starts it, keeps working, completion is a notification. Parent can
+spawn a second L2 while the first is still running without waiting for the
+first to exit. Snapshot (`omit` / `0`) is allowed. Positive `timeout_ms`
+remains only when the parent must join. Named tests are Surmount / grok-oss
+fork contracts.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-tool-types` `parent_spawn_subagent_second_l2_while_first_still_running_without_wait` | Spawn notice is fire-and-return: keep working, notification, snapshot omit/0; not a blocking positive timeout as the default retrieval |
+| `xai-grok-tools` `parent_spawn_subagent_second_l2_while_first_still_running_without_wait` | Two background `spawn_registered` admits while the first L2 is still running; no blocking wait in between |
+
+```bash
+cargo test -p xai-tool-types --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
+cargo test -p xai-grok-tools --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
 ```
 
 #### File-level infer-from-path verify
@@ -1211,6 +1291,29 @@ cargo test -p xai-grok-pager --lib -- \
   auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt
 ```
 
+#### Compact standing-law reminder (not AGENTS.md)
+
+Surmount / grok-oss fork. After compact, standing Surmount law must be
+the first section of the post-compaction `<system-reminder>` (first
+screen). FORK.md is the divergence home. Named tests are contracts. Do
+not fit tests to code. Behavior work is red then green TDD. Do not
+interrupt live L2s when L1 shows a plan pane. Long builder L2s
+(compile, lake, mill) are fire-and-return. Upstream parent turns often
+sit on a 10-minute `get_command_or_subagent_output` wait. This is not a
+buried AGENTS.md paragraph and not `/recap`. Named `fn`
+`section_surmount_standing_law_after_compact` in `xai-grok-shell`
+`compaction_context.rs`, wrapped by `xai-grok-compaction`
+`wrap_system_reminder`. Distinct Extra row from nested-wait hang, compact
+occupancy re-enqueue, and L2 spawn prompt.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-shell` `post_compact_reminder_includes_surmount_standing_law` | Empty live-state still injects standing law as the first `<system-reminder>` section |
+
+```bash
+cargo test -p xai-grok-shell --lib -- post_compact_reminder_includes_surmount_standing_law
+```
+
 #### `/view-plan` never samples
 
 Fork-owned. Resume `--continue` can submit `/view-plan` before slash
@@ -1786,12 +1889,17 @@ cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_app
 cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval \
   default_max_allows_l2_to_spawn_l3 rust_edit_verify dangerous_cargo
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
+cargo test -p xai-grok-tools-api --lib -- \
+  goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools \
+  goal_instruction_carries_objective_and_contract_tokens
 cargo test -p xai-grok-shell --lib -- from_config_without_prefetch_produces_usable_catalog \
   baked_default_is_grok_46_medium_fork_contract \
   stream_started_emits_retry_state_stream_resumed \
   keep_unverified_persisted_model_keeps_seeded_custom_slug \
   seeded_test_model_keeps_chat_completions_backend \
-  leader_is_older_than_same_semver_git_sha_identity
+  leader_is_older_than_same_semver_git_sha_identity \
+  goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools \
+  goal_task_discipline_parent_spawns_l2_not_product_tools
 cargo test -p xai-grok-pager --lib -- \
   plan_soft_park_docks_right_not_centered_overlay \
   plan_soft_park_draw_right_pane_matches_side_panel_status \

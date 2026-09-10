@@ -545,6 +545,7 @@ identifier that has no matching `fn`.
   `peer_relaunch_accepts_same_semver_different_sha`,
   `peer_relaunch_declines_equal_identity_on_same_path`,
   `peer_relaunch_accepts_deleted_inode_even_when_identity_equal`,
+  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
   `leader_is_older_than_same_semver_git_sha_identity`. Fail-does-not-signal
   alone is not this seam. TUI `/rebuild` is the operator path with persist
   plus self re-exec. CLI `grok-oss rebuild` is clap-wired
@@ -720,6 +721,31 @@ identifier that has no matching `fn`.
   `ensure_session_ids_same_uuid_returns_same_ulid`,
   `attach_and_new_session_both_call_ensure_session_ids_fail_open`,
   `existing_uuid_session_gets_mapped_ulid_on_load_path_helper`.
+- [x] **Official serving-path fingerprints (Surmount, 2026-09-09):** Consumer
+  Grok shows Grok 4.6 with no public checkpoint ID. grok-oss logs and
+  `/metadata` show Chat Completions `system_fingerprint` and last
+  `GET /v1/language-models` `{id, fingerprint, version, created}` for the
+  current sampling model, with when those were observed. Fingerprint is
+  backend configuration, not a SHA of the weights. A flip means the serving
+  path changed; behavior still decides if weights moved. Additive
+  `$GROK_HOME/grok_oss.db` schema v7 tables
+  `completion_system_fingerprint`, `language_model_serving`,
+  `serving_fingerprint_flip`. Does not drop `/spend` schema v1. Not on the
+  status bar. Do not invent dated slugs such as `grok-4.6-20260812` unless
+  that list endpoint names them. **Upstream** owns the Chat Completions
+  `system_fingerprint` JSON field. **Surmount** owns persist, flip history,
+  language-models snapshot, `/metadata` serving lines, and user-guide copy.
+  Tests: `format_includes_stored_serving_fingerprint_fields`,
+  `show_session_metadata_includes_fingerprint_fields_from_stored_samples`,
+  `parse_language_models_json_reads_id_fingerprint_version_created`,
+  `parse_language_models_json_does_not_invent_dated_slugs`,
+  `record_completion_fingerprint_persists_a_flip`,
+  `persist_language_models_list_upserts_and_records_flip`,
+  `migrate_v6_file_to_v7_adds_serving_tables_without_dropping_spend`,
+  `chat_completion_response_deserializes_system_fingerprint`,
+  `chat_completion_chunk_deserializes_system_fingerprint`,
+  `chat_completions_stream_copies_system_fingerprint_onto_assistant`,
+  `user_guide_metadata_documents_serving_fingerprints`.
 - [x] **`from_config` no-prefetch usable catalog**:
   `ModelsManager::from_config` with no prefetch argument is a zero-network
   boot and must produce a usable bundled catalog. Test:
@@ -760,6 +786,45 @@ identifier that has no matching `fn`.
   report). Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
   A restack can keep AGENTS via `FORK_PATHS` and still drop
   `CHILD_TASK_DESCRIPTION`.
+- [x] **`/goal` parent coordinates; L2 MUST spawn L3 (Surmount / grok-oss
+  fork of the injected prompt):** Upstream `goal_instruction` tells the
+  parent to "Deliver everything the user asked for yourself," which
+  fills L1. Surmount keeps the objective and the `update_goal` contract,
+  and tells L1 to coordinate (spawn L2; that L2 MUST spawn L3 for
+  tools; L3 does the tools; no L4). There is no bundled goal skill;
+  `goal_instruction` plus the live `goal_rules.md` /
+  `goal_rules_legacy.md` templates are the product prompt. Distinct
+  from spawn-tool copy `CHILD_TASK_DESCRIPTION` (easy L2 work may stay
+  on L2). Crate: `xai-grok-tools-api` `slash_commands.rs`. Tests:
+  `goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools`,
+  `goal_instruction_carries_objective_and_contract_tokens`. Live
+  harness: `xai-grok-shell`
+  `goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools`,
+  `goal_task_discipline_parent_spawns_l2_not_product_tools`.
+- [x] **Parent fire-and-return spawn (Surmount / grok-oss fork)**: a nested
+  L2 that is a long builder (compile, lake, mill) must not occupy the
+  parent as a blocking 10-minute `get_command_or_subagent_output` wait
+  loop. Parent starts it, keeps working, completion is a notification.
+  Parent can spawn a second L2 while the first is still running without
+  waiting for the first to exit. Snapshot (`omit` / `0`) is allowed.
+  Positive `timeout_ms` remains only when the parent must join.
+  Upstream parent turns often sit on a 10-minute wait. Named test:
+  `parent_spawn_subagent_second_l2_while_first_still_running_without_wait`
+  in `xai-tool-types` (`task.rs`) and `xai-grok-tools`
+  (`task/backend_tests.rs`).
+- [x] **Compact standing-law reminder (Surmount / grok-oss fork)**: after
+  compact, standing Surmount law (FORK.md as the divergence home, named
+  tests as contracts, red then green TDD, do not interrupt live L2s when
+  L1 shows a plan pane, fire-and-return for long builder L2s) is the
+  first section of the post-compaction `<system-reminder>`. It is not a
+  buried AGENTS.md paragraph and not `/recap`. Upstream parent turns
+  often sit on a 10-minute `get_command_or_subagent_output` wait.
+  Surmount starts the builder L2 and keeps working; completion is a
+  notification. Crate: `xai-grok-shell`
+  `session/helpers/compaction_context.rs`
+  (`section_surmount_standing_law_after_compact`, wrapped by
+  `xai-grok-compaction` `wrap_system_reminder`). Named test:
+  `post_compact_reminder_includes_surmount_standing_law`.
 - [x] **Soft interject only + Enter cue honesty**: mid-turn interject
   (Ctrl+Enter) injects into the current turn and **never cancels**. Cancel is
   Esc/stop only. Composer footer Enter cue (send / queue / interject) is
@@ -817,17 +882,30 @@ identifier that has no matching `fn`.
   `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
   `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`,
   `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md`,
+  `handle_rebuild_done_persists_open_plan_pane_and_session_load_docks_it`,
   `handle_rebuild_done_keeps_nested_subagents_for_resume`,
-  `rebuild_and_relaunch_starts_while_nested_subagents_are_running`
+  `rebuild_and_relaunch_starts_while_nested_subagents_are_running`,
+  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
+  `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`,
+  `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`
   (`xai-grok-pager` `app/dispatch/rebuild.rs` and `agent_view/session.rs`);
   `export_git_index_omits_unstaged_dirty_file`,
-  `stash_keep_index_hides_unstaged_wip_from_compile_worktree`
+  `stash_keep_index_hides_unstaged_wip_from_compile_worktree`,
+  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`
   (`xai-grok-update` `rebuild.rs`). Keep these stronger than an upstream
-  resume that cancels nested orphans. Leader `RelaunchForUpdate` keeps
-  nested ids on that leader the same way a TUI disconnect does (this
-  process is not exec-replaced while nested ids are live). After nested
-  ids finish, this process stays up while the parent turn is still busy,
-  with no five-second cap. Named drain tests:
+  resume that cancels nested orphans. This TUI exec-replaces onto the new
+  binary even while nested work is live. Unix exec keeps the same PID and
+  `ps` start time; compare `/proc/<pid>/exe` inode to the cargo-bin file.
+  Post-relaunch chrome shows `grok-oss` version plus git SHA (`ps` fork
+  time is not the signal). Named test:
+  `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`.
+  Restore occupancy-drops Human-turn queue rows even when memory
+  `pending_prompts` is already non-empty. Named test:
+  `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`.
+  Leader `RelaunchForUpdate` keeps nested ids on that leader the same way
+  a TUI disconnect does (the leader is not exec-replaced while nested ids
+  are live). After nested ids finish, that leader stays up while the parent
+  turn is still busy, with no five-second cap. Named drain tests:
   `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`,
   `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
   Not a land class. User-guide `04-slash-commands`.
@@ -1509,6 +1587,32 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   Do not claim repo `.agents/reports/` is the live home. Fold helper
   `first_report_path` matches any `.agents/reports/` substring (home or
   leftover repo path). That is implementation, not a land class.
+- [x] **Kill a think-only L3 after about 15 minutes (pinned 2026-09-09).**
+  L2 must kill an L3 that is still on turn 1 with no useful file or
+  test progress after about 15 minutes of think-only work or stalled
+  cargo-verify. Then L2 must spawn a tighter L3, or report failure.
+  Do not wait forever on 10-minute polls. L3 rambling think dumps
+  are a failed run, not progress. L1 never product-edits. Dual-pin:
+  [`AGENTS.md`](AGENTS.md) § *Kill a think-only L3 after about 15
+  minutes*; host `~/.grok/AGENTS.md` same heading; skill
+  `hierarchically-structured-subagents`.
+- [x] **Fire-and-return (pinned 2026-09-09).** Surmount wait law, not
+  upstream default. Start a long nested job (compile, mill, Lake).
+  The parent keeps working. It does not sit in a blocking
+  `get_command_or_subagent_output` ten-minute loop. When the job
+  finishes, the parent is notified and then does the next step or
+  reports the fail. Return means the parent still owns the outcome.
+  Forget would mean never look at the result. "Background the job"
+  and "don't wait" omit that ownership. Named tests now exist:
+  `parent_spawn_subagent_second_l2_while_first_still_running_without_wait`
+  (`xai-tool-types` `task.rs` and `xai-grok-tools`
+  `task/backend_tests.rs`) and
+  `post_compact_reminder_includes_surmount_standing_law`
+  (`xai-grok-shell` `compaction_context.rs`, helper
+  `section_surmount_standing_law_after_compact`). Named tests are
+  contracts: observed red, then green; do not fit the test to a
+  ten-minute poll. Dual-pin: [`AGENTS.md`](AGENTS.md) and
+  host `~/.grok/AGENTS.md` § *Fire-and-return*.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +
@@ -1564,9 +1668,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `write`, OpenCode `edit`, `hashline_edit`): each tool takes the path
   automatically as part of the call. Happy path is silent. A held path
   is a tool error that names the holder and the file. The tool does
-  not write, wait, or show a human steal, skip, or wait menu. Lock
-  releases when the call finishes. File-level infer-from-path verify
-  still runs under the same hold. Helper: `xai-grok-tools`
+  not write, wait, or show a human steal, skip, or wait menu. The hard
+  exclusive lock lasts only for that one edit-tool call, then releases.
+  Spawn `write_paths` is a soft assignment (reminder to siblings, not a
+  lifetime exclusive lock). File-level infer-from-path verify still
+  runs under the same hold. Helper: `xai-grok-tools`
   `implementations/editor_infra/per_path_write_lock.rs`. Named tests
   below. A restack that drops the helper, the OpenCode `edit` lock
   acquire, the `hashline_edit` lock acquire, or those tests is a
@@ -1686,16 +1792,21 @@ before canonicalize or any write. Existing-file edits and new-file
 - `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`
 - `hashline_edit_refuses_when_another_agent_holds_the_path`
 - `hashline_edit_happy_path_does_not_mention_the_lock`
-- `search_replace_refuses_a_path_reserved_by_another_agent`
-- `reserved_path_blocks_another_agent_until_holder_released`
+- `sequential_writes_succeed_after_the_first_tool_call_returns_even_when_both_agents_were_assigned_the_same_write_paths`
+- `concurrent_in_flight_writes_on_the_same_path_still_conflict`
+- `spawn_write_paths_soft_assignment_does_not_block_a_sibling_and_the_reminder_is_observable`
 - `same_holder_can_write_a_path_they_reserved`
-- `reserved_path_blocks_another_agent_in_flight_write`
+- `sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths`
+- `search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment`
+- `soft_lock_reminder_is_observable_on_a_sibling_tool_call`
+- `spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error`
 
-Spawn-time claims (`write_paths` on `task` / `spawn_subagent`) last until the child finishes. Omit the field to skip spawn-time claims; edit tools still refuse overlapping in-flight writes.
+Spawn `write_paths` on `task` / `spawn_subagent` is a **soft assignment**. Other nested agents get a reminder (`L2 X is assigned these paths`). Spawn and later sequential edits do not fail for the child's lifetime. The hard exclusive lock lasts only for one `search_replace` / `write` / `apply_patch` call. Two agents still cannot write the same file at the same instant.
 
 ```bash
 cargo test -p xai-grok-tools --lib per_path_write_lock
-cargo test -p xai-grok-tools --lib spawn_rejects_when_write_paths_overlap_a_live_claim
+cargo test -p xai-grok-tools --lib spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error
+cargo test -p xai-grok-tools --lib soft_lock_reminder_is_observable_on_a_sibling_tool_call
 ```
 
 OpenCode `edit` fixture (not under that module filter):
@@ -1736,7 +1847,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. Fail-open: a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up. Named `/limits` words and `limits_pins.json`. grok-oss limits is not xAI billing truth. Machine console API key for host surmount-1: console API credits / console team prepaid, install under that host grok home (`$GROK_HOME` or `~/.grok`), never commit the key, no guest git, GPG sign on the laptop, attach SSH + tmux as user grok, L0 is not `/dashboard`. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`, `user_guide_limits_names_fail_open_and_named_commands`, `user_guide_machine_console_api_key_for_surmount_1`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. Nested L2/L3 overlay Esc dismisses the view and does not cancel. | Plan honesty `fn`s under Chrome. Overlay Esc: `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. L0 is Surmount GPUI and must not merge with `/dashboard` or `/running`. L0 action set remote host console API key is laptop-side for a machine console API key (never prints the key; no guest git). `/start` starts paused or interrupted work in this process; not `/resume`. `/unstick` resends the last parent prompt as if the network dropped it; orphans a hung in-flight prompt; WAL images resend as resource links, never data URLs; not `/resume`, not a second Human line, not unwind. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (Job, State, Operator, Next) when chat is unclear. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid. `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. Once `prompt_wal.jsonl` exists in the tree, `/rebuild` must say relaunch preserves that WAL. Do not document that preservation as shipped while the file is absent. | `running_slash_lists_sibling_fixture_row`; L0 `surmount-coordinator-gui` `write_enqueue_creates_per_session_file`, `omits_prompt_text`, `keeps_pid_session_cwd`, `enqueue_drop_path_is_per_session_id`, `CoordinatorApp_selects_row`, `CoordinatorApp_omits_prompt_in_displayed_fields`, `CoordinatorApp_enqueue_writes_drop_file`, `set_remote_host_console_api_key_never_prints_the_key`, `set_remote_host_console_api_key_is_not_pager_dashboard`; `user_guide_machine_console_api_key_for_surmount_1`; `/start` cite `start_*` tests; `/unstick` cite `unstick_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. L0 is Surmount GPUI and must not merge with `/dashboard` or `/running`. L0 action set remote host console API key is laptop-side for a machine console API key (never prints the key; no guest git). `/start` starts paused or interrupted work in this process; not `/resume`. `/unstick` resends the last parent prompt as if the network dropped it; orphans a hung in-flight prompt; WAL images resend as resource links, never data URLs; not `/resume`, not a second Human line, not unwind. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (Job, State, Operator, Next) when chat is unclear. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid, plus last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` for the current sampling model (serving-path config, not a SHA of the weights, not on the status bar). `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. Once `prompt_wal.jsonl` exists in the tree, `/rebuild` must say relaunch preserves that WAL. Do not document that preservation as shipped while the file is absent. | `running_slash_lists_sibling_fixture_row`; L0 `surmount-coordinator-gui` `write_enqueue_creates_per_session_file`, `omits_prompt_text`, `keeps_pid_session_cwd`, `enqueue_drop_path_is_per_session_id`, `CoordinatorApp_selects_row`, `CoordinatorApp_omits_prompt_in_displayed_fields`, `CoordinatorApp_enqueue_writes_drop_file`, `set_remote_host_console_api_key_never_prints_the_key`, `set_remote_host_console_api_key_is_not_pager_dashboard`; `user_guide_machine_console_api_key_for_surmount_1`; `/start` cite `start_*` tests; `/unstick` cite `unstick_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `show_session_metadata_includes_fingerprint_fields_from_stored_samples`; `user_guide_metadata_documents_serving_fingerprints`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. `[ui] composer_multiline` defaults on; false makes the Human box single-line. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
@@ -1882,7 +1993,9 @@ Hermeticity fixes keep that contract: PATH includes bash, `$GROK_HOME` is
 writable, TLS uses webpki roots when the OS store is empty, bwrap
 placeholders exist without dropping deny binds, and grok argv0 fixtures
 work on Nix coreutils (a multi-call binary). Land proof is those named
-`fn`s below, not a skipped subset. Process: [`AGENTS.md`](AGENTS.md) hard
+`fn`s below, not a skipped subset. After compact, standing Surmount law
+is the first section of the post-compaction `<system-reminder>`, not a
+buried AGENTS.md paragraph. Process: [`AGENTS.md`](AGENTS.md) hard
 constraint 15.
 
 **The operator's words are the spec (pinned 2026-09-01).** A named cargo
@@ -2002,6 +2115,14 @@ last-session on start, **and** product skills are not a Python runtime.
 **Extra proven restack-droppable classes** (named cargo tests exist; a land
 that drops them while keeping the seven is still a seam loss):
 
+- Official serving-path fingerprints (Surmount persist + `/metadata`;
+  upstream Chat Completions `system_fingerprint` JSON). Named tests:
+  `show_session_metadata_includes_fingerprint_fields_from_stored_samples`,
+  `parse_language_models_json_reads_id_fingerprint_version_created`,
+  `record_completion_fingerprint_persists_a_flip`,
+  `user_guide_metadata_documents_serving_fingerprints`. Schema v7 tables
+  must not drop `/spend` v1
+  (`migrate_v6_file_to_v7_adds_serving_tables_without_dropping_spend`).
 - Always-on bubble copy **click + wrap** (paint-only is a failed land).
 - Plan present ≠ Approve + modal-free typing (four-CTA idle paint is not honesty).
 - Lost-prompt integration tests are fork-owned contracts. Clickable Approve
@@ -2025,6 +2146,7 @@ that drops them while keeping the seven is still a seam loss):
   `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md`,
   `handle_rebuild_done_keeps_nested_subagents_for_resume`,
   `rebuild_and_relaunch_starts_while_nested_subagents_are_running`,
+  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
   `export_git_index_omits_unstaged_dirty_file`,
   `stash_keep_index_hides_unstaged_wip_from_compile_worktree`. Unstaged WIP
   is not the compile source. Do not weaken to an upstream nested-cancel.
@@ -2039,7 +2161,9 @@ that drops them while keeping the seven is still a seam loss):
   `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue`,
   `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn`,
   `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
-  `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`.
+  `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`,
+  `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`,
+  `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`.
   Leader `RelaunchForUpdate` keeps nested ids on that leader the same way
   a TUI disconnect does, and keeps this process up while the parent turn
   is still busy (no five-second cap). Named tests:
@@ -2133,6 +2257,30 @@ that drops them while keeping the seven is still a seam loss):
   `poisoned_image_session_recovers_within_the_failing_turn`).
 - Always-three-layer product prompt (`child_task_description_is_concise`,
   `default_max_allows_l2_to_spawn_l3`).
+- `/goal` parent coordinates (Surmount fork of the injected prompt vs
+  upstream "Deliver everything yourself"):
+  `goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools`
+  (`xai-grok-tools-api` `slash_commands.rs`). Keep
+  `goal_instruction_carries_objective_and_contract_tokens`. Live
+  templates: `goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools`,
+  `goal_task_discipline_parent_spawns_l2_not_product_tools`
+  (`xai-grok-shell`).
+- Parent fire-and-return spawn (Surmount / grok-oss fork): a nested L2
+  that is a long builder must not occupy the parent as a blocking
+  10-minute `get_command_or_subagent_output` wait. Parent starts it,
+  keeps working, completion is a notification. Parent can spawn a
+  second L2 while the first is still running. Named `fn`:
+  `parent_spawn_subagent_second_l2_while_first_still_running_without_wait`
+  (`xai-tool-types` `task.rs` and `xai-grok-tools`
+  `task/backend_tests.rs`).
+- Compact standing-law reminder (Surmount / grok-oss fork): after compact,
+  standing Surmount law is the first `<system-reminder>` section, not a
+  buried AGENTS.md paragraph and not `/recap`. Upstream parent turns
+  often sit on a 10-minute poll wait. Surmount is fire-and-return for
+  long builder L2s, and that wait/discovery law is injected here. Named
+  `fn`: `post_compact_reminder_includes_surmount_standing_law`
+  (`xai-grok-shell` `compaction_context.rs`
+  `section_surmount_standing_law_after_compact`).
 - File-level infer-from-path verify after ACP structured edits
   (`rustfmt_argv_edition_2024_config_and_absolute_files`,
   `clippy_argv_lints_the_edited_file_not_crate_lib`,
@@ -2146,7 +2294,10 @@ that drops them while keeping the seven is still a seam loss):
   `held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu`,
   `opencode_edit_cannot_write_a_path_another_agent_already_holds`,
   `hashline_edit_refuses_when_another_agent_holds_the_path`,
-  `hashline_edit_happy_path_does_not_mention_the_lock`).
+  `hashline_edit_happy_path_does_not_mention_the_lock`,
+  `sequential_writes_succeed_after_the_first_tool_call_returns_even_when_both_agents_were_assigned_the_same_write_paths`,
+  `spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error`,
+  `soft_lock_reminder_is_observable_on_a_sibling_tool_call`).
   A restack that drops `per_path_write_lock.rs`, the OpenCode `edit`
   lock acquire, the `hashline_edit` lock acquire, or these tests is a
   failed land. Not one of the seven numbered classes.
@@ -2336,7 +2487,8 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
   build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
   peer_relaunch_accepts_same_semver_different_sha \
   peer_relaunch_declines_equal_identity_on_same_path \
-  peer_relaunch_accepts_deleted_inode_even_when_identity_equal
+  peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
+  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart
 cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_identity
 
 # Extra: /rebuild signals every live grok-oss PID (SHA-aware is not this list)
@@ -2351,6 +2503,9 @@ cargo test -p xai-grok-pager --lib -- \
   handle_rebuild_done_persists_plan_feedback_draft_and_plan_md \
   handle_rebuild_done_keeps_nested_subagents_for_resume \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
+  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart \
+  post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha \
+  restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty \
   rebuild_subcommand_parses \
   prompt_wal_appends_on_enter_before_model_wait \
   prompt_wal_appends_on_mid_turn_interject \
@@ -2440,6 +2595,13 @@ cargo test -p xai-grok-pager --lib -- \
 cargo test -p xai-grok-shell --lib -- \
   main_session_sampling_window_is_catalog_500k_even_when_economic_is_on \
   nested_session_sampling_window_stays_200k_when_catalog_is_500k
+
+# Extra: parent fire-and-return spawn (no blocking 10-minute wait)
+cargo test -p xai-tool-types --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
+cargo test -p xai-grok-tools --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
+
+# Extra: compact standing-law reminder (not AGENTS.md)
+cargo test -p xai-grok-shell --lib -- post_compact_reminder_includes_surmount_standing_law
 
 # Extra: spawn-prompt fold + last-answer caps
 cargo test -p xai-grok-sampling-types --lib -- fold_spawn_prompt

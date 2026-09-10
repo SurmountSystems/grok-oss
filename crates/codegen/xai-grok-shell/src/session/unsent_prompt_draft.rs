@@ -759,8 +759,8 @@ pub mod prompt_wal {
     /// Parsed user-turn matching (JSONL, `/goal` rewrite, escaped quotes).
     /// Not a raw file `contains` of decoded WAL text.
     pub use crate::session::prompt_wal_recorded::{
-        operator_text_already_recorded, unwrap_user_query, user_texts_from_chat_history_jsonl,
-        wal_sends_missing_from_history,
+        operator_text_already_recorded, operator_text_matches_recorded, unwrap_user_query,
+        user_texts_from_chat_history_jsonl, wal_sends_missing_from_history,
     };
 
     #[cfg(test)]

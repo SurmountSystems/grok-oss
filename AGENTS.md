@@ -35,6 +35,17 @@ scratch. Session `plan.md` under `.grok/sessions/` is product/session
 state and does not move to `~/.agents/`. Host dual-pin:
 `~/.grok/AGENTS.md` § *Project agent home*.
 
+### Process violation: `docs/dev/bugs/` is not a reports home (pinned 2026-09-09)
+
+Operator: process violation. `docs/dev/bugs/` is not a reports home.
+Do not invent a `docs/dev/bugs/` diary in git. Agent reports and bug
+screenshots must not live in the grok-oss git tree. Live reports home
+is `~/.agents/reports/` on this machine. GitHub bug reports attach
+screenshots on the issue (`docs/github-tracking.md`). Do not create
+project `.agents/reports/`, `.agents/plans/`, or project-root `.grok/`
+for reports. This pin does not weaken § *Project agent home*. Host
+dual-pin: `~/.grok/AGENTS.md` same heading.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -219,7 +230,8 @@ less than product code and tests. Do not invent long essays or git nags.
    the catalog 500k sampling window. AUTO compact on L1 uses that
    window, not the old 200k knee. Nested L2 sampling stays 200k. L2
    may compact. L3 never compact. An L3 is disposable. If it stalls
-   or spirals, kill it. When an L3 is near 200k, it summarizes,
+   or spirals, kill it. Think-only stall: see § *Kill a think-only L3
+   after about 15 minutes*. When an L3 is near 200k, it summarizes,
    reports to L2, and stops. Do not compact-and-continue on L3.
    Keep L1 near about 40% of that 500k window, and keep nested
    sessions near 40% of their 200k window. Compaction is expensive
@@ -770,9 +782,9 @@ joins under project `.agents/joins/`.
 
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
-- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error.
+- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
 - **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report.
-- **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
+- **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not edit product code (see § *I hate seeing you edit code at L1*). L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
 - **No worktrees** on this tree (`allow_worktree = false`). Do not invent a worktree workflow.
@@ -815,15 +827,59 @@ This section is project **D1** law and must survive recon. Host dual-pin:
 `~/.grok/AGENTS.md` § *Regressions and deep diagnosis* + § *Hard stop — parent
 is coordinator only*.
 
+### Kill a think-only L3 after about 15 minutes (pinned 2026-09-09)
+
+Operator: wasteful L3s spiral in think-only loops and do nothing useful.
+Detect and prevent.
+
+L2 must kill an L3 that is still on turn 1 with no useful file or test
+progress after about 15 minutes of think-only work or stalled
+cargo-verify. Then L2 must spawn a tighter L3, or report failure. Do
+not wait forever on 10-minute polls.
+
+L1 never product-edits. L3 rambling think dumps are a failed run, not
+progress. This pin does not license killing a healthy L2, or an L3 that
+is already editing files or running named tests.
+
+Dual-pin: this file; host `~/.grok/AGENTS.md` same heading;
+[`FORK.md`](FORK.md) Process; skill
+`hierarchically-structured-subagents`.
+
+### I hate seeing you edit code at L1 (pinned 2026-09-09)
+
+Operator: I hate seeing you edit code at L1. L1 must not edit product
+code. L1 spawns L2. L2 decides whether to spawn L3. Easy work can stay
+on L2. This pin does not weaken existing agent-depth law.
+
+The Hierarchical fast path stays: one-command host question, one
+already-named path, read the asked-for report, one already-named
+one-line edit. "Just a quick edit" of product code is not that path.
+
+Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
+
+### Fire-and-return (pinned 2026-09-09)
+
+Start a long nested job (compile, mill, Lake). The parent keeps working. It does not sit in a blocking wait until that job exits. When the job finishes, the parent is notified and then does the next step or reports the fail. The job is not abandoned.
+
+This name is more accurate than fire-and-forget, because forget means never look at the result. Return means the parent still owns the outcome. It is more precise than "background the job" or "don't wait", because those omit the notification and the next step.
+
+A blocking `get_command_or_subagent_output` ten-minute loop serializes L1 so FORK and AGENTS pins never run after compact. That is not fire-and-return.
+
+Host mill and Lake instance: `~/.grok/AGENTS.md` § *Session parallelism* and § *Do not wait on the isolated bottleneck*. Divergence home: [`FORK.md`](FORK.md) Process.
+
 Product: soft-park that **traps** L1 is rejected; plan review is on demand
 (`/view-plan`, status click, panel CTAs), not forced keyboard capture of the
 main thread.
 
 **Default loop (pinned 2026-07-27):** track on board → **spawn** → **wait** →
-read the short report on disk. Do **not** kill/respawn mid-flight to re-scope; do **not**
+read the short report on disk. Long mill, Lake, or compile jobs are
+**fire-and-return**: do not sit in a blocking `get_command_or_subagent_output`
+loop on those jobs (see § *Fire-and-return*). Do **not** kill/respawn mid-flight to re-scope; do **not**
 monologue interim workarounds while an implementer runs. Mid-flight operator
 clarifications → board upsert only; **resume** after the report (or additive spawn
-if disjoint). Host: § *Hard stop* default loop.
+if disjoint). A think-only L3 still on turn 1 after about 15 minutes is
+wasteful; L2 kills it (see § *Kill a think-only L3 after about 15 minutes*).
+Host: § *Hard stop* default loop.
 
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
   2026-07-26): never bare **child/children** as a nickname for subagents

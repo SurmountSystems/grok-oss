@@ -201,6 +201,72 @@ impl AgentView {
         }
     }
 
+    /// Keep-draft from before live present: Isolated Preview Enter still
+    /// SendPrompt. Comments typed after park still stash.
+    fn composer_is_keep_draft_from_before_present(&self) -> bool {
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        let notes = self.prompt.text();
+        pav.stashed_prompt.text.trim() == notes.trim()
+            && pav.stashed_prompt.images.len() == self.prompt.images.len()
+            && (!notes.trim().is_empty() || !self.prompt.images.is_empty())
+    }
+
+    /// Isolated Preview / Comment Enter stashes the Human-box critique so it
+    /// rides Approve. Keep-draft from before live present still SendPrompt.
+    /// Isolated Preview comments typed after park still stash. Empty Enter
+    /// never Approves. Line-comment overlay Enter still saves. Session
+    /// Multiline Enter still inserts a newline.
+    pub(super) fn hold_parked_plan_review_comments_from_enter(&mut self) -> bool {
+        let text = self.prompt.text().to_string();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        // Recognized slash commands are not plan review comments.
+        // `/plan queue` must still hold on the prompt queue; `--soft` is
+        // not the queue hold token.
+        if let Some(invocation) = crate::slash::parse_invocation(trimmed) {
+            let reg = self.prompt.slash_controller.registry();
+            if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
+            {
+                return false;
+            }
+        }
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        if self.multiline_mode && allow_newlines {
+            return false;
+        }
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        if pav.focus == PlanApprovalFocus::Commenting {
+            return false;
+        }
+        if self.composer_is_keep_draft_from_before_present() {
+            return false;
+        }
+        let pane_open = self.line_viewer.is_some();
+        let hold = match pav.prompt_intent {
+            PlanPromptIntent::Comment => true,
+            PlanPromptIntent::Revise
+            | PlanPromptIntent::Questions
+            | PlanPromptIntent::ApproveNotes => {
+                pane_open && pav.focus == PlanApprovalFocus::Preview
+            }
+        };
+        if !hold {
+            return false;
+        }
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.feedback_draft = Some(text);
+        }
+        self.persist_unsent_composer_draft_now();
+        self.show_toast("This comment will ride Approve. Click Approve, Clarify, or Revise.");
+        true
+    }
+
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let in_plan_approval = self.plan_approval_view.is_some();
@@ -273,9 +339,13 @@ impl AgentView {
         }
         if in_plan_approval && key!(Enter).matches(key) && !crate::input::is_mod_enter(key) {
             let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
-            if focus == Some(PlanApprovalFocus::Commenting)
-                || focus == Some(PlanApprovalFocus::Prompt)
-            {
+            if focus == Some(PlanApprovalFocus::Commenting) {
+                return self.handle_plan_feedback_key(key);
+            }
+            if self.hold_parked_plan_review_comments_from_enter() {
+                return InputOutcome::Changed;
+            }
+            if focus == Some(PlanApprovalFocus::Prompt) {
                 return self.handle_plan_feedback_key(key);
             }
             if !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty() {
@@ -355,8 +425,11 @@ impl AgentView {
                 if focus == Some(PlanApprovalFocus::Prompt) {
                     return self.handle_plan_feedback_key(key);
                 }
-                // Preview: empty Enter never Approves. A draft submits as
-                // a normal prompt so present cannot steal the composer.
+                if self.hold_parked_plan_review_comments_from_enter() {
+                    return InputOutcome::Changed;
+                }
+                // Preview: empty Enter never Approves. A non-empty draft
+                // already stashed above so it can ride Approve.
                 return self.send_composer_as_normal_prompt();
             }
             if self.is_plan_viewer() {

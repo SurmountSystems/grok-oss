@@ -6,6 +6,10 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Leader AutoUpdate drain stays leftover (2026-09-09).** Nested hold before leader relaunch is not this rebuild-identity and stale-queue slice. TUI `/rebuild` still exec-replaces while nested work is live. Named drain tests stay `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect` and `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+
+- **This Grok Build window still needs left grok-oss `/rebuild` to show the identity and stale-queue fix (2026-09-09).** The source tree now shows grok-oss version plus git SHA after exec, occupancy-drops Human-turn queue rows even when memory is already non-empty, and keeps `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` on post-rebuild load. This stock Grok Build TUI 1.0.13 debugger is a different binary and does not pick up that chrome. Left grok-oss PID 88691 loads the fix only after that process `/rebuild`s or is restarted onto a newly installed `grok-oss`. Named `just test-remote` stays operator-owned. Report: `/home/hunter/.agents/reports/impl-rebuild-identity-and-stale-queue.md`.
+
 - **Remote operation performance (2026-09-03).** This nested overlay had wait/kill/get_output and no `spawn_subagent`. Load path: `apply_child_tool_policy` strips Task when `nested_spawn_allowed` is false (`child_depth >= max`). Operator `config.toml` has no `max_depth`. A remote `grok_build_settings.subagents_max_depth` of 1 no longer wins over the L1→L2→L3 default. Named tests: `resolve_max_depth_remote_one_does_not_block_l2_spawn`, `l2_grok_build_child_tool_policy_keeps_spawn_subagent`, `max_depth_child_tool_policy_strips_spawn_subagent_and_keeps_bash_lifecycle`. SSH TUI default draw cadence is 33ms when the display-refresh probe is skipped (`ssh_probe_skip_uses_slower_default_cadence`). Leftover: this running grok-oss binary still omits `spawn_subagent` until the Operator installs grok-oss and reopens the session; copying `enqueue.json` onto the remote grok home; the GPUI L0 window; grok-rate-limit HTTP cooldowns were already the shared flock store and were not changed this slice. Compaction `image_url` serialization belongs to the image L2. Report: `/home/hunter/.agents/reports/fix-remote-operation-performance.md`.
 
 - **Waiting for the model is not always a hang (shipped in source 2026-09-01).** Live nested wait, live sampler wait, queued `pending_prompts` (1 queued while nested still running), and false wait after nested ids already completed are distinct. `/unstick` does not auto-fire on a long live wait. Named tests: `waiting_for_the_model_is_not_idle_when_nested_subagent_still_running`, `waiting_for_the_model_is_not_idle_when_prompt_is_queued`, `parent_must_not_wait_for_the_model_after_waited_nested_already_completed`. This running grok-oss TUI will not show that wait-kind chrome until you install grok-oss and reopen the session. Named `just test-remote` stays operator-owned. The wait tool on the shell may still be Pending after chrome drops; this slice does not complete that ACP call.
@@ -149,25 +153,26 @@ or code — not only here. Closed campaign history:
   `.agents/reports/live-tasks-2026-08-15.md`.
 
 - **ACP edit tools take a per-path write lock (shipped 2026-08-15;
-  spawn `write_paths` 2026-08-22).** `search_replace`, `apply_patch`,
-  `write`, OpenCode `edit`, and `hashline_edit` acquire the path
-  automatically as part of the tool call. Happy path is silent (no lock
-  argument). A held path is a tool error that names the holder and the
-  file. The tool does not write, wait, or show a human steal, skip, or
-  wait menu. Agents resolve the conflict by talking to each other. The
-  in-flight lock releases when the call finishes. Spawn may also pass
-  `write_paths` on `task` / `spawn_subagent` to claim files until the
-  child finishes. That claim is optional. Omit it when paths are
-  unknown. File-level infer-from-path verify still runs under the
-  in-flight hold. FORK subsection **ACP per-path write lock**. Named
-  tests: module filter `per_path_write_lock`; spawn
-  `spawn_rejects_when_write_paths_overlap_a_live_claim`; OpenCode edit
-  `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
-  Report: `/home/hunter/.agents/reports/feat-subagent-write-coordination.md`.
-  Spawn claims stay optional. Session board todos do not claim files.
-  Nested agents do not get a sibling-writer list. The table is in this
-  process only. "Preparing write" is a TUI activity label, not a lock
-  wait.
+  spawn `write_paths` soft assignment 2026-09-09).** `search_replace`,
+  `apply_patch`, `write`, OpenCode `edit`, and `hashline_edit` acquire
+  the path automatically as part of the tool call. Happy path is silent
+  (no lock argument). A held path is a tool error that names the holder
+  and the file. The tool does not write, wait, or show a human steal,
+  skip, or wait menu. The hard exclusive lock lasts only for that one
+  edit-tool call, then releases. Spawn `write_paths` on `task` /
+  `spawn_subagent` is a soft assignment: other nested agents get a
+  reminder that an L2 is assigned those paths. Spawn and later sequential
+  edits do not fail for the child's lifetime. Two agents still cannot
+  write the same file at the same instant. File-level infer-from-path
+  verify still runs under the in-flight hold. FORK subsection **ACP
+  per-path write lock**. Named tests: module filter `per_path_write_lock`;
+  spawn `spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error`;
+  reminder `soft_lock_reminder_is_observable_on_a_sibling_tool_call`;
+  OpenCode edit `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
+  Report: `/home/hunter/.agents/reports/l3-impl-tool-call-hard-locks.md`.
+  Spawn assignment stays optional. Session board todos do not claim
+  files. The table is in this process only. "Preparing write" is a TUI
+  activity label, not a lock wait.
 
 - **Tools improve tools (pinned 2026-08-15; process law, not a product
   slice).** Do not write disposable bash, Python, or one-off `curl` as

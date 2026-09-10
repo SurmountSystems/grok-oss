@@ -203,7 +203,15 @@ pub(super) fn handle_exit_plan_mode(
         agent.prompt.set_text("");
     }
     let restore_open_pane = is_restore
-        && (agent.is_plan_viewer() || agent.line_viewer.is_some() || agent.view_plan_requested);
+        && (agent.is_plan_viewer()
+            || agent.line_viewer.is_some()
+            || agent.view_plan_requested
+            || agent.session.session_id.as_ref().is_some_and(|sid| {
+                crate::slash::commands::plan::take_isolated_preview_open(
+                    &agent.session.cwd.to_string_lossy(),
+                    sid.0.as_ref(),
+                )
+            }));
 
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0;
@@ -277,6 +285,9 @@ pub(super) fn handle_exit_plan_mode(
         agent.latest_inline_plan_content = state.plan_content.clone();
     } else {
         agent.latest_inline_plan_content = None;
+    }
+    if let Some(ref body) = state.plan_content {
+        agent.persist_session_plan_body(body);
     }
     // Live present re-arms decision CTAs after a prior Approve/Quit and
     // clears Revise/Clarify in-flight so CTAs arm once. Restore must not

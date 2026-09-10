@@ -5720,3 +5720,166 @@ fn http_502_failed_turn_does_not_auto_run_next_implement() {
             .collect::<Vec<_>>()
     );
 }
+
+const PLAN_COMMENT_CRITIQUE: &str = "keep the join order from the archive index";
+
+fn park_comment_plan(app: &mut crate::app::app_view::AppView) {
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+    pav.focus = PlanApprovalFocus::Prompt;
+    pav.prompt_intent = PlanPromptIntent::Comment;
+    agent.plan_approval_view = Some(pav);
+    agent.session.state = AgentState::Idle;
+}
+
+fn effects_start_model_prompt(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )
+    })
+}
+
+/// Surmount / grok-oss fork: named tests are contracts.
+/// After Comment, a non-empty Human-box critique must not dispatch a
+/// model Prompt. Empty Enter never Approves. The text stays so Approve
+/// can wrap [`PLAN_APPROVED_REVIEW_COMMENTS_LEAD`].
+#[test]
+fn comment_intent_send_prompt_does_not_start_model_wait() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    park_comment_plan(&mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("");
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "Comment critique must not start a Prompt; effects={effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Comment Enter must not Approve"
+    );
+    assert_eq!(agent.session.state, AgentState::Idle);
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "Comment critique must not queue a Prompt, got {:?}",
+        agent.session.pending_prompts
+    );
+    assert!(
+        agent.prompt.text().contains(PLAN_COMMENT_CRITIQUE),
+        "try_send restore: composer must keep the critique for Approve, got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.feedback_draft.as_deref()),
+        Some(PLAN_COMMENT_CRITIQUE)
+    );
+}
+
+/// Isolated Preview Human-box typing is the same comment path while the
+/// plan pane is open. Enter must not start Waiting for the model.
+#[test]
+fn isolated_preview_send_prompt_does_not_start_model_wait() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_approval_view =
+            Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: Isolated Preview pane must be open"
+        );
+        agent.prompt.set_text("");
+        agent.session.state = AgentState::Idle;
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "Isolated Preview critique must not start a Prompt; effects={effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Isolated Preview Enter must not Approve"
+    );
+    assert_eq!(agent.session.state, AgentState::Idle);
+    assert!(agent.prompt.text().contains(PLAN_COMMENT_CRITIQUE));
+}
+
+/// Held comments ride Approve with the review-comments lead. Empty Enter
+/// never Approves; this path is non-empty then click Approve.
+#[test]
+fn comment_intent_held_critique_rides_approve_with_review_lead() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    park_comment_plan(&mut app);
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "hold must happen before Approve; effects={effects:?}"
+    );
+
+    let outcome = app.agents.get_mut(&id).unwrap().approve_plan();
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve must wrap with PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_COMMENT_CRITIQUE),
+                "Approve must carry the held critique, got {text:?}"
+            );
+        }
+        other => panic!("Approve after held Comment critique must Interject; got {other:?}"),
+    }
+    assert!(
+        app.agents.get(&id).unwrap().plan_approval_view.is_none(),
+        "Approve must decide the parked plan"
+    );
+}
+
+/// Revise Prompt focus is revision notes, not this hold. A dispatched
+/// SendPrompt there still asks the model so we do not swallow every
+/// parked-plan send.
+#[test]
+fn revise_prompt_send_prompt_still_asks_the_model() {
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        agent.plan_approval_view = Some(pav);
+        agent.session.state = AgentState::Idle;
+    }
+    let effects = dispatch(
+        Action::SendPrompt("please use auth middleware".into()),
+        &mut app,
+    );
+    assert!(
+        effects_start_model_prompt(&effects)
+            || app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains("auth middleware")),
+        "Revise Prompt SendPrompt must not be swallowed as a held comment; effects={effects:?}"
+    );
+}

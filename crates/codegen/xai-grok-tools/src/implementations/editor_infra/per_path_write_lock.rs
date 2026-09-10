@@ -11,22 +11,26 @@
 //! This is a fail-fast table, not the unused FIFO waiter in
 //! [`super::file_operation_lock`].
 //!
-//! Spawn may also claim paths for a live subagent (`write_paths` on
-//! `task` / `spawn_subagent`). That claim lasts until the child
-//! finishes. Edit tools still take the short in-flight lock on top.
+//! Spawn `write_paths` on `task` / `spawn_subagent` is a **soft
+//! assignment**. Other nested agents get a reminder that a sibling is
+//! assigned those paths. Assignment does not exclusive-block spawn or
+//! edits for the child's lifetime. The hard exclusive lock is only
+//! [`try_acquire_write`] for one `search_replace` / `write` /
+//! `apply_patch` call.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::types::resources::{OwnerSessionId, SharedResources};
 
-/// Process-wide table: in-flight writes and spawn-time claims.
+/// Process-wide table: in-flight hard locks and spawn-time soft assignments.
 struct WriteLockTable {
-    /// Path currently inside an edit-tool call.
+    /// Path currently inside an edit-tool call (hard lock).
     held: HashMap<PathBuf, String>,
-    /// Path claimed by a live subagent until [`release_holder`].
-    reserved: HashMap<PathBuf, String>,
+    /// Path assigned to live subagents via spawn `write_paths` (soft).
+    /// Several holders may share a path. This does not block acquire.
+    assigned: HashMap<PathBuf, HashSet<String>>,
 }
 
 static TABLE: OnceLock<Mutex<WriteLockTable>> = OnceLock::new();
@@ -35,7 +39,7 @@ fn table() -> &'static Mutex<WriteLockTable> {
     TABLE.get_or_init(|| {
         Mutex::new(WriteLockTable {
             held: HashMap::new(),
-            reserved: HashMap::new(),
+            assigned: HashMap::new(),
         })
     })
 }
@@ -54,11 +58,6 @@ fn unique_normalized_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) ->
 
 fn holder_conflict<'a>(table: &'a WriteLockTable, key: &Path, holder: &str) -> Option<&'a str> {
     if let Some(existing) = table.held.get(key)
-        && existing != holder
-    {
-        return Some(existing.as_str());
-    }
-    if let Some(existing) = table.reserved.get(key)
         && existing != holder
     {
         return Some(existing.as_str());
@@ -185,34 +184,62 @@ pub fn try_acquire_writes(
     Ok(guards)
 }
 
-/// Claim paths for a live subagent until [`release_holder`].
+/// Soft-assign paths for a live subagent until [`release_holder`].
 ///
-/// All-or-nothing. The same holder may claim a path twice. Another
-/// holder, or an in-flight write by someone else, is a [`PathHeldError`].
-pub fn try_reserve_writes(
-    paths: impl IntoIterator<Item = impl AsRef<Path>>,
-    holder: &str,
-) -> Result<(), PathHeldError> {
+/// Overlapping assignment with another live subagent succeeds. It does
+/// not exclusive-block that sibling's later edit. The same holder may
+/// assign a path twice. Hard conflict is only an in-flight
+/// [`try_acquire_write`] by someone else, and that is still only for
+/// that one tool call.
+pub fn try_reserve_writes(paths: impl IntoIterator<Item = impl AsRef<Path>>, holder: &str) {
     let unique = unique_normalized_paths(paths);
     let mut table = lock_table();
-    for key in &unique {
-        if let Some(existing) = holder_conflict(&table, key, holder) {
-            return Err(PathHeldError {
-                path: key.clone(),
-                holder: existing.to_string(),
-            });
-        }
-    }
     for key in unique {
-        table.reserved.insert(key, holder.to_string());
+        table
+            .assigned
+            .entry(key)
+            .or_default()
+            .insert(holder.to_string());
     }
-    Ok(())
 }
 
-/// Drop every spawn-time path claim for this holder.
+/// Drop every spawn-time path assignment for this holder.
 pub fn release_holder(holder: &str) {
     let mut table = lock_table();
-    table.reserved.retain(|_, existing| existing != holder);
+    for holders in table.assigned.values_mut() {
+        holders.remove(holder);
+    }
+    table.assigned.retain(|_, holders| !holders.is_empty());
+}
+
+/// Reminder text for other nested agents: which live L2s are assigned
+/// which paths. `except_holder` is the current agent, so they do not
+/// get a note about their own assignment.
+pub fn format_soft_assignment_reminder(except_holder: Option<&str>) -> Option<String> {
+    let table = lock_table();
+    let mut by_holder: BTreeMap<&str, Vec<&Path>> = BTreeMap::new();
+    for (path, holders) in &table.assigned {
+        for holder in holders {
+            if except_holder.is_some_and(|id| id == holder) {
+                continue;
+            }
+            by_holder.entry(holder.as_str()).or_default().push(path);
+        }
+    }
+    if by_holder.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(by_holder.len());
+    for (holder, mut paths) in by_holder {
+        paths.sort();
+        let listed = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("L2 {holder} is assigned these paths: {listed}."));
+    }
+    Some(lines.join("\n"))
 }
 
 /// Who should be named if this call holds the path.
@@ -326,28 +353,86 @@ mod tests {
     }
 
     #[test]
-    fn reserved_path_blocks_another_agent_until_holder_released() {
+    fn sequential_writes_succeed_after_the_first_tool_call_returns_even_when_both_agents_were_assigned_the_same_write_paths()
+     {
+        // Operator: write locks must be hard at the tool-call level, not at
+        // the agent/layer level. Two agents sequential writes to the same
+        // file after first tool call returns must succeed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("shared.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let first = format!("seq-first-{}", path.display());
+        let second = format!("seq-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+
+        let first_call = try_acquire_write(&path, &first).unwrap();
+        drop(first_call);
+        let second_call = try_acquire_write(&path, &second);
+        assert!(
+            second_call.is_ok(),
+            "after the first search_replace/write/apply_patch call returns, a sibling must be able to write the same file"
+        );
+        release_holder(&first);
+        release_holder(&second);
+    }
+
+    #[test]
+    fn concurrent_in_flight_writes_on_the_same_path_still_conflict() {
+        // Operator: keep the two-agents-cannot-write-the-same-file-at-the-same-instant
+        // contract. That is the hard lock. Concurrent overlapping in-flight
+        // edits on the same path still fail.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("inflight.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let first = format!("hard-first-{}", path.display());
+        let second = format!("hard-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+        let _first_call = try_acquire_write(&path, &first).unwrap();
+        let err = try_acquire_write(&path, &second).unwrap_err();
+        assert_eq!(err.holder, first);
+        release_holder(&first);
+        release_holder(&second);
+    }
+
+    #[test]
+    fn spawn_write_paths_soft_assignment_does_not_block_a_sibling_and_the_reminder_is_observable() {
+        // Operator: layer/L2 write_paths claims must be a soft lock. Other
+        // agents get an automated reminder that a sibling is working on that
+        // path. They must not be blocked for minutes (ACP claim for the whole
+        // L2 lifetime).
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("claimed.txt");
         std::fs::write(&path, "x\n").unwrap();
-        // Holder ids must be unique across parallel tests: release_holder
-        // drops every claim for that id.
-        let first = format!("reserve-until-{}", path.display());
-        let second = format!("reserve-until-other-{}", path.display());
-        try_reserve_writes([&path], &first).unwrap();
-        let err = try_reserve_writes([&path], &second).unwrap_err();
-        assert_eq!(err.holder, first);
-        let message = err.message();
+        let first = format!("soft-first-{}", path.display());
+        let second = format!("soft-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+
+        let note = format_soft_assignment_reminder(Some(&second))
+            .expect("soft-lock reminder must be observable to the sibling");
         assert!(
-            message.contains(&first),
-            "error must name the holder: {message}"
+            note.contains(&format!("L2 {first} is assigned these paths")),
+            "reminder must name the assigned sibling: {note}"
         );
         assert!(
-            message.contains("claimed.txt"),
-            "error must name the file: {message}"
+            note.contains("claimed.txt"),
+            "reminder must name the file: {note}"
         );
+
+        let write = try_acquire_write(&path, &second);
+        assert!(
+            write.is_ok(),
+            "a sibling must not be exclusive-blocked for the assignee's lifetime"
+        );
+        drop(write);
         release_holder(&first);
-        try_reserve_writes([&path], &second).expect("path must be free after the holder finishes");
+        let leftover = format_soft_assignment_reminder(Some(&second)).unwrap_or_default();
+        assert!(
+            !leftover.contains(&first),
+            "reminder must end when the assignee finishes: {leftover}"
+        );
         release_holder(&second);
     }
 
@@ -357,7 +442,7 @@ mod tests {
         let path = tmp.path().join("own.txt");
         std::fs::write(&path, "x\n").unwrap();
         let holder = format!("same-holder-{}", path.display());
-        try_reserve_writes([&path], &holder).unwrap();
+        try_reserve_writes([&path], &holder);
         let write = try_acquire_write(&path, &holder);
         assert!(
             write.is_ok(),
@@ -365,18 +450,5 @@ mod tests {
         );
         drop(write);
         release_holder(&holder);
-    }
-
-    #[test]
-    fn reserved_path_blocks_another_agent_in_flight_write() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("other.txt");
-        std::fs::write(&path, "x\n").unwrap();
-        let first = format!("inflight-reserve-{}", path.display());
-        let second = format!("inflight-other-{}", path.display());
-        try_reserve_writes([&path], &first).unwrap();
-        let err = try_acquire_write(&path, &second).unwrap_err();
-        assert_eq!(err.holder, first);
-        release_holder(&first);
     }
 }

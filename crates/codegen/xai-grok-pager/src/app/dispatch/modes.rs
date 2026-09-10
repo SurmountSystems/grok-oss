@@ -55,6 +55,10 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
 /// if a description is provided). When already in plan mode: no-op with toast.
 /// Use `/view-plan` to open the current saved plan preview.
 ///
+/// `/plan --soft` docks Isolated Preview for a new feature (`soft: true`).
+/// Present is not Approve. Nested L2s stay Working. `--soft` is not the
+/// queue hold token.
+///
 /// When a description is present, the mode switch and prompt send must be
 /// ordered: the mode switch ACP call must complete before the prompt is
 /// dispatched. `SetModeThenPrompt` bundles both into a single spawned task
@@ -62,17 +66,25 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
 pub(super) fn dispatch_enter_plan_mode(
     app: &mut AppView,
     description: Option<String>,
+    soft: bool,
 ) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if soft && let Some(agent) = app.agents.get_mut(&id) {
+        // `/plan --soft` docks Isolated Preview. `/view-plan` stays
+        // `dispatch_show_plan` → `open_plan_from_view_plan_or_status`.
+        agent.dock_isolated_preview();
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
 
     let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
     if in_plan {
-        app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
+        if !soft {
+            app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
+        }
         return vec![];
     }
 

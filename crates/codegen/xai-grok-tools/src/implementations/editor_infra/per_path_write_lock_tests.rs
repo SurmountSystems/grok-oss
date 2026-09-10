@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
 use crate::implementations::editor_infra::per_path_write_lock::{
-    release_holder, try_acquire_write, try_reserve_writes,
+    format_soft_assignment_reminder, release_holder, try_acquire_write, try_reserve_writes,
 };
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
 use crate::implementations::grok_build_hashline::edit::{
@@ -272,33 +272,72 @@ async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() 
 }
 
 #[tokio::test]
-async fn search_replace_refuses_a_path_reserved_by_another_agent() {
+async fn sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths()
+ {
+    // Operator: write locks must be hard at the tool-call level, not at
+    // the agent/layer level. Two agents sequential writes to the same
+    // file after first tool call returns must succeed.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("shared-seq.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let first = format!("seq-sr-a-{}", path.display());
+    let second = format!("seq-sr-b-{}", path.display());
+    try_reserve_writes([&path], &first);
+    try_reserve_writes([&path], &second);
+
+    let first_result = xai_tool_runtime::Tool::run(
+        &SearchReplaceTool,
+        test_ctx(search_replace_resources(tmp.path(), &first)),
+        search_replace_input("shared-seq.txt", "one\n", "two\n"),
+    )
+    .await
+    .expect("first agent's tool call must succeed");
+    assert!(matches!(first_result, SearchReplaceOutput::EditsApplied(_)));
+
+    let second_result = xai_tool_runtime::Tool::run(
+        &SearchReplaceTool,
+        test_ctx(search_replace_resources(tmp.path(), &second)),
+        search_replace_input("shared-seq.txt", "two\n", "three\n"),
+    )
+    .await
+    .expect("after the first tool call returns, the sibling write must succeed");
+    assert!(matches!(
+        second_result,
+        SearchReplaceOutput::EditsApplied(_)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
+    release_holder(&first);
+    release_holder(&second);
+}
+
+#[tokio::test]
+async fn search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("reserved.txt");
     std::fs::write(&path, "keep\n").unwrap();
     let holder = format!("spawn-claim-{}", path.display());
-    try_reserve_writes([&path], &holder).unwrap();
+    try_reserve_writes([&path], &holder);
 
-    let err = xai_tool_runtime::Tool::run(
+    let note = format_soft_assignment_reminder(Some("other-writer"))
+        .expect("soft-lock reminder must be observable");
+    assert!(
+        note.contains(&format!("L2 {holder} is assigned these paths")),
+        "reminder must name the assigned sibling: {note}"
+    );
+    assert!(
+        note.contains("reserved.txt"),
+        "reminder must name the file: {note}"
+    );
+
+    let result = xai_tool_runtime::Tool::run(
         &SearchReplaceTool,
         test_ctx(search_replace_resources(tmp.path(), "other-writer")),
         search_replace_input("reserved.txt", "keep\n", "overwrite\n"),
     )
     .await
-    .expect_err("a spawn-time claim must block another agent's edit");
-
-    assert!(
-        err.detail.contains(&holder),
-        "error must name the holder: {}",
-        err.detail
-    );
-    assert!(
-        err.detail.contains("reserved.txt"),
-        "error must name the file: {}",
-        err.detail
-    );
-    assert_no_human_lock_menu(&err.detail);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+    .expect("a spawn-time write_paths assignment must not exclusive-block another agent's edit");
+    assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "overwrite\n");
     release_holder(&holder);
 }
 

@@ -331,6 +331,144 @@ fn slash_plan_with_args_already_in_plan_is_noop() {
     assert!(read_toast(&app).contains("/view-plan"));
 }
 
+/// Named contract: `/plan --soft` docks Isolated Preview for a new
+/// feature. Present is not Approve. Nested L2s stay Working. Empty
+/// Enter never Approves. `--soft` is not the queue hold token.
+#[test]
+fn plan_soft_docks_isolated_preview_without_approving_or_cancelling_nested() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.subagent_sessions.insert(
+            "child-l2".to_string(),
+            super::make_test_subagent("child-sess", "l2-worker"),
+        );
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::CancelTurn { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan --soft` must not cancel nested work or Approve, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "plan"
+        )),
+        "`/plan --soft` must still enter plan mode, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "`/plan --soft` must dock Isolated Preview"
+    );
+    assert!(
+        agent.line_viewer.as_ref().is_some_and(|v| !v.fullscreen),
+        "Isolated Preview is a right dock, not a covering exclusive present"
+    );
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Isolated Preview must park a local idle decision; present is not Approve"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "present is not Approve; empty Enter never Approves"
+    );
+    assert_eq!(agent.plan_mode_pending, Some(true));
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        !nested.pending_kill && !nested.finished,
+        "nested L2 must stay Working; docking Isolated Preview is not Cancelling"
+    );
+}
+
+/// Named contract: `/plan --soft add feature` docks Isolated Preview
+/// and enters plan mode with the description after stripping `--soft`.
+/// ShowPlan-only is not enough if that drops the feature prompt.
+#[test]
+fn plan_soft_with_feature_enters_plan_mode_and_docks() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.subagent_sessions.insert(
+            "child-l2".to_string(),
+            super::make_test_subagent("child-sess", "l2-worker"),
+        );
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("/plan --soft add feature".into()),
+        &mut app,
+    );
+
+    assert_eq!(effects.len(), 1, "expected 1 effect, got: {effects:?}");
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::SetModeThenPrompt { mode_id, text, .. }
+                if &*mode_id.0 == "plan" && text == "add feature"
+        ),
+        "`/plan --soft add feature` must enter plan mode with the description, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "`/plan --soft add feature` must dock Isolated Preview"
+    );
+    assert!(!agent.plan_decision_resolved, "present is not Approve");
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        !nested.pending_kill && !nested.finished,
+        "nested L2 must stay Working"
+    );
+}
+
+/// Named contract: `--soft` is not the queue hold token. Keep `queue`
+/// and `later`.
+#[test]
+fn plan_soft_is_not_the_queue_hold_token() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_soft = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+    assert!(
+        via_soft.iter().any(|e| matches!(
+            e,
+            Effect::SetSessionMode { mode_id, .. } if &*mode_id.0 == "plan"
+        )),
+        "`/plan --soft` must run this turn, got {via_soft:?}"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        0,
+        "`--soft` must not hold the command on the prompt queue"
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    app.agents.get_mut(&id).unwrap().plan_mode_pending = None;
+    app.agents.get_mut(&id).unwrap().plan_mode_active = false;
+    let via_token = dispatch(Action::SendPrompt("/plan queue --soft".into()), &mut app);
+    assert!(
+        via_token.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan queue --soft` must still hold, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
 /// Multi-agent fan-out (sibling for `plan_mode`).
 /// `Action::SetPlanMode(On)` populates the active agent's
 /// `plan_mode_pending` and never touches other agents in the

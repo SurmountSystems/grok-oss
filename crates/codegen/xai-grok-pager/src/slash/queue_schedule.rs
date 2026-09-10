@@ -135,4 +135,16 @@ mod tests {
         assert_eq!(split_schedule_token("keep auth"), (false, "keep auth"));
         assert_eq!(split_schedule_token(""), (false, ""));
     }
+
+    /// Named contract: `--soft` is not the queue hold token.
+    #[test]
+    fn split_schedule_token_does_not_treat_soft_as_hold() {
+        assert_eq!(split_schedule_token("--soft"), (false, "--soft"));
+        assert_eq!(
+            split_schedule_token("--soft add feature"),
+            (false, "--soft add feature")
+        );
+        assert_eq!(split_schedule_token("queue --soft"), (true, "--soft"));
+        assert_eq!(split_schedule_token("later --soft"), (true, "--soft"));
+    }
 }

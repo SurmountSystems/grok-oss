@@ -214,7 +214,7 @@ The named tool is `pull_remote_tree`. Direction is `HOST:SRC` (or a local source
 
 ### `/metadata`
 
-Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. Fields that are not known are omitted rather than invented. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
+Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. For the current sampling model it also shows last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` with when those were observed. Those fingerprints are serving-path configuration, not a SHA of the weights, and they are not on the status bar. Fields that are not known are omitted rather than invented. Do not invent dated slugs such as `grok-4.6-20260812` unless `/v1/language-models` lists them. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
 
 ### `/fork`
 
@@ -348,10 +348,14 @@ A handful of commands only work in one of the two modes, because the surface the
 
 Enter plan mode. Immediate `/plan` (optionally with a description) still enters plan mode when you want it now.
 
-To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue. Present is not Approve. Empty Enter never Approves.
+`/plan --soft` docks Isolated Preview on the right for a new feature. Nested subagents stay Working. Present is not Approve. Empty Enter never Approves. `--soft` is not the queue hold token. `/plan --soft add feature` still enters plan mode with that description after stripping `--soft`. Approve still files a GitHub issue with the plan text as documented in GitHub tracking.
+
+To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 
 ```
-/plan [description]
+/plan [--soft] [description]
+/plan --soft
+/plan --soft add feature
 /plan queue
 /queue /plan
 ```
@@ -575,9 +579,9 @@ Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances
 3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
 4. Verifies package version plus git SHA.
 5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
+6. Re-execs this TUI onto the newly installed binary. Unix `exec` keeps the same PID and `ps` start time; that is not proof this process is still the old image. Trust the post-relaunch identity chrome (`grok-oss` version plus git SHA) and the inode of `/proc/<pid>/exe` versus `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`. `ps` fork time is not the signal. Stock Grok Build is a different binary and is not updated by grok-oss `/rebuild`. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. This TUI still exec-replaces while nested work is live. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
 
-Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. This TUI does not wait for that drain before it exec-replaces. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`, `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`.
 
 To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 

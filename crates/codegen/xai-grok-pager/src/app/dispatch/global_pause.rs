@@ -138,7 +138,9 @@ fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Ef
     let agent = app.agents.get_mut(&id)?;
     agent.session.enqueue_command("/compact".into());
     if let Some(text) = continue_text {
-        agent.session.enqueue_prompt(text);
+        // Same text may already be a Human turn; mark continue so stale
+        // occupancy does not drop it before compact drains.
+        agent.session.enqueue_continue_prior_work(text);
     }
     app.show_toast(OVER_WINDOW_COMPACT_RETRY_TOAST);
     Some(maybe_drain_queue_and_note_peek(app, id))
@@ -365,8 +367,10 @@ pub(super) fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {
             continue;
         }
         // Front of local queue so the interrupted turn continues before
-        // newer typed follow-ups that arrived while paused.
-        agent.session.enqueue_prompt_front(text);
+        // newer typed follow-ups that arrived while paused. Mark continue
+        // so matching an earlier Human turn does not look like stale
+        // occupancy.
+        agent.session.enqueue_continue_prior_work_front(text);
         snap.mark_resume_consumed();
         resumed_count += 1;
         effects.extend(maybe_drain_queue_and_note_peek(app, snap.agent_id));

@@ -1,11 +1,15 @@
-//! `/plan` -- enter plan mode.
-//!
 //! `/plan` enters plan mode. `/plan <description>` enters plan mode and starts
 //! a turn with the description after the mode switch completes.
+//!
+//! `/plan --soft` is the dock for a new feature. It docks Isolated Preview,
+//! the existing plan present surface on the right. L1 docking Isolated Preview
+//! must not cancel nested L2s. Nested work stays Working. Present is not
+//! Approve.
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
 use crate::app::actions::{Action, PlanModeKind};
+use crate::app::agent_view::AgentView;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::queue_schedule::{plan_command_text, queue_later_command, split_schedule_token};
 
@@ -18,7 +22,7 @@ impl SlashCommand for PlanCommand {
     }
 
     fn description(&self) -> &str {
-        "Enter plan mode"
+        "Enter plan mode, or /plan --soft to dock Isolated Preview"
     }
 
     fn session_scoped(&self) -> bool {
@@ -32,7 +36,7 @@ impl SlashCommand for PlanCommand {
     }
 
     fn usage(&self) -> &str {
-        "/plan [queue|later] [description]"
+        "/plan [--soft] [queue|later] [description]"
     }
 
     fn takes_args(&self) -> bool {
@@ -48,13 +52,125 @@ impl SlashCommand for PlanCommand {
         if hold {
             return queue_later_command(plan_command_text(rest));
         }
-        let trimmed = rest;
+        let (soft, trimmed) = split_soft_flag(rest);
+        if soft {
+            // `/plan --soft` docks Isolated Preview for a new feature.
+            // EnterPlanMode { soft: true } still enters plan mode so a
+            // feature description is not dropped. ShowPlan is `/view-plan`.
+            // L1 docking Isolated Preview must not cancel nested L2s.
+            // Nested work stays Working. Present is not Approve.
+            return CommandResult::Action(Action::EnterPlanMode {
+                description: if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                },
+                soft: true,
+            });
+        }
         if trimmed.is_empty() {
             return CommandResult::Action(Action::SetPlanMode(PlanModeKind::On));
         }
         CommandResult::Action(Action::EnterPlanMode {
             description: Some(trimmed.to_string()),
+            soft: false,
         })
+    }
+}
+
+/// Leading `--soft` token. Not `--softer` and not a description that happens
+/// to start with that string without a token boundary.
+fn split_soft_flag(args: &str) -> (bool, &str) {
+    let trimmed = args.trim();
+    if trimmed == "--soft" {
+        return (true, "");
+    }
+    if let Some(rest) = trimmed.strip_prefix("--soft")
+        && rest.starts_with(char::is_whitespace)
+    {
+        return (true, rest.trim_start());
+    }
+    (false, trimmed)
+}
+
+/// Session sidecar: Isolated Preview was docked when this TUI persisted
+/// for `/rebuild`. Resume must not auto-dock leftover `plan.md`. This file
+/// means the pane was open and must come back after relaunch. rebuild persist
+/// plus load docks Isolated Preview again.
+const ISOLATED_PREVIEW_OPEN_FILE: &str = "isolated_preview_open";
+
+fn isolated_preview_open_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
+    xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(cwd, session_id)
+        .and_then(|p| p.parent().map(|dir| dir.join(ISOLATED_PREVIEW_OPEN_FILE)))
+}
+
+/// Write or clear the Isolated Preview dock marker for `/rebuild` restore.
+/// This helper is crate-visible so rebuild persist can record the pane.
+/// The roundtrip in this file is the part this module can prove. rebuild.rs
+/// and load.rs own the persist and load call sites.
+pub(crate) fn persist_isolated_preview_open(cwd: &str, session_id: &str, open: bool) {
+    let Some(path) = isolated_preview_open_path(cwd, session_id) else {
+        return;
+    };
+    if open {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, b"1\n");
+    } else {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// True when Isolated Preview was docked at the last `/rebuild` persist.
+/// Consumes the marker so a later resume without the pane does not dock.
+/// This helper is crate-visible so load can dock Isolated Preview again.
+pub(crate) fn take_isolated_preview_open(cwd: &str, session_id: &str) -> bool {
+    let Some(path) = isolated_preview_open_path(cwd, session_id) else {
+        return false;
+    };
+    let open = path.is_file();
+    if open {
+        let _ = std::fs::remove_file(&path);
+    }
+    open
+}
+
+impl AgentView {
+    /// Dock Isolated Preview on the right. L1 docking Isolated Preview must
+    /// not cancel nested L2s. Nested work stays Working. Present is not
+    /// Approve. A live Approve waiter, if parked, stays parked.
+    ///
+    /// `/plan --soft` is the dock for a new feature. `/rebuild` restore uses
+    /// this same crate-visible surface.
+    pub(crate) fn dock_isolated_preview(&mut self) {
+        self.view_plan_requested = true;
+        self.snapshot_or_clear_plan_feedback_draft();
+        if self.plan_approval_view.is_some() {
+            self.reopen_plan_approval();
+        } else {
+            self.park_local_idle_plan_decision_if_needed();
+            if self.plan_approval_view.is_none() {
+                let stashed = self.prompt.stash();
+                let mut pav =
+                    crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(
+                        self.plan_body_for_preview(),
+                    );
+                pav.stashed_prompt = stashed;
+                self.plan_approval_view = Some(pav);
+            }
+            self.show_plan_preview();
+        }
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.fullscreen = false;
+            viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        }
+        self.restore_plan_feedback_draft_if_composer_lost();
+        self.clear_view_plan_request_if_waiter_bound();
+        self.persist_session_plan_dock_open(true);
+        if let Some(body) = self.plan_body_for_preview() {
+            self.persist_session_plan_body(&body);
+        }
     }
 }
 
@@ -158,7 +274,11 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "Refactor the auth flow") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(
+                    !soft,
+                    "`/plan <desc>` without --soft is not Isolated Preview"
+                );
                 assert_eq!(
                     description.as_deref(),
                     Some("Refactor the auth flow"),
@@ -178,7 +298,8 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "something") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(!soft);
                 assert_eq!(description.as_deref(), Some("something"));
             }
             other => panic!("expected EnterPlanMode, got {other:?}"),
@@ -193,10 +314,103 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "  hello world  ") {
-            CommandResult::Action(Action::EnterPlanMode { description }) => {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(!soft);
                 assert_eq!(description.as_deref(), Some("hello world"));
             }
             other => panic!("expected EnterPlanMode, got {other:?}"),
         }
+    }
+
+    /// Named contract: `/plan --soft` docks Isolated Preview. EnterPlanMode
+    /// with `soft: true` is that surface so a new feature still enters plan
+    /// mode. It is not `/view-plan` ShowPlan and not a covering exclusive
+    /// present.
+    #[test]
+    fn plan_soft_flag_dispatches_show_plan_to_dock_isolated_preview() {
+        let cmd = PlanCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
+        match cmd.run(&mut ctx, "--soft") {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(
+                    soft,
+                    "`/plan --soft` must dock Isolated Preview (EnterPlanMode.soft)"
+                );
+                assert!(
+                    description.is_none(),
+                    "`/plan --soft` with no feature text must not invent a description"
+                );
+            }
+            other => {
+                panic!(
+                    "`/plan --soft` must dock Isolated Preview via EnterPlanMode.soft, got {other:?}"
+                )
+            }
+        }
+    }
+
+    /// Named contract: `--soft` is a flag, not a plan description.
+    #[test]
+    fn plan_soft_flag_is_not_a_description() {
+        let cmd = PlanCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
+        match cmd.run(&mut ctx, "  --soft  ") {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(soft);
+                assert!(description.is_none());
+            }
+            other => {
+                panic!("whitespace around --soft must still dock Isolated Preview, got {other:?}")
+            }
+        }
+        match cmd.run(&mut ctx, "--soft rewrite auth") {
+            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
+                assert!(
+                    soft,
+                    "`/plan --soft <feature>` must still dock Isolated Preview"
+                );
+                assert_eq!(
+                    description.as_deref(),
+                    Some("rewrite auth"),
+                    "`--soft` is a flag; the rest is the feature description"
+                );
+            }
+            other => {
+                panic!("`/plan --soft <feature>` must keep the feature description, got {other:?}")
+            }
+        }
+    }
+
+    /// Named contract: rebuild persist + load docks Isolated Preview again.
+    /// This file proves the persist-marker helper roundtrip. rebuild.rs and
+    /// load.rs own the persist and load call sites.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn persist_isolated_preview_open_roundtrip_rebuild_persist_load_docks_again() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "iso-preview-roundtrip";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+
+        persist_isolated_preview_open(&cwd, session_id, true);
+        assert!(
+            take_isolated_preview_open(&cwd, session_id),
+            "rebuild persist + load docks Isolated Preview again"
+        );
+        assert!(
+            !take_isolated_preview_open(&cwd, session_id),
+            "take consumes the Isolated Preview dock marker so a later resume without the pane does not dock"
+        );
+
+        persist_isolated_preview_open(&cwd, session_id, true);
+        persist_isolated_preview_open(&cwd, session_id, false);
+        assert!(
+            !take_isolated_preview_open(&cwd, session_id),
+            "persist open=false must clear the Isolated Preview dock marker"
+        );
     }
 }

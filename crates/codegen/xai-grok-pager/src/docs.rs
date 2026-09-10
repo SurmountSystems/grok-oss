@@ -688,6 +688,27 @@ mod tests {
                 && slash.content.contains("queued prompts"),
             "04-slash-commands.md must say /rebuild keeps the unsent draft and queued prompts"
         );
+        assert!(
+            slash.content.contains("/proc/<pid>/exe") && slash.content.contains("inode"),
+            "04-slash-commands.md must say Unix exec keeps PID and ps start time, so inode is how you tell the live image restarted"
+        );
+        assert!(
+            slash.content.contains("identity chrome")
+                && slash.content.contains("ps` fork time is not the signal"),
+            "04-slash-commands.md must say the grok-oss version plus git SHA is the relaunch signal, not ps fork time"
+        );
+        assert!(
+            slash
+                .content
+                .contains("Stock Grok Build is a different binary"),
+            "04-slash-commands.md must say stock Grok Build is not updated by grok-oss /rebuild"
+        );
+        assert!(
+            slash
+                .content
+                .contains("This TUI still exec-replaces while nested work is live"),
+            "04-slash-commands.md must say this TUI exec-replaces even while nested work is live"
+        );
     }
 
     /// Named contract: operator-facing resume / `--version` examples use
@@ -732,6 +753,38 @@ mod tests {
                 doc.filename
             );
         }
+    }
+
+    /// Named contract: `/metadata` documents serving-path fingerprints
+    /// (Chat Completions `system_fingerprint` and language-models fields).
+    /// Fingerprint is not a SHA of the weights and is not on the status bar.
+    #[test]
+    fn user_guide_metadata_documents_serving_fingerprints() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("### `/metadata`"),
+            "04-slash-commands must document /metadata"
+        );
+        assert!(
+            slash.content.contains("system_fingerprint")
+                && slash.content.contains("language-models"),
+            "04-slash-commands /metadata must name system_fingerprint and language-models fields"
+        );
+        assert!(
+            slash.content.contains("not a SHA of the weights"),
+            "04-slash-commands must say fingerprint is not a SHA of the weights"
+        );
+        assert!(
+            slash.content.contains("not on the status bar"),
+            "04-slash-commands must say serving fingerprints are not on the status bar"
+        );
+        assert!(
+            slash.content.contains("grok-4.6-20260812"),
+            "04-slash-commands must warn not to invent dated slugs"
+        );
     }
 
     /// `/unstick` is documented as a new slash and is not `/resume`.
@@ -826,6 +879,65 @@ mod tests {
         assert!(
             content.contains("Ctrl+Z") || content.contains("ctrl+z"),
             "19-plan-mode.md must say Ctrl+Z restores the Human box"
+        );
+    }
+
+    /// Named contract: `/plan --soft` docks Isolated Preview for a new
+    /// feature. Present is not Approve. Nested work stays Working.
+    /// `--soft` is not the queue hold token. Empty Enter never Approves.
+    #[test]
+    fn user_guide_plan_soft_docks_isolated_preview() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("/plan --soft"),
+            "04-slash-commands.md must document /plan --soft"
+        );
+        assert!(
+            slash.content.contains("Isolated Preview"),
+            "04-slash-commands.md must say /plan --soft docks Isolated Preview"
+        );
+        assert!(
+            slash.content.contains("not the queue hold token"),
+            "04-slash-commands.md must say --soft is not the queue hold token"
+        );
+        assert!(
+            slash.content.contains("Present is not Approve"),
+            "04-slash-commands.md must keep present is not Approve"
+        );
+        assert!(
+            slash.content.contains("Empty Enter never Approves"),
+            "04-slash-commands.md must keep empty Enter never Approves"
+        );
+        assert!(
+            slash.content.contains("Nested subagents stay Working"),
+            "04-slash-commands.md must say nested subagents stay Working"
+        );
+        assert!(
+            slash.content.contains("/plan --soft add feature"),
+            "04-slash-commands.md must show /plan --soft add feature"
+        );
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            plan.content.contains("/plan --soft"),
+            "19-plan-mode.md must document /plan --soft"
+        );
+        assert!(
+            plan.content.contains("/plan --soft add feature"),
+            "19-plan-mode.md must say /plan --soft add feature also enters plan mode"
+        );
+        assert!(
+            plan.content.contains("not the queue hold token"),
+            "19-plan-mode.md must say --soft is not the queue hold token"
+        );
+        assert!(
+            !plan.content.contains("does not enter plan mode by itself"),
+            "19-plan-mode.md must not say /plan --soft skips plan mode"
         );
     }
 

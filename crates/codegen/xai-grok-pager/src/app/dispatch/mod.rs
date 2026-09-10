@@ -38,6 +38,8 @@ mod running;
 mod session;
 mod settings;
 mod soft_stop;
+#[cfg(test)]
+mod stale_queue_occupancy;
 mod start;
 mod status;
 mod task_result;

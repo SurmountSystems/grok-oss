@@ -207,6 +207,11 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
         .unwrap_or(0);
     let session_id = peer_rebuild_session_id(app);
     let current_exe = std::env::current_exe().ok();
+    // Production inode check lives in should_peer_relaunch_for_request
+    // (`/proc/self/exe` vs the install). Path-only current_exe misses a
+    // replaced cargo-bin that still readlinks to the same path.
+    let opportunistic = !signaled
+        && xai_grok_update::should_peer_relaunch_for_request(&self_identity, &request, now);
     let Some(relaunch) = peer_rebuild_relaunch_if_applicable(
         &self_identity,
         &request,
@@ -214,7 +219,7 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
         session_id.as_deref(),
         app.screen_mode.is_minimal(),
         current_exe.as_deref(),
-        signaled,
+        signaled || opportunistic,
     ) else {
         if signaled {
             tracing::warn!(
@@ -259,6 +264,60 @@ pub(crate) fn is_rebuild_reexec_process() -> bool {
 /// Env pairs written onto the rebuild `exec` (besides `GROK_SCREEN_MODE`).
 pub(crate) fn rebuild_relaunch_process_env() -> [(&'static str, &'static str); 1] {
     [(GROK_REBUILD_RELAUNCH_ENV, "1")]
+}
+
+/// Operator-visible identity after `/rebuild` exec.
+///
+/// Unix `exec` keeps the same PID and `ps` fork time. That is not proof the
+/// process is still the old image. Quote: operator ran rebuild and `ps`
+/// still showed Monday; the product must show the new identity anyway.
+pub(crate) fn rebuild_relaunch_identity_chrome(
+    version_with_commit: &str,
+    channel_label: &str,
+) -> String {
+    format!(
+        "Running {}",
+        crate::client_identity::product_version_line(version_with_commit, channel_label)
+    )
+}
+
+/// Toast on the outgoing process before `exec` (same identity string).
+pub(crate) fn rebuild_relaunch_in_progress_toast(
+    version_with_commit: &str,
+    channel_label: &str,
+) -> String {
+    format!(
+        "Relaunching {}",
+        crate::client_identity::product_version_line(version_with_commit, channel_label)
+    )
+}
+
+/// Post-exec chrome on the new binary. Toast only when nothing else is
+/// occupying the slot (continue-interrupted-turn must keep its toast).
+pub(crate) fn announce_rebuild_relaunch_identity_with(
+    agent: &mut crate::app::agent_view::AgentView,
+    is_reexec: bool,
+    version_with_commit: &str,
+    channel_label: &str,
+) {
+    if !is_reexec {
+        return;
+    }
+    let chrome = rebuild_relaunch_identity_chrome(version_with_commit, channel_label);
+    if agent.toast.is_none() {
+        agent.show_toast(&chrome);
+    }
+    agent.scrollback.push_block(RenderBlock::system(chrome));
+}
+
+/// Announce compile-time grok-oss version plus git SHA after rebuild exec.
+pub(crate) fn announce_rebuild_relaunch_identity(agent: &mut crate::app::agent_view::AgentView) {
+    announce_rebuild_relaunch_identity_with(
+        agent,
+        is_rebuild_reexec_process(),
+        env!("VERSION_WITH_COMMIT"),
+        xai_grok_update::channel_label(),
+    );
 }
 
 /// Surmount / grok-oss fork: leader IPC drop during `/rebuild` must still
@@ -323,9 +382,10 @@ pub(crate) fn arm_peer_rebuild_before_exit(
     }
     // Leader may have drained for RelaunchForUpdate before SIGUSR1 was
     // observed. Force SIGUSR1 gates (fresh request + exe + session) so
-    // same-commit / unknown SHA / no `(deleted)` still re-exec. Skip when
-    // this process is already the rebuild re-exec, or when it started
-    // after the request (`grok-oss --resume` on the new binary).
+    // same-commit / unknown SHA / no `(deleted)` still re-exec. Skip force
+    // when this process is already the rebuild re-exec, or when it started
+    // after the request (`grok-oss --resume` on the new binary). A later
+    // install still opportunistic-arms below via inode/identity.
     let request_at =
         xai_grok_update::read_rebuild_relaunch_request().map(|r| r.requested_at_unix_secs);
     if matches!(reason, PeerRebuildExitReason::LeaderDisconnect)
@@ -336,6 +396,13 @@ pub(crate) fn arm_peer_rebuild_before_exit(
         )
         && try_arm_peer_rebuild_relaunch_from_request(app, true)
     {
+        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
+        return true;
+    }
+    // A prior `/rebuild` exec left GROK_REBUILD_RELAUNCH set. A later
+    // install that replaced the mapped inode must still opportunistic-arm.
+    // Force-arm of the same request would loop; inode/identity gates do not.
+    if is_rebuild_reexec_process() && try_arm_peer_rebuild_relaunch_from_request(app, false) {
         let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
         return true;
     }
@@ -385,9 +452,11 @@ pub(super) fn handle_rebuild_done(
 
             // Mid-turn: cancel the parent turn so this process does not keep
             // driving it. Do not cancel nested subagent ids in this TUI persist
-            // path. Nested work is not a reason to block `/rebuild`. Leader
-            // `RelaunchForUpdate` also keeps nested ids on that leader (same
-            // as a TUI disconnect); it does not exec-replace while they are live.
+            // path. Nested work is not a reason to block `/rebuild`. This TUI
+            // still exec-replaces onto the new binary. Leader
+            // `RelaunchForUpdate` keeps nested ids on that leader (same as a
+            // TUI disconnect) and does not exec-replace the leader while they
+            // are live.
             if let Some(agent) = app.agents.get(&agent_id)
                 && agent.session.state.is_turn_running()
             {
@@ -407,7 +476,10 @@ pub(super) fn handle_rebuild_done(
                     minimal: app.screen_mode.is_minimal(),
                 });
                 if let Some(agent) = app.agents.get_mut(&agent_id) {
-                    agent.show_toast("Relaunching this session on the new binary…");
+                    agent.show_toast(&rebuild_relaunch_in_progress_toast(
+                        &report.installed_identity,
+                        "",
+                    ));
                 }
                 effects.extend(unregister_and_quit(app));
             } else {
@@ -696,6 +768,59 @@ mod tests {
         let env = rebuild_relaunch_process_env();
         assert_eq!(env, [(GROK_REBUILD_RELAUNCH_ENV, "1")]);
         assert_ne!(GROK_REBUILD_RELAUNCH_ENV, "GROK_SCREEN_MODE");
+    }
+
+    /// Named contract: after `/rebuild` exec, operator-visible chrome includes
+    /// grok-oss version plus git SHA. Quote: operator ran rebuild and `ps`
+    /// still showed Monday; the product must show the new identity anyway.
+    #[test]
+    fn post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha() {
+        let identity = "1.0.3 (825986fefeea)";
+        let chrome = rebuild_relaunch_identity_chrome(identity, "");
+        assert_eq!(chrome, "Running grok-oss 1.0.3 (825986fefeea)");
+        assert!(
+            chrome.contains("grok-oss"),
+            "post-relaunch chrome must name grok-oss, not stock Grok Build; got {chrome:?}"
+        );
+        assert!(
+            chrome.contains("1.0.3") && chrome.contains("825986fefeea"),
+            "post-relaunch chrome must include package version plus git SHA; got {chrome:?}"
+        );
+        assert_ne!(
+            chrome.split_whitespace().next(),
+            Some("grok"),
+            "must not print bare grok as the product token: {chrome:?}"
+        );
+        let in_progress = rebuild_relaunch_in_progress_toast(identity, "");
+        assert_eq!(in_progress, "Relaunching grok-oss 1.0.3 (825986fefeea)");
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&crate::app::agent::AgentId(0)).unwrap();
+        announce_rebuild_relaunch_identity_with(agent, false, identity, "");
+        assert!(
+            agent.toast.is_none(),
+            "a process that is not the rebuild re-exec must not paint identity chrome"
+        );
+        announce_rebuild_relaunch_identity_with(agent, true, identity, "");
+        let toast = agent
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert_eq!(toast, chrome);
+        let system: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| {
+                let entry = agent.scrollback.entry(i)?;
+                match &entry.block {
+                    crate::scrollback::block::RenderBlock::System(s) => Some(s.text.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert!(
+            system.iter().any(|t| t == &chrome),
+            "post-exec scrollback must keep the identity string when ps fork time stays Monday; got {system:?}"
+        );
     }
 
     /// Surmount / grok-oss fork: `grok-oss --resume` after install, already
@@ -1528,6 +1653,82 @@ mod tests {
             &cwd_str, sid,
         );
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Operator: "Wait, that process hasn't restarted? I literally ran rebuild.
+    /// Maybe the bug is in the rebuild command?"
+    /// Successful `/rebuild` must exec-replace this grok-oss TUI onto the
+    /// newly installed binary even while nested agents are running.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn operator_ran_rebuild_and_the_grok_oss_process_did_not_restart() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::{AgentId, AgentState};
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some("01a068a5-dc26-7f20-947c-1cfe4a204b23".into());
+            agent.session.cwd = proj.path().to_path_buf();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-rebuild-no-restart".into());
+            agent.session.in_flight_prompt = None;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                    "operator ran rebuild",
+                ));
+            agent.subagent_sessions.insert(
+                "cs-rebuild-still-live".into(),
+                running_l2_subagent("nested work still live"),
+            );
+        }
+
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let relaunch = app.rebuild_relaunch.as_ref().expect(
+            "operator ran rebuild and the grok-oss process did not restart: \
+             successful /rebuild must arm exec-replace onto the installed binary",
+        );
+        assert_eq!(relaunch.installed_exe, installed);
+        assert_eq!(relaunch.session_id, "01a068a5-dc26-7f20-947c-1cfe4a204b23");
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "operator ran rebuild and the grok-oss process did not restart: \
+             this TUI must quit into exec, got {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::CancelTurn {
+                    cancel_subagents: true,
+                    ..
+                }
+            )),
+            "nested ids stay for resume; got {effects:?}"
+        );
+        let toast = app
+            .agents
+            .get(&agent_id)
+            .unwrap()
+            .toast
+            .as_ref()
+            .map(|(msg, _)| msg.as_str())
+            .unwrap_or("");
+        assert!(
+            toast.contains("grok-oss") && toast.contains("0.2.120") && toast.contains("newsha"),
+            "outgoing /rebuild toast must name grok-oss version plus git SHA even when ps still shows Monday; got {toast:?}"
+        );
     }
 
     fn running_l2_subagent(description: &str) -> crate::app::subagent::SubagentInfo {

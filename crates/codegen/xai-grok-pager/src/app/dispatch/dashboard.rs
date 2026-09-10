@@ -1508,8 +1508,14 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             vec![]
         }
         // `/plan <description>` — stage plan mode AND spawn immediately with
-        // the description as the first prompt.
-        CommandResult::Action(Action::EnterPlanMode { description }) => {
+        // the description as the first prompt. `/plan --soft` on the
+        // session-less dashboard has no Isolated Preview to dock; stage
+        // plan mode the same way (and spawn when a feature description
+        // remains after stripping `--soft`).
+        CommandResult::Action(Action::EnterPlanMode {
+            description,
+            soft: _,
+        }) => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
             }

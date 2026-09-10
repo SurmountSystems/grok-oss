@@ -225,6 +225,7 @@ impl AgentView {
 
     /// Rebuild the queue pane via [`visible_held_server_row`] excludes.
     pub(crate) fn sync_queue_pane(&mut self) {
+        self.drop_stale_queue_occupancy();
         self.queue.sync_from_merged(
             &self.session.pending_prompts,
             &self.shared_queue,

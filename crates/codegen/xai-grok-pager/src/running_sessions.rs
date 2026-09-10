@@ -277,13 +277,20 @@ mod tests {
     #[test]
     fn cli_gui_is_l0_not_running() {
         let plain = PagerArgs::try_parse_from(["grok-oss", "gui"]).unwrap();
-        assert!(matches!(plain.command, Some(Command::Gui { host: None })));
+        assert!(matches!(
+            plain.command,
+            Some(Command::Gui {
+                host: None,
+                ssh: None
+            })
+        ));
         let remote =
             PagerArgs::try_parse_from(["grok-oss", "gui", "--host", "surmount-1"]).unwrap();
         assert!(matches!(
             remote.command,
             Some(Command::Gui {
-                host: Some(h)
+                host: Some(h),
+                ssh: None
             }) if h == "surmount-1"
         ));
         let running = PagerArgs::try_parse_from(["grok-oss", "running"]).unwrap();

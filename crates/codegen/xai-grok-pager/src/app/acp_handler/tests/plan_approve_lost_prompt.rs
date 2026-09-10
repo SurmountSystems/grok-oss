@@ -460,3 +460,117 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);
 }
+
+/// Isolated Preview Enter must stash the typed critique, not start a
+/// Waiting-for-the-model Prompt. Empty Enter never Approves. Click
+/// Approve still completes the live waiter and wraps review comments.
+#[test]
+fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments() {
+    let mut app = make_app_with_agent("sess-1");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let mut rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nEnter then Approve\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+    }
+
+    let empty_enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty_enter);
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .plan_approval_view
+            .is_some(),
+        "empty Enter never Approves"
+    );
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start a Prompt; effects={empty_effects:?}"
+    );
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "empty Enter must leave the live waiter parked"
+    );
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(
+        !matches!(
+            enter,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::ActionThenForward(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "Isolated Preview Enter must stash comments, not start a Prompt; got {enter:?}"
+    );
+    let enter_effects = dispatch_outcome(&mut app, enter);
+    assert!(
+        !enter_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "Isolated Preview Enter must not dispatch a model send; effects={enter_effects:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Isolated Preview Enter must not Approve"
+        );
+        assert!(
+            agent.prompt.text().contains(HUMAN_BOX_PROMPT),
+            "composer must keep the critique for Approve, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.as_deref()),
+            Some(HUMAN_BOX_PROMPT)
+        );
+    }
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "stashing comments must leave the live waiter parked"
+    );
+
+    let after = click_approve_via_app(&mut app);
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .plan_approval_view
+            .is_none(),
+        "click Approve must decide the parked plan"
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}

@@ -430,7 +430,7 @@ pub fn write_remote_enqueue(
     let remote_dir = format!("{home}/{ENQUEUE_DIR}/{sid}");
     let remote_file = format!("{remote_dir}/{ENQUEUE_FILE}");
     let dest = format!("{user_at_host}:{remote_file}");
-    let mkdir = vec![
+    let mkdir = [
         "ssh".to_string(),
         user_at_host.to_string(),
         format!("mkdir -p {remote_dir}"),

@@ -448,6 +448,58 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
+/// Isolated Preview / Comment Enter stashes the Human-box critique so it
+/// rides Approve with [`PLAN_APPROVED_REVIEW_COMMENTS_LEAD`]. Empty text
+/// is not held and never Approves. Comment holds even if the pane is shut.
+/// Isolated Preview holds only while the pane is open. Revise Prompt still
+/// asks the model. Recognized slash commands are not comments: `/plan
+/// queue` / `/plan later` must still hold on the prompt queue, and
+/// `--soft` is not the queue hold token.
+fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some(invocation) = crate::slash::parse_invocation(trimmed) {
+        let reg = agent.prompt.slash_controller.registry();
+        // Builtins stay commands even when Isolated Preview is docked.
+        // `/plan queue --soft` must hold on the prompt queue; `--soft` is
+        // not the queue hold token and is not a parked-plan comment.
+        if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token) {
+            return false;
+        }
+    }
+    let Some(pav) = agent.plan_approval_view.as_ref() else {
+        return false;
+    };
+    let pane_open = agent.line_viewer.is_some();
+    let hold = match pav.prompt_intent {
+        PlanPromptIntent::Comment => true,
+        PlanPromptIntent::Revise | PlanPromptIntent::Questions | PlanPromptIntent::ApproveNotes => {
+            pane_open
+                && matches!(
+                    pav.focus,
+                    PlanApprovalFocus::Preview | PlanApprovalFocus::Commenting
+                )
+        }
+    };
+    if !hold {
+        return false;
+    }
+    // try_send already cleared the composer; restore so Approve can wrap
+    // [`PLAN_APPROVED_REVIEW_COMMENTS_LEAD`].
+    if agent.prompt.text().trim() != text.trim() {
+        agent.prompt.set_text(text);
+    }
+    if let Some(pav) = agent.plan_approval_view.as_mut() {
+        pav.feedback_draft = Some(text.to_string());
+    }
+    agent.persist_unsent_composer_draft_now();
+    agent.show_toast("This comment will ride Approve. Click Approve, Clarify, or Revise.");
+    true
+}
+
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -570,6 +622,10 @@ pub(super) fn dispatch_send_prompt_inner(
     // Submitting the prompt retires any edit-contextual ephemeral tip
     // (ambient tips live out their TTL across the submit).
     agent.ephemeral_tip.clear_on_submit();
+
+    if hold_parked_plan_review_comments(agent, &text) {
+        return vec![];
+    }
 
     let trimmed = text.trim();
 

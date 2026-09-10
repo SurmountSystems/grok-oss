@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,10 @@ const REBUILD_RELAUNCH_REQUEST_FILENAME: &str = "rebuild_relaunch_request.json";
 
 /// Ignore requests older than this so a stale file cannot thrash forever.
 const REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS: u64 = 15 * 60;
+
+/// Nested work can keep a leader draining indefinitely. The TUI that ran
+/// `/rebuild` must still return so it can exec-replace onto the new binary.
+pub const REBUILD_LEADER_SIGNAL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Summary of one rebuild + relaunch attempt (for CLI, slash scrollback, tests).
 #[derive(Debug, Clone)]
@@ -1267,11 +1271,13 @@ pub fn should_peer_relaunch_for_request(
     request: &RebuildRelaunchRequest,
     now_secs: u64,
 ) -> bool {
-    should_peer_relaunch_for_request_with_current_exe(
+    should_peer_relaunch_for_request_with_current_exe_and_image(
         self_identity,
         request,
         now_secs,
         std::env::current_exe().ok().as_deref(),
+        running_image_dev_ino(),
+        file_dev_ino(&request.installed_exe),
     )
 }
 
@@ -1292,6 +1298,27 @@ pub fn should_peer_relaunch_for_request_with_current_exe(
     now_secs: u64,
     current_exe: Option<&Path>,
 ) -> bool {
+    should_peer_relaunch_for_request_with_current_exe_and_image(
+        self_identity,
+        request,
+        now_secs,
+        current_exe,
+        None,
+        None,
+    )
+}
+
+/// Like [`should_peer_relaunch_for_request_with_current_exe`], with running vs
+/// installed `(dev, ino)` so a replaced cargo-bin image is detected when
+/// Linux `readlink(/proc/self/exe)` omits `(deleted)`.
+pub fn should_peer_relaunch_for_request_with_current_exe_and_image(
+    self_identity: &str,
+    request: &RebuildRelaunchRequest,
+    now_secs: u64,
+    current_exe: Option<&Path>,
+    running_image: Option<(u64, u64)>,
+    installed_image: Option<(u64, u64)>,
+) -> bool {
     if !peer_rebuild_request_is_actionable(request, now_secs) {
         return false;
     }
@@ -1299,13 +1326,34 @@ pub fn should_peer_relaunch_for_request_with_current_exe(
         return true;
     }
     // Same compile-time identity (or unknown SHA) but still on a replaced
-    // binary: Linux `/proc/self/exe` keeps the deleted inode after install.
-    running_exe_needs_relaunch_onto(current_exe, &request.installed_exe)
+    // binary: Linux `/proc/self/exe` keeps the old inode after install.
+    running_exe_needs_relaunch_onto_with_image(
+        current_exe,
+        &request.installed_exe,
+        running_image,
+        installed_image,
+    )
 }
 
 /// True when this process should re-exec onto `installed_exe` because the
 /// running image is gone/replaced (deleted inode) or is a different path.
 pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe: &Path) -> bool {
+    running_exe_needs_relaunch_onto_with_image(current_exe, installed_exe, None, None)
+}
+
+/// Linux `readlink(/proc/pid/exe)` often omits `(deleted)` once a new file
+/// occupies the same path. Compare the mapped image inode to the install.
+pub fn running_exe_needs_relaunch_onto_with_image(
+    current_exe: Option<&Path>,
+    installed_exe: &Path,
+    running_image: Option<(u64, u64)>,
+    installed_image: Option<(u64, u64)>,
+) -> bool {
+    if let (Some(running), Some(installed)) = (running_image, installed_image)
+        && running != installed
+    {
+        return true;
+    }
     let Some(current) = current_exe else {
         return false;
     };
@@ -1319,6 +1367,34 @@ pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe
     let cur = dunce::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
     let inst = dunce::canonicalize(installed_exe).unwrap_or_else(|_| installed_exe.to_path_buf());
     cur != inst
+}
+
+/// Device and inode of the image this process is still running. On Linux
+/// that is `/proc/self/exe`, which stats the mapped inode even when the
+/// directory entry was replaced.
+fn running_image_dev_ino() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        file_dev_ino(Path::new("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn file_dev_ino(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Pure: PID set rebuild should SIGUSR1 after the composite `(pid, session_id)`
@@ -1574,7 +1650,22 @@ where
             }
             RebuildFleetSignalStep::Leaders => {
                 if plan.signal_leaders {
-                    leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
+                    // Do not wait for nested-work drain. Operator ran rebuild
+                    // and the grok-oss TUI did not restart while this await
+                    // sat on a live leader.
+                    leader_outcomes = match tokio::time::timeout(
+                        REBUILD_LEADER_SIGNAL_TIMEOUT,
+                        leader::signal_leaders_to_relaunch(&installed_identity),
+                    )
+                    .await
+                    {
+                        Ok(outcomes) => outcomes,
+                        Err(_) => vec![LeaderRelaunchOutcome::Skipped {
+                            reason: "leader signal timed out; this TUI still re-execs onto the new binary"
+                                .into(),
+                            pid: None,
+                        }],
+                    };
                 }
             }
         }
@@ -2297,6 +2388,56 @@ mod tests {
             1_000,
             Some(exe.as_path()),
         ));
+    }
+
+    /// Operator: "Wait, that process hasn't restarted? I literally ran rebuild.
+    /// Maybe the bug is in the rebuild command?"
+    /// After `just install` replaced `~/.cargo/bin/grok-oss`, Linux
+    /// `readlink(/proc/pid/exe)` still showed that path without `(deleted)`
+    /// while `stat` inodes differed. The live grok-oss process did not restart.
+    #[test]
+    fn operator_ran_rebuild_and_the_grok_oss_process_did_not_restart() {
+        let path = Path::new("/home/hunter/.cargo/bin/grok-oss");
+        let req = make_rebuild_relaunch_request(
+            path.to_path_buf(),
+            "1.0.3 (825986fefeea) [stable]",
+            1_000,
+        );
+        assert!(
+            running_exe_needs_relaunch_onto_with_image(
+                Some(path),
+                path,
+                Some((8, 3_240_185)),
+                Some((8, 160_803_642)),
+            ),
+            "operator ran rebuild and the grok-oss process did not restart: \
+             a replaced cargo-bin inode must exec-replace even when the path \
+             matches and there is no (deleted) marker"
+        );
+        assert!(
+            should_peer_relaunch_for_request_with_current_exe_and_image(
+                "1.0.3 (825986fefeea) [stable]",
+                &req,
+                1_000,
+                Some(path),
+                Some((8, 3_240_185)),
+                Some((8, 160_803_642)),
+            ),
+            "equal compile-time identity is not proof the live image is the new install"
+        );
+        assert!(
+            !running_exe_needs_relaunch_onto_with_image(
+                Some(path),
+                path,
+                Some((8, 160_803_642)),
+                Some((8, 160_803_642)),
+            ),
+            "matching inodes on the same path must not thrash re-exec"
+        );
+        assert!(
+            REBUILD_LEADER_SIGNAL_TIMEOUT <= Duration::from_secs(5),
+            "waiting on nested leader drain must not block the TUI that ran /rebuild"
+        );
     }
 
     /// Contract: after install replaces the binary, Linux shows `(deleted)` on
