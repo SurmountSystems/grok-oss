@@ -80,7 +80,7 @@ prompt. `⇧E` clears all pins, and `Ctrl+T` clears pins on thinking blocks.
 |-----|--------|
 | `y` | Copy block content to clipboard |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
-| `Enter` | Open block content in fullscreen viewer |
+| `Enter` | Expand a selected collapsed or hidden block (image attachment ellipsis and other folded hidden bodies), same as `:expand`. On an already-expanded selected entry, open the fullscreen viewer. Composer `Enter` with text still sends. |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
 
 ---
@@ -404,6 +404,7 @@ The bottom of the TUI displays a contextual shortcuts bar showing the most relev
 The TUI supports mouse interaction:
 
 - **Click** on a scrollback entry to select it
+- **Double-click** a collapsed or hidden block (image attachment ellipsis and other folded hidden bodies) to expand it, same as `:expand`
 - **Scroll wheel** to scroll through the scrollback
 - **Click** on the prompt area to focus it
 - **Hover** over the prompt to see a highlight (configurable via `pager.toml`)
@@ -428,7 +429,7 @@ Focus prompt:     Space or any letter key (auto-focuses and types)
 Navigation:       j/k (up/down)  H/L (prev/next turn)  K/J (prev/next response)  g/G (top/bottom)
 Scrolling:        Ctrl+J/K (line)  Ctrl+U/D (half page; D=Shift+D in VSCode)  PgUp/PgDn (page)
 Folding:          h/l (collapse/expand)  e (toggle)  E (all)
-Content:          y (copy)  Y (copy cmd)  Enter (fullscreen)
+Content:          y (copy)  Y (copy cmd)  Enter (expand hidden, else fullscreen)
 View:             r (raw markdown)  Ctrl+T (thinking)
 Focus prompt:     i, Tab, or Space
 ```

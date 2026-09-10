@@ -455,6 +455,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     child_updates_replayed: false,
                 },
             );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
+            );
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
             {
@@ -650,6 +654,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.tools_used = tools_used.into_iter().map(Arc::from).collect();
                 info.error_count = Some(error_count);
                 info.last_progress_at = std::time::Instant::now();
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                    &child_session_id,
+                    tokens_used,
+                );
             }
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
                 && context_window_tokens > 0
@@ -755,7 +763,12 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.turns = Some(turns);
                 if tokens_used > 0 {
                     info.tokens_used = Some(tokens_used);
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                        &child_session_id,
+                        tokens_used,
+                    );
                 }
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
                 info.pending_kill = false;
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
@@ -1402,7 +1415,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
                     child_session_id: Arc::from(child_session_id.clone()),
-                    description: Arc::from(description),
+                    description: Arc::from(description.clone()),
                     subagent_type: Arc::from(subagent_type),
                     persona: persona.map(Arc::from),
                     role: role.map(Arc::from),
@@ -1441,6 +1454,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     child_updates_replayed: false,
                 },
             );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
+            );
             agent.ensure_subagent_child_view(&child_session_id);
             true
         }
@@ -1471,6 +1488,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.tools_used = tools_used.into_iter().map(Arc::from).collect();
             info.error_count = Some(error_count);
             info.last_progress_at = std::time::Instant::now();
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
             true
         }
         XaiSessionUpdate::SubagentFinished {
@@ -1494,6 +1515,11 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.turns = Some(turns);
             info.duration_ms = Some(duration_ms);
             info.tokens_used = Some(tokens_used);
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
             info.activity_label = None;
             info.pending_kill = false;
             info.kill_requested_at = None;

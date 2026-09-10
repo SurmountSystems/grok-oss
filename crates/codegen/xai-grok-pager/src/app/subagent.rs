@@ -571,7 +571,13 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
         Some(c) => c.to_uppercase().chain(chars).collect(),
         None => raw_label,
     };
-    (label, clean_desc.to_string())
+    // Suffix owned by agent_view::l2_token_tracking (`measured N tokens`).
+    // In-memory `tokens_used` only. Do not open session transcript files here.
+    let desc = match info.tokens_used {
+        Some(n) => format!("{clean_desc} (measured {n} tokens)"),
+        None => clean_desc.to_string(),
+    };
+    (label, desc)
 }
 
 /// Running, non-workflow L2 rows for the L1 Subagents list.

@@ -184,6 +184,7 @@ mod prompt;
 mod queue;
 mod render;
 pub use render::AppRenderParams;
+pub(crate) mod l2_token_tracking;
 mod live_prompt_task;
 mod rewind;
 mod selection;

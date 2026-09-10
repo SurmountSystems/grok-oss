@@ -30,8 +30,8 @@ use super::import_claude::{
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
 use super::modes::{
-    dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
-    set_permission_mode, set_plan_mode, set_yolo_mode,
+    dispatch_cycle_mode, dispatch_dock_isolated_preview, dispatch_enter_plan_mode,
+    dispatch_show_plan, dispatch_toggle_yolo, set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
     dispatch_enter_remember_mode, dispatch_open_feedback_pane,
@@ -1052,8 +1052,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                      then re-exec this session on the new binary.",
                     ));
             }
-            let start_dir =
+            let session_cwd = app
+                .agents
+                .get(&agent_id)
+                .map(|agent| agent.session.cwd.clone())
+                .filter(|cwd| !cwd.as_os_str().is_empty());
+            let process_cwd =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let start_dir =
+                super::rebuild::rebuild_compile_start_dir(session_cwd.as_deref(), &process_cwd);
             vec![crate::app::actions::Effect::RunRebuild {
                 start_dir,
                 agent_id,
@@ -1070,9 +1077,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::UnstickLastL1Prompt => super::unstick::dispatch_unstick_last_l1_prompt(app),
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
-        Action::EnterPlanMode { description, soft } => {
-            dispatch_enter_plan_mode(app, description, soft)
+        Action::DockIsolatedPreview { description } => {
+            dispatch_dock_isolated_preview(app, description)
         }
+        Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
         Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),

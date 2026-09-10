@@ -12,7 +12,7 @@
 //! (each process fetches; no shared file).
 //!
 //! Snapshot stores identity ids, included SuperGrok period used percent,
-//! reset, SuperGrok dollar extras cents, and poll outcome class. Never JWTs
+//! reset, SuperGrok dollar credits, and poll outcome class. Never JWTs
 //! or API keys.
 
 use std::fs::{self, File, OpenOptions};
@@ -29,7 +29,6 @@ use super::allowance_exhaust_from_billing::{
     remember_supergrok_included_billing,
 };
 use super::included_poll_history::record_included_poll_now;
-use super::xai_management::CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS;
 
 /// Snapshot JSON under `$GROK_HOME`.
 pub const SNAPSHOT_FILE_NAME: &str = "limits_snapshot.json";
@@ -40,8 +39,14 @@ pub const LOCK_FILE_NAME: &str = "limits_snapshot.lock";
 /// Alias of [`LOCK_FILE_NAME`] for callers that want the snapshot-prefixed name.
 pub const SNAPSHOT_LOCK_FILE_NAME: &str = LOCK_FILE_NAME;
 
-/// Shared snapshot freshness window. Matches Management process TTL (60s).
-pub const SNAPSHOT_TTL_SECS: u64 = CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS;
+/// Shared snapshot freshness window for HonorTtl automatic/background checks.
+///
+/// One hour per machine: SuperGrok credits and Management credits APIs are
+/// checked at most once an hour unless the operator ForceRefresh (`/limits`,
+/// `/limits refresh`, `grok-oss limits`, `grok-oss limits refresh`). This is
+/// not the Management in-process paint cache
+/// ([`super::xai_management::CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`], 60s).
+pub const SNAPSHOT_TTL_SECS: u64 = 3600;
 
 /// [`SNAPSHOT_TTL_SECS`] as a [`Duration`].
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(SNAPSHOT_TTL_SECS);
@@ -63,11 +68,13 @@ pub const POLL_OUTCOME_NEVER: &str = "never";
 /// Whether this collect should bust a fresh snapshot when this process is leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitsSnapshotMode {
-    /// Background TUI poll: reuse a snapshot younger than [`SNAPSHOT_TTL`].
+    /// Background TUI poll: reuse a snapshot younger than [`SNAPSHOT_TTL`]
+    /// (one hour). Does not clear Management process caches.
     HonorTtl,
     /// Explicit `grok-oss limits` / `/limits`: fetch if this process holds
-    /// exclusive flock without waiting. After waiting on a leader, reuse the
-    /// just-written snapshot unless it is still missing or stale.
+    /// exclusive flock without waiting, even when the snapshot is younger
+    /// than one hour. After waiting on a leader, reuse the just-written
+    /// snapshot unless it is still missing or stale.
     ForceRefresh,
 }
 
@@ -314,6 +321,10 @@ fn apply_management_snapshot(mgmt: &LimitsSnapshotManagement) {
 ///
 /// Returns `None` when no management key is configured. Call only from a
 /// hub leader fetch callback so followers do not stampede the Management API.
+/// Automatic HonorTtl leader HTTP is at most once an hour per machine
+/// ([`SNAPSHOT_TTL_SECS`]). ForceRefresh still fetches. Process Mutex 60s
+/// caches may paint in-process; they must not cause extra leader HTTP under
+/// HonorTtl.
 pub async fn fetch_management_into_snapshot() -> Option<LimitsSnapshotManagement> {
     use super::xai_management::{
         USAGE_SERIES_DEFAULT_DAY_WINDOW, fetch_console_team_postpaid_preview_default,
@@ -555,8 +566,56 @@ mod tests {
         doc
     }
 
+    /// Ninety seconds is older than the Management process cache (60s) and
+    /// younger than the shared snapshot hour. HonorTtl must not HTTP.
+    const WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS: u64 = 90_000;
+
+    #[test]
+    fn snapshot_ttl_secs_is_one_hour_not_management_process_cache() {
+        assert_eq!(
+            SNAPSHOT_TTL_SECS, 3600,
+            "HonorTtl automatic SuperGrok credits and Management credits checks are at most once an hour per machine"
+        );
+        assert_eq!(
+            crate::auth::CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS,
+            60,
+            "Management process cache stays 60s as an in-process paint helper; it is not the shared hourly fetch"
+        );
+        assert_ne!(
+            SNAPSHOT_TTL_SECS,
+            crate::auth::CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn snapshot_younger_than_one_hour_is_not_stale_including_ninety_seconds() {
+        let now = 1_700_000_000_000;
+        let ninety = sample_doc(
+            now.saturating_sub(WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS),
+            10.0,
+        );
+        assert!(
+            !snapshot_is_stale(&ninety, now),
+            "90s is within the hour; a 60s shared TTL would wrongly treat this as stale"
+        );
+        let almost_hour = sample_doc(now.saturating_sub((SNAPSHOT_TTL_SECS - 1) * 1000), 10.0);
+        assert!(!snapshot_is_stale(&almost_hour, now));
+    }
+
+    #[test]
+    fn snapshot_at_one_hour_is_stale() {
+        let now = 1_700_000_000_000;
+        let hour = sample_doc(now.saturating_sub(SNAPSHOT_TTL_SECS * 1000), 10.0);
+        assert!(
+            snapshot_is_stale(&hour, now),
+            "after 3600s a waiter or leader may fetch once"
+        );
+    }
+
+    /// Second grok-oss process within the hour does not hit the SuperGrok
+    /// credits API or Management credits APIs.
     #[tokio::test]
-    async fn limits_snapshot_second_process_reads_file_and_does_not_http() {
+    async fn limits_snapshot_second_process_within_the_hour_does_not_http() {
         let tmp = tempfile::TempDir::new().expect("temp home");
         let home = tmp.path();
         let _env = SharedSnapshotEnvGuard::acquire(home);
@@ -585,7 +644,7 @@ mod tests {
         let (role2, doc2) = coordinate_limits_snapshot(
             home,
             LimitsSnapshotMode::HonorTtl,
-            now.saturating_add(1_000),
+            now.saturating_add(WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS),
             || {
                 let http2 = Arc::clone(&http2);
                 async move {
@@ -599,12 +658,12 @@ mod tests {
         assert_eq!(
             role2,
             LimitsSnapshotRole::FollowerRead,
-            "second process must read the flock snapshot, not HTTP"
+            "second process within the hour must read the flock snapshot, not HTTP"
         );
         assert_eq!(
             http.load(Ordering::SeqCst),
             1,
-            "second process must not call SuperGrok billing HTTP"
+            "second process must not call SuperGrok credits or Management credits APIs"
         );
         assert_eq!(doc2.identities[0].usage_pct, Some(24.0));
         let remembered = included_billing_fields_snapshot();
@@ -616,6 +675,82 @@ mod tests {
         assert!(supergrok_billing_poll_outcome("user-personal").is_ok());
     }
 
+    /// HonorTtl with a snapshot younger than one hour does not HTTP.
+    #[tokio::test]
+    async fn limits_snapshot_honor_ttl_fresh_within_hour_does_not_http() {
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+        write_limits_snapshot_file(home, &sample_doc(now, 18.0))
+            .expect("seed within-hour snapshot");
+        let http = Arc::new(AtomicU32::new(0));
+        let http1 = Arc::clone(&http);
+        let (role, doc) = coordinate_limits_snapshot(
+            home,
+            LimitsSnapshotMode::HonorTtl,
+            now.saturating_add(WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS),
+            || {
+                let http1 = Arc::clone(&http1);
+                async move {
+                    http1.fetch_add(1, Ordering::SeqCst);
+                    sample_doc(now, 90.0)
+                }
+            },
+        )
+        .await
+        .expect("honor ttl within hour");
+        assert_eq!(role, LimitsSnapshotRole::FollowerRead);
+        assert_eq!(
+            http.load(Ordering::SeqCst),
+            0,
+            "HonorTtl must not HTTP SuperGrok credits or Management credits APIs while the snapshot is younger than one hour"
+        );
+        assert_eq!(doc.identities[0].usage_pct, Some(18.0));
+    }
+
+    /// ForceRefresh leader HTTP-fetches even when the snapshot file is
+    /// younger than one hour (explicit `/limits` / `grok-oss limits`).
+    #[tokio::test]
+    async fn limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour()
+     {
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+        write_limits_snapshot_file(home, &sample_doc(now, 100.0))
+            .expect("seed within-hour snapshot");
+        let http = Arc::new(AtomicU32::new(0));
+        let http1 = Arc::clone(&http);
+        let (role, doc) = coordinate_limits_snapshot(
+            home,
+            LimitsSnapshotMode::ForceRefresh,
+            now.saturating_add(WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS),
+            || {
+                let http1 = Arc::clone(&http1);
+                async move {
+                    http1.fetch_add(1, Ordering::SeqCst);
+                    sample_doc(
+                        now.saturating_add(WITHIN_HOUR_BUT_PAST_PROCESS_CACHE_MS),
+                        41.0,
+                    )
+                }
+            },
+        )
+        .await
+        .expect("force refresh within hour");
+        assert_eq!(role, LimitsSnapshotRole::LeaderFetched);
+        assert_eq!(
+            http.load(Ordering::SeqCst),
+            1,
+            "ForceRefresh must fetch even when the snapshot is younger than one hour"
+        );
+        assert_eq!(doc.identities[0].usage_pct, Some(41.0));
+    }
+
+    /// After the hour, a waiter/leader may fetch once. Stale means 3600s, not 60s.
     #[tokio::test]
     async fn limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once() {
         let tmp = tempfile::TempDir::new().expect("temp home");

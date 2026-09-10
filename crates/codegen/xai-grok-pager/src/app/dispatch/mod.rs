@@ -50,7 +50,10 @@ mod voice;
 
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
-pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
+pub(crate) use billing::{
+    BACKGROUND_BILLING_POLL_FORCE_REFRESH, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
+    is_credit_limit_error,
+};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 #[cfg(test)]
 pub(crate) use notes::FEEDBACK_QUESTION_LABEL;

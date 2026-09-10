@@ -31,6 +31,18 @@ pub enum SupergrokAccountRole {
     Business,
 }
 
+/// Operator SuperGrok paying-identity pin in `$GROK_HOME/limits_pins.json`.
+///
+/// Unset means default rank: personal SuperGrok JWT while personal included
+/// SuperGrok period limits have room. Not a `[auth]` key. Not
+/// `preferred_method`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SupergrokIdentityPin {
+    Personal,
+    Business,
+}
+
 /// Snapshot of included-allowance headroom for one SuperGrok identity.
 ///
 /// Pure input for ranking; no network, no secret store.
@@ -356,6 +368,15 @@ pub enum PickSupergrokForAuto {
 pub fn pick_supergrok_identity_for_auto(
     identities: &[SupergrokIdentityHeadroom],
 ) -> PickSupergrokForAuto {
+    pick_supergrok_identity_for_auto_with_pin(identities, None)
+}
+
+/// Same as [`pick_supergrok_identity_for_auto`], honoring an operator
+/// SuperGrok identity pin from `limits_pins.json`.
+pub fn pick_supergrok_identity_for_auto_with_pin(
+    identities: &[SupergrokIdentityHeadroom],
+    identity_pin: Option<SupergrokIdentityPin>,
+) -> PickSupergrokForAuto {
     if identities.is_empty() {
         return PickSupergrokForAuto::NoIdentities;
     }
@@ -365,7 +386,7 @@ pub fn pick_supergrok_identity_for_auto(
         .any(|i| i.role == SupergrokAccountRole::Personal);
     let mut with_headroom: Vec<&SupergrokIdentityHeadroom> = identities
         .iter()
-        .filter(|i| included_paying_headroom(i, personal_present))
+        .filter(|i| included_paying_headroom(i, personal_present, identity_pin))
         .collect();
 
     if with_headroom.is_empty() {
@@ -416,51 +437,79 @@ fn personal_supergrok_login_present(candidates: &[SupergrokSessionCandidate]) ->
 }
 
 /// Included remaining that sampling hop may spend. Team remaining is not a
-/// SuperGrok paying source while a personal SuperGrok login exists.
-fn included_paying_headroom(row: &SupergrokIdentityHeadroom, personal_login_present: bool) -> bool {
-    if !row.has_included_headroom() {
-        return false;
+/// SuperGrok paying source while a personal SuperGrok login exists, unless
+/// the operator pinned SuperGrok (business) with `use-business`.
+///
+/// An identity pin (`use-personal` / `use-business`) selects that SuperGrok
+/// login even when included remaining is 0 or the period-limits payload is
+/// missing (`usage_pct` None). Unset pin still requires remaining, and still
+/// omits Team while a personal SuperGrok login exists.
+fn included_paying_headroom(
+    row: &SupergrokIdentityHeadroom,
+    personal_login_present: bool,
+    identity_pin: Option<SupergrokIdentityPin>,
+) -> bool {
+    match identity_pin {
+        Some(SupergrokIdentityPin::Business) => row.role == SupergrokAccountRole::Business,
+        Some(SupergrokIdentityPin::Personal) => row.role == SupergrokAccountRole::Personal,
+        None => {
+            if !row.has_included_headroom() {
+                return false;
+            }
+            if personal_login_present && role_settles_as_team_oauth(row.role) {
+                return false;
+            }
+            true
+        }
     }
-    if personal_login_present && role_settles_as_team_oauth(row.role) {
-        return false;
-    }
-    true
 }
 
 fn is_supergrok_paying_session(
     candidate: &SupergrokSessionCandidate,
     personal_login_present: bool,
+    identity_pin: Option<SupergrokIdentityPin>,
 ) -> bool {
-    !(personal_login_present && role_settles_as_team_oauth(candidate.headroom.role))
+    match identity_pin {
+        Some(SupergrokIdentityPin::Business) => {
+            candidate.headroom.role == SupergrokAccountRole::Business
+        }
+        Some(SupergrokIdentityPin::Personal) => {
+            candidate.headroom.role == SupergrokAccountRole::Personal
+        }
+        None => !(personal_login_present && role_settles_as_team_oauth(candidate.headroom.role)),
+    }
 }
 
 fn live_supergrok_recovery_tokens(
     sessions: &[SupergrokSessionCandidate],
     console: &[String],
     personal_login_present: bool,
+    identity_pin: Option<SupergrokIdentityPin>,
 ) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    let push_live =
-        |paying_only: bool, seen: &mut std::collections::HashSet<String>, out: &mut Vec<String>| {
-            for c in sessions {
-                if c.hard_expired {
-                    continue;
-                }
-                if paying_only && !is_supergrok_paying_session(c, personal_login_present) {
-                    continue;
-                }
-                let t = c.access_token.trim();
-                if t.is_empty() || console.iter().any(|k| k == t) {
-                    continue;
-                }
-                if seen.insert(t.to_owned()) {
-                    out.push(t.to_owned());
-                }
+    let push_live = |paying_only: bool,
+                     seen: &mut std::collections::HashSet<String>,
+                     out: &mut Vec<String>| {
+        for c in sessions {
+            if c.hard_expired {
+                continue;
             }
-        };
+            if paying_only && !is_supergrok_paying_session(c, personal_login_present, identity_pin)
+            {
+                continue;
+            }
+            let t = c.access_token.trim();
+            if t.is_empty() || console.iter().any(|k| k == t) {
+                continue;
+            }
+            if seen.insert(t.to_owned()) {
+                out.push(t.to_owned());
+            }
+        }
+    };
     push_live(true, &mut seen, &mut out);
-    if out.is_empty() {
+    if out.is_empty() && identity_pin.is_none() {
         push_live(false, &mut seen, &mut out);
     }
     out
@@ -641,6 +690,15 @@ pub fn session_bearer_should_align_to_ranked_free_period_primary(
 pub fn order_live_supergrok_for_auto(
     candidates: &[SupergrokSessionCandidate],
 ) -> AutoSupergrokOrder {
+    order_live_supergrok_for_auto_with_pin(candidates, None)
+}
+
+/// Same as [`order_live_supergrok_for_auto`], honoring an operator SuperGrok
+/// identity pin from `limits_pins.json`.
+pub fn order_live_supergrok_for_auto_with_pin(
+    candidates: &[SupergrokSessionCandidate],
+    identity_pin: Option<SupergrokIdentityPin>,
+) -> AutoSupergrokOrder {
     if candidates.is_empty() {
         return AutoSupergrokOrder {
             live_tokens: Vec::new(),
@@ -654,11 +712,12 @@ pub fn order_live_supergrok_for_auto(
 
     // Prefer personal SuperGrok included paying headroom that did **not** last
     // auth-fail. Team JWT remaining is not a SuperGrok paying source while a
-    // personal SuperGrok login exists.
+    // personal SuperGrok login exists, unless `use-business` pinned it.
     let mut live: Vec<&SupergrokSessionCandidate> = candidates
         .iter()
         .filter(|c| {
-            included_paying_headroom(&c.headroom, personal_present)
+            !c.hard_expired
+                && included_paying_headroom(&c.headroom, personal_present, identity_pin)
                 && !auth_failed(&c.headroom.identity_id)
         })
         .collect();
@@ -668,10 +727,12 @@ pub fn order_live_supergrok_for_auto(
         // nobody has headroom. Do not primary a known-dead JWT; ExhaustedAll when
         // any candidate exists so console / recovery can run.
         let only_auth_failed_paying = candidates.iter().any(|c| {
-            included_paying_headroom(&c.headroom, personal_present)
+            !c.hard_expired
+                && included_paying_headroom(&c.headroom, personal_present, identity_pin)
                 && auth_failed(&c.headroom.identity_id)
         }) && candidates.iter().all(|c| {
-            !included_paying_headroom(&c.headroom, personal_present)
+            c.hard_expired
+                || !included_paying_headroom(&c.headroom, personal_present, identity_pin)
                 || auth_failed(&c.headroom.identity_id)
         });
         if only_auth_failed_paying {
@@ -684,7 +745,7 @@ pub fn order_live_supergrok_for_auto(
         // No poll outcomes / no headroom: pure pick (existing ExhaustedAll path).
         let headrooms: Vec<SupergrokIdentityHeadroom> =
             candidates.iter().map(|c| c.headroom.clone()).collect();
-        return match pick_supergrok_identity_for_auto(&headrooms) {
+        return match pick_supergrok_identity_for_auto_with_pin(&headrooms, identity_pin) {
             PickSupergrokForAuto::NoIdentities => AutoSupergrokOrder {
                 live_tokens: Vec::new(),
                 live_identity_ids: Vec::new(),
@@ -699,10 +760,13 @@ pub fn order_live_supergrok_for_auto(
                 // Unreachable when live was empty from paying-headroom filter
                 // without auth-failed, but keep sort for safety if pick disagrees.
                 // Team remaining is still not a paying source while a personal
-                // SuperGrok login exists.
+                // SuperGrok login exists, unless `use-business` pinned it.
                 let mut fallback: Vec<&SupergrokSessionCandidate> = candidates
                     .iter()
-                    .filter(|c| included_paying_headroom(&c.headroom, personal_present))
+                    .filter(|c| {
+                        !c.hard_expired
+                            && included_paying_headroom(&c.headroom, personal_present, identity_pin)
+                    })
                     .collect();
                 sort_live_supergrok_by_reset(&mut fallback);
                 AutoSupergrokOrder {
@@ -744,7 +808,18 @@ pub fn order_credentials_for_preferred_auto(
     sessions: &[SupergrokSessionCandidate],
     console_keys: &[String],
 ) -> AutoCredentialOrder {
-    let ranked = order_live_supergrok_for_auto(sessions);
+    let identity_pin = super::limits_pins::load_limits_pins().supergrok_identity;
+    order_credentials_for_preferred_auto_with_pin(sessions, console_keys, identity_pin)
+}
+
+/// Same as [`order_credentials_for_preferred_auto`] with an explicit identity
+/// pin (tests). Production auto-rank loads the pin from `limits_pins.json`.
+pub fn order_credentials_for_preferred_auto_with_pin(
+    sessions: &[SupergrokSessionCandidate],
+    console_keys: &[String],
+    identity_pin: Option<SupergrokIdentityPin>,
+) -> AutoCredentialOrder {
+    let ranked = order_live_supergrok_for_auto_with_pin(sessions, identity_pin);
     let mut console: Vec<String> = console_keys
         .iter()
         .map(|k| k.trim().to_owned())
@@ -785,7 +860,7 @@ pub fn order_credentials_for_preferred_auto(
         .filter(|c| {
             !c.hard_expired
                 && has_positive_supergrok_dollar_extras(c.prepaid_balance_cents)
-                && is_supergrok_paying_session(c, personal_present)
+                && is_supergrok_paying_session(c, personal_present, identity_pin)
         })
         .collect();
     if !with_extras.is_empty() {
@@ -822,7 +897,8 @@ pub fn order_credentials_for_preferred_auto(
     // SuperGrok HTTP 402. Hard-expired SuperGrok is never recovery. Prefer a
     // personal SuperGrok JWT. Team JWT is last-resort only when no personal
     // SuperGrok JWT is live (Team-only login).
-    let recovery = live_supergrok_recovery_tokens(sessions, &console, personal_present);
+    let recovery =
+        live_supergrok_recovery_tokens(sessions, &console, personal_present, identity_pin);
     if !recovery.is_empty() {
         let mut tokens = recovery;
         let primary = tokens.remove(0);
@@ -899,6 +975,13 @@ pub fn preferred_uses_supergrok_auto_rank(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn order_credentials_for_preferred_auto(
+        sessions: &[SupergrokSessionCandidate],
+        console_keys: &[String],
+    ) -> AutoCredentialOrder {
+        order_credentials_for_preferred_auto_with_pin(sessions, console_keys, None)
+    }
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(secs, 0).single().expect("valid ts")

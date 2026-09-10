@@ -5,8 +5,10 @@
 //! `just install` → `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`.
 //!
 //! Identity SHA in `version (sha)` is a **git object id**, not a SHA-1
-//! security hash of a downloaded artifact. Verify is `binary --version`.
-//! Failed verify must not signal peers.
+//! security hash of a downloaded artifact. Verify is `binary --version`,
+//! then that SHA must match this workspace `git rev-parse --short=12 HEAD`.
+//! A leftover cargo-bin identity is not an acceptable exec target.
+//! Failed verify or SHA mismatch must not signal peers.
 //!
 //! After install it:
 //! 1. Soft-signals reachable leaders (`RelaunchForUpdate`).
@@ -102,6 +104,22 @@ impl InstallBackend {
             Self::CargoFixedArgv => "cargo build + install (fixed argv)",
         }
     }
+}
+
+/// Relative path of TUI `/limits` words (`use-personal` / `use-business`).
+const LIMITS_CMD_REL: &str = "crates/codegen/xai-grok-pager/src/limits_cmd.rs";
+
+/// Compile start dir for `/rebuild`: prefer the session workspace when it is a
+/// Grok OSS root or walks up to one (`justfile` plus pager-bin manifest).
+/// Fall back to process cwd only when the session path cannot resolve a tree.
+pub fn rebuild_compile_start_dir(session_cwd: Option<&Path>, process_cwd: &Path) -> PathBuf {
+    if let Some(session) = session_cwd
+        && !session.as_os_str().is_empty()
+        && resolve_source_root(session).is_ok()
+    {
+        return session.to_path_buf();
+    }
+    process_cwd.to_path_buf()
 }
 
 /// Walk from `start` upward until a checkout with this repo's install recipe
@@ -1119,6 +1137,83 @@ pub fn verify_installed_identity(binary: &Path) -> Result<String> {
     })
 }
 
+/// Parenthetical git SHA from an identity such as `1.0.3 (157f1746)`.
+pub fn identity_git_sha(identity: &str) -> Option<String> {
+    leader::parse_binary_identity(identity)?.git_sha
+}
+
+/// True when `identity` parenthetical SHA equals workspace `git rev-parse --short=12 HEAD`.
+pub fn installed_identity_matches_workspace_git_sha(identity: &str, workspace_sha: &str) -> bool {
+    let Some(sha) = identity_git_sha(identity) else {
+        return false;
+    };
+    sha.eq_ignore_ascii_case(workspace_sha.trim())
+}
+
+/// Workspace HEAD short SHA, same width as pager-bin `build.rs` (`--short=12`).
+pub fn workspace_git_short_sha(source_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(source_root)
+        .output()
+        .with_context(|| format!("git rev-parse --short=12 HEAD in {}", source_root.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse --short=12 HEAD failed in {}: {}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        bail!(
+            "git rev-parse --short=12 HEAD produced an empty SHA in {}",
+            source_root.display()
+        );
+    }
+    Ok(sha)
+}
+
+/// True when this tree's `limits_cmd.rs` already names `use-personal` and `use-business`.
+pub fn source_tree_has_limits_identity_words(source_root: &Path) -> bool {
+    let path = source_root.join(LIMITS_CMD_REL);
+    std::fs::read_to_string(path)
+        .map(|text| text.contains("use-personal") && text.contains("use-business"))
+        .unwrap_or(false)
+}
+
+/// Acceptable `/rebuild` exec identity: workspace git SHA, not a leftover cargo-bin.
+///
+/// If `source_root` already contains `use-personal` and `use-business`, a leftover
+/// cargo-bin identity is still not an acceptable exec target.
+pub fn rebuild_exec_target_is_workspace_binary(
+    installed_identity: &str,
+    workspace_short_sha: &str,
+    source_root: &Path,
+) -> bool {
+    let matches =
+        installed_identity_matches_workspace_git_sha(installed_identity, workspace_short_sha);
+    if source_tree_has_limits_identity_words(source_root) && !matches {
+        return false;
+    }
+    matches
+}
+
+/// Fail before fleet signal / exec when the installed identity is not this workspace.
+pub fn require_installed_identity_matches_workspace(
+    identity: &str,
+    workspace_sha: &str,
+) -> Result<()> {
+    if installed_identity_matches_workspace_git_sha(identity, workspace_sha) {
+        return Ok(());
+    }
+    bail!(
+        "installed grok-oss identity is leftover cargo-bin {identity}; \
+         this workspace git SHA is {workspace_sha}. \
+         /rebuild must exec the binary produced from this workspace, not an older cargo-bin."
+    );
+}
+
 /// Extract `0.1.100 (sha)` from lines like `grok-oss 0.1.100 (sha)`.
 pub fn parse_version_output(stdout: &str) -> Option<String> {
     let line = stdout.lines().next()?.trim();
@@ -1619,6 +1714,24 @@ where
         }
     };
 
+    let workspace_sha = match workspace_git_short_sha(&source_root) {
+        Ok(sha) => sha,
+        Err(e) => {
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(
+                e.context("could not read this workspace git SHA; not signaling peers or leaders")
+            );
+        }
+    };
+    if let Err(e) =
+        require_installed_identity_matches_workspace(&installed_identity, &workspace_sha)
+    {
+        debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+        return Err(e.context(
+            "installed binary git SHA does not match this workspace; not signaling peers or leaders",
+        ));
+    }
+
     let plan = RebuildFleetPlan::after_install(true);
     debug_assert!(plan.should_replace_fleet());
 
@@ -1854,6 +1967,150 @@ mod tests {
         assert!(
             err.contains("Could not find a Grok OSS source tree"),
             "{err}"
+        );
+    }
+
+    /// Operator: "rebuild is supposed to use a binary. This is a bug, not a
+    /// product miss I have to accept."
+    /// Leftover cargo-bin identity `1.0.3 (157f1746)` must not match a
+    /// different workspace short SHA. Matching workspace SHA is accepted.
+    /// If this tree's `limits_cmd.rs` already has `use-personal` and
+    /// `use-business`, a leftover cargo-bin is not an acceptable exec target.
+    #[test]
+    fn rebuild_must_exec_workspace_binary_not_stale_cargo_bin() {
+        let leftover = "1.0.3 (157f1746)";
+        let workspace = "cafebabedead";
+        assert!(
+            !installed_identity_matches_workspace_git_sha(leftover, workspace),
+            "leftover identity 1.0.3 (157f1746) must not match a different workspace SHA"
+        );
+        assert!(
+            installed_identity_matches_workspace_git_sha("1.0.3 (cafebabedead)", workspace),
+            "matching workspace short SHA in version (sha) is an acceptable rebuild exec target"
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let limits = tmp
+            .path()
+            .join("crates/codegen/xai-grok-pager/src/limits_cmd.rs");
+        fs::create_dir_all(limits.parent().unwrap()).unwrap();
+        fs::write(
+            &limits,
+            "pub const LIMITS_WORD_USE_PERSONAL: &str = \"use-personal\";\n\
+             pub const LIMITS_WORD_USE_BUSINESS: &str = \"use-business\";\n",
+        )
+        .unwrap();
+        assert!(
+            source_tree_has_limits_identity_words(tmp.path()),
+            "fixture limits_cmd.rs must contain use-personal and use-business"
+        );
+        assert!(
+            !rebuild_exec_target_is_workspace_binary(leftover, workspace, tmp.path()),
+            "leftover cargo-bin identity is not an acceptable rebuild exec target when this tree already has use-personal and use-business"
+        );
+        assert!(
+            rebuild_exec_target_is_workspace_binary("1.0.3 (cafebabedead)", workspace, tmp.path()),
+            "workspace-matching identity is accepted even when the tree already has those slash words"
+        );
+    }
+
+    /// Identity SHA must equal workspace `git rev-parse --short=12 HEAD`.
+    /// Mismatch fails before fleet signal / exec. Do not SIGUSR1 peers.
+    #[test]
+    fn installed_identity_must_match_workspace_git_sha() {
+        require_installed_identity_matches_workspace("1.0.3 (deadbeefcafe)", "deadbeefcafe")
+            .expect("matching SHA must pass the gate");
+        let err = require_installed_identity_matches_workspace("1.0.3 (157f1746)", "deadbeefcafe")
+            .expect_err("leftover cargo-bin SHA must fail before fleet signal");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leftover cargo-bin") && msg.contains("157f1746"),
+            "error must name leftover cargo-bin identity, got {msg}"
+        );
+        assert!(
+            msg.contains("deadbeefcafe"),
+            "error must name the workspace SHA, got {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("just install first"),
+            "must not tell the operator to just install first: {msg}"
+        );
+        assert!(
+            !RebuildFleetPlan::after_install(false).should_replace_fleet(),
+            "mismatch must not SIGUSR1 peers or leaders"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        init_git_repo(root);
+        fs::write(root.join("src.txt"), b"index\n").unwrap();
+        let add = Command::new("git")
+            .args(["add", "src.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let cfg = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        let commit = Command::new("git")
+            .env("ALLOW_UNSIGNED_COMMIT", "1")
+            .args(["commit", "-m", "index"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        let sha = workspace_git_short_sha(root).expect("workspace short SHA");
+        assert!(
+            sha.len() >= 12,
+            "pager-bin build.rs uses git rev-parse --short=12 HEAD; got {sha}"
+        );
+        let identity = format!("1.0.3 ({sha})");
+        require_installed_identity_matches_workspace(&identity, &sha)
+            .expect("workspace-built identity must match HEAD short SHA");
+        assert!(installed_identity_matches_workspace_git_sha(
+            &identity, &sha
+        ));
+        assert!(!installed_identity_matches_workspace_git_sha(
+            "1.0.3 (157f1746)",
+            &sha
+        ));
+    }
+
+    #[test]
+    fn rebuild_compile_start_dir_prefers_session_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let session = tmp.path().join("workspace");
+        fs::create_dir_all(session.join("crates/codegen/xai-grok-pager-bin")).unwrap();
+        fs::write(session.join("justfile"), "install:\n").unwrap();
+        fs::write(
+            session.join("crates/codegen/xai-grok-pager-bin/Cargo.toml"),
+            "[package]\nname=\"xai-grok-pager-bin\"\n",
+        )
+        .unwrap();
+        let process = tmp.path().join("process-cwd");
+        fs::create_dir_all(&process).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&session), &process),
+            session,
+            "session workspace that is a Grok OSS root must win over process cwd"
+        );
+        let nested = session.join("crates/codegen/xai-grok-pager/src");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&nested), &process),
+            nested,
+            "session cwd that walks up to a Grok OSS root must still be preferred"
+        );
+        let elsewhere = tmp.path().join("not-a-tree");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&elsewhere), &process),
+            process,
+            "process cwd is the fallback only when session cwd cannot resolve a source tree"
         );
     }
 

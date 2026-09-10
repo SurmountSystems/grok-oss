@@ -799,18 +799,22 @@ pub enum Action {
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
-    /// `/view-plan` uses this. `/plan --soft` uses [`Self::EnterPlanMode`]
-    /// with `soft: true` so a new feature still enters plan mode.
+    /// `/view-plan` uses this. Isolated Preview for a new feature is
+    /// [`Self::DockIsolatedPreview`], not this variant.
     ShowPlan,
+    /// `/plan --soft` docks Isolated Preview on the right. It does not
+    /// enter plan mode. It does not park L1. It does not enqueue the
+    /// description as a Prompt. Present is not Approve. Nested L2s stay
+    /// Working. `--soft` is not the queue hold token. Hard `/plan`
+    /// without `--soft` still uses [`Self::EnterPlanMode`].
+    DockIsolatedPreview {
+        description: Option<String>,
+    },
     /// Enter plan mode. If a description is provided, also start a turn
-    /// with that text as the prompt.
-    ///
-    /// `soft` is `/plan --soft`: dock Isolated Preview for a new feature.
-    /// Present is not Approve. Nested L2s stay Working. `--soft` is not
-    /// the queue hold token.
+    /// with that text as the prompt. Hard `/plan` only. `/plan --soft`
+    /// uses [`Self::DockIsolatedPreview`] and must not use this variant.
     EnterPlanMode {
         description: Option<String>,
-        soft: bool,
     },
     /// Set plan mode on/off. Per-session, ACP-mediated (not persisted
     /// to config.toml). `/plan <desc>` uses `EnterPlanMode` instead

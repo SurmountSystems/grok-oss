@@ -217,6 +217,14 @@ limits from that snapshot. SuperGrok Heavy ranking optional label is not
 this class. Human prose next to `*_extras*` identifiers says SuperGrok
 dollar credits.
 
+The personal SuperGrok JWT is the paying identity when personal included
+SuperGrok period limits have room. Operators switch SuperGrok identity with
+use-personal / use-business on `$GROK_HOME/limits_pins.json`. No new `[auth]`
+keys. Stock `preferred_method = "api_key"` still pins console. Automatic
+limits and credits fetch is at most once an hour per machine through the
+snapshot hub (`limits_snapshot_hub.rs`). ForceRefresh still fetches.
+SuperGrok is paid.
+
 | path::test | Contract |
 |------------|----------|
 | `sampling_config_auto_use_fills_console_hop_after_included_full` | `sampling_config` fills console failover when included SuperGrok period limits are full |
@@ -237,10 +245,15 @@ dollar credits.
 | `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both` | Per-turn reconstruct does not flatten remaining when SuperGrok dollar credits sit on both identities |
 | `pick_prefers_business_included_before_personal_when_both_have_remaining` | When both stored SuperGrok logins still have included remaining, pick Business / Team first |
 | `order_credentials_business_included_before_personal_when_both_have_room` | Credential order spends Business included before personal included while both have room |
-| `limits_snapshot_second_process_reads_file_and_does_not_http` | Second grok-oss process reads `$GROK_HOME/limits_snapshot.json` and does not call SuperGrok billing HTTP |
-| `limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once` | A stale snapshot lets the next exclusive-flock holder fetch once |
+| `limits_snapshot_second_process_within_the_hour_does_not_http` | Second grok-oss process within the hour reads `$GROK_HOME/limits_snapshot.json` and does not call SuperGrok credits or Management credits APIs |
+| `limits_snapshot_honor_ttl_fresh_within_hour_does_not_http` | HonorTtl with a snapshot younger than one hour does not HTTP SuperGrok credits or Management credits APIs |
+| `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour` | ForceRefresh leader HTTP-fetches even when the snapshot file is younger than one hour (explicit `/limits` / `grok-oss limits`) |
+| `limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once` | After the hour, a waiter or leader may fetch once. Stale means 3600s, not 60s |
 | `limits_snapshot_never_writes_access_tokens` | Shared snapshot never stores JWTs or API keys |
 | `billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http` | `x.ai/billing` uses the snapshot hub instead of unconditionally HTTP-ing siblings |
+| `personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits` | Personal included SuperGrok period limits that still have remaining stay the paying identity. Leftover Business SuperGrok dollar credits must not win. use-personal does not write `[auth] preferred_method` |
+| `business_with_no_period_limits_payload_still_switchable_via_use_business` | Business SuperGrok with no included period-limits payload is still switchable via use-business when a Team login exists. use-business does not write `[auth] preferred_method` |
+| `use_personal_switches_back_from_business_pin` | use-personal switches back from a Business pin on `$GROK_HOME/limits_pins.json` |
 
 Rank neighbors (not hop by themselves; do not treat these as class 5 proof):
 `hop_does_not_switch_to_console_while_stored_business_included_remaining`,
@@ -268,10 +281,15 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_h
   prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both \
   pick_prefers_business_included_before_personal_when_both_have_remaining \
   order_credentials_business_included_before_personal_when_both_have_room \
-  limits_snapshot_second_process_reads_file_and_does_not_http \
+  limits_snapshot_second_process_within_the_hour_does_not_http \
+  limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
   limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once \
   limits_snapshot_never_writes_access_tokens \
-  billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http
+  billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
+  personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
+  business_with_no_period_limits_payload_still_switchable_via_use_business \
+  use_personal_switches_back_from_business_pin
 ```
 
 ### 5b. Combined remaining included SuperGrok period limits (distinct pools)
@@ -478,6 +496,30 @@ cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_app
 cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval
 ```
 
+#### `/plan --soft` docks Isolated Preview
+
+Fork-owned. `/plan --soft` docks Isolated Preview on the right. It does
+not enter plan mode. It does not park L1. It does not enqueue the
+description as a Prompt. Nested L2s stay Working. Hard `/plan` without
+`--soft` enters plan mode. `--soft` is not the queue hold token.
+Present is not Approve. Empty Enter never Approves.
+
+| path::test | Contract |
+|------------|----------|
+| `plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode` | Slash `--soft` returns DockIsolatedPreview, not EnterPlanMode |
+| `plan_soft_docks_isolated_preview_without_entering_plan_mode` | Dispatch docks Isolated Preview; L1 stays running; nested L2s stay Working |
+| `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt` | `/plan --soft add feature` seeds Isolated Preview and does not grow pending_prompts |
+| `plan_soft_is_not_the_queue_hold_token` | `--soft` is not `queue` / `later` |
+| `user_guide_plan_soft_docks_isolated_preview` | 04-slash-commands and 19-plan-mode say `--soft` does not enter plan mode |
+
+```bash
+cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode \
+  plan_soft_docks_isolated_preview_without_entering_plan_mode \
+  plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt \
+  plan_soft_is_not_the_queue_hold_token \
+  user_guide_plan_soft_docks_isolated_preview
+```
+
 #### Clickable Approve must not drop the Human-box prompt
 
 Mouse Approve on an isolated present is not Empty Enter on Revise.
@@ -494,13 +536,17 @@ have a piece; never fit the contract to a wipe.
 | `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt` | Empty at present, type in Preview, click Approve still sends the typed string |
 | `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt` | Comment then Prompt focus, type, click Approve does not drop the Human-box prompt |
 | `isolated_present_click_approve_dispatches_interject_with_prompt_text` | Click Approve dispatches Interject that carries the prompt text |
+| `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments` | Isolated Preview Enter stashes notes; empty Enter never Approves; click Approve wraps review comments |
+| `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt` | Isolated Preview Approve with notes in the plan composer submits those notes with Approve, not as a queued Prompt, and does not drop them. Empty Enter never Approves. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   isolated_present_preview_click_approve_does_not_drop_human_box_prompt \
   isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
-  isolated_present_click_approve_dispatches_interject_with_prompt_text
+  isolated_present_click_approve_dispatches_interject_with_prompt_text \
+  isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments \
+  isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt
 ```
 
 #### L2 spawn prompt (2026-08-20)
@@ -638,13 +684,19 @@ Fail-does-not-signal alone is not SHA-aware identity.
 | `peer_relaunch_declines_equal_identity_on_same_path` | Equal identity on the same path does not loop |
 | `peer_relaunch_accepts_deleted_inode_even_when_identity_equal` | Deleted inode still relaunches |
 | `leader_is_older_than_same_semver_git_sha_identity` | Leader older-than uses same-semver git SHA identity |
+| `rebuild_must_exec_workspace_binary_not_stale_cargo_bin` | Leftover cargo-bin `1.0.3 (157f1746)` is not an acceptable `/rebuild` exec target when this workspace SHA differs |
+| `installed_identity_must_match_workspace_git_sha` | Installed identity SHA must equal workspace `git rev-parse --short=12 HEAD` before fleet signal |
+| `tui_rebuild_starts_from_session_workspace_not_process_cwd` | TUI `/rebuild` compiles from the session workspace, not process cwd |
 
 ```bash
 cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers \
   build_fail_does_not_signal_leaders parse_version_output_extracts_identity \
   peer_relaunch_accepts_same_semver_different_sha \
   peer_relaunch_declines_equal_identity_on_same_path \
-  peer_relaunch_accepts_deleted_inode_even_when_identity_equal
+  peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
+  rebuild_must_exec_workspace_binary_not_stale_cargo_bin \
+  installed_identity_must_match_workspace_git_sha
+cargo test -p xai-grok-pager --lib -- tui_rebuild_starts_from_session_workspace_not_process_cwd
 cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_identity
 ```
 
@@ -732,6 +784,27 @@ cargo test -p xai-grok-pager --lib -- work_control_chrome_matrix_pause_not_cance
   global_paused_idle_paints_resume_not_stop \
   clear_finished_action_idle_is_quiet_not_neon_green_or_magenta \
   clear_finished_click_does_not_open_subagent
+```
+
+#### Enter and double-click expand hidden blocks
+
+After selecting a collapsed or hidden transcript block (image attachment
+ellipsis, and other hidden blocks the product folds), Enter expands it, same
+as `:expand`. Double-click on that collapsed block also expands it. Composer
+Enter with text still sends.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `enter_on_selected_collapsed_image_prompt_expands` | Enter on a selected collapsed `[Image #1]` user prompt expands it, same as `:expand` |
+| `xai-grok-pager` `enter_on_selected_collapsed_tool_expands` | Enter on a selected collapsed tool block expands it |
+| `xai-grok-pager` `double_click_on_collapsed_image_prompt_expands` | Double-click on a collapsed `[Image #1]` block expands hidden content |
+| `xai-grok-pager` `composer_enter_with_text_still_sends_when_collapsed_image_is_selected` | Composer Enter with text still sends and does not expand the selected collapsed image |
+
+```bash
+cargo test -p xai-grok-pager --lib -- enter_on_selected_collapsed_image_prompt_expands \
+  enter_on_selected_collapsed_tool_expands \
+  double_click_on_collapsed_image_prompt_expands \
+  composer_enter_with_text_still_sends_when_collapsed_image_is_selected
 ```
 
 #### User-guide fork pins (beyond class 1 resume and class 7 skills)
@@ -918,6 +991,27 @@ cargo test -p xai-grok-pager --lib -- \
   l2_row_shows_live_l3_count_not_specialist_names
 ```
 
+#### Nested L2 measured tokens (not billing meters)
+
+Subagents list shows `measured N tokens` from in-memory nested L2 session
+usage. Layout must not read the session transcript jsonl. TECH.md records
+spawn, usage tick, and L2 exit. Those counts are not included SuperGrok
+period limits, not SuperGrok dollar credits, and not console team prepaid
+/ console API credits.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `subagents_list_shows_measured_tokens_per_nested_l2` | After spawn and a 12400 usage tick, the Subagents list row contains `measured 12400 tokens` |
+| `xai-grok-pager` `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit` | Temp TECH.md has the measured number, L1 to L2 to L3 tree, aspect table columns, and the not-billing-meters sentence |
+| `xai-grok-pager` `subagents_list_layout_does_not_read_chat_history_jsonl` | Paint takes in-memory counts only and does not open the session transcript file |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  subagents_list_shows_measured_tokens_per_nested_l2 \
+  tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
+  subagents_list_layout_does_not_read_chat_history_jsonl
+```
+
 #### Nested overlay hang, duplicate prompt, L3 click (Surmount / grok-oss fork)
 
 Finished nested L2/L3 must not leave L1 on `Waiting for the model` with a
@@ -960,6 +1054,7 @@ Named tests are Surmount / grok-oss fork contracts.
 | `overlay_nested_status_click_opens_l3_session_view` | Overlay L3 status click opens that specialist view |
 | `interjection_echo_does_not_duplicate_last_human_prompt` | Optimistic Human line plus echo must not duplicate `[Image #1]` |
 | `image_interject_leaves_one_prompt_and_empty_queue` | After image interject the prompt appears once and is not leftover in the queue |
+| `after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler` | After /rebuild or resume plus Plan Exit, a plan-composer follow-up must not leave Waiting for the model with no sampler / no first token |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -985,7 +1080,8 @@ cargo test -p xai-grok-pager --lib -- \
   auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity \
   overlay_nested_status_click_opens_l3_session_view \
   interjection_echo_does_not_duplicate_last_human_prompt \
-  image_interject_leaves_one_prompt_and_empty_queue
+  image_interject_leaves_one_prompt_and_empty_queue \
+  after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler
 ```
 
 #### `/start` plus leftover cancel-resume marker
@@ -1077,6 +1173,7 @@ turn is still busy, with no five-second cap.
 | `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md` | Plan Human-box notes and `plan.md` survive `/rebuild` |
 | `handle_rebuild_done_keeps_nested_subagents_for_resume` | Nested ids are not cancelled in TUI persist; Subagents list must not go empty |
 | `rebuild_and_relaunch_starts_while_nested_subagents_are_running` | Nested work is not a `/rebuild` gate |
+| `tui_rebuild_starts_from_session_workspace_not_process_cwd` | TUI `/rebuild` compiles from the session workspace, not process cwd |
 | `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect` | Nested ids still exist after rebuild/relaunch intent; drain does not exec-replace while they are live |
 | `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect` | Parent-turn busy keeps this leader up; drain does not AutoUpdate while `AgentActivity::is_busy` or IPC `agent_busy` |
 | `rebuild_subcommand_parses` | CLI `grok-oss rebuild` is clap-wired |
@@ -1090,6 +1187,7 @@ cargo test -p xai-grok-pager --lib -- \
   handle_rebuild_done_persists_plan_feedback_draft_and_plan_md \
   handle_rebuild_done_keeps_nested_subagents_for_resume \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
+  tui_rebuild_starts_from_session_workspace_not_process_cwd \
   rebuild_subcommand_parses
 cargo test -p xai-grok-shell --lib -- \
   relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect \
@@ -1148,6 +1246,9 @@ occupancy tests in the table below.
 | path::test | Contract |
 |------------|----------|
 | `prompt_wal_appends_on_enter_before_model_wait` | Enter send appends WAL before `Effect::SendPrompt`. Operator-verified known good (2026-09-02): live `send` records. |
+| `enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue` | Enter after a 15-line paste chip must WAL Send (or Queue with visible enqueue). Composer must not wipe when neither send nor enqueue landed. Do not fit tests to a wipe. Catalog contract. |
+| `enter_after_paste_chip_with_pause_button_chrome_still_sends` | Footer `[pause]` button chrome (not engaged; engaged paints `[resume]`) must not swallow Enter after a paste chip. Still `Effect::SendPrompt` + WAL Send. Catalog contract. |
+| `enter_while_drain_blocked_must_wal_queue_or_keep_composer` | `TurnCancelling` / drain_blocked Enter must WAL Queue and enqueue, or keep the composer. No silent wipe. Catalog contract. |
 | `prompt_wal_appends_on_mid_turn_interject` | Mid-turn interject appends WAL before `SendInterject`. Operator-verified known good (2026-09-02): live `interject` records. |
 | `prompt_wal_appends_on_queue_enqueue` | Queue enqueue (L0 drain and mid-turn `pending_prompts` enqueue) appends `kind=queue`. Catalog contract. Not operator-verified known good (2026-09-02): a live session wrote `pending_prompts.json` without `prompt_wal.jsonl`. |
 | `prompt_wal_appends_on_approve_notes` | Plan Human-box notes that ride Approve append a `PlanNotes` WAL line. Operator-verified known good (2026-09-02): live `plan-notes` records. |
@@ -1157,12 +1258,14 @@ occupancy tests in the table below.
 | `wal_send_whose_body_is_truly_absent_from_parsed_user_text_still_restores` | A WAL send whose body is not a parsed user turn still restores. Assistant substring is not a match. Catalog contract. |
 | `wal_sends_missing_from_history_skips_goal_and_quoted_and_keeps_absent` | Combined helper: skip `/goal` and quoted committed sends, restore a truly absent send. Catalog contract. |
 | `restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send` | Pager bind must not enqueue those two committed WAL sends; a missing send still restores. Catalog contract. |
+| `restore_prompt_wal_does_not_enqueue_committed_interject_or_queue` | WAL Interject and Queue kinds already parsed as user turns in `chat_history.jsonl` must not restore into the pager queue. A truly absent Interject still restores. Catalog contract. Do not weaken Send, `/goal`, or quoted-body skip tests. |
 | `restore_pending_prompts_skips_bodies_already_recorded_in_chat_history` | `pending_prompts.json` rows already in chat history must not restore after `/rebuild`. Catalog contract. |
 | `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Rebuild flush also writes a WAL line (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
 | `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Rebuild flush WAL line for queued bodies (existing persist test, not weakened). Operator-verified known good (2026-09-02): live `rebuild-flush` records. |
 | `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue` | Resume restore: operator prompt appears once, not composer plus queue #1. Catalog contract, not operator-verified known good from 2026-09-02. |
 | `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn` | Resume must not arm Enter:interject unless a live sampler turn is running. Catalog contract, not operator-verified known good from 2026-09-02. |
 | `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` | Waiting after resume is a real sampler wait, not occupancy leftover. Catalog contract, not operator-verified known good from 2026-09-02. |
+| `after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler` | After /rebuild or resume plus Plan Exit, a plan-composer follow-up must not leave Waiting for the model with no sampler / no first token. Parked Preview + default Revise with the pane shut must hold as a comment, not start a Prompt the shell will not sample. Catalog contract. |
 | `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string` | Unsent draft and queue restore must not both rehydrate the same string. Catalog contract, not operator-verified known good from 2026-09-02. |
 | `append_fsyncs_a_line_and_does_not_rewrite_prior_lines` | WAL append fsyncs a line and does not rewrite prior lines. Catalog contract, not operator-verified known good from 2026-09-02. |
 | `skips_prompt_wal_jsonl_because_it_is_not_conversation` | Persistence collect skips `prompt_wal.jsonl` because it is not conversation. Catalog contract, not operator-verified known good from 2026-09-02. |
@@ -1170,17 +1273,22 @@ occupancy tests in the table below.
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_enter_before_model_wait \
+  enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue \
+  enter_after_paste_chip_with_pause_button_chrome_still_sends \
+  enter_while_drain_blocked_must_wal_queue_or_keep_composer \
   prompt_wal_appends_on_mid_turn_interject \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
   session_load_restores_wal_send_missing_from_prompt_history \
   restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send \
+  restore_prompt_wal_does_not_enqueue_committed_interject_or_queue \
   restore_pending_prompts_skips_bodies_already_recorded_in_chat_history \
   handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it \
   handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
   resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
   resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone \
+  after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler \
   resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string
 cargo test -p xai-grok-shell --lib -- \
   append_fsyncs_a_line_and_does_not_rewrite_prior_lines \
@@ -1280,15 +1388,27 @@ occupancy operator prompt, or any operator prompt, onto
 `/implement` must not fire. Drain already-queued work only. This is not
 the compact-fail pause unstick path.
 
+A prompt that already issued, or already has a Human turn in this
+session, must not come back as a queued stale Prompt after rebuild,
+occupancy drop, Compact, or session reload. Compact-fail unstick after
+occupancy drop requeues `/compact` only. Session load cancel-resume
+must not enqueue a Human turn already in chat history.
+
 | path::test | Contract |
 |------------|----------|
 | `compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt` | `/compact` complete must not re-enqueue occupancy or auto-run leftover `/implement` |
 | `auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt` | AUTO compact must not re-enqueue occupancy or any operator prompt |
+| `sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty` | After Compact empties live scrollback, the painted queue still drops `shared_queue` Prompt wires whose text is already a parsed user turn in `chat_history.jsonl` |
+| `compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn` | Compact-fail unstick after occupancy drop requeues `/compact` only, not the last Human turn |
+| `session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history` | `apply_canceled_turn_resume_on_load` must not enqueue a Human turn already recorded in chat history |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt \
-  auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt
+  auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt \
+  sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty \
+  compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn \
+  session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history
 ```
 
 #### Compact standing-law reminder (not AGENTS.md)
@@ -1360,13 +1480,15 @@ a management key does not clear Management caches.
 | `xai-grok-pager` `management_meter_cache_policy_collect_force_background_honor_ttl` | Collect is ForceRefresh; background poll is HonorTtl |
 | `xai-grok-pager` `should_clear_management_meter_caches_force_with_key_only` | ForceRefresh without a management key does not clear Management caches |
 | `xai-grok-shell` `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh` | Explicit get-billing snapshot mode is ForceRefresh |
+| `xai-grok-shell` `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour` | ForceRefresh leader HTTP-fetches even when the snapshot is younger than one hour |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   management_meter_cache_policy_collect_force_background_honor_ttl \
   should_clear_management_meter_caches_force_with_key_only
 cargo test -p xai-grok-shell --lib -- \
-  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh
+  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour
 ```
 
 #### Spawn-prompt fold plus last-answer caps
@@ -1622,6 +1744,9 @@ Dual-auth hop + multi SuperGrok + `/limits`; `interject_contract_*`;
 `auto_compact_completed_preserves_todo_board`;
 `compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt`;
 `auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt`;
+`sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty`;
+`compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn`;
+`session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history`;
 skills order
 (`agents_home_skills_shadow_grok_user_skills`,
 `local_agents_skills_shadow_local_grok_skills`); UDAX toon filters; plan
@@ -1658,11 +1783,17 @@ Do not call SuperGrok free.
 | `letter_key_types_and_is_not_the_only_submit` | Letter keys type; they are not the only submit | **Keep** |
 | `sampling_config_auto_use_*` | `sampling_config_for_model` / `prepare_sampling_config_for_model` fills console failover when included SuperGrok period limits are full | **Keep** |
 | `sampling_config_hops_to_sibling_included_before_extras` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
-| `limits_snapshot_second_process_reads_file_and_does_not_http` | One grok-oss process fetches SuperGrok billing; others read the flock snapshot | **Keep** |
+| `limits_snapshot_second_process_within_the_hour_does_not_http` | Second grok-oss process within the hour reads the flock snapshot and does not HTTP SuperGrok credits or Management credits APIs | **Keep** |
+| `limits_snapshot_honor_ttl_fresh_within_hour_does_not_http` | HonorTtl with a snapshot younger than one hour does not HTTP | **Keep** |
+| `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour` | ForceRefresh still fetches when the snapshot is younger than one hour | **Keep** |
+| `personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits` | Personal included SuperGrok period limits stay the paying identity over leftover Business SuperGrok dollar credits | **Keep** |
 | `compact_meter_stays_included_while_sibling_pool_has_remaining` | Compact meter stays on included SuperGrok period limits while a distinct sibling pool has remaining | **Keep** |
 | `auto_compact_completed_preserves_todo_board` | AutoCompact does not wipe the UI todo board | **Keep** |
 | `compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt` | `/compact` complete must not re-enqueue occupancy or any operator prompt | **Keep** |
 | `auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt` | AUTO compact must not re-enqueue occupancy or any operator prompt | **Keep** |
+| `sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty` | Compact-empty scrollback still drops painted `shared_queue` rows already in chat history | **Keep** |
+| `compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn` | Compact-fail unstick requeues `/compact` only, not the last Human turn | **Keep** |
+| `session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history` | Session load cancel-resume must not enqueue a Human turn already in chat history | **Keep** |
 | `todo_badge_names_tasks_not_only_fraction` | Status-row badge names tasks, not only `614/638` | **Keep** |
 | `status_header_todo_badge_names_tasks` | Agent status header paints `tasks N/M` and does not auto-open the pane | **Keep** |
 | `nested_l2_overlay_todo_toggle_stays_findable` | Nested L2 overlay keeps that nested session's tasks badge and Ctrl+T | **Keep** |
@@ -1682,6 +1813,9 @@ cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included
   auto_compact_completed_preserves_todo_board \
   compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt \
   auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt \
+  sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty \
+  compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn \
+  session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history \
   todo_badge_names_tasks_not_only_fraction \
   status_header_todo_badge_names_tasks \
   nested_l2_overlay_todo_toggle_stays_findable hide_header_zeroes \
@@ -1689,7 +1823,12 @@ cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included
   forked_session_status_header_clicks_open_dashboard_and_cycle \
   load_session_restores_fork_family_from_disk
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
-  limits_snapshot_second_process_reads_file_and_does_not_http
+  limits_snapshot_second_process_within_the_hour_does_not_http \
+  limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
+  personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
+  business_with_no_period_limits_payload_still_switchable_via_use_business \
+  use_personal_switches_back_from_business_pin
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining
 cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal_peers
 cargo test -p xai-grok-pager-bin --test version_without_tty
@@ -1823,6 +1962,9 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   auto_compact_completed_preserves_todo_board \
   compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt \
   auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt \
+  sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty \
+  compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn \
+  session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history \
   todo_badge_names_tasks_not_only_fraction \
   status_header_todo_badge_names_tasks \
   nested_l2_overlay_todo_toggle_stays_findable
@@ -1843,10 +1985,15 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_h
   prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both \
   pick_prefers_business_included_before_personal_when_both_have_remaining \
   order_credentials_business_included_before_personal_when_both_have_room \
-  limits_snapshot_second_process_reads_file_and_does_not_http \
+  limits_snapshot_second_process_within_the_hour_does_not_http \
+  limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
   limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once \
   limits_snapshot_never_writes_access_tokens \
   billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
+  personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
+  business_with_no_period_limits_payload_still_switchable_via_use_business \
+  use_personal_switches_back_from_business_pin \
   combined_included_remaining_sums_distinct_personal_and_business_pools \
   combined_included_remaining_does_not_double_count_unified_pool \
   combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool
@@ -1892,6 +2039,16 @@ cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
 cargo test -p xai-grok-tools-api --lib -- \
   goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools \
   goal_instruction_carries_objective_and_contract_tokens
+cargo test -p xai-grok-tools --lib -- \
+  sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths \
+  search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment \
+  spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error
+cargo test -p xai-grok-shell --lib -- \
+  migrate_v5_file_to_v6_adds_session_plans_without_dropping_v5_tables \
+  plan_soft_sets_dock_open_without_requiring_markdown_write_lock \
+  present_upserts_session_plan_body_without_rewriting_plan_md \
+  isolated_preview_and_present_read_sql_first_then_disk_plan_md_fallback \
+  grok_oss_db_session_plans_are_not_the_token_economy_spend_ledger
 cargo test -p xai-grok-shell --lib -- from_config_without_prefetch_produces_usable_catalog \
   baked_default_is_grok_46_medium_fork_contract \
   stream_started_emits_retry_state_stream_resumed \
@@ -1925,6 +2082,8 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
+  isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments \
+  isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
   main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
   plan_human_box_keystroke_burst_does_not_append_prompt_wal \
@@ -1975,6 +2134,9 @@ cargo test -p xai-grok-pager --lib -- \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
   rebuild_subcommand_parses \
   prompt_wal_appends_on_enter_before_model_wait \
+  enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue \
+  enter_after_paste_chip_with_pause_button_chrome_still_sends \
+  enter_while_drain_blocked_must_wal_queue_or_keep_composer \
   prompt_wal_appends_on_mid_turn_interject \
   prompt_wal_appends_on_queue_enqueue \
   prompt_wal_appends_on_approve_notes \
@@ -1984,10 +2146,12 @@ cargo test -p xai-grok-pager --lib -- \
   interject_does_not_wait_minutes_or_block_paint \
   session_load_restores_wal_send_missing_from_prompt_history \
   restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send \
+  restore_prompt_wal_does_not_enqueue_committed_interject_or_queue \
   restore_pending_prompts_skips_bodies_already_recorded_in_chat_history \
   resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue \
   resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn \
   resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone \
+  after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler \
   resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string \
   context_chip_names_sampling_window_when_catalog_differs \
   context_chip_hover_percent_uses_sampling_window_when_catalog_differs \
@@ -2004,8 +2168,11 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
   peer_relaunch_accepts_same_semver_different_sha \
   peer_relaunch_declines_equal_identity_on_same_path \
   peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
+  rebuild_must_exec_workspace_binary_not_stale_cargo_bin \
+  installed_identity_must_match_workspace_git_sha \
   rebuild_signals_each_pid_after_composite_key \
   peer_pids_to_signal_excludes_self_dead_and_non_grok
+cargo test -p xai-grok-pager --lib -- tui_rebuild_starts_from_session_workspace_not_process_cwd
 cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_search_per_root \
   distinct_roots_each_keep_one_search get_results_does_not_keep_a_stale_search_alive
 cargo test -p xai-grok-shell --test test_image_strip_recovery -- \

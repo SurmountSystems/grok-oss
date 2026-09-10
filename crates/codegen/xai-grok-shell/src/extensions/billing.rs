@@ -219,6 +219,18 @@ pub fn limits_snapshot_mode_for_get_billing(
     }
 }
 
+/// Whether the hub leader fetch should bust Management process caches.
+///
+/// True only for explicit ForceRefresh when a management key is present.
+/// Background HonorTtl polls must not clear those caches (they are 60s
+/// in-process paint helpers, not the shared hourly snapshot TTL).
+pub fn should_clear_management_caches_on_billing_leader_fetch(
+    force_refresh: bool,
+    has_management_key: bool,
+) -> bool {
+    force_refresh && has_management_key
+}
+
 /// Parse `forceRefresh` from the billing extension params JSON.
 pub fn force_refresh_from_billing_params(params_json: &str) -> bool {
     serde_json::from_str::<GetBillingParams>(params_json)
@@ -760,7 +772,10 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
             let home_for_fetch = home_for_fetch.clone();
             let base_for_fetch = base_for_fetch.clone();
             async move {
-                if force_refresh && crate::auth::resolve_management_api_key_default().is_some() {
+                if should_clear_management_caches_on_billing_leader_fetch(
+                    force_refresh,
+                    crate::auth::resolve_management_api_key_default().is_some(),
+                ) {
                     crate::auth::clear_console_team_billing_meter_caches();
                 }
                 fetch_supergrok_credits_snapshot_document(
@@ -1036,6 +1051,32 @@ mod tests {
         ));
         assert!(!force_refresh_from_billing_params("{}"));
         assert!(!force_refresh_from_billing_params("not-json"));
+    }
+
+    /// Background billing poll HonorTtl does not clear Management caches
+    /// and does not ForceRefresh.
+    #[test]
+    fn background_billing_poll_honor_ttl_does_not_force_refresh_or_clear_management_caches() {
+        assert_eq!(
+            limits_snapshot_mode_for_get_billing(false),
+            crate::auth::LimitsSnapshotMode::HonorTtl
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(false, true),
+            "HonorTtl background poll must not clear Management process caches"
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(false, false),
+            "HonorTtl without a management key must not clear"
+        );
+        assert!(
+            should_clear_management_caches_on_billing_leader_fetch(true, true),
+            "ForceRefresh with a management key still busts process caches"
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(true, false),
+            "ForceRefresh without a management key must not clear"
+        );
     }
 
     /// Explicit `/limits` collect must ForceRefresh a fresh-by-TTL disk

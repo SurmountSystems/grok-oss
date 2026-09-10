@@ -5853,6 +5853,155 @@ fn comment_intent_held_critique_rides_approve_with_review_lead() {
     );
 }
 
+/// After /rebuild (or resume) plus Plan Exit, a follow-up in the plan
+/// composer must not leave L1 on Waiting for the model for many minutes
+/// with no sampler / no first token. Idle parked Comment Enter is a
+/// different surface (`comment_intent_send_prompt_does_not_start_model_wait`).
+/// Restore paint is a different surface
+/// (`resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`).
+/// This is plan-comment-as-Prompt after rebuild + parked plan approval:
+/// default restore is Preview + Revise with the pane shut, so the hold
+/// that Isolated Preview uses when the pane is open used to miss.
+#[test]
+fn after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler() {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+
+    const FOLLOW_UP: &str = "please keep the mill on nixbuilder";
+    let id = AgentId(0);
+
+    // Rebuild resume while still showing plan approval: waiter gone
+    // (`for_idle_decision`), default Revise, pane shut. That is the
+    // Operator footer `plan approval` hang.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Restored park\n".into(),
+            )),
+        );
+        agent.line_viewer = None;
+        agent.session.state = AgentState::Idle;
+        agent.turn_started_at = None;
+        agent.last_activity = None;
+        agent.prompt.set_text("");
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+        assert!(pav.response_tx.is_none(), "rebuild idle park has no waiter");
+    }
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "rebuild + parked plan follow-up must not start a Prompt that never gets first token; effects={effects:?}"
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "parked plan approval must stay until Approve / Exit"
+        );
+        assert_eq!(agent.session.state, AgentState::Idle);
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "must not queue a Prompt the shell will not start, got {:?}",
+            agent.session.pending_prompts
+        );
+        assert!(
+            !matches!(
+                agent.resolve_turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::Model))
+            ),
+            "must not paint Waiting for the model with no sampler, got {:?}",
+            agent.resolve_turn_activity()
+        );
+        assert!(
+            agent.prompt.text().contains(FOLLOW_UP)
+                || agent
+                    .plan_approval_view
+                    .as_ref()
+                    .and_then(|p| p.feedback_draft.as_deref())
+                    == Some(FOLLOW_UP),
+            "follow-up must stay as a parked comment, composer={:?} draft={:?}",
+            agent.prompt.text(),
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.clone())
+        );
+    }
+
+    // Same hang with a live reverse-request still parked and the pane
+    // shut (restore without docking). Preview + Revise used to SendPrompt
+    // because Isolated Preview hold required the pane.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+        pav.focus = PlanApprovalFocus::Preview;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        agent.plan_approval_view = Some(pav);
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.line_viewer = None;
+        agent.session.state = AgentState::Idle;
+        agent.turn_started_at = None;
+        agent.last_activity = None;
+        agent.prompt.set_text("");
+    }
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "live parked Preview follow-up with pane shut must not become a 10-minute Prompt; effects={effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.state, AgentState::Idle);
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert!(
+        !matches!(
+            app.agents[&id].resolve_turn_activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Model))
+        ),
+        "no Waiting for the model without a live sampler, got {:?}",
+        app.agents[&id].resolve_turn_activity()
+    );
+
+    // Plan Exit already completed: the follow-up is a real turn.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Exit me\n".into(),
+            )),
+        );
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.session.state = AgentState::Idle;
+    }
+    app.agents.get_mut(&id).unwrap().abandon_plan();
+    assert!(
+        app.agents[&id].plan_approval_view.is_none(),
+        "Exit must clear plan approval chrome"
+    );
+    assert!(
+        app.agents[&id].plan_decision_resolved,
+        "Exit must persist plan_decision_resolved"
+    );
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        effects_start_model_prompt(&effects)
+            || app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(FOLLOW_UP)),
+        "after Plan Exit the follow-up must start a sampler turn, not sit Waiting; effects={effects:?}"
+    );
+}
+
 /// Revise Prompt focus is revision notes, not this hold. A dispatched
 /// SendPrompt there still asks the model so we do not swallow every
 /// parked-plan send.

@@ -358,16 +358,18 @@ impl AgentView {
         })
     }
 
-    /// Drop queue rows that are already Human turns in live scrollback, then
-    /// collapse consecutive identical bodies (server rows first, then local).
-    /// Scrollback only: does not read `chat_history.jsonl`. Layout and drain
-    /// must use this path so queue-pane paint does not parse history.
+    /// Drop queue rows that are already Human turns in live scrollback or in
+    /// `chat_history.jsonl`, then collapse consecutive identical bodies
+    /// (server rows first, then local). Compact can empty UserPrompt blocks
+    /// while chat history still has the Human turn; paint and drain must
+    /// still drop that occupancy.
     pub(crate) fn drop_stale_queue_occupancy(&mut self) {
-        self.drop_stale_queue_occupancy_inner(false);
+        self.drop_stale_queue_occupancy_inner(true);
     }
 
-    /// Same occupancy drop, plus Human turns recorded in `chat_history.jsonl`.
-    /// Persist, restore, and rebuild use this path. Layout must not.
+    /// Same occupancy drop, including Human turns recorded in
+    /// `chat_history.jsonl`. Persist, restore, rebuild, and queue-pane paint
+    /// use this path.
     pub(crate) fn drop_stale_queue_occupancy_with_chat_history(&mut self) {
         self.drop_stale_queue_occupancy_inner(true);
     }

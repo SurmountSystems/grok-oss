@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::supergrok_identity_rank::{
+    SupergrokAccountRole, SupergrokIdentityPin, SupergrokSessionCandidate,
+};
+
 /// Filename under `$GROK_HOME`. Sibling of `exhausted_credits/`.
 pub const LIMITS_PINS_FILE: &str = "limits_pins.json";
 
@@ -54,6 +58,10 @@ pub struct LimitsPins {
     /// Which meter chrome should emphasize. None = no pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meter_source: Option<MeterSource>,
+    /// Operator SuperGrok paying identity (`use-personal` / `use-business`).
+    /// Unset means default rank. Not a `[auth]` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supergrok_identity: Option<SupergrokIdentityPin>,
 }
 
 fn grok_home_path() -> PathBuf {
@@ -116,6 +124,56 @@ pub enum StaySupergrokApply {
     BlockedByPreferredApiKey,
 }
 
+/// Persist personal SuperGrok as the paying identity (sidecar, not `[auth]`).
+///
+/// Does not write `[auth] preferred_method`. Stock `preferred_method = "api_key"`
+/// still pins console. Clears `use-console` so reconstruct stays on SuperGrok.
+pub fn apply_use_personal() -> Result<IdentityPinApply, std::io::Error> {
+    if disk_preferred_is_console_primary() {
+        return Ok(IdentityPinApply::BlockedByPreferredApiKey);
+    }
+    let mut pins = load_limits_pins();
+    pins.supergrok_identity = Some(SupergrokIdentityPin::Personal);
+    pins.use_console = false;
+    pins.stay_supergrok = true;
+    save_limits_pins(&pins)?;
+    Ok(IdentityPinApply::Applied)
+}
+
+/// Persist Business SuperGrok as the paying identity (sidecar, not `[auth]`).
+///
+/// Fail loud when `auth.json` has no Team login. Does not write
+/// `[auth] preferred_method`. Stock `preferred_method = "api_key"` still pins
+/// console. Business is switchable even when the included period-limits
+/// payload is missing.
+pub fn apply_use_business() -> Result<IdentityPinApply, std::io::Error> {
+    if disk_preferred_is_console_primary() {
+        return Ok(IdentityPinApply::BlockedByPreferredApiKey);
+    }
+    if !stored_team_login_present() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No Team login in auth.json. Log in to SuperGrok Business / Team, then retry use-business.",
+        ));
+    }
+    let mut pins = load_limits_pins();
+    pins.supergrok_identity = Some(SupergrokIdentityPin::Business);
+    pins.use_console = false;
+    pins.stay_supergrok = true;
+    save_limits_pins(&pins)?;
+    Ok(IdentityPinApply::Applied)
+}
+
+/// Outcome of [`apply_use_personal`] / [`apply_use_business`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityPinApply {
+    /// Sidecar `supergrok_identity` pin was written.
+    Applied,
+    /// Stock `[auth] preferred_method = "api_key"` pins console. Command does
+    /// not override that key.
+    BlockedByPreferredApiKey,
+}
+
 /// Persist that the operator wants the console key (sidecar, not `[auth]`).
 ///
 /// Fail loud when no console API key is stored (credentials store, env, or
@@ -135,24 +193,72 @@ pub fn apply_use_console() -> Result<(), std::io::Error> {
     save_limits_pins(&pins)
 }
 
-/// Honor sidecar `stay_supergrok` / `use_console` on a reconstructed sampler
-/// config. Does not write `[auth] preferred_method`. Stock
-/// `preferred_method = "api_key"` still pins console and wins over stay.
-/// `use-console` switches live identity without that stock key. A stored
-/// console key is enough even when it is not already in live failover.
+/// Honor sidecar `stay_supergrok` / `use_console` / SuperGrok identity pin on
+/// a reconstructed sampler config. Does not write `[auth] preferred_method`.
+/// Stock `preferred_method = "api_key"` still pins console and wins over stay
+/// and `use-personal` / `use-business`. `use-console` switches live identity
+/// without that stock key. A stored console key is enough even when it is not
+/// already in live failover.
 pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::SamplerConfig) {
     if disk_preferred_is_console_primary() {
         return;
     }
     let pins = load_limits_pins();
+    if pins.use_console && pins.supergrok_identity.is_none() && !pins.stay_supergrok {
+        inject_stored_console_keys_into_failover(config);
+        xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+        return;
+    }
     if pins.stay_supergrok {
         xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+    }
+    if let Some(pin) = pins.supergrok_identity {
+        apply_supergrok_identity_pin_to_sampler_config(config, pin);
         return;
     }
     if pins.use_console {
         inject_stored_console_keys_into_failover(config);
         xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
     }
+}
+
+fn apply_supergrok_identity_pin_to_sampler_config(
+    config: &mut xai_grok_sampler::SamplerConfig,
+    pin: SupergrokIdentityPin,
+) {
+    let wanted = match pin {
+        SupergrokIdentityPin::Personal => SupergrokAccountRole::Personal,
+        SupergrokIdentityPin::Business => SupergrokAccountRole::Business,
+    };
+    let home = grok_home_path();
+    let candidates = super::load_supergrok_session_candidates(&home);
+    let Some(chosen) = candidates.iter().find(|c: &&SupergrokSessionCandidate| {
+        !c.hard_expired && c.headroom.role == wanted && !c.access_token.trim().is_empty()
+    }) else {
+        xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+        return;
+    };
+    let token = chosen.access_token.trim().to_owned();
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    config.failover_api_keys.retain(|k| k.trim() != token);
+    if !active.is_empty() && active != token {
+        config.failover_api_keys.retain(|k| k.trim() != active);
+        config.failover_api_keys.insert(0, active);
+    }
+    config.api_key = Some(token.clone());
+    config.session_identity_key = Some(token);
+    xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+}
+
+/// True when `auth.json` holds a SuperGrok Team / Business login.
+fn stored_team_login_present() -> bool {
+    let path = grok_home_path().join("auth.json");
+    let Ok(map) = super::read_auth_json(&path) else {
+        return false;
+    };
+    map.values().any(|auth| {
+        super::model::is_supergrok_session_mode(auth.auth_mode) && auth.is_team_principal()
+    })
 }
 
 /// Env, credentials store, then `auth.json` API key. Unique, first-seen order.
@@ -411,6 +517,7 @@ preferred_method = "api_key"
             stay_supergrok: true,
             use_console: false,
             meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
         };
         save_limits_pins(&pins).expect("save pins");
         save_limits_pins_under(grok_home, &pins).expect("save pins under home");
@@ -452,6 +559,7 @@ preferred_method = "api_key"
             stay_supergrok: true,
             use_console: false,
             meter_source: Some(MeterSource::Console),
+            supergrok_identity: None,
         };
         save_limits_pins_under(home.path(), &pins).expect("save under home");
         assert_eq!(load_limits_pins_under(home.path()), pins);
@@ -459,6 +567,7 @@ preferred_method = "api_key"
             stay_supergrok: false,
             use_console: false,
             meter_source: Some(MeterSource::Combined),
+            supergrok_identity: None,
         })
         .expect("save via GROK_HOME");
         let loaded = load_limits_pins();
@@ -649,6 +758,7 @@ preferred_method = "api_key"
             stay_supergrok: true,
             use_console: false,
             meter_source: None,
+            supergrok_identity: None,
         })
         .expect("write stay sidecar");
 
@@ -757,6 +867,208 @@ preferred_method = "api_key"
         assert!(
             !home.path().join("config.toml").exists(),
             "use-console must not write [auth] preferred_method"
+        );
+    }
+
+    fn seed_personal_and_team_auth(home: &std::path::Path) {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+        let mut map = std::collections::BTreeMap::new();
+        let base = "https://auth.x.ai::client-identity-pin";
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-personal".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal".into(),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-business".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-biz".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-1".into()),
+                team_id: Some("team-1".into()),
+                ..Default::default()
+            },
+        );
+        fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+    }
+
+    fn dual_identity_candidates() -> Vec<crate::auth::SupergrokSessionCandidate> {
+        use crate::auth::{
+            SupergrokAccountRole, SupergrokIdentityHeadroom, SupergrokSessionCandidate,
+        };
+        use chrono::TimeZone;
+        vec![
+            SupergrokSessionCandidate {
+                headroom: SupergrokIdentityHeadroom {
+                    identity_id: "personal-1".into(),
+                    role: SupergrokAccountRole::Personal,
+                    included_remaining: 80,
+                    reset_at: Some(chrono::Utc.timestamp_opt(2_000, 0).single().expect("ts")),
+                },
+                access_token: "tok-personal".into(),
+                prepaid_balance_cents: Some(0),
+                hard_expired: false,
+            },
+            SupergrokSessionCandidate {
+                headroom: SupergrokIdentityHeadroom {
+                    identity_id: "business-1".into(),
+                    role: SupergrokAccountRole::Business,
+                    included_remaining: 0,
+                    reset_at: None,
+                },
+                access_token: "tok-business".into(),
+                prepaid_balance_cents: Some(12_345),
+                hard_expired: false,
+            },
+        ]
+    }
+
+    /// Named contract: personal included SuperGrok period limits that still
+    /// have remaining (reset clock known) stay the paying identity. Leftover
+    /// Business SuperGrok dollar credits must not win.
+    #[test]
+    #[serial_test::serial]
+    fn personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits()
+    {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_personal_and_team_auth(home.path());
+        assert_eq!(
+            apply_use_personal().expect("use-personal"),
+            IdentityPinApply::Applied
+        );
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+        assert!(
+            !home.path().join("config.toml").exists(),
+            "use-personal must not write [auth] preferred_method"
+        );
+
+        let order = crate::auth::order_credentials_for_preferred_auto(
+            &dual_identity_candidates(),
+            &["console-leftover".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-personal"),
+            "personal included SuperGrok period limits must beat leftover Business dollar credits"
+        );
+        assert_ne!(order.primary.as_deref(), Some("tok-business"));
+
+        let mut config = dual_auth_sampler("tok-business", "console-leftover");
+        config.failover_api_keys = vec!["tok-personal".into(), "console-leftover".into()];
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some("tok-personal"),
+            "reconstruct must sample personal SuperGrok, not leftover Business credits"
+        );
+    }
+
+    /// Named contract: Business SuperGrok with no included period-limits
+    /// payload is still switchable via use-business when a Team login exists.
+    #[test]
+    #[serial_test::serial]
+    fn business_with_no_period_limits_payload_still_switchable_via_use_business() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_personal_and_team_auth(home.path());
+        assert_eq!(
+            apply_use_business().expect("use-business with Team login"),
+            IdentityPinApply::Applied
+        );
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+
+        let mut sessions = dual_identity_candidates();
+        sessions[1].headroom.included_remaining = 0;
+        sessions[1].prepaid_balance_cents = None;
+        let order = crate::auth::order_credentials_for_preferred_auto(
+            &sessions,
+            &["console-must-wait".into()],
+        );
+        assert_eq!(
+            order.primary.as_deref(),
+            Some("tok-business"),
+            "use-business must select Business SuperGrok even with no period-limits payload"
+        );
+
+        let mut config = dual_auth_sampler("tok-personal", "console-must-wait");
+        config.failover_api_keys = vec!["tok-business".into(), "console-must-wait".into()];
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some("tok-business"));
+        assert!(
+            !home.path().join("config.toml").exists(),
+            "use-business must not write [auth] preferred_method"
+        );
+    }
+
+    /// Named contract: use-personal switches back from a Business pin.
+    #[test]
+    #[serial_test::serial]
+    fn use_personal_switches_back_from_business_pin() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_personal_and_team_auth(home.path());
+        apply_use_business().expect("start on Business pin");
+        assert_eq!(
+            load_limits_pins().supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+        assert_eq!(
+            apply_use_personal().expect("switch back"),
+            IdentityPinApply::Applied
+        );
+        assert_eq!(
+            load_limits_pins().supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+
+        let order = crate::auth::order_credentials_for_preferred_auto(
+            &dual_identity_candidates(),
+            &["console-k".into()],
+        );
+        assert_eq!(order.primary.as_deref(), Some("tok-personal"));
+
+        let mut config = dual_auth_sampler("tok-business", "console-k");
+        config.failover_api_keys = vec!["tok-personal".into(), "console-k".into()];
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some("tok-personal"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn use_business_fails_loud_when_no_team_login_in_auth_json() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let err = apply_use_business()
+            .expect_err("use-business must fail when auth.json has no Team login");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Team login") && msg.contains("auth.json"),
+            "fail-loud message must name the missing Team login: {msg}"
+        );
+        assert!(
+            load_limits_pins().supergrok_identity.is_none(),
+            "must not persist a Business pin when no Team login is stored"
         );
     }
 }

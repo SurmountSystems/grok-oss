@@ -33,6 +33,10 @@ use crate::views::limits_snapshot::{
 pub const LIMITS_WORD_STAY_SUPERGROK: &str = "stay-supergrok";
 /// Persist that the operator wants the console key.
 pub const LIMITS_WORD_USE_CONSOLE: &str = "use-console";
+/// Persist personal SuperGrok as the paying identity.
+pub const LIMITS_WORD_USE_PERSONAL: &str = "use-personal";
+/// Persist Business SuperGrok as the paying identity.
+pub const LIMITS_WORD_USE_BUSINESS: &str = "use-business";
 /// Persist which meter chrome should emphasize.
 pub const LIMITS_WORD_METER: &str = "meter";
 /// Named ForceRefresh collect (same policy as explicit `/limits` open).
@@ -40,7 +44,7 @@ pub const LIMITS_WORD_REFRESH: &str = "refresh";
 
 /// Usage listing for unknown extra args (slash and CLI share these words).
 pub fn limits_named_words_usage() -> &'static str {
-    "/limits, /limits --json, /limits stay-supergrok, /limits use-console, /limits meter included|dollar-credits|console|combined, or /limits refresh"
+    "/limits, /limits --json, /limits stay-supergrok, /limits use-console, /limits use-personal, /limits use-business, /limits meter included|dollar-credits|console|combined, or /limits refresh"
 }
 
 /// CLI args for `grok limits` / `grok limits multipoll`.
@@ -62,6 +66,10 @@ pub enum LimitsCommand {
     StaySupergrok,
     /// Persist that the operator wants the console key (sidecar, not `[auth]`).
     UseConsole,
+    /// Persist personal SuperGrok as the paying identity (sidecar, not `[auth]`).
+    UsePersonal,
+    /// Persist Business SuperGrok as the paying identity (sidecar, not `[auth]`).
+    UseBusiness,
     /// Persist which meter chrome `/limits` should emphasize.
     Meter {
         #[arg(value_enum)]
@@ -127,6 +135,8 @@ pub enum LimitsNamedAction {
     Json,
     StaySupergrok,
     UseConsole,
+    UsePersonal,
+    UseBusiness,
     Meter(LimitsMeterWord),
     Refresh,
 }
@@ -139,6 +149,8 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
         ["--json"] | ["json"] => Ok(LimitsNamedAction::Json),
         [w] if *w == LIMITS_WORD_STAY_SUPERGROK => Ok(LimitsNamedAction::StaySupergrok),
         [w] if *w == LIMITS_WORD_USE_CONSOLE => Ok(LimitsNamedAction::UseConsole),
+        [w] if *w == LIMITS_WORD_USE_PERSONAL => Ok(LimitsNamedAction::UsePersonal),
+        [w] if *w == LIMITS_WORD_USE_BUSINESS => Ok(LimitsNamedAction::UseBusiness),
         [w] if *w == LIMITS_WORD_REFRESH => Ok(LimitsNamedAction::Refresh),
         [w] if *w == LIMITS_WORD_METER => Err(format!(
             "Unknown argument: {args}. Use {}",
@@ -161,7 +173,8 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
 /// Persist a named pin action. Refresh/show/json do not persist.
 pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, String> {
     use xai_grok_shell::auth::limits_pins::{
-        StaySupergrokApply, apply_meter_source, apply_stay_supergrok, apply_use_console,
+        IdentityPinApply, StaySupergrokApply, apply_meter_source, apply_stay_supergrok,
+        apply_use_business, apply_use_console, apply_use_personal,
     };
     match action {
         LimitsNamedAction::Show | LimitsNamedAction::Json | LimitsNamedAction::Refresh => {
@@ -184,6 +197,28 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
                     .into()
             })
             .map_err(|e| format!("Could not write use-console pin: {e}")),
+        LimitsNamedAction::UsePersonal => match apply_use_personal() {
+            Ok(IdentityPinApply::Applied) => Ok(
+                "Use personal SuperGrok: next request uses the personal SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console."
+                    .into(),
+            ),
+            Ok(IdentityPinApply::BlockedByPreferredApiKey) => Err(
+                "Console is pinned by [auth] preferred_method = api_key. use-personal does not override that stock key."
+                    .into(),
+            ),
+            Err(e) => Err(format!("Could not write use-personal pin: {e}")),
+        },
+        LimitsNamedAction::UseBusiness => match apply_use_business() {
+            Ok(IdentityPinApply::Applied) => Ok(
+                "Use Business SuperGrok: next request uses the Team / Business SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console."
+                    .into(),
+            ),
+            Ok(IdentityPinApply::BlockedByPreferredApiKey) => Err(
+                "Console is pinned by [auth] preferred_method = api_key. use-business does not override that stock key."
+                    .into(),
+            ),
+            Err(e) => Err(format!("Could not write use-business pin: {e}")),
+        },
         LimitsNamedAction::Meter(src) => apply_meter_source(src.to_meter_source())
             .map(|()| format!("Meter source pin written: {}.", src.as_word()))
             .map_err(|e| format!("Could not write meter source pin: {e}")),
@@ -313,7 +348,7 @@ pub struct LimitsCliReport {
     /// Always true. grok-oss limits JSON is a client printout, not grok.com
     /// Usage and not xAI billing truth. Combined remaining is not Usage.
     pub printout_not_billing_truth: bool,
-    /// Same named words as TUI `/limits`: stay-supergrok, use-console, meter, refresh.
+    /// Same named words as TUI `/limits`: stay-supergrok, use-console, use-personal, use-business, meter, refresh.
     pub named_commands: &'static [&'static str],
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
@@ -1432,6 +1467,18 @@ pub async fn run(args: LimitsArgs) -> Result<()> {
         }
         Some(LimitsCommand::UseConsole) => {
             let msg = apply_limits_named_action(LimitsNamedAction::UseConsole)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
+            Ok(())
+        }
+        Some(LimitsCommand::UsePersonal) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::UsePersonal)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
+            Ok(())
+        }
+        Some(LimitsCommand::UseBusiness) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::UseBusiness)
                 .map_err(|e| anyhow::anyhow!(e))?;
             writeln!(std::io::stdout().lock(), "{msg}")?;
             Ok(())

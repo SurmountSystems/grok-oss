@@ -1,10 +1,11 @@
 //! `/plan` enters plan mode. `/plan <description>` enters plan mode and starts
 //! a turn with the description after the mode switch completes.
 //!
-//! `/plan --soft` is the dock for a new feature. It docks Isolated Preview,
-//! the existing plan present surface on the right. L1 docking Isolated Preview
+//! `/plan --soft` docks Isolated Preview, the existing plan present surface
+//! on the right. It does not enter plan mode. It does not park L1. It does
+//! not enqueue the description as a Prompt. L1 docking Isolated Preview
 //! must not cancel nested L2s. Nested work stays Working. Present is not
-//! Approve.
+//! Approve. `--soft` is not the queue hold token (`queue` / `later`).
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
@@ -54,18 +55,17 @@ impl SlashCommand for PlanCommand {
         }
         let (soft, trimmed) = split_soft_flag(rest);
         if soft {
-            // `/plan --soft` docks Isolated Preview for a new feature.
-            // EnterPlanMode { soft: true } still enters plan mode so a
-            // feature description is not dropped. ShowPlan is `/view-plan`.
-            // L1 docking Isolated Preview must not cancel nested L2s.
-            // Nested work stays Working. Present is not Approve.
-            return CommandResult::Action(Action::EnterPlanMode {
+            // `/plan --soft` docks Isolated Preview. This is not
+            // EnterPlanMode and not `/view-plan` ShowPlan. Dispatch must
+            // not enter plan mode, must not park L1, and must not enqueue
+            // the description as a Prompt. Nested L2s stay Working.
+            // Present is not Approve.
+            return CommandResult::Action(Action::DockIsolatedPreview {
                 description: if trimmed.is_empty() {
                     None
                 } else {
                     Some(trimmed.to_string())
                 },
-                soft: true,
             });
         }
         if trimmed.is_empty() {
@@ -73,7 +73,6 @@ impl SlashCommand for PlanCommand {
         }
         CommandResult::Action(Action::EnterPlanMode {
             description: Some(trimmed.to_string()),
-            soft: false,
         })
     }
 }
@@ -144,6 +143,25 @@ impl AgentView {
     /// `/plan --soft` is the dock for a new feature. `/rebuild` restore uses
     /// this same crate-visible surface.
     pub(crate) fn dock_isolated_preview(&mut self) {
+        self.dock_isolated_preview_with_feature(None);
+    }
+
+    /// `/plan --soft [description]` docks Isolated Preview. A feature
+    /// description seeds Isolated Preview. It does not enter plan mode and
+    /// does not enqueue that text as a Prompt.
+    pub(crate) fn dock_isolated_preview_with_feature(&mut self, feature: Option<String>) {
+        if let Some(text) = feature.filter(|s| !s.trim().is_empty()) {
+            self.latest_inline_plan_content = Some(text.clone());
+            if let Some(pav) = self.plan_approval_view.as_mut()
+                && pav
+                    .plan_content
+                    .as_ref()
+                    .is_none_or(|c| c.trim().is_empty())
+            {
+                pav.plan_content = Some(text);
+                pav.has_plan = true;
+            }
+        }
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
         if self.plan_approval_view.is_some() {
@@ -274,16 +292,15 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "Refactor the auth flow") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(
-                    !soft,
-                    "`/plan <desc>` without --soft is not Isolated Preview"
-                );
+            CommandResult::Action(Action::EnterPlanMode { description }) => {
                 assert_eq!(
                     description.as_deref(),
                     Some("Refactor the auth flow"),
                     "`/plan <desc>` must dispatch EnterPlanMode with the description"
                 );
+            }
+            CommandResult::Action(Action::DockIsolatedPreview { .. }) => {
+                panic!("`/plan <desc>` without --soft is not Isolated Preview")
             }
             other => panic!("expected Action::EnterPlanMode, got {other:?}"),
         }
@@ -298,8 +315,7 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_active_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "something") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(!soft);
+            CommandResult::Action(Action::EnterPlanMode { description }) => {
                 assert_eq!(description.as_deref(), Some("something"));
             }
             other => panic!("expected EnterPlanMode, got {other:?}"),
@@ -314,44 +330,46 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "  hello world  ") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(!soft);
+            CommandResult::Action(Action::EnterPlanMode { description }) => {
                 assert_eq!(description.as_deref(), Some("hello world"));
             }
             other => panic!("expected EnterPlanMode, got {other:?}"),
         }
     }
 
-    /// Named contract: `/plan --soft` docks Isolated Preview. EnterPlanMode
-    /// with `soft: true` is that surface so a new feature still enters plan
-    /// mode. It is not `/view-plan` ShowPlan and not a covering exclusive
-    /// present.
+    /// Named contract: `/plan --soft` docks Isolated Preview. That Action
+    /// is not EnterPlanMode and not `/view-plan` ShowPlan. Dispatch must
+    /// not enter plan mode.
     #[test]
-    fn plan_soft_flag_dispatches_show_plan_to_dock_isolated_preview() {
+    fn plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode() {
         let cmd = PlanCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "--soft") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(
-                    soft,
-                    "`/plan --soft` must dock Isolated Preview (EnterPlanMode.soft)"
-                );
+            CommandResult::Action(Action::DockIsolatedPreview { description }) => {
                 assert!(
                     description.is_none(),
                     "`/plan --soft` with no feature text must not invent a description"
                 );
             }
+            CommandResult::Action(Action::EnterPlanMode { .. }) => {
+                panic!("`/plan --soft` must not return EnterPlanMode")
+            }
+            CommandResult::Action(Action::SetPlanMode(_)) => {
+                panic!("`/plan --soft` must not enter plan mode")
+            }
+            CommandResult::Action(Action::ShowPlan) => {
+                panic!("`/plan --soft` is Isolated Preview, not `/view-plan` ShowPlan")
+            }
             other => {
-                panic!(
-                    "`/plan --soft` must dock Isolated Preview via EnterPlanMode.soft, got {other:?}"
-                )
+                panic!("`/plan --soft` must dock Isolated Preview, got {other:?}")
             }
         }
     }
 
-    /// Named contract: `--soft` is a flag, not a plan description.
+    /// Named contract: `--soft` is a flag, not a plan description and not
+    /// the queue hold token. The rest seeds Isolated Preview.
     #[test]
     fn plan_soft_flag_is_not_a_description() {
         let cmd = PlanCommand;
@@ -359,8 +377,7 @@ mod tests {
         let bundle = BundleState::default();
         let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
         match cmd.run(&mut ctx, "  --soft  ") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(soft);
+            CommandResult::Action(Action::DockIsolatedPreview { description }) => {
                 assert!(description.is_none());
             }
             other => {
@@ -368,20 +385,23 @@ mod tests {
             }
         }
         match cmd.run(&mut ctx, "--soft rewrite auth") {
-            CommandResult::Action(Action::EnterPlanMode { description, soft }) => {
-                assert!(
-                    soft,
-                    "`/plan --soft <feature>` must still dock Isolated Preview"
-                );
+            CommandResult::Action(Action::DockIsolatedPreview { description }) => {
                 assert_eq!(
                     description.as_deref(),
                     Some("rewrite auth"),
-                    "`--soft` is a flag; the rest is the feature description"
+                    "`--soft` is a flag; the rest seeds Isolated Preview, not a Prompt"
                 );
+            }
+            CommandResult::Action(Action::EnterPlanMode { .. }) => {
+                panic!("`/plan --soft <feature>` must not return EnterPlanMode")
             }
             other => {
                 panic!("`/plan --soft <feature>` must keep the feature description, got {other:?}")
             }
+        }
+        match cmd.run(&mut ctx, "queue --soft") {
+            CommandResult::QueueLater { .. } => {}
+            other => panic!("`queue` is the hold token; `--soft` is not, got {other:?}"),
         }
     }
 

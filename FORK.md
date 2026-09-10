@@ -192,7 +192,8 @@ identifier that has no matching `fn`.
   `auto_compact_started_after_subagent_finished_does_not_set_live_compact_activity`,
   `overlay_nested_status_click_opens_l3_session_view`,
   `interjection_echo_does_not_duplicate_last_human_prompt`,
-  `image_interject_leaves_one_prompt_and_empty_queue`.
+  `image_interject_leaves_one_prompt_and_empty_queue`,
+  `after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler`.
 - [x] **Binary / branding is `grok-oss`**: `grok-oss --version` first token is
   **`grok-oss`**, not bare `grok` (substring `grok` is how `grok 1.0.3` stayed
   green). Resume and relaunch hints are `grok-oss --resume`. Welcome, tutorial,
@@ -230,10 +231,13 @@ identifier that has no matching `fn`.
   (`session/acp_session_impl/sampler_turn.rs`).
 - [x] **Any stored SuperGrok login with included remaining before SuperGrok dollar credits**:
   Any stored SuperGrok identity with remaining included SuperGrok period
-  limits stays ahead of SuperGrok dollar credits and console. Business /
-  Team included still ranks before personal when both have remaining. After
-  both included pools are exhausted, SuperGrok dollar credits rank before
-  console. Do **not** flatten remaining to zero from `usagePct` /
+  limits stays ahead of SuperGrok dollar credits and console. The personal
+  SuperGrok JWT is the paying identity when personal included SuperGrok
+  period limits have room. Operators switch SuperGrok identity with
+  use-personal / use-business on `$GROK_HOME/limits_pins.json`. That sidecar
+  is not a new `[auth]` key. Stock `preferred_method = "api_key"` still pins
+  console. After both included pools are exhausted, SuperGrok dollar credits
+  rank before console. Do **not** flatten remaining to zero from `usagePct` /
   `creditUsagePercent` 100 plus missing SuperGrok Heavy. Prior remaining
   stays. A memo without a usage reading still forces remaining 0. Used
   percent below 100 still sets remaining from the percent helper. The
@@ -257,12 +261,19 @@ identifier that has no matching `fn`.
   names. Human prose next to them says SuperGrok dollar credits. This
   file does not claim live Business remaining or a live window hop.
 - [x] **Personal SuperGrok JWT is the paying identity**: spend included SuperGrok
-  period limits on a stored personal SuperGrok login first. A Team / Business
-  SuperGrok JWT is not the paying source while that personal login exists
-  (that JWT settles as team postpaid OAuth / Grok Build and can debit the
-  Billing Credits card). Team-only login still uses the Team JWT. Crate:
-  `xai-grok-shell` `auth/supergrok_identity_rank.rs`, `auth/manager_tests.rs`.
-  Tests: `live_operator_numbers_omit_team_jwt_while_personal_included_and_dollar_credits_remain`,
+  period limits on a stored personal SuperGrok login first when those included
+  SuperGrok period limits have room. A Team / Business SuperGrok JWT is not
+  the paying source while that personal login exists (that JWT settles as
+  team postpaid OAuth / Grok Build and can debit the Billing Credits card).
+  Operators switch SuperGrok identity with use-personal / use-business on
+  `$GROK_HOME/limits_pins.json`. No new `[auth]` keys. Stock
+  `preferred_method = "api_key"` still pins console. Team-only login still
+  uses the Team JWT. Crate: `xai-grok-shell` `auth/supergrok_identity_rank.rs`,
+  `auth/manager_tests.rs`, `auth/limits_pins.rs`. Tests:
+  `live_operator_numbers_omit_team_jwt_while_personal_included_and_dollar_credits_remain`,
+  `personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits`,
+  `business_with_no_period_limits_payload_still_switchable_via_use_business`,
+  `use_personal_switches_back_from_business_pin`,
   `pick_prefers_business_included_before_personal_when_both_have_remaining`,
   `order_credentials_business_included_before_personal_when_both_have_room`,
   `align_to_ranked_free_period_primary_switches_sticky_team_base_to_personal`.
@@ -285,10 +296,15 @@ identifier that has no matching `fn`.
   Compact remaining / Active driver:
   `matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool`.
 - [x] **One-process SuperGrok billing flock**: one `grok-oss` process fetches
-  SuperGrok billing; others read `$GROK_HOME/limits_snapshot.json`. The
-  snapshot never stores JWTs or API keys. Crate: `xai-grok-shell`
-  `auth/limits_snapshot_hub.rs`, `extensions/billing.rs`. Tests:
-  `limits_snapshot_second_process_reads_file_and_does_not_http`,
+  SuperGrok billing; others read `$GROK_HOME/limits_snapshot.json`. Automatic
+  limits and credits fetch is at most once an hour per machine through that
+  snapshot hub. ForceRefresh still fetches (explicit `/limits` and
+  `grok-oss limits`). The snapshot never stores JWTs or API keys. Crate:
+  `xai-grok-shell` `auth/limits_snapshot_hub.rs`, `extensions/billing.rs`.
+  Tests:
+  `limits_snapshot_second_process_within_the_hour_does_not_http`,
+  `limits_snapshot_honor_ttl_fresh_within_hour_does_not_http`,
+  `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour`,
   `limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once`,
   `limits_snapshot_never_writes_access_tokens`,
   `billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http`.
@@ -517,8 +533,25 @@ identifier that has no matching `fn`.
   operator prompt (named tests
   `compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt`,
   `auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt`).
-  That is not the compact-fail pause unstick path. FORK claims; not a land
-  class.
+  That is not the compact-fail pause unstick path. A prompt that already
+  issued, or already has a Human turn in this session, must not come
+  back as a queued stale Prompt after rebuild, occupancy drop, Compact,
+  or session reload. Compact-fail unstick after occupancy drop
+  requeues `/compact` only (`try_unstick_idle_over_window_compact_fail`).
+  Compact-empty scrollback still drops `shared_queue` rows already in
+  `chat_history.jsonl` (`AgentView::sync_queue_pane`). Session load
+  cancel-resume returns after `operator_text_already_recorded`
+  (`apply_canceled_turn_resume_on_load`). WAL Interject and Queue
+  kinds already in chat history must not restore
+  (`restore_prompt_wal_does_not_enqueue_committed_interject_or_queue`).
+  Named occupancy tests:
+  `sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty`,
+  `compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn`,
+  `session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history`.
+  Catalog:
+  [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
+  § Compact must not re-enqueue occupancy and § Prompt write-ahead log.
+  FORK claims; not a land class.
 - [x] **Shared rate limits**: crate `grok-rate-limit` (Surmount name, not
   `xai-`); cooldowns under `~/.grok/rate_limits/`; optional
   `GROK_DISABLE_SHARED_RATE_LIMIT=1`. Path-restored (`FORK_PATHS`).
@@ -536,9 +569,15 @@ identifier that has no matching `fn`.
   class.
 - [x] **`/rebuild` is SHA-aware peer relaunch**: local `just install`, not an
   xAI download. Verify package version plus git SHA. Same semver plus a
-  different SHA is newer. Failed install must not replace the binary or
+  different SHA is newer. After install, the installed identity git SHA
+  must match this workspace `git rev-parse --short=12 HEAD` (same width as
+  pager-bin `build.rs`). A leftover cargo-bin such as `1.0.3 (157f1746)`
+  is not an acceptable exec target when this workspace SHA differs. TUI
+  `/rebuild` compiles from the session workspace, not a random process
+  cwd. Failed install or SHA mismatch must not replace the binary or
   `SIGUSR1` peers. Crate: `xai-grok-update` `rebuild.rs`;
-  `xai-grok-shell` `leader/mod.rs`. Tests:
+  `xai-grok-shell` `leader/mod.rs`; TUI dispatch
+  `xai-grok-pager` `app/dispatch/router.rs`. Tests:
   `failed_install_must_not_replace_or_signal_peers`,
   `build_fail_does_not_signal_leaders`,
   `parse_version_output_extracts_identity`,
@@ -546,11 +585,14 @@ identifier that has no matching `fn`.
   `peer_relaunch_declines_equal_identity_on_same_path`,
   `peer_relaunch_accepts_deleted_inode_even_when_identity_equal`,
   `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
-  `leader_is_older_than_same_semver_git_sha_identity`. Fail-does-not-signal
-  alone is not this seam. TUI `/rebuild` is the operator path with persist
-  plus self re-exec. CLI `grok-oss rebuild` is clap-wired
-  (`Command::Rebuild`) to the same compile-and-signal core without self
-  re-exec. Named test: `rebuild_subcommand_parses`.
+  `leader_is_older_than_same_semver_git_sha_identity`,
+  `rebuild_must_exec_workspace_binary_not_stale_cargo_bin`,
+  `installed_identity_must_match_workspace_git_sha`,
+  `tui_rebuild_starts_from_session_workspace_not_process_cwd`.
+  Fail-does-not-signal alone is not this seam. TUI `/rebuild` is the
+  operator path with persist plus self re-exec. CLI `grok-oss rebuild` is
+  clap-wired (`Command::Rebuild`) to the same compile-and-signal core
+  without self re-exec. Named test: `rebuild_subcommand_parses`.
 - [x] **Running grok-oss sessions**: live TUI windows on this `$GROK_HOME`
   from `active_sessions.json`. Slash `/running` (alias `/windows`) and CLI
   `grok-oss running` / `grok-oss running --json`. Not Agent Dashboard, not
@@ -880,6 +922,7 @@ identifier that has no matching `fn`.
   `resume_restore_must_not_put_the_same_operator_prompt_in_composer_and_queue`,
   `resume_restore_must_not_arm_enter_interject_when_no_live_sampler_turn`,
   `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`,
+  `after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler`,
   `resume_restore_must_not_rehydrate_unsent_draft_and_queue_with_the_same_string`,
   `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md`,
   `handle_rebuild_done_persists_open_plan_pane_and_session_load_docks_it`,
@@ -887,18 +930,23 @@ identifier that has no matching `fn`.
   `rebuild_and_relaunch_starts_while_nested_subagents_are_running`,
   `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
   `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`,
+  `tui_rebuild_starts_from_session_workspace_not_process_cwd`,
   `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`
   (`xai-grok-pager` `app/dispatch/rebuild.rs` and `agent_view/session.rs`);
   `export_git_index_omits_unstaged_dirty_file`,
   `stash_keep_index_hides_unstaged_wip_from_compile_worktree`,
-  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`
+  `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`,
+  `rebuild_must_exec_workspace_binary_not_stale_cargo_bin`,
+  `installed_identity_must_match_workspace_git_sha`
   (`xai-grok-update` `rebuild.rs`). Keep these stronger than an upstream
   resume that cancels nested orphans. This TUI exec-replaces onto the new
   binary even while nested work is live. Unix exec keeps the same PID and
   `ps` start time; compare `/proc/<pid>/exe` inode to the cargo-bin file.
   Post-relaunch chrome shows `grok-oss` version plus git SHA (`ps` fork
-  time is not the signal). Named test:
-  `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`.
+  time is not the signal). That SHA must be this workspace HEAD, not a
+  leftover cargo-bin such as `157f1746`. Named tests:
+  `post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha`,
+  `rebuild_must_exec_workspace_binary_not_stale_cargo_bin`.
   Restore occupancy-drops Human-turn queue rows even when memory
   `pending_prompts` is already non-empty. Named test:
   `restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty`.
@@ -924,8 +972,14 @@ identifier that has no matching `fn`.
   must not both rehydrate the same string, and a WAL Send must not
   enqueue a body already in the composer. Resume must not arm
   Enter:interject unless a live sampler turn is actually running, and
-  Waiting must be a real sampler wait, not occupancy leftover. Tests:
+  Waiting must be a real sampler wait, not occupancy leftover. Enter after a
+  paste chip must not wipe the composer without send or enqueue; footer
+  `[pause]` button chrome (not engaged) must not swallow that Enter.
+  Tests:
   `prompt_wal_appends_on_enter_before_model_wait`,
+  `enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue`,
+  `enter_after_paste_chip_with_pause_button_chrome_still_sends`,
+  `enter_while_drain_blocked_must_wal_queue_or_keep_composer`,
   `prompt_wal_appends_on_mid_turn_interject`,
   `prompt_wal_appends_on_queue_enqueue`,
   `prompt_wal_appends_on_approve_notes`,
@@ -1085,6 +1139,8 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt`,
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
+  `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments`,
+  `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `preview_typed_comment_rides_along_on_approve`,
   `prompt_tab_typed_comment_rides_along_on_approve`,
   `esc_with_human_box_draft_keeps_feedback_draft`,
@@ -1121,6 +1177,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `plan_soft_park_draw_right_pane_matches_side_panel_status`,
   `plan_row_click_does_not_enter_commenting`,
   `plan_loop_status_does_not_claim_side_panel_when_viewer_closed`.
+- [x] **`/plan --soft` docks Isolated Preview**: does not enter plan mode, does
+  not park L1, does not enqueue a Prompt. Nested L2s stay Working. Hard
+  `/plan` without `--soft` enters plan mode. `--soft` is not the queue hold
+  token. Present is not Approve. Empty Enter never Approves. Comment then
+  Approve carries notes. Tests:
+  `plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode`,
+  `plan_soft_docks_isolated_preview_without_entering_plan_mode`,
+  `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt`,
+  `plan_soft_is_not_the_queue_hold_token`,
+  `user_guide_plan_soft_docks_isolated_preview`.
 - [x] **Plan-review and Linux prompt screenshot paste**: `Event::Paste` and
   plan-review Ctrl+V run the clipboard image probe on every OS. Approve and
   Revise drain composer image chips. Tests:
@@ -1151,6 +1217,18 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   (`app/subagent.rs`),
   `l2_row_shows_live_l3_count_not_specialist_names`
   (`views/tasks_pane.rs`).
+- [ ] **Subagents list measured L2 tokens and TECH.md**: nested L2 session
+  usage is an in-memory map (`agent_view::l2_token_tracking`). The
+  Subagents list suffix is `measured N tokens`. TECH.md at the workspace
+  root (tests inject a temp path) has a description-label L1 to L2 to L3
+  tree and a table with columns id, contract/aspect, owner, measured
+  tokens, estimate, status. Layout must not parse the session transcript
+  jsonl. Those counts are not included SuperGrok period limits, not
+  SuperGrok dollar credits, and not console team prepaid / console API
+  credits. Tests:
+  `subagents_list_shows_measured_tokens_per_nested_l2`,
+  `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit`,
+  `subagents_list_layout_does_not_read_chat_history_jsonl`.
 - [x] **Always-on bubble copy is paint plus click**: flag on paints `⧉`. A
   full-width first line still paints a hit. Click on the human glyph copies
   that prompt. Click on the assistant glyph copies that message. Paint-only
@@ -1269,6 +1347,15 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `composer_multiline_defaults_on`,
   `prime_applies_composer_multiline_from_ui`. Do not weaken Ctrl-Z,
   `?` insert, or Approve-with-comment.
+- [x] **Enter and double-click expand hidden blocks (2026-09-09)**: after
+  selecting a collapsed or hidden transcript block (image attachment
+  ellipsis and other folded hidden bodies), Enter expands it, same as
+  `:expand`. Double-click on that collapsed block also expands it.
+  Composer Enter with text still sends. Tests:
+  `enter_on_selected_collapsed_image_prompt_expands`,
+  `enter_on_selected_collapsed_tool_expands`,
+  `double_click_on_collapsed_image_prompt_expands`,
+  `composer_enter_with_text_still_sends_when_collapsed_image_is_selected`.
 - [x] **Aborted thinking is not the live turn (2026-09-02)**: pause or
   cancel must not leave a truncated user-facing draft inside an expanded
   thought, and must not paint empty leftovers as `Thought for 0.0s`.
@@ -1613,6 +1700,36 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   contracts: observed red, then green; do not fit the test to a
   ten-minute poll. Dual-pin: [`AGENTS.md`](AGENTS.md) and
   host `~/.grok/AGENTS.md` § *Fire-and-return*.
+- [x] **Take the Operator seriously (pinned 2026-09-09).** Live
+  grok-oss after `/rebuild` must be this workspace's binary. Do not
+  tell the Operator to accept tree versus this TUI when `/rebuild`,
+  slash, plan Approve, or Enter is supposed to do the thing. Dual-pin:
+  [`AGENTS.md`](AGENTS.md) § *Take the Operator seriously*; host
+  `~/.grok/AGENTS.md` same heading.
+- [x] **Cargo tests run on surmount-1, not on horizon (pinned
+  2026-09-09).** For now, all cargo tests run on surmount-1 (the VPS
+  builder / nixbuilder host). Host horizon (this laptop) must not run
+  cargo tests. That includes edit-tool verify: the post-edit rustfmt,
+  clippy, and test pipeline that can invoke rustc or cargo. Horizon
+  must not run that verify. `GROK_SKIP_EDIT_VERIFY=1` is the kill
+  switch for that verify. The product reads only the process
+  environment (`GROK_SKIP_EDIT_VERIFY` must equal `1`).
+  `~/.grok/config.toml` has no such key. Do not invent a new `[auth]`
+  key. On horizon, export it before starting grok-oss: in fish,
+  `set -gx GROK_SKIP_EDIT_VERIFY 1`; in a POSIX shell,
+  `export GROK_SKIP_EDIT_VERIFY=1`. Durable home on this machine is
+  `~/.config/fish/config.fish`. This already-running grok-oss process
+  does not pick up a later fish export until the Operator relaunches
+  grok-oss. Agents still may run `just check-remote` under existing
+  law: one live run at a time, and do not restart that run at five
+  minutes. `just test-remote` and `just cargo-remote` stay
+  operator-owned unless the Operator already whitelist those in the
+  same words. This pin does not weaken agent-depth, fire-and-return,
+  Kill a think-only L3 after about 15 minutes, I hate seeing you edit
+  code at L1, or the rule that the Operator owns the VPS builder. It
+  is additive: horizon is not the cargo-test host. Dual-pin:
+  [`AGENTS.md`](AGENTS.md) hard constraint 3b-horizon-cargo and the
+  same heading; host `~/.grok/AGENTS.md` same heading.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +
@@ -1695,8 +1812,13 @@ File-level rustfmt-only may stay on this laptop (no rustc). File-level
 clippy that compiles belongs on the remote builder too (`just
 cargo-remote` / `just check-remote`). Agents must not run `cargo test`,
 `cargo clippy`, `cargo build`, or rustc on this laptop for grok-oss.
-Named filters: `just test-remote` (see the CI table). `GROK_SKIP_EDIT_VERIFY`
-is the kill switch, not the default.
+Named filters: `just test-remote` (see the CI table). For now, cargo
+tests run on surmount-1, not on horizon; horizon must export
+`GROK_SKIP_EDIT_VERIFY=1` before starting grok-oss so edit-tool verify
+does not invoke rustc or cargo here. `GROK_SKIP_EDIT_VERIFY` is still
+the kill switch, not a config.toml key and not the product default on
+other hosts. See Process **Cargo tests run on surmount-1, not on
+horizon**.
 
 Quality `cargo fmt --all -- --check` (`workspace-cargo-quality`) is a hard
 miss. rustfmt `Diff in` is not a flake 502. File-level rustfmt on the
@@ -1853,7 +1975,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
-| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` is not a fifth idle CTA (title bar + hint). Approve files a GitHub issue with the plan text (`docs/github-tracking.md`). Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
+| [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` is not a fifth idle CTA (title bar + hint). Approve files a GitHub issue with the plan text (`docs/github-tracking.md`). Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. `/plan --soft` docks Isolated Preview and does not enter plan mode. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. `user_guide_plan_soft_docks_isolated_preview`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
 | [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. L0 is Surmount GPUI, not this pager, and must not merge with either. Call L0 `grok-oss gui`. L0 action set remote host console API key is laptop-side, not this pager. Session todos stay in this TUI. | Cite `omits_prompt_text`, `set_remote_host_console_api_key_is_not_pager_dashboard`, `user_guide_machine_console_api_key_for_surmount_1`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
@@ -2088,15 +2210,21 @@ cargo `fn`):
    helpers are not hop. `sampling_config` must fill console failover after
    those included limits are full, and must omit it while they still have
    room. Includes personal SuperGrok JWT as the paying identity while that
-   login exists (Team JWT omitted; that JWT settles Billing Credits), any stored
+   login exists and personal included SuperGrok period limits have room
+   (Team JWT omitted; that JWT settles Billing Credits). Operators switch
+   SuperGrok identity with use-personal / use-business on
+   `$GROK_HOME/limits_pins.json`. No new `[auth]` keys. Stock
+   `preferred_method = "api_key"` still pins console. Also: any stored
    SuperGrok login with included remaining before SuperGrok dollar credits,
    sibling included before SuperGrok dollar credits, and the one-process
-   limits flock. Do not flatten remaining to zero from usage percent 100
-   plus missing SuperGrok Heavy. Never invent used-up included SuperGrok
-   period limits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar
-   credits $0 printout must not mark SuperGrok used up or hop to console.
-   Real SuperGrok HTTP 402 after that request failed can still leave
-   SuperGrok. SuperGrok Heavy ranking optional label is not this class.
+   hourly limits flock (HonorTtl at most once an hour per machine;
+   ForceRefresh still fetches). Do not flatten remaining to zero from usage
+   percent 100 plus missing SuperGrok Heavy. Never invent used-up included
+   SuperGrok period limits. Fail-open: a client 100% / remaining 0 /
+   SuperGrok dollar credits $0 printout must not mark SuperGrok used up or
+   hop to console. Real SuperGrok HTTP 402 after that request failed can
+   still leave SuperGrok. SuperGrok Heavy ranking optional label is not this
+   class. SuperGrok is paid.
 6. **Last-session on start.** Interactive `grok-oss` opens the remembered
    last session for this working directory. It does not land on Welcome
    first.
@@ -2133,8 +2261,15 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_present_preview_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt`,
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
-  `isolated_present_click_approve_dispatches_interject_with_prompt_text`.
+  `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
+  `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments`,
+  `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`.
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
+  Installed identity git SHA must match this workspace HEAD short SHA.
+  TUI `/rebuild` starts from the session workspace. Named tests:
+  `rebuild_must_exec_workspace_binary_not_stale_cargo_bin`,
+  `installed_identity_must_match_workspace_git_sha`,
+  `tui_rebuild_starts_from_session_workspace_not_process_cwd`.
 - `/rebuild` SIGUSR1s every other live grok-oss TUI PID (dedupe by PID; two
   windows on the same session both get a signal). SHA-aware fail-does-not-signal
   is not this list. Named tests: `rebuild_signals_each_pid_after_composite_key`,
@@ -2324,7 +2459,8 @@ that drops them while keeping the seven is still a seam loss):
 - ForceRefresh on explicit `/limits`
   (`management_meter_cache_policy_collect_force_background_honor_ttl`,
   `should_clear_management_meter_caches_force_with_key_only`,
-  `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh`).
+  `limits_snapshot_mode_for_get_billing_explicit_is_force_refresh`,
+  `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour`).
 - Footer / session sampling window vs catalog
   (`context_chip_names_sampling_window_when_catalog_differs`,
   `context_chip_hover_percent_uses_sampling_window_when_catalog_differs`,
@@ -2441,10 +2577,15 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use \
   combined_included_remaining_does_not_collapse_matching_percent_and_reset_into_one_pool \
   pick_prefers_business_included_before_personal_when_both_have_remaining \
   order_credentials_business_included_before_personal_when_both_have_room \
-  limits_snapshot_second_process_reads_file_and_does_not_http \
+  limits_snapshot_second_process_within_the_hour_does_not_http \
+  limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
   limits_snapshot_stale_file_lets_waiter_become_leader_and_fetch_once \
   limits_snapshot_never_writes_access_tokens \
-  billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http
+  billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
+  personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
+  business_with_no_period_limits_payload_still_switchable_via_use_business \
+  use_personal_switches_back_from_business_pin
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining \
   active_spend_driver_stays_included_while_any_distinct_pool_has_remaining \
   matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool
@@ -2488,7 +2629,10 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
   peer_relaunch_accepts_same_semver_different_sha \
   peer_relaunch_declines_equal_identity_on_same_path \
   peer_relaunch_accepts_deleted_inode_even_when_identity_equal \
-  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart
+  operator_ran_rebuild_and_the_grok_oss_process_did_not_restart \
+  rebuild_must_exec_workspace_binary_not_stale_cargo_bin \
+  installed_identity_must_match_workspace_git_sha
+cargo test -p xai-grok-pager --lib -- tui_rebuild_starts_from_session_workspace_not_process_cwd
 cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_identity
 
 # Extra: /rebuild signals every live grok-oss PID (SHA-aware is not this list)
@@ -2505,6 +2649,7 @@ cargo test -p xai-grok-pager --lib -- \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
   operator_ran_rebuild_and_the_grok_oss_process_did_not_restart \
   post_rebuild_relaunch_chrome_includes_grok_oss_version_and_git_sha \
+  tui_rebuild_starts_from_session_workspace_not_process_cwd \
   restore_pending_prompts_from_disk_drops_human_turns_when_memory_queue_is_nonempty \
   rebuild_subcommand_parses \
   prompt_wal_appends_on_enter_before_model_wait \
@@ -2556,6 +2701,12 @@ cargo test -p xai-grok-pager --lib -- \
   live_subagent_list_shows_only_l2_and_reports_live_l3_count \
   l2_row_shows_live_l3_count_not_specialist_names
 
+# Extra: Subagents list measured L2 tokens and TECH.md (not billing meters)
+cargo test -p xai-grok-pager --lib -- \
+  subagents_list_shows_measured_tokens_per_nested_l2 \
+  tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
+  subagents_list_layout_does_not_read_chat_history_jsonl
+
 # Extra: /start + leftover cancel-resume marker drop
 cargo test -p xai-grok-pager --lib -- \
   start_while_globally_paused_continues_interrupted_turn_once \
@@ -2584,7 +2735,8 @@ cargo test -p xai-grok-pager --lib -- \
   management_meter_cache_policy_collect_force_background_honor_ttl \
   should_clear_management_meter_caches_force_with_key_only
 cargo test -p xai-grok-shell --lib -- \
-  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh
+  limits_snapshot_mode_for_get_billing_explicit_is_force_refresh \
+  limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour
 
 # Extra: sampling window vs catalog (chip + session field + spawn seed)
 cargo test -p xai-grok-pager --lib -- \

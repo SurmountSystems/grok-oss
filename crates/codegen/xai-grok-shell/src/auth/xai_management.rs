@@ -64,12 +64,14 @@ pub const MANAGEMENT_KEY_VALIDATION_PATH: &str = "/auth/management-keys/validati
 pub const USAGE_SERIES_DEFAULT_DAY_WINDOW: i64 = 7;
 
 /// Shared soft window (seconds) for Management **prepaid**, **postpaid**, and
-/// **usage series** process caches.
+/// **usage series** **process** caches (in-process paint helpers).
 ///
-/// Background TUI billing polls reuse a warm entry for this long. Explicit
-/// `grok limits` collect / TUI `/limits` open busts these caches so dollars
-/// are not stuck until TTL expiry or process restart. Honesty surfaces may
-/// cite this value.
+/// This is not the machine-wide shared snapshot TTL
+/// ([`super::limits_snapshot_hub::SNAPSHOT_TTL_SECS`], one hour). Automatic
+/// Management HTTP rides the hub leader under HonorTtl (at most once an hour
+/// per machine). These 60s Mutex caches must not cause extra leader HTTP
+/// under HonorTtl. Explicit `grok-oss limits` / TUI `/limits` ForceRefresh
+/// busts these caches so dollars are not stuck until process restart.
 pub const CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS: u64 = 60;
 
 /// Alias of [`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`] for prepaid lag copy
@@ -2472,10 +2474,16 @@ mod tests {
 
     #[test]
     fn billing_meter_cache_ttl_secs_is_sixty_and_prepaid_alias_matches() {
+        // In-process paint helper only. Not the shared hourly hub fetch
+        // (`SNAPSHOT_TTL_SECS` = 3600).
         assert_eq!(CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS, 60);
         assert_eq!(
             CONSOLE_TEAM_PREPAID_CACHE_TTL_SECS, CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS,
-            "prepaid alias must track shared billing-meter TTL"
+            "prepaid alias must track the 60s process cache, not the shared hourly snapshot"
+        );
+        assert_ne!(
+            CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS,
+            super::SNAPSHOT_TTL_SECS
         );
     }
 

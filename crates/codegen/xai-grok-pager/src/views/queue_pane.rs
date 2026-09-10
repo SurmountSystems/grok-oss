@@ -594,6 +594,11 @@ impl QueuePane {
         self.entries.iter().map(|e| e.id).collect()
     }
 
+    /// Painted row bodies in display order (`#N` `[Send now]`).
+    pub fn entry_texts(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.text.as_str()).collect()
+    }
+
     /// Resolve a row's origin metadata by its selection id (for edit routing).
     pub fn row_ref(&self, id: u64) -> Option<QueueRowRef> {
         self.entries

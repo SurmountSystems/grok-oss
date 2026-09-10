@@ -48,7 +48,7 @@ After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) t
 
 ### Isolated Preview (`/plan --soft`)
 
-**`/plan --soft`** docks Isolated Preview on the right without a covering exclusive present. Isolated Preview is the existing plan present surface on the right of the transcript. Nested subagents stay Working. `/plan --soft add feature` also enters plan mode with that description. Present is not Approve. Empty Enter never Approves. `--soft` is not the queue hold token (`queue` / `later`). Approve still files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)).
+**`/plan --soft`** docks Isolated Preview on the right without a covering exclusive present. Isolated Preview is the existing plan present surface on the right of the transcript. It does not enter plan mode. It does not park L1. Nested subagents stay Working. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Hard `/plan` without `--soft` enters plan mode. Present is not Approve. Empty Enter never Approves. `--soft` is not the queue hold token (`queue` / `later`). Comment then Approve carries notes. Approve still files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)).
 
 When the main session (L1) shows that plan pane, nested L2 subagents keep running. Those sessions stay Working. Docking Isolated Preview does not cancel them and does not paint Cancelling.
 

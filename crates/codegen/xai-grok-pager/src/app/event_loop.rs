@@ -29,6 +29,15 @@ use super::session_load_barrier::{
 };
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 
+/// Near-full included SuperGrok period background poll interval.
+///
+/// Matches the shared limits snapshot HonorTtl window (one hour) so this
+/// loop does not stampede SuperGrok credits or Management credits APIs
+/// every 30 seconds. FetchBilling from this timer is HonorTtl
+/// (`force_refresh: false`). Chrome may keep painting from the snapshot.
+pub(crate) const BILLING_POLL_INTERVAL: Duration =
+    Duration::from_secs(xai_grok_shell::auth::SNAPSHOT_TTL_SECS);
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimedInputEvent {
     pub(super) event: Event,
@@ -1745,7 +1754,6 @@ pub(crate) async fn run(
     // iteration so it is popped on every close path.
     let mut gboom_keyboard_pushed = false;
 
-    const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut billing_poll_at: Option<Instant> = None;
 
     // L0 drop files arrive while this window may be idle (`TickDemand::None`
@@ -2636,7 +2644,7 @@ pub(crate) async fn run(
                         agent_id: id,
                         silent: true,
                         nonce: 0,
-                        force_refresh: false,
+                        force_refresh: dispatch::BACKGROUND_BILLING_POLL_FORCE_REFRESH,
                     }];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
@@ -4290,6 +4298,23 @@ fn process_effects(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[test]
+    fn billing_poll_interval_is_one_hour_honor_ttl_not_thirty_second_http() {
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(xai_grok_shell::auth::SNAPSHOT_TTL_SECS)
+        );
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(3600),
+            "near-full included SuperGrok period background poll must not HTTP every 30s"
+        );
+        assert!(
+            !dispatch::BACKGROUND_BILLING_POLL_FORCE_REFRESH,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+    }
 
     #[test]
     fn typeahead_classification_keeps_text_drops_noise_and_control() {

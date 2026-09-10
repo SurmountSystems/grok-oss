@@ -475,6 +475,16 @@ mod tests {
                 "{name} must say other live TUIs read a snapshot under $GROK_HOME"
             );
             assert!(
+                content.contains("limits_snapshot.json")
+                    && content.contains("HonorTtl")
+                    && content.contains("once an hour"),
+                "{name} must say automatic HonorTtl is at most once an hour on limits_snapshot.json"
+            );
+            assert!(
+                content.contains("not leftover business credits"),
+                "{name} must say grok-oss uses personal SuperGrok, not leftover business credits, when personal included SuperGrok period limits have room again"
+            );
+            assert!(
                 content.contains("There is no extra daemon"),
                 "{name} must say there is no extra daemon"
             );
@@ -520,6 +530,18 @@ mod tests {
             assert!(
                 content.contains("use-console"),
                 "{name} must name use-console"
+            );
+            assert!(
+                content.contains("use-personal"),
+                "{name} must name use-personal"
+            );
+            assert!(
+                content.contains("use-business"),
+                "{name} must name use-business"
+            );
+            assert!(
+                content.contains("supergrok_identity"),
+                "{name} must name the limits_pins.json field supergrok_identity"
             );
             assert!(
                 content.contains("limits_pins.json"),
@@ -883,8 +905,10 @@ mod tests {
     }
 
     /// Named contract: `/plan --soft` docks Isolated Preview for a new
-    /// feature. Present is not Approve. Nested work stays Working.
-    /// `--soft` is not the queue hold token. Empty Enter never Approves.
+    /// feature. It does not enter plan mode. It does not park L1. It does
+    /// not enqueue the description as a Prompt. Present is not Approve.
+    /// Nested work stays Working. `--soft` is not the queue hold token.
+    /// Empty Enter never Approves.
     #[test]
     fn user_guide_plan_soft_docks_isolated_preview() {
         let slash = USER_GUIDE
@@ -898,6 +922,10 @@ mod tests {
         assert!(
             slash.content.contains("Isolated Preview"),
             "04-slash-commands.md must say /plan --soft docks Isolated Preview"
+        );
+        assert!(
+            slash.content.contains("does not enter plan mode"),
+            "04-slash-commands.md must say /plan --soft does not enter plan mode"
         );
         assert!(
             slash.content.contains("not the queue hold token"),
@@ -919,6 +947,10 @@ mod tests {
             slash.content.contains("/plan --soft add feature"),
             "04-slash-commands.md must show /plan --soft add feature"
         );
+        assert!(
+            !slash.content.contains("still enters plan mode"),
+            "04-slash-commands.md must not say /plan --soft still enters plan mode"
+        );
         let plan = USER_GUIDE
             .iter()
             .find(|d| d.filename == "19-plan-mode.md")
@@ -929,15 +961,19 @@ mod tests {
         );
         assert!(
             plan.content.contains("/plan --soft add feature"),
-            "19-plan-mode.md must say /plan --soft add feature also enters plan mode"
+            "19-plan-mode.md must show /plan --soft add feature"
+        );
+        assert!(
+            plan.content.contains("does not enter plan mode"),
+            "19-plan-mode.md must say /plan --soft does not enter plan mode"
         );
         assert!(
             plan.content.contains("not the queue hold token"),
             "19-plan-mode.md must say --soft is not the queue hold token"
         );
         assert!(
-            !plan.content.contains("does not enter plan mode by itself"),
-            "19-plan-mode.md must not say /plan --soft skips plan mode"
+            !plan.content.contains("also enters plan mode"),
+            "19-plan-mode.md must not say /plan --soft add feature also enters plan mode"
         );
     }
 

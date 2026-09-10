@@ -91,6 +91,86 @@ mod tests {
         }
     }
 
+    fn append_wal_kind(
+        cwd: &str,
+        sid: &str,
+        kind: xai_grok_shell::session::prompt_wal::PromptWalKind,
+        body: &str,
+    ) {
+        let record =
+            xai_grok_shell::session::prompt_wal::PromptWalRecord::new(sid, kind, body, Vec::new());
+        xai_grok_shell::session::prompt_wal::append_prompt_wal(cwd, sid, &record)
+            .expect("write WAL");
+    }
+
+    /// Named contract: WAL Interject and Queue kinds that are already parsed
+    /// user turns in `chat_history.jsonl` must not restore into the pager
+    /// queue. Do not weaken Send, `/goal`, or quoted-body skip tests.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn restore_prompt_wal_does_not_enqueue_committed_interject_or_queue() {
+        use crate::app::agent::AgentId;
+        use xai_grok_shell::session::prompt_wal::PromptWalKind;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-restore-skip-interject-queue";
+        let issued_interject = "BTW names follow-up that already ran as a Human turn";
+        let issued_queue =
+            "Convert this LightWave 3D scene to a sprite sheet with two extra lines.";
+        let missing_interject = "operator interject that never reached chat history";
+        append_wal_kind(&cwd_str, sid, PromptWalKind::Interject, issued_interject);
+        append_wal_kind(&cwd_str, sid, PromptWalKind::Queue, issued_queue);
+        append_wal_kind(&cwd_str, sid, PromptWalKind::Interject, missing_interject);
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": issued_interject}],
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": issued_queue}],
+                }),
+            ),
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.prompt_history.clear();
+            agent.session.pending_prompts.clear();
+            agent.restore_prompt_wal_from_disk();
+            let queued: Vec<&str> = agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect();
+            assert!(
+                !queued.contains(&issued_interject),
+                "pager bind must not enqueue a WAL Interject already recorded as a Human turn; queue={queued:?}"
+            );
+            assert!(
+                !queued.contains(&issued_queue),
+                "pager bind must not enqueue a WAL Queue body already recorded as a Human turn; queue={queued:?}"
+            );
+            assert!(
+                queued.contains(&missing_interject),
+                "a WAL Interject whose body is truly absent from parsed user text must still restore; queue={queued:?}"
+            );
+        }
+    }
+
     /// Named contract: `pending_prompts.json` rows that are already committed
     /// user turns must not restore into the pager queue after `/rebuild`.
     #[test]

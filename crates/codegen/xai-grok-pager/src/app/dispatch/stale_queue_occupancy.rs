@@ -269,4 +269,265 @@ mod tests {
             "a still-unsent follow-up must remain after occupancy drop; queue={queued:?}"
         );
     }
+
+    fn write_session_chat_history(cwd: &str, sid: &str, jsonl: &str) {
+        let path = xai_grok_shell::session::prompt_wal::chat_history_path(cwd, sid)
+            .expect("chat_history.jsonl path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, jsonl).unwrap();
+    }
+
+    fn shared_prompt_wire(
+        id: &str,
+        text: &str,
+        position: usize,
+    ) -> crate::app::prompt_queue::QueueEntryWire {
+        crate::app::prompt_queue::QueueEntryWire {
+            id: id.into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: text.into(),
+            position,
+            combined_texts: None,
+        }
+    }
+
+    /// Named contract: a prompt that already issued or already has a Human
+    /// turn in this session must not come back as a queued stale Prompt after
+    /// rebuild, occupancy drop, Compact, or session reload. Duplicate occupancy
+    /// rows for the same already-issued text must not remain in the pager
+    /// queue. After Compact empties live scrollback, `sync_queue_pane` (the
+    /// paint path the Operator sees) must still drop `shared_queue` Prompt
+    /// wires whose text is already a parsed user turn in `chat_history.jsonl`.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "stale-paint-compact-emptied-scrollback";
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": LIGHTWAVE}],
+                })
+            ),
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        agent.session.prompt_history.clear();
+        agent.session.pending_prompts.clear();
+        agent.session.state = AgentState::TurnRunning;
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "Compact emptied live scrollback; this fixture must not push a UserPrompt block"
+        );
+        agent.shared_queue = vec![
+            shared_prompt_wire("occ-4", LIGHTWAVE, 0),
+            shared_prompt_wire("occ-5", LIGHTWAVE, 1),
+        ];
+        agent.session.pending_prompts.push_back(QueuedPrompt::plain(
+            6,
+            STILL_UNSENT,
+            QueueEntryKind::Prompt,
+        ));
+        agent.sync_queue_pane();
+        let painted = agent.queue.entry_texts();
+        assert!(
+            !painted.iter().any(|t| t.trim() == LIGHTWAVE),
+            "a prompt that already issued or already has a Human turn in this session must not come back as a queued stale Prompt after rebuild, occupancy drop, Compact, or session reload; painted={painted:?}"
+        );
+        assert_eq!(
+            painted.iter().filter(|t| t.trim() == LIGHTWAVE).count(),
+            0,
+            "duplicate occupancy rows for the same already-issued text must not remain in the pager queue; painted={painted:?}"
+        );
+        assert!(
+            painted.iter().any(|t| *t == STILL_UNSENT),
+            "a truly unsent follow-up must still paint as a queue row; painted={painted:?}"
+        );
+        assert_eq!(
+            agent.queue.entry_ids().len(),
+            1,
+            "queue pane must not paint the compacted Human turn as a [Send now] row; ids={:?} painted={painted:?}",
+            agent.queue.entry_ids()
+        );
+        assert!(
+            !agent
+                .shared_queue
+                .iter()
+                .any(|w| w.text.trim() == LIGHTWAVE),
+            "paint-path occupancy drop must remove already-issued shared_queue Prompt wires even when scrollback is empty"
+        );
+    }
+
+    /// Named contract: Compact-fail unstick after occupancy drop must not
+    /// leave the last Human turn as a Prompt row. Command `/compact` only.
+    #[test]
+    fn compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::dispatch::dispatch;
+        use crate::scrollback::blocks::SessionEvent;
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::Idle;
+            agent.session.in_flight_prompt = None;
+            agent.session.compact_held_prompt = None;
+            agent.session.pending_prompts.clear();
+            agent.session_sampling_window = Some(500_000);
+            agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+                507_000, 500_000,
+            ));
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(LIGHTWAVE));
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::CompactionFailed {
+                        error: "Compaction sampler got a spending-limit response.".into(),
+                    },
+                ));
+        }
+        let effects = dispatch(Action::ToggleGlobalPause, &mut app);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.persist_pending_prompts();
+            agent.sync_queue_pane();
+        }
+        let agent = app.agents.get(&id).unwrap();
+        let queued = queued_texts(agent);
+        let painted = agent.queue.entry_texts();
+        let human_prompt = queued.iter().any(|t| t.trim() == LIGHTWAVE)
+            || painted.iter().any(|t| t.trim() == LIGHTWAVE)
+            || effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text.trim() == LIGHTWAVE));
+        assert!(
+            !human_prompt,
+            "Compact-fail unstick after occupancy drop must not leave the last Human turn as a Prompt row; queue={queued:?} painted={painted:?} effects={effects:?}"
+        );
+        let compact_only = queued.iter().all(|t| t.trim() == "/compact")
+            && effects.iter().any(|e| matches!(e, Effect::Compact { .. }));
+        assert!(
+            compact_only,
+            "Human-turn requeues Compact only; queue={queued:?} effects={effects:?}"
+        );
+        assert!(
+            !painted.iter().any(|t| t.trim() == LIGHTWAVE),
+            "the Operator-visible [Send now] pane must not show the last Human turn after compact-fail unstick; painted={painted:?}"
+        );
+    }
+
+    /// Named contract: `apply_canceled_turn_resume_on_load` after a finished
+    /// Human turn in chat history must not `enqueue_prompt_front` that text.
+    /// Compact may have removed the UserPrompt from live scrollback.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "stale-cancel-resume-chat-history";
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": LIGHTWAVE}],
+                })
+            ),
+        );
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+        let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+            LIGHTWAVE,
+            Some("pid-stale-compacted-resume"),
+            "2026-09-09T00:00:00Z",
+        )
+        .expect("marker");
+        xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+            &cwd_str, sid, &marker,
+        )
+        .expect("write leftover marker");
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            assert_eq!(
+                agent.scrollback.len(),
+                0,
+                "Compact emptied UserPrompt from live scrollback"
+            );
+        }
+        let load_effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        let queued = queued_texts(agent);
+        let painted = agent.queue.entry_texts();
+        assert!(
+            !queued.iter().any(|t| t.trim() == LIGHTWAVE),
+            "session load must not enqueue_prompt_front a finished Human turn that is already in chat history; queue={queued:?}"
+        );
+        assert!(
+            !painted.iter().any(|t| t.trim() == LIGHTWAVE),
+            "the Operator-visible queue must not show that Human turn as a [Send now] Prompt; painted={painted:?}"
+        );
+        let refired = load_effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text.trim() == LIGHTWAVE));
+        assert!(
+            !refired,
+            "cancel-resume must not re-fire a Human turn already recorded in chat history; effects={load_effects:?}"
+        );
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
 }

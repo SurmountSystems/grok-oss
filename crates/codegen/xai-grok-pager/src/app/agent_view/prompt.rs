@@ -1155,6 +1155,39 @@ mod shift_tab_cycle_mode_tests {
         }
     }
 
+    /// Do not steal composer Enter when the composer is focused and has text
+    /// (do not break send). A collapsed `[Image #1]` transcript item may be
+    /// selected; Enter in the Human box still sends.
+    #[test]
+    fn composer_enter_with_text_still_sends_when_collapsed_image_is_selected() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                "Here.\n\n1. [Image #1]\n2. hidden\n3. hidden\n4. hidden",
+            ));
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.prompt.set_text("follow up");
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "follow up");
+            }
+            other => panic!(
+                "composer Enter with text must send, not expand the selected collapsed image, got {other:?}"
+            ),
+        }
+        let entry = agent.scrollback.entry(0).expect("user prompt");
+        assert_ne!(
+            entry.display_mode,
+            crate::scrollback::types::DisplayMode::Expanded,
+            "send must not expand the selected collapsed transcript item"
+        );
+    }
+
     /// `[ui] composer_multiline = false`: Shift+Enter sends, never a second line.
     #[test]
     fn composer_multiline_off_shift_enter_sends_not_newline() {

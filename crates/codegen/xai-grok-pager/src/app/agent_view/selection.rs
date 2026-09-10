@@ -1115,19 +1115,19 @@ impl AgentView {
                 //
                 // Gated OFF for now (unsolved scroll jump on enter — see
                 // inline_edit::INLINE_EDIT_ENABLED). When disabled this is a
-                // no-op, so the block below runs and restores the EXACT
-                // pre-feature double-click behavior for a prompt: fold (if
-                // foldable) + scroll the entry to the top.
+                // no-op, so the block below runs: expand hidden content, or
+                // toggle fold on an already-expanded prompt, then scroll
+                // the entry to the top.
                 if !(crate::app::inline_edit::INLINE_EDIT_ENABLED && self.enter_inline_edit(idx)) {
                     if foldable {
-                        self.scrollback.toggle_fold_selected();
+                        self.expand_or_toggle_selected_fold();
                     }
                     self.scrollback.scroll_to_entry_top(idx);
                 }
             }
             2 => {
                 if foldable {
-                    self.scrollback.toggle_fold_selected();
+                    self.expand_or_toggle_selected_fold();
                 }
             }
             3.. if !is_prompt => {
@@ -1145,6 +1145,21 @@ impl AgentView {
             Some((now, idx, click_count))
         };
         (last_click, show_word_select_tip)
+    }
+
+    /// Double-click on hidden content expands it. Double-click on an
+    /// already-expanded foldable entry still toggles (collapse).
+    fn expand_or_toggle_selected_fold(&mut self) {
+        let hidden = self
+            .scrollback
+            .selected()
+            .and_then(|idx| self.scrollback.entry(idx))
+            .is_some_and(|e| e.display_mode != crate::scrollback::types::DisplayMode::Expanded);
+        if hidden {
+            self.scrollback.expand_selected();
+        } else {
+            self.scrollback.toggle_fold_selected();
+        }
     }
 
     /// Return the correct selection model for a hit, accounting for the

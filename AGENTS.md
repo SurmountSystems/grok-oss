@@ -135,6 +135,30 @@ less than product code and tests. Do not invent long essays or git nags.
    run them. Agents do not run cargo/rustc on this laptop either.
    `GROK_SKIP_EDIT_VERIFY` is the kill switch for the edit-tool verify,
    not the default. Host dual-pin: `~/.grok/AGENTS.md`.
+3b-horizon-cargo. **Cargo tests run on surmount-1, not on horizon (pinned
+   2026-09-09).** For now, all cargo tests run on surmount-1 (the VPS
+   builder / nixbuilder host). Host horizon (this laptop) must not run
+   cargo tests. That includes edit-tool verify: the post-edit rustfmt,
+   clippy, and test pipeline that can invoke rustc or cargo. Horizon
+   must not run that verify. `GROK_SKIP_EDIT_VERIFY=1` is the kill
+   switch for that verify. The product reads only the process
+   environment (`GROK_SKIP_EDIT_VERIFY` must equal `1`).
+   `~/.grok/config.toml` has no such key. Do not invent a new `[auth]`
+   key. On horizon, export it before starting grok-oss: in fish,
+   `set -gx GROK_SKIP_EDIT_VERIFY 1`; in a POSIX shell,
+   `export GROK_SKIP_EDIT_VERIFY=1`. Durable home on this machine is
+   `~/.config/fish/config.fish`. This already-running grok-oss process
+   does not pick up a later fish export until the Operator relaunches
+   grok-oss. Agents still may run `just check-remote` under
+   3b-remote-check: one live run at a time, and do not restart that run
+   at five minutes. `just test-remote` and `just cargo-remote` stay
+   operator-owned unless the Operator already whitelist those in the
+   same words. This pin does not weaken agent-depth, fire-and-return,
+   Kill a think-only L3 after about 15 minutes, I hate seeing you edit
+   code at L1, or the rule that the Operator owns the VPS builder. It
+   is additive: horizon is not the cargo-test host. Dual-pin:
+   [`FORK.md`](FORK.md) Process same heading; host
+   `~/.grok/AGENTS.md` same heading.
 3b-remote-wait. **A live remote compile must not be restarted at five
    minutes (pinned 2026-08-28).** When this session is explicitly told to
    run `just test-remote`, `just cargo-remote`, or `just check-remote`,
@@ -424,10 +448,12 @@ less than product code and tests. Do not invent long essays or git nags.
    build still does not match) is a named failure mode under § *The
    operator's words are the spec*. A dropped operator prompt is a
    product defect under § *Wasted human time* (hard constraint 24).
-   Operator speech is work. Report finished nested work the same turn
-   the host says the nested agent exited. Full host pin:
+   Operator speech is work. Take the Operator seriously. Report
+   finished nested work the same turn the host says the nested agent
+   exited. Full host pin:
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
-   speech is work*, § *Report finished nested work the same turn*.
+   speech is work*, § *Take the Operator seriously*, § *Report
+   finished nested work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -742,6 +768,35 @@ the prompt write-ahead log known-good tests, L1 lean, or the
 Hierarchical fast path. Dual-pin: this file and host
 `~/.grok/AGENTS.md` same heading.
 
+## Take the Operator seriously (pinned 2026-09-09)
+
+Take the Operator seriously. Their words are the spec. A live grok-oss
+window they can see is this product.
+
+Do not dismiss a live miss as "tree versus this TUI," "the Operator must
+`/rebuild`," or "other path" when the product (`/rebuild`, slash, plan
+Approve, Enter) is supposed to do the thing.
+
+Hard constraint **Tell the operator when it is a different path**
+(`3b-say-the-other-path`) still applies when the fix is truly not this
+tree (VPS daemon, fish export this process cannot see). It does not
+apply when `/rebuild` execs a stale `~/.cargo/bin/grok-oss` while this
+workspace already has the code.
+
+Getting mad is a same-turn pin-and-fix, not a lecture. Do not be lazy.
+Do not make the Operator repeat themselves.
+
+Tokens in this session are the Operator's real money. SuperGrok is a
+paid product. A complaint in this window is work, not venting. This
+agent is a tool, not a therapist. Grok OSS must recursively improve
+Grok OSS in this tree, or the broken tool is discarded.
+
+This pin does not weaken § *The operator's words are the spec*,
+§ *Operator speech is work*, § *Wasted human time*, § *I hate seeing
+you edit code at L1*, or § *Fire-and-return*. Dual-pin: this file and
+host `~/.grok/AGENTS.md` same heading. Process pointer:
+[`FORK.md`](FORK.md) Process.
+
 ## Report finished nested work the same turn (pinned 2026-09-02)
 
 Report finished nested work the same turn the host says the nested agent
@@ -856,6 +911,34 @@ already-named path, read the asked-for report, one already-named
 one-line edit. "Just a quick edit" of product code is not that path.
 
 Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
+
+### Cargo tests run on surmount-1, not on horizon (pinned 2026-09-09)
+
+For now, all cargo tests run on surmount-1 (the VPS builder / nixbuilder
+host). Host horizon (this laptop) must not run cargo tests. That includes
+edit-tool verify: the post-edit rustfmt, clippy, and test pipeline that
+can invoke rustc or cargo. Horizon must not run that verify.
+
+`GROK_SKIP_EDIT_VERIFY=1` is the kill switch for that verify. The
+product reads only the process environment (`GROK_SKIP_EDIT_VERIFY` must
+equal `1`). `~/.grok/config.toml` has no such key. Do not invent a new
+`[auth]` key. On horizon, export it before starting grok-oss: in fish,
+`set -gx GROK_SKIP_EDIT_VERIFY 1`; in a POSIX shell,
+`export GROK_SKIP_EDIT_VERIFY=1`. Durable home on this machine is
+`~/.config/fish/config.fish`. This already-running grok-oss process does
+not pick up a later fish export until the Operator relaunches grok-oss.
+
+Agents still may run `just check-remote` under existing law: one live
+run at a time, and do not restart that run at five minutes.
+`just test-remote` and `just cargo-remote` stay operator-owned unless
+the Operator already whitelist those in the same words.
+
+This pin does not weaken agent-depth, fire-and-return, Kill a think-only
+L3 after about 15 minutes, I hate seeing you edit code at L1, or the
+rule that the Operator owns the VPS builder. It is additive: horizon is
+not the cargo-test host. Dual-pin: this file hard constraint
+3b-horizon-cargo; [`FORK.md`](FORK.md) Process same heading; host
+`~/.grok/AGENTS.md` same heading.
 
 ### Fire-and-return (pinned 2026-09-09)
 

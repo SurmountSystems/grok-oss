@@ -17,8 +17,13 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::{AppView, RebuildRelaunch};
 use crate::scrollback::block::RenderBlock;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// Compile start dir for TUI `/rebuild`: session workspace over process cwd.
+pub(crate) fn rebuild_compile_start_dir(session_cwd: Option<&Path>, process_cwd: &Path) -> PathBuf {
+    xai_grok_update::rebuild_compile_start_dir(session_cwd, process_cwd)
+}
 
 /// Unix epoch seconds when this TUI process started. Compared to a rebuild
 /// request timestamp so a later `grok-oss --resume` is not treated as an
@@ -794,6 +799,24 @@ mod tests {
         let in_progress = rebuild_relaunch_in_progress_toast(identity, "");
         assert_eq!(in_progress, "Relaunching grok-oss 1.0.3 (825986fefeea)");
 
+        let leftover = "1.0.3 (157f1746)";
+        assert!(
+            !xai_grok_update::installed_identity_matches_workspace_git_sha(
+                leftover,
+                "825986fefeea"
+            ),
+            "leftover 157f1746 is not acceptable when workspace SHA differs; chrome after exec uses env!(VERSION_WITH_COMMIT) of the exec'd binary, so the gate is that we exec the workspace-built file"
+        );
+        let leftover_chrome = rebuild_relaunch_identity_chrome(leftover, "");
+        assert!(
+            leftover_chrome.contains("157f1746"),
+            "if we wrongly exec leftover cargo-bin, chrome would still show 157f1746; got {leftover_chrome:?}"
+        );
+        assert!(
+            !leftover_chrome.contains("825986fefeea"),
+            "leftover chrome must not pretend to be the workspace SHA"
+        );
+
         let mut app = crate::app::app_view::tests::test_app_with_agent();
         let agent = app.agents.get_mut(&crate::app::agent::AgentId(0)).unwrap();
         announce_rebuild_relaunch_identity_with(agent, false, identity, "");
@@ -1260,6 +1283,63 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::RunRebuild { .. })),
             "after a failed rebuild, /rebuild must still spawn RunRebuild: {effects:?}"
+        );
+    }
+
+    /// Named contract: TUI `/rebuild` compiles this session's workspace, not
+    /// a random process cwd. After rebuild exec of a workspace-matching
+    /// identity, `/limits` parse is this tree's `limits_cmd.rs` words.
+    /// Do not claim the live TUI already has them.
+    #[test]
+    fn tui_rebuild_starts_from_session_workspace_not_process_cwd() {
+        use crate::app::actions::{Action, Effect};
+        use crate::app::agent::AgentId;
+        use crate::slash::command::SlashCommand;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("grok-build-workspace");
+        fs::create_dir_all(session.join("crates/codegen/xai-grok-pager-bin")).unwrap();
+        fs::write(session.join("justfile"), "install:\n").unwrap();
+        fs::write(
+            session.join("crates/codegen/xai-grok-pager-bin/Cargo.toml"),
+            "[package]\nname=\"xai-grok-pager-bin\"\n",
+        )
+        .unwrap();
+        let process = tmp.path().join("other-cwd");
+        fs::create_dir_all(&process).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&session), &process),
+            session,
+            "rebuild compile start dir prefers session workspace over process cwd"
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.cwd = session.clone();
+        }
+        let effects = super::super::dispatch(Action::RebuildAndRelaunch, &mut app);
+        let start = effects.iter().find_map(|e| match e {
+            Effect::RunRebuild { start_dir, .. } => Some(start_dir.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            start.as_ref(),
+            Some(&session),
+            "Action::RebuildAndRelaunch must pass start_dir equal to agent.session.cwd when that cwd is a Grok OSS workspace, not process cwd; got {effects:?}"
+        );
+
+        let tree_limits = include_str!("../../limits_cmd.rs");
+        assert!(
+            tree_limits.contains("use-personal") && tree_limits.contains("use-business"),
+            "this workspace limits_cmd.rs already has use-personal and use-business"
+        );
+        let usage = crate::slash::commands::limits::LimitsCommand.usage();
+        assert!(
+            usage.contains("use-personal") && usage.contains("use-business"),
+            "after rebuild exec of a workspace-matching identity, /limits parse is this tree's limits_cmd.rs words; got {usage}"
         );
     }
 

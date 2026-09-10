@@ -131,17 +131,10 @@ fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Ef
     let ActiveView::Agent(id) = app.active_view else {
         return None;
     };
-    let continue_text = {
-        let agent = app.agents.get(&id)?;
-        continue_prompt_after_compact(agent)
-    };
     let agent = app.agents.get_mut(&id)?;
+    // Human-turn requeues Compact only. Occupancy drop must not keep
+    // continue_prior_work of issued Human text as a Prompt row.
     agent.session.enqueue_command("/compact".into());
-    if let Some(text) = continue_text {
-        // Same text may already be a Human turn; mark continue so stale
-        // occupancy does not drop it before compact drains.
-        agent.session.enqueue_continue_prior_work(text);
-    }
     app.show_toast(OVER_WINDOW_COMPACT_RETRY_TOAST);
     Some(maybe_drain_queue_and_note_peek(app, id))
 }

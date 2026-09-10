@@ -1376,6 +1376,20 @@ fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: boo
         let _ = clear_canceled_turn_resume(&cwd, &sid);
         return;
     }
+    let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, &sid)
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    if xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
+        &marker.prompt_text,
+        &[],
+        &[],
+        chat_blob.as_deref(),
+    ) {
+        // Compact may have removed UserPrompt from live scrollback while
+        // chat history still has the finished Human turn. Do not enqueue
+        // that text as a queued Prompt.
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return;
+    }
     if !resume_enabled {
         return;
     }

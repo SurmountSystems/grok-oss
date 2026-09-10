@@ -24,7 +24,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits [--json | stay-supergrok | use-console | meter included|dollar-credits|console|combined | refresh]"
+        "/limits [--json | stay-supergrok | use-console | use-personal | use-business | meter included|dollar-credits|console|combined | refresh]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -55,6 +55,20 @@ impl SlashCommand for LimitsCommand {
                 match_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
                 description: "Ask for the console key (sidecar pin)".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                description: "Ask for personal SuperGrok as the paying identity (sidecar pin)"
+                    .into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                description: "Ask for Business SuperGrok as the paying identity (sidecar pin)"
+                    .into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_METER.into(),
@@ -149,11 +163,20 @@ mod tests {
     fn limits_command_rejects_unknown_args() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
+        let usage = LimitsCommand.usage();
+        assert!(
+            usage.contains("use-console")
+                && usage.contains("use-personal")
+                && usage.contains("use-business"),
+            "slash usage must list use-personal and use-business next to use-console: {usage}"
+        );
         let result = LimitsCommand.run(&mut ctx, "extra");
         assert!(
             matches!(result, CommandResult::Error(ref e) if e.contains("--json")
                 && e.contains("stay-supergrok")
                 && e.contains("use-console")
+                && e.contains("use-personal")
+                && e.contains("use-business")
                 && e.contains("meter")
                 && e.contains("refresh")),
             "expected usage error listing the named words, got {result:?}"
@@ -241,14 +264,48 @@ mod tests {
 
         let stay = crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK;
         let use_console = crate::limits_cmd::LIMITS_WORD_USE_CONSOLE;
+        let use_personal = crate::limits_cmd::LIMITS_WORD_USE_PERSONAL;
+        let use_business = crate::limits_cmd::LIMITS_WORD_USE_BUSINESS;
         let meter = crate::limits_cmd::LIMITS_WORD_METER;
         let refresh = crate::limits_cmd::LIMITS_WORD_REFRESH;
         assert_eq!(stay, "stay-supergrok");
         assert_eq!(use_console, "use-console");
+        assert_eq!(use_personal, "use-personal");
+        assert_eq!(use_business, "use-business");
         assert_eq!(meter, "meter");
         assert_eq!(refresh, "refresh");
 
+        let usage = LimitsCommand.usage();
+        assert!(
+            usage.contains(use_console)
+                && usage.contains(use_personal)
+                && usage.contains(use_business),
+            "slash usage must list use-personal and use-business next to use-console: {usage}"
+        );
         let models = ModelState::default();
+        let app_ctx = crate::slash::command::AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: false,
+            screen_mode: crate::app::ScreenMode::Inline,
+            current_title: None,
+        };
+        let suggested: Vec<String> = LimitsCommand
+            .suggest_args(&app_ctx, "")
+            .expect("slash /limits suggestions")
+            .into_iter()
+            .map(|item| item.insert_text)
+            .collect();
+        assert!(
+            suggested.iter().any(|w| w == use_personal)
+                && suggested.iter().any(|w| w == use_business)
+                && suggested.iter().any(|w| w == use_console),
+            "suggest_args must offer use-personal and use-business next to use-console, got {suggested:?}"
+        );
+
         let mut ctx = make_ctx(&models);
         for (args, label) in [
             (stay, "stay-supergrok"),
@@ -269,6 +326,8 @@ mod tests {
         for args in [
             vec!["grok-oss", "limits", stay],
             vec!["grok-oss", "limits", use_console],
+            vec!["grok-oss", "limits", use_personal],
+            vec!["grok-oss", "limits", use_business],
             vec!["grok-oss", "limits", refresh],
             vec!["grok-oss", "limits", meter, "included"],
             vec!["grok-oss", "limits", meter, "dollar-credits"],

@@ -15,9 +15,8 @@
 //! typed string. Leftover composer text without an implement payload is
 //! also a miss (typed after an empty present, stash does not match).
 //!
-//! Docs leftover (do not edit those files from this slice):
-//! `FORK.md` Land checklist and `doc/dev/upstream-regression-filters.md`
-//! must catalog these function names.
+//! Catalog: `FORK.md` Land checklist and
+//! `doc/dev/upstream-regression-filters.md` name these functions.
 
 use super::*;
 use crate::app::actions::{Action, Effect};
@@ -570,6 +569,107 @@ fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_commen
             .plan_approval_view
             .is_none(),
         "click Approve must decide the parked plan"
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+fn notes_queued_as_prompt(app: &AppView, after: &AfterClickApprove, needle: &str) -> bool {
+    let queued = app
+        .agents
+        .get(&AgentId(0))
+        .unwrap()
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text.contains(needle) && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD));
+    let send_prompt = after.effects.iter().any(|effect| match effect {
+        Effect::SendPrompt { text, .. } => {
+            text.contains(needle) && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        }
+        Effect::SendPromptNow { .. } => true,
+        _ => false,
+    });
+    queued || send_prompt
+}
+
+/// Isolated Preview Approve with notes in the plan composer must submit
+/// those notes with Approve, not queue them as a Prompt, and not drop
+/// them. Empty Enter never Approves.
+#[test]
+fn isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt() {
+    let mut app = make_app_with_agent("sess-1");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nApprove with notes\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview),
+            "Isolated Preview starts Preview"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview pane must be open"
+        );
+    }
+
+    let empty_enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty_enter);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves"
+        );
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "empty Enter must not queue a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start a Prompt; effects={empty_effects:?}"
+    );
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "click Approve must decide the parked plan"
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(HUMAN_BOX_PROMPT)
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with notes must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
+        "Approve with notes must Interject, not SendPrompt or queue a Prompt; effects={:?} pending={:?}",
+        after.effects,
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
     );
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);

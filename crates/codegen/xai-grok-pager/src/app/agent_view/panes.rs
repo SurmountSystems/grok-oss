@@ -6,8 +6,20 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::scrollback::ScrollbackSearchState;
+use crate::scrollback::types::DisplayMode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 impl AgentView {
+    /// Selected foldable entry that is collapsed or truncated (hidden body).
+    /// Group headers keep Enter as OpenBlockViewer (toggles the group).
+    fn selected_hidden_foldable(&self) -> bool {
+        if self.scrollback.is_selected_group_header() {
+            return false;
+        }
+        self.scrollback
+            .selected()
+            .and_then(|idx| self.scrollback.entry(idx))
+            .is_some_and(|e| e.is_foldable() && e.display_mode != DisplayMode::Expanded)
+    }
     /// Scrollback-focused key handling.
     ///
     /// When the block viewer is open, routes keys to the viewer.
@@ -47,6 +59,12 @@ impl AgentView {
         {
             self.highlighted_link_idx = None;
             return InputOutcome::Action(Action::OpenLink(target));
+        }
+        // Collapsed/hidden selected block: Enter expands (same as :expand).
+        // Do this before inline-edit and OpenBlockViewer so a folded
+        // `[Image #1] ...` user prompt actually opens instead of no-op.
+        if key!(Enter).matches(key) && self.selected_hidden_foldable() {
+            return InputOutcome::Action(Action::Expand);
         }
         if crate::app::inline_edit::INLINE_EDIT_ENABLED
             && key!(Enter).matches(key)
