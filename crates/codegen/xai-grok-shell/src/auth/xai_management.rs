@@ -67,12 +67,16 @@ pub const USAGE_SERIES_DEFAULT_DAY_WINDOW: i64 = 7;
 /// **usage series** **process** caches (in-process paint helpers).
 ///
 /// This is not the machine-wide shared snapshot TTL
-/// ([`super::limits_snapshot_hub::SNAPSHOT_TTL_SECS`], one hour). Automatic
+/// ([`SNAPSHOT_TTL_SECS`], one hour). Automatic
 /// Management HTTP rides the hub leader under HonorTtl (at most once an hour
 /// per machine). These 60s Mutex caches must not cause extra leader HTTP
 /// under HonorTtl. Explicit `grok-oss limits` / TUI `/limits` ForceRefresh
 /// busts these caches so dollars are not stuck until process restart.
 pub const CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS: u64 = 60;
+
+/// Shared HonorTtl window (one hour). Re-exported so process-cache tests
+/// can assert they are not this machine-wide snapshot TTL.
+pub use super::limits_snapshot_hub::SNAPSHOT_TTL_SECS;
 
 /// Alias of [`CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS`] for prepaid lag copy
 /// and older call sites. Same 60s window as postpaid and usage series caches.

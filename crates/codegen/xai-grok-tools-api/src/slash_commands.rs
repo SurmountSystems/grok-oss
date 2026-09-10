@@ -312,6 +312,7 @@ mod tests {
         assert!(goal_usage_message().contains("Usage: /goal"));
     }
 
+    // Grok OSS: /goal parent coordinates and L2 must spawn L3 for tools. This diverges from upstream xAI because FORK.md agent-depth forbids filling L1 with tool work.
     #[test]
     fn goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools() {
         let text = goal_instruction("ship the widget");

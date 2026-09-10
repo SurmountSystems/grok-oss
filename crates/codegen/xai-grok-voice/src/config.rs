@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::VoiceError;
@@ -30,6 +32,10 @@ pub struct VoiceConfig {
     pub client_identifier: String,
     #[serde(skip)]
     pub user_agent: String,
+    /// Session directory that holds `prompt_wal.jsonl`; audio WAL is a sibling.
+    /// Grok OSS: Until the Operator stops recording, PCM is forked to that WAL.
+    #[serde(skip)]
+    pub audio_wal_session_dir: Option<PathBuf>,
 }
 
 impl Default for VoiceConfig {
@@ -43,6 +49,7 @@ impl Default for VoiceConfig {
             stt_interim_results: true,
             client_identifier: String::new(),
             user_agent: String::new(),
+            audio_wal_session_dir: None,
         }
     }
 }

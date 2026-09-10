@@ -6,12 +6,23 @@ use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
-/// Set multiline input mode — swap Enter and Shift+Enter behavior.
+/// Set multiline input mode. Mid-line Enter inserts a newline. Enter at
+/// the end of the last line still sends or interjects. Shift+Enter still
+/// sends.
 ///
 /// PAGER-OWNED: ephemeral, no `Effect::PersistSetting`. On the agent
 /// view this is per-session (`AgentView::multiline_mode`); on the
 /// dashboard it lives on `DashboardState::multiline_mode`. Idempotent.
+///
+/// Grok OSS: Operator: when `[ui] allow_session_multiline` is false, refuse
+/// turning session Multiline on (slash, settings, Ctrl+M).
 pub(in crate::app::dispatch) fn set_multiline_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
+    if new && !crate::appearance::cache::load_allow_session_multiline() {
+        app.show_toast(
+            "Session Multiline is disabled ([ui] allow_session_multiline / Settings → Editor)",
+        );
+        return vec![];
+    }
     if matches!(app.active_view, ActiveView::AgentDashboard) {
         let Some(d) = app.dashboard.as_mut() else {
             return vec![];
@@ -81,6 +92,51 @@ pub(in crate::app::dispatch) fn set_composer_multiline(
     app.show_toast(&save_success_toast("Composer multiline", new));
     vec![Effect::PersistSetting {
         key: "composer_multiline",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_allow_session_multiline_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_allow_session_multiline(new);
+    app.current_ui.allow_session_multiline = Some(new);
+    // Grok OSS: Operator: turning the allow flag off forces active session
+    // Multiline off so the Operator cannot stay in that mode accidentally.
+    if !new {
+        if let ActiveView::Agent(id) = app.active_view {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.multiline_mode = false;
+            }
+        }
+        if let Some(d) = app.dashboard.as_mut() {
+            d.multiline_mode = false;
+        }
+    }
+}
+
+/// Allow session Multiline to be enabled (`Ctrl+M` / `/multiline` / settings).
+///
+/// SHELL-owned: cache + `[ui].allow_session_multiline` via `Effect::PersistSetting`.
+/// Default on. Distinct from `[ui].composer_multiline`.
+pub(in crate::app::dispatch) fn set_allow_session_multiline(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_allow_session_multiline();
+    if prev == new {
+        return vec![];
+    }
+    set_allow_session_multiline_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "allow_session_multiline",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Allow session Multiline", new));
+    vec![Effect::PersistSetting {
+        key: "allow_session_multiline",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]

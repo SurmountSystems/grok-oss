@@ -51,7 +51,7 @@ mod voice;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{
-    BACKGROUND_BILLING_POLL_FORCE_REFRESH, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
+    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, background_billing_poll_fetch_billing,
     is_credit_limit_error,
 };
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
@@ -73,6 +73,8 @@ pub(crate) use turn::{reconcile_overdue_cancels, reconcile_overdue_turn_ends};
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.
+#[cfg(test)]
+pub(crate) use billing::background_billing_poll_snapshot_mode;
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]

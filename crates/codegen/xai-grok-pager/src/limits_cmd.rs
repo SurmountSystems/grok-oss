@@ -339,7 +339,7 @@ pub struct LimitsCliReport {
     ///
     /// Wire: `supergrok_free_period` | `supergrok_extras` | `console_key`.
     /// Distinct from [`Self::live_sampling`] when SuperGrok session is live
-    /// but free period is full and SuperGrok dollar extras drive after-burner.
+    /// but free period is full and SuperGrok dollar credits drive after-burner.
     pub active_driver: &'static str,
     /// Human label for the active driver (matches `/limits` **Active:** line,
     /// including a `meter_source` pin when one is set). grok-oss limits JSON
@@ -360,9 +360,9 @@ pub struct LimitsCliReport {
     /// True when every sample in the flat window carried Grok Build product %.
     /// Only meaningful when [`Self::flat_poll_unproven_debit`] is true.
     pub flat_poll_observed_build: bool,
-    /// True when every sample in the flat window carried SuperGrok $ extras.
+    /// True when every sample in the flat window carried SuperGrok dollar credits.
     /// Only meaningful when [`Self::flat_poll_unproven_debit`] is true.
-    pub flat_poll_observed_extras: bool,
+    pub flat_poll_observed_dollar_credits: bool,
     /// Non-secret warnings (fetch failures, no auth, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -372,18 +372,22 @@ pub struct LimitsCliReport {
 
 /// Active spend driver from a `/limits` snapshot (same Design A logic as status).
 ///
-/// Uses primary SuperGrok free-period % and SuperGrok dollar extras when live
+/// Uses primary SuperGrok free-period % and SuperGrok dollar credits when live
 /// is SuperGrok. Console live always returns console key. Team prepaid remaining
 /// and team Grok Build settlement are never the `activeDriver` label here
 /// (intent chrome only; settlement honesty notes name those meters separately).
 pub fn active_spend_driver_from_snapshot(snap: &LimitsSnapshot) -> ActiveSpendDriver {
-    let extras_cents = snap.primary.dollar_extras.as_ref().map(|d| d.balance_cents);
+    let dollar_credits_cents = snap
+        .primary
+        .dollar_credits
+        .as_ref()
+        .map(|d| d.balance_cents);
     let (included_known, included_pct) = chrome_included_from_limits_snapshot(snap);
     active_spend_driver(
         snap.live_identity,
         included_known,
         included_pct,
-        extras_cents,
+        dollar_credits_cents,
     )
 }
 
@@ -410,11 +414,11 @@ pub struct PrincipalCliMeter {
     pub period_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_reset: Option<String>,
-    /// SuperGrok dollar extras remaining (USD), when observed and positive.
+    /// SuperGrok dollar credits remaining (USD), when observed and positive.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dollar_extras_usd: Option<f64>,
-    /// False when only included was polled (sibling) — extras not claimed empty.
-    pub dollar_extras_observed: bool,
+    pub dollar_credits_usd: Option<f64>,
+    /// False when only included was polled (sibling) — SuperGrok dollar credits not claimed empty.
+    pub dollar_credits_observed: bool,
     /// Grok Build product usage % from wire `productUsage` when present.
     /// Distinct from top-level `includedUsedPct` (account-level included %).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -455,7 +459,7 @@ pub struct ConsoleCliSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_prepaid_gap: Option<&'static str>,
     /// Team postpaid invoice period total USD (Management preview). Distinct
-    /// from [`Self::team_prepaid_usd`] and SuperGrok $ extras.
+    /// from [`Self::team_prepaid_usd`] and SuperGrok dollar credits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_postpaid_period_total_usd: Option<f64>,
     /// OAuth / Grok Build class spend USD on the postpaid invoice.
@@ -644,12 +648,13 @@ pub fn build_limits_cli_from_parts_with_postpaid(
 /// Set flat-poll honesty flags from process poll history (not test-only).
 ///
 /// Product path for `/limits` and `limits --json`. History empty → flags stay
-/// false. Does not invent inference counters. Observed Build / extras flags
-/// come from the same series so honesty copy does not overclaim.
+/// false. Does not invent inference counters. Observed Build / SuperGrok
+/// dollar credits flags come from the same series so honesty copy does not
+/// overclaim.
 pub fn attach_flat_poll_from_history(snap: LimitsSnapshot) -> LimitsSnapshot {
     let ev = xai_grok_shell::auth::flat_poll_evidence_from_history();
     snap.with_flat_poll_unproven_debit(ev.unproven)
-        .with_flat_poll_observed_meters(ev.observed_build, ev.observed_extras)
+        .with_flat_poll_observed_meters(ev.observed_build, ev.observed_dollar_credits)
 }
 
 /// Build a machine-readable CLI report from a `/limits` snapshot (no I/O).
@@ -714,7 +719,7 @@ pub fn report_from_snapshot_with_meter_source(
         named_commands: crate::views::limits_honesty::LIMITS_NAMED_COMMANDS,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
         flat_poll_observed_build: snap.flat_poll_observed_build,
-        flat_poll_observed_extras: snap.flat_poll_observed_extras,
+        flat_poll_observed_dollar_credits: snap.flat_poll_observed_dollar_credits,
         supergrok: SuperGrokCliSection {
             principals,
             shared_unified_pool: snap.shared_unified_supergrok_pool,
@@ -806,11 +811,11 @@ fn principal_cli(
             .included
             .as_ref()
             .and_then(|i| i.next_reset_display.clone()),
-        dollar_extras_usd: p
-            .dollar_extras
+        dollar_credits_usd: p
+            .dollar_credits
             .as_ref()
             .map(|d| d.balance_cents.abs() as f64 / 100.0),
-        dollar_extras_observed: p.dollar_extras_observed,
+        dollar_credits_observed: p.dollar_credits_observed,
         // From snapshot (CreditBalance after FetchBilling / live collect).
         // Live CLI collect may also `apply_grok_build_usage_pcts` by index.
         grok_build_usage_pct: p.grok_build_usage_pct,
@@ -973,7 +978,7 @@ fn credit_balance_from_snapshot_identity(
         pay_as_you_go: false,
         on_demand_cap_cents: None,
         on_demand_used_cents: Some(0),
-        prepaid_balance_cents: row.extras_cents,
+        prepaid_balance_cents: row.dollar_credits_cents,
         period_type: row.period_type.clone(),
         is_unified_billing_user: row.is_unified_billing_user,
         grok_build_usage_pct: row.grok_build_usage_pct,
@@ -1159,7 +1164,7 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
             if let Some(build_pct) = row.grok_build_usage_pct {
                 build_usage.insert(row.identity_id.clone(), build_pct);
             }
-            if row.usage_pct.is_some() || row.extras_cents.is_some() {
+            if row.usage_pct.is_some() || row.dollar_credits_cents.is_some() {
                 balances.insert(
                     row.identity_id.clone(),
                     credit_balance_from_snapshot_identity(row),
@@ -1202,7 +1207,7 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     }
 
     // Console team prepaid / business credits remaining (Management API).
-    // Distinct from SuperGrok $ extras and from inference XAI_API_KEY.
+    // Distinct from SuperGrok dollar credits and from inference XAI_API_KEY.
     // Key alone is enough: team id may come from config/env or key validation.
     //
     // Explicit `grok limits` collect: bust ≤60s process cache so dollars are
@@ -1829,8 +1834,8 @@ pub fn extract_multipoll_sample_fields(
                     .to_owned(),
                 role: p.get("role").and_then(|v| v.as_str()).map(str::to_owned),
                 included_used_pct: p.get("includedUsedPct").and_then(|v| v.as_f64()),
-                // SuperGrok dollar credits (wire still dollarExtrasUsd).
-                dollar_credits_usd: p.get("dollarExtrasUsd").and_then(|v| v.as_f64()),
+                // SuperGrok dollar credits (our limits JSON key dollarCreditsUsd).
+                dollar_credits_usd: p.get("dollarCreditsUsd").and_then(|v| v.as_f64()),
                 grok_build_usage_pct: p.get("grokBuildUsagePct").and_then(|v| v.as_f64()),
             });
         }
@@ -1936,7 +1941,7 @@ pub async fn run_multipoll(args: MultipollArgs) -> Result<()> {
         "freePeriodStepped": class.free_period_stepped(),
         "flatPollUnprovenDebit": flat_ev.unproven,
         "flatPollObservedBuild": flat_ev.observed_build,
-        "flatPollObservedExtras": flat_ev.observed_extras,
+        "flatPollObservedDollarCredits": flat_ev.observed_dollar_credits,
         "autoUseIncludedLimits": ctx.auto_use_included_limits,
         "preferredIsApiKey": ctx.preferred_is_api_key,
         "sampleFields": fields_rows,
@@ -2448,7 +2453,7 @@ mod tests {
             "product attach from history must set flat_poll_unproven_debit"
         );
         assert!(
-            snap.flat_poll_observed_build && snap.flat_poll_observed_extras,
+            snap.flat_poll_observed_build && snap.flat_poll_observed_dollar_credits,
             "history with Build + extras must set observed flags"
         );
         assert!(
@@ -2456,7 +2461,7 @@ mod tests {
             "limits --json must export flatPollUnprovenDebit for multipoll / ticket evidence"
         );
         assert!(
-            report.flat_poll_observed_build && report.flat_poll_observed_extras,
+            report.flat_poll_observed_build && report.flat_poll_observed_dollar_credits,
             "limits --json must export observed Build/extras flags with flat-poll evidence"
         );
         let expected = flat_poll_unproven_debit_note(true, true);
@@ -2530,7 +2535,7 @@ mod tests {
             "report_from_snapshot must pass flat_poll_unproven_debit into limits --json"
         );
         assert!(
-            !report.flat_poll_observed_build && !report.flat_poll_observed_extras,
+            !report.flat_poll_observed_build && !report.flat_poll_observed_dollar_credits,
             "observed flags must match snapshot (included-only window)"
         );
         let human = format_limits_human(&snap, &report.notes);
@@ -2652,7 +2657,7 @@ mod tests {
             v["activeDriverLabel"]
                 .as_str()
                 .unwrap_or("")
-                .contains("included SuperGrok period limits"),
+                .contains("SuperGrok period"),
             "active driver label: {v}"
         );
         assert_eq!(v["supergrok"]["principals"][0]["includedUsedPct"], 42.5);
@@ -2790,7 +2795,7 @@ mod tests {
         assert_eq!(report.console.billing_credits_usd, Some(47.03));
         assert_eq!(report.console.team_prepaid_usd, Some(112.45));
         assert_eq!(
-            report.supergrok.principals[0].dollar_extras_usd,
+            report.supergrok.principals[0].dollar_credits_usd,
             Some(248.24)
         );
         let human = format_limits_human(&snap, &report.notes);
@@ -2818,14 +2823,14 @@ mod tests {
         assert_eq!(v["console"]["billingCreditsCard"], "fetched");
         assert_eq!(v["console"]["billingCreditsUsd"], 47.03);
         assert_eq!(v["console"]["teamPrepaidUsd"], 112.45);
-        assert_eq!(v["supergrok"]["principals"][0]["dollarExtrasUsd"], 248.24);
+        assert_eq!(v["supergrok"]["principals"][0]["dollarCreditsUsd"], 248.24);
         assert_ne!(
             v["console"]["billingCreditsUsd"],
             v["console"]["teamPrepaidUsd"]
         );
         assert_ne!(
             v["console"]["billingCreditsUsd"],
-            v["supergrok"]["principals"][0]["dollarExtrasUsd"]
+            v["supergrok"]["principals"][0]["dollarCreditsUsd"]
         );
     }
 
@@ -2909,10 +2914,10 @@ mod tests {
         );
     }
 
-    /// Named contract (P3/P5): free period headroom + SuperGrok extras on account
-    /// → `activeDriver` is free SuperGrok period (not extras, not console).
+    /// Named contract (P3/P5): free period headroom + SuperGrok dollar credits on account
+    /// → `activeDriver` is free SuperGrok period (not SuperGrok dollar credits, not console).
     #[test]
-    fn limits_json_active_driver_free_period_with_extras_on_account() {
+    fn limits_json_active_driver_free_period_with_dollar_credits_on_account() {
         let mut b = bal(6.0);
         b.prepaid_balance_cents = Some(10_029);
         let input = PrincipalLimitsInput {
@@ -2935,9 +2940,7 @@ mod tests {
         );
         assert_eq!(report.active_driver, "supergrok_free_period");
         assert!(
-            report
-                .active_driver_label
-                .contains("included SuperGrok period limits"),
+            report.active_driver_label.contains("SuperGrok period"),
             "label: {}",
             report.active_driver_label
         );
@@ -2945,7 +2948,7 @@ mod tests {
         assert!(!report.console.is_live);
         let human = format_limits_human(&snap, &report.notes);
         assert!(
-            human.contains("Active: included SuperGrok period limits"),
+            human.contains("Active: SuperGrok period"),
             "human must lead with active free period: {human}"
         );
         assert!(
@@ -2954,9 +2957,9 @@ mod tests {
         );
     }
 
-    /// Named contract: free period full + extras → activeDriver SuperGrok extras.
+    /// Named contract: free period full + SuperGrok dollar credits → activeDriver SuperGrok extras (wire).
     #[test]
-    fn limits_json_active_driver_extras_afterburner() {
+    fn limits_json_active_driver_dollar_credits_afterburner() {
         let mut b = bal(100.0);
         b.prepaid_balance_cents = Some(453);
         let input = PrincipalLimitsInput {
@@ -3059,14 +3062,11 @@ mod tests {
 
         let included =
             report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::Included));
-        assert_eq!(
-            included.active_driver_label,
-            "Active: included SuperGrok period limits"
-        );
+        assert_eq!(included.active_driver_label, "Active: SuperGrok period");
 
         let none = report_from_snapshot(&snap, vec![]);
         assert_eq!(
-            none.active_driver_label, "Active: included SuperGrok period limits",
+            none.active_driver_label, "Active: SuperGrok period",
             "no pin stays Design A: {}",
             none.active_driver_label
         );
@@ -3074,7 +3074,7 @@ mod tests {
         let one_combined =
             report_from_snapshot_with_meter_source(&snap, vec![], Some(MeterSource::Combined));
         assert_eq!(
-            one_combined.active_driver_label, "Active: included SuperGrok period limits",
+            one_combined.active_driver_label, "Active: SuperGrok period",
             "combined pin plus one honest pool must not invent combined: {}",
             one_combined.active_driver_label
         );
@@ -3784,8 +3784,8 @@ mod tests {
         let mut principal = serde_json::json!({
             "label": "SuperGrok (business)",
             "role": "business",
-            "dollarExtrasObserved": true,
-            "dollarExtrasUsd": 100.29
+            "dollarCreditsObserved": true,
+            "dollarCreditsUsd": 100.29
         });
         if let Some(pct) = included_used_pct {
             principal["includedUsedPct"] = serde_json::json!(pct);
@@ -3930,12 +3930,12 @@ mod tests {
                     {
                         "label": "SuperGrok (personal)",
                         "includedUsedPct": 100.0,
-                        "dollarExtrasObserved": false
+                        "dollarCreditsObserved": false
                     },
                     {
                         "label": "SuperGrok (business)",
                         "includedUsedPct": 66.0,
-                        "dollarExtrasObserved": false
+                        "dollarCreditsObserved": false
                     }
                 ],
                 "sharedUnifiedPool": true

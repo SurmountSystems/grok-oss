@@ -940,6 +940,7 @@ preferred_method = "api_key"
     /// Business SuperGrok dollar credits must not win.
     #[test]
     #[serial_test::serial]
+    // Grok OSS: personal included SuperGrok period limits that still have remaining stay the paying identity; leftover Business SuperGrok dollar credits must not win. Operators switch SuperGrok identity with use-personal / use-business on limits_pins.json. SuperGrok is paid.
     fn personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits()
     {
         let home = TempDir::new().expect("temp grok home");
@@ -984,6 +985,7 @@ preferred_method = "api_key"
     /// payload is still switchable via use-business when a Team login exists.
     #[test]
     #[serial_test::serial]
+    // Grok OSS: Business SuperGrok with no included period-limits payload is still switchable via use-business when a Team login exists. Operators switch SuperGrok identity with use-personal / use-business on limits_pins.json. SuperGrok is paid.
     fn business_with_no_period_limits_payload_still_switchable_via_use_business() {
         let home = TempDir::new().expect("temp grok home");
         let _env = EnvGuard::set("GROK_HOME", home.path());
@@ -1024,6 +1026,7 @@ preferred_method = "api_key"
     /// Named contract: use-personal switches back from a Business pin.
     #[test]
     #[serial_test::serial]
+    // Grok OSS: use-personal switches back from a Business pin on limits_pins.json. SuperGrok is paid.
     fn use_personal_switches_back_from_business_pin() {
         let home = TempDir::new().expect("temp grok home");
         let _env = EnvGuard::set("GROK_HOME", home.path());
@@ -1056,6 +1059,7 @@ preferred_method = "api_key"
 
     #[test]
     #[serial_test::serial]
+    // Grok OSS: use-business fails loud when auth.json has no Team login and must not persist a Business pin. Operators switch SuperGrok identity with use-personal / use-business on limits_pins.json. SuperGrok is paid.
     fn use_business_fails_loud_when_no_team_login_in_auth_json() {
         let home = TempDir::new().expect("temp grok home");
         let _env = EnvGuard::set("GROK_HOME", home.path());

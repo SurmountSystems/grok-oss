@@ -7,27 +7,35 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Default TECH.md filename at the workspace root.
 pub const TECH_MD_FILENAME: &str = "TECH.md";
 
-/// Suffix shown on a Subagents list row after a usage tick.
-pub const MEASURED_TOKENS_SUFFIX_PREFIX: &str = "measured";
+/// Unit word on the Subagents list token suffix (`53.4k tokens`).
+/// Operator-visible chrome must not prefix this with `measured`.
 pub const MEASURED_TOKENS_SUFFIX_UNIT: &str = "tokens";
 
 /// Billing-truth sentence required in TECH.md (complete thought).
 pub const NOT_BILLING_METERS_SENTENCE: &str = "Measured nested L2 tokens are session usage counts, not included SuperGrok period limits, not SuperGrok dollar credits, and not console team prepaid / console API credits. SuperGrok is a paid product. Estimates are estimates, not billing truth.";
 
 /// One nested L2 row tracked in memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Grok OSS: `measured_tokens` is an `AtomicU64` high-water so concurrent ACP
+/// usage ticks do not race. This diverges from upstream xAI because Grok OSS
+/// Subagents list chrome tracks nested L2 session usage in this map. A racy
+/// last-write `u64` can drop a later count (10232) when a stale smaller tick
+/// lands last.
+#[derive(Debug)]
 pub struct NestedL2Tokens {
     /// Nested session id (internal key; not dumped in Subagents list text).
     pub nested_session_id: String,
     /// Operator-facing description label for the Subagents list and TECH.md tree.
     pub description: String,
-    /// Measured session usage token count for this nested L2.
-    pub measured_tokens: u64,
+    /// High-water nested L2 session usage. Not included SuperGrok period
+    /// limits, SuperGrok dollar credits, or console team prepaid.
+    measured_tokens: AtomicU64,
     /// Optional estimate (not billing truth).
     pub estimate_tokens: Option<u64>,
     /// Owner of the contract/aspect row in TECH.md.
@@ -61,14 +69,47 @@ impl NestedL2Tokens {
         Self {
             nested_session_id: nested_session_id.into(),
             description: description.into(),
-            measured_tokens: 0,
+            measured_tokens: AtomicU64::new(0),
             estimate_tokens: None,
             owner: "L2".to_string(),
             contract_aspect: "nested L2 session usage".to_string(),
             status: NestedL2Status::Spawned,
         }
     }
+
+    /// Session usage high-water for this nested L2 (not billing meters).
+    pub fn measured_tokens(&self) -> u64 {
+        self.measured_tokens.load(Ordering::Relaxed)
+    }
 }
+
+impl Clone for NestedL2Tokens {
+    fn clone(&self) -> Self {
+        Self {
+            nested_session_id: self.nested_session_id.clone(),
+            description: self.description.clone(),
+            measured_tokens: AtomicU64::new(self.measured_tokens()),
+            estimate_tokens: self.estimate_tokens,
+            owner: self.owner.clone(),
+            contract_aspect: self.contract_aspect.clone(),
+            status: self.status,
+        }
+    }
+}
+
+impl PartialEq for NestedL2Tokens {
+    fn eq(&self, other: &Self) -> bool {
+        self.nested_session_id == other.nested_session_id
+            && self.description == other.description
+            && self.measured_tokens() == other.measured_tokens()
+            && self.estimate_tokens == other.estimate_tokens
+            && self.owner == other.owner
+            && self.contract_aspect == other.contract_aspect
+            && self.status == other.status
+    }
+}
+
+impl Eq for NestedL2Tokens {}
 
 /// In-memory nested L2 token counts keyed by nested session id.
 #[derive(Debug, Clone)]
@@ -80,7 +121,7 @@ pub struct L2TokenTracker {
 
 impl Default for L2TokenTracker {
     fn default() -> Self {
-        Self::with_tech_md_path(default_tech_md_path())
+        production_tracker()
     }
 }
 
@@ -94,9 +135,21 @@ pub fn default_tech_md_path() -> PathBuf {
         .join(TECH_MD_FILENAME)
 }
 
+/// Production TECH.md tracker: workspace-root path, or `GROK_TECH_MD_PATH`.
+fn production_tracker() -> L2TokenTracker {
+    if let Some(p) = std::env::var_os("GROK_TECH_MD_PATH") {
+        L2TokenTracker::with_tech_md_path(PathBuf::from(p))
+    } else {
+        match std::env::current_dir() {
+            Ok(root) => L2TokenTracker::at_workspace_root(root),
+            Err(_) => L2TokenTracker::with_tech_md_path(default_tech_md_path()),
+        }
+    }
+}
+
 fn process_tracker() -> &'static Mutex<L2TokenTracker> {
     static TRACKER: OnceLock<Mutex<L2TokenTracker>> = OnceLock::new();
-    TRACKER.get_or_init(|| Mutex::new(L2TokenTracker::default()))
+    TRACKER.get_or_init(|| Mutex::new(production_tracker()))
 }
 
 fn with_process_tracker(f: impl FnOnce(&mut L2TokenTracker)) {
@@ -109,6 +162,13 @@ fn with_process_tracker(f: impl FnOnce(&mut L2TokenTracker)) {
     {
         let _ = tracker.persist_tech_md();
     }
+}
+
+fn peek_process_tracker<R>(f: impl FnOnce(&L2TokenTracker) -> R) -> R {
+    let tracker = process_tracker()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&tracker)
 }
 
 /// Production spawn hook. Subagents list paint still uses in-memory counts only.
@@ -159,9 +219,14 @@ impl L2TokenTracker {
     }
 
     /// Record a usage tick (measured session tokens, not billing meters).
+    ///
+    /// ACP `SubagentProgress` `tokens_used` is a cumulative total. `fetch_max`
+    /// keeps the high-water so concurrent ticks cannot lose a later count.
     pub fn record_usage(&mut self, nested_session_id: &str, measured_tokens: u64) {
         if let Some(row) = self.by_id.get_mut(nested_session_id) {
-            row.measured_tokens = measured_tokens;
+            let _previous = row
+                .measured_tokens
+                .fetch_max(measured_tokens, Ordering::Relaxed);
             if row.status == NestedL2Status::Spawned {
                 row.status = NestedL2Status::Running;
             }
@@ -181,8 +246,12 @@ impl L2TokenTracker {
 
     /// Subagents list token suffix. Plain English. No UUID dump. No billing-meter words.
     pub fn format_subagents_list_token_suffix(&self, nested_session_id: &str) -> Option<String> {
-        let row = self.by_id.get(nested_session_id)?;
-        Some(format_measured_tokens_suffix(row.measured_tokens))
+        let row = self.get(nested_session_id)?;
+        let measured = row.measured_tokens();
+        if row.status == NestedL2Status::Spawned && measured == 0 {
+            return None;
+        }
+        Some(format_measured_tokens_suffix(measured))
     }
 
     /// Paint a Subagents list row from in-memory counts only.
@@ -201,16 +270,24 @@ impl L2TokenTracker {
     /// Render TECH.md and write it to the injected path.
     pub fn persist_tech_md(&self) -> std::io::Result<()> {
         let body = render_tech_md(&self.by_id);
-        if let Some(parent) = self.tech_md_path.parent() {
+        let path = self.tech_md_path();
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.tech_md_path, body)
+        std::fs::write(path, body)
     }
 }
 
-/// Format `measured 12400 tokens` (plain English).
+/// Compact Subagents list suffix: `53.4k tokens`.
+///
+/// Same compact count style as the rest of grok-oss (`format_tokens_compact`).
+/// Contract A: must not contain the word `measured`. Must not paint a raw
+/// integer like 53407. Keep `tokens`. Under 1000 stays `42 tokens`.
 pub fn format_measured_tokens_suffix(measured_tokens: u64) -> String {
-    format!("{MEASURED_TOKENS_SUFFIX_PREFIX} {measured_tokens} {MEASURED_TOKENS_SUFFIX_UNIT}")
+    let compact = crate::views::agent_status::format_tokens_compact(
+        i64::try_from(measured_tokens).unwrap_or(i64::MAX),
+    );
+    format!("{compact} {MEASURED_TOKENS_SUFFIX_UNIT}")
 }
 
 /// Subagents list row paint. In-memory count only. Never opens the session transcript file.
@@ -222,6 +299,29 @@ pub fn format_subagents_list_row_from_memory(
         Some(suffix) if !suffix.is_empty() => format!("{description} ({suffix})"),
         _ => description.to_string(),
     }
+}
+
+/// Operator-visible Subagents description suffix from in-memory usage.
+///
+/// `tokens_used` is the row's last usage tick (`None` before the first tick).
+/// Does not open the session transcript file. Called from `format_subagent_label`.
+pub fn format_subagents_list_description(description: &str, tokens_used: Option<u64>) -> String {
+    let suffix = tokens_used.map(format_measured_tokens_suffix);
+    format_subagents_list_row_from_memory(description, suffix.as_deref())
+}
+
+/// Live Subagents list row. Prefers the in-memory tracker; falls back to the
+/// last usage tick on `SubagentInfo` when this nested id is not tracked yet.
+/// Does not open the session transcript file.
+pub fn format_live_subagents_list_row(
+    nested_session_id: &str,
+    description: &str,
+    tokens_used: Option<u64>,
+) -> String {
+    peek_process_tracker(|t| match t.get(nested_session_id) {
+        Some(_) => t.format_subagents_list_row(nested_session_id, description),
+        None => format_subagents_list_description(description, tokens_used),
+    })
 }
 
 fn render_tech_md(by_id: &HashMap<String, NestedL2Tokens>) -> String {
@@ -272,7 +372,7 @@ fn render_tech_md(by_id: &HashMap<String, NestedL2Tokens>) -> String {
                 "| {table_id} | {aspect} | {owner} | {measured} | {estimate} | {status} |\n",
                 aspect = row.contract_aspect,
                 owner = row.owner,
-                measured = row.measured_tokens,
+                measured = row.measured_tokens(),
                 status = row.status.as_str(),
             ));
         }
@@ -286,22 +386,68 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Operator contract: Subagents list shows measured tokens per nested L2.
-    /// After spawn + usage tick of 12400, the row contains `measured 12400 tokens`.
+    /// Contract A: the shared Subagents description helper paints compact
+    /// count plus `tokens` after an in-memory usage tick. Must not contain
+    /// the word `measured`. Must not paint a raw integer like 12400. No
+    /// usage tick means no suffix.
+    #[test]
+    fn format_subagents_list_description_shows_measured_tokens_suffix() {
+        let with_tick = format_subagents_list_description("rate-limit implementer", Some(12400));
+        assert!(
+            with_tick.contains("12.4k tokens"),
+            "Subagents description must contain 12.4k tokens, got {with_tick:?}"
+        );
+        assert!(
+            !with_tick.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {with_tick:?}"
+        );
+        assert!(
+            !with_tick.contains("12400"),
+            "must not paint a raw integer token count, got {with_tick:?}"
+        );
+        assert_eq!(
+            format_measured_tokens_suffix(12400),
+            format!("12.4k {MEASURED_TOKENS_SUFFIX_UNIT}")
+        );
+        let before_tick = format_subagents_list_description("rate-limit implementer", None);
+        assert_eq!(before_tick, "rate-limit implementer");
+        assert!(
+            !before_tick.contains("tokens"),
+            "no token suffix before the first usage tick, got {before_tick:?}"
+        );
+    }
+
+    /// Contract A: nested L2 Subagents list chrome uses the same compact
+    /// count style as the rest of grok-oss (K/M). Must contain compact plus
+    /// `tokens` (`53.4k tokens`). Must not contain `measured`. Must not
+    /// paint a raw integer like 53407. Match `format_tokens_compact`.
     #[test]
     fn subagents_list_shows_measured_tokens_per_nested_l2() {
         let mut tracker = L2TokenTracker::with_tech_md_path("/tmp/unused-tech.md");
-        tracker.record_spawn("nested-l2-session", "rate-limit implementer");
-        tracker.record_usage("nested-l2-session", 12400);
-        let row = tracker.format_subagents_list_row("nested-l2-session", "rate-limit implementer");
+        tracker.record_spawn("nested-l2-session", "Stale prompt still live");
+        tracker.record_usage("nested-l2-session", 53407);
+        let row = tracker.format_subagents_list_row("nested-l2-session", "Stale prompt still live");
+        let compact = crate::views::agent_status::format_tokens_compact(53407);
+        assert_eq!(compact, "53.4k");
         assert!(
-            row.contains("measured 12400 tokens"),
-            "Subagents list row must contain measured 12400 tokens, got {row:?}"
+            row.contains("53.4k tokens"),
+            "Subagents list row must contain 53.4k tokens, got {row:?}"
         );
         assert!(
-            !row.contains("nested-l2-session") || row.contains("rate-limit implementer"),
+            !row.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {row:?}"
+        );
+        assert!(
+            !row.contains("53407"),
+            "must not paint a raw integer token count, got {row:?}"
+        );
+        assert!(
+            !row.contains("nested-l2-session") || row.contains("Stale prompt still live"),
             "row uses the description label, not UUID speech as the visible name"
         );
+        assert_eq!(format_measured_tokens_suffix(42), "42 tokens");
+        assert_eq!(format_measured_tokens_suffix(12400), "12.4k tokens");
+        assert_eq!(format_measured_tokens_suffix(1_500_000), "1.5M tokens");
     }
 
     /// Operator contract: TECH.md write records measured tokens on spawn,
@@ -356,6 +502,55 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Workspace-root constructor, TECH.md path getter, and in-memory `get`
+    /// feed the same Subagents list row formatter as live chrome. Direct
+    /// calls so lib-test `-D dead-code` sees `at_workspace_root`,
+    /// `tech_md_path`, and `get` even when other tests use a temp path.
+    #[test]
+    fn at_workspace_root_tech_md_path_and_get_feed_subagents_list_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "grok-l2-token-tracking-workspace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let mut tracker = L2TokenTracker::at_workspace_root(&dir);
+        assert_eq!(tracker.tech_md_path(), dir.join(TECH_MD_FILENAME).as_path());
+        tracker.record_spawn("nested-l2-session", "Stale prompt still live");
+        tracker.record_usage("nested-l2-session", 53407);
+        let measured = tracker
+            .get("nested-l2-session")
+            .expect("spawned nested L2 row")
+            .measured_tokens();
+        assert_eq!(measured, 53407);
+        let suffix = tracker
+            .format_subagents_list_token_suffix("nested-l2-session")
+            .expect("suffix after usage tick");
+        assert_eq!(suffix, format_measured_tokens_suffix(53407));
+        assert_eq!(suffix, format!("53.4k {MEASURED_TOKENS_SUFFIX_UNIT}"));
+        let row = tracker.format_subagents_list_row("nested-l2-session", "Stale prompt still live");
+        assert_eq!(
+            row,
+            format_subagents_list_row_from_memory("Stale prompt still live", Some(&suffix))
+        );
+        assert!(
+            row.contains("53.4k tokens"),
+            "Subagents list row must contain 53.4k tokens, got {row:?}"
+        );
+        assert!(
+            !row.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {row:?}"
+        );
+        assert!(
+            !row.contains("53407"),
+            "must not paint a raw integer token count, got {row:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Operator contract: layout_must_not_read the session transcript jsonl.
     /// The Subagents list paint function takes the in-memory count only.
     /// Never open that transcript file in this module.
@@ -372,7 +567,11 @@ mod tests {
                 .format_subagents_list_token_suffix("id-only-in-memory")
                 .as_deref(),
         );
-        assert!(row.contains("measured 42 tokens"));
+        assert!(row.contains("42 tokens"));
+        assert!(
+            !row.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {row:?}"
+        );
         let src = include_str!("l2_token_tracking.rs");
         let forbidden = concat!("chat_history", ".jsonl");
         let product = src.split("mod tests").next().expect("product before tests");
@@ -383,6 +582,85 @@ mod tests {
         assert!(
             !product.contains("std::fs::read") && !product.contains("File::open"),
             "paint path must not open files; persist_tech_md writes TECH.md only"
+        );
+    }
+
+    /// Grok OSS: nested L2 token accumulator is AtomicU64 so concurrent ACP
+    /// usage ticks do not race. This diverges from upstream xAI because Grok
+    /// OSS Subagents list tracks nested L2 session usage in-memory
+    /// (`l2_token_tracking`) and paints compact chrome. A racy last-write
+    /// u64 can drop 10232 when a stale smaller tick lands last. Named tests
+    /// are contracts: the high-water is 10232, chrome is `10.2k tokens`, and
+    /// the outcome must not be fitted to a racy last-write.
+    #[test]
+    fn concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water() {
+        let src = include_str!("l2_token_tracking.rs");
+        let product = src.split("mod tests").next().expect("product before tests");
+        assert!(
+            product.contains("AtomicU64"),
+            "nested L2 token accumulator must be AtomicU64, not a racy u64"
+        );
+        assert!(
+            product.contains("fetch_max"),
+            "concurrent usage ticks must keep the high-water with fetch_max"
+        );
+        assert!(
+            !product.contains("pub measured_tokens: u64"),
+            "do not store nested L2 usage in a racy public u64"
+        );
+
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(
+            L2TokenTracker::with_tech_md_path("/tmp/unused-tech-atomic.md"),
+        ));
+        {
+            let mut t = tracker.lock().expect("spawn lock");
+            t.record_spawn("nested-l2-session", "Atomic usage ticks");
+        }
+        const HIGH_WATER: u64 = 10232;
+        const STALE: u64 = 8000;
+        let mut joins = Vec::new();
+        for i in 0..8 {
+            let tracker = std::sync::Arc::clone(&tracker);
+            joins.push(std::thread::spawn(move || {
+                let tick = if i % 2 == 0 { HIGH_WATER } else { STALE };
+                for _ in 0..64 {
+                    let mut t = tracker.lock().expect("usage lock");
+                    t.record_usage("nested-l2-session", tick);
+                }
+            }));
+        }
+        for j in joins {
+            j.join().expect("usage thread");
+        }
+        let t = tracker.lock().expect("read lock");
+        let measured = t
+            .get("nested-l2-session")
+            .expect("spawned nested L2 row")
+            .measured_tokens();
+        assert_eq!(
+            measured, HIGH_WATER,
+            "concurrent usage ticks must keep 10232, not a stale last-write like 8000"
+        );
+        let row = t.format_subagents_list_row("nested-l2-session", "Atomic usage ticks");
+        assert!(
+            row.contains("10.2k tokens"),
+            "Subagents list must paint compact 10.2k tokens after 10232, got {row:?}"
+        );
+        assert!(
+            !row.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {row:?}"
+        );
+        assert!(
+            !row.contains("10232"),
+            "must not paint a raw integer token count, got {row:?}"
+        );
+        assert!(
+            !row.contains("8000"),
+            "must not paint a stale concurrent tick, got {row:?}"
+        );
+        assert_eq!(
+            format_measured_tokens_suffix(HIGH_WATER),
+            format!("10.2k {MEASURED_TOKENS_SUFFIX_UNIT}")
         );
     }
 }

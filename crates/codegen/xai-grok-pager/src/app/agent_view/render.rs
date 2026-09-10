@@ -1182,6 +1182,10 @@ impl AgentView {
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
         let max_prompt_height = area.height / 2;
+        // Grok OSS: While recording, the prompt box grows with the transcript
+        // and must not clip spoken text. Overlay Some is the live recording path.
+        self.prompt
+            .set_voice_recording_grow(voice_listening, voice_interim);
         let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
             self.prompt
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
@@ -6656,8 +6660,12 @@ mod status_credits_meter_tests {
             "status bar must push \"credits\" so hit_credits.rect is a real rect"
         );
         assert!(
-            text.contains("included SuperGrok period limits"),
-            "status bar must paint the compact included SuperGrok period limits meter:\n{text}"
+            text.contains("SuperGrok period"),
+            "status bar must paint the compact SuperGrok period meter:\n{text}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
         );
         assert!(
             text.contains("24%"),

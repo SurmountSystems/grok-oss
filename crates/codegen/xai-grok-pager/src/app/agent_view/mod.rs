@@ -2801,15 +2801,16 @@ pub(crate) mod test_fixtures {
             ScrollbackState::new(),
         )
     }
-    /// Interject chord for non–VS Code family tests (`Ctrl+Enter`).
+    /// Interject / send-now chord for non–VS Code family tests (`Ctrl+I`).
+    /// Grok OSS: Ctrl+Enter inserts a newline in the composer; it is not send-now.
     pub fn force_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL)
     }
     /// Interject chord for VS Code family tests (`Ctrl+L`).
     pub fn vscode_interject_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)
     }
-    /// Host-independent registry for queue/prompt interject tests (Ctrl+Enter).
+    /// Host-independent registry for queue/prompt interject tests (Ctrl+I send-now).
     pub fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()
     }

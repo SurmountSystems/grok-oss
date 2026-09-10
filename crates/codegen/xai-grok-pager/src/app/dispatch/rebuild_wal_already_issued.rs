@@ -28,9 +28,10 @@ mod tests {
             .expect("write WAL");
     }
 
-    /// Named contract: after `/rebuild`, do not enqueue WAL Send bodies that
+    /// Grok OSS Named contract: after `/rebuild`, do not enqueue WAL Send bodies that
     /// are already committed user turns. A truly missing WAL send still
-    /// restores.
+    /// restores. This diverges from upstream xAI because the catalog WAL table pins
+    /// restore and skip tests as contracts, not known-good from 2026-09-02.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send() {
@@ -103,9 +104,10 @@ mod tests {
             .expect("write WAL");
     }
 
-    /// Named contract: WAL Interject and Queue kinds that are already parsed
+    /// Grok OSS Named contract: WAL Interject and Queue kinds that are already parsed
     /// user turns in `chat_history.jsonl` must not restore into the pager
-    /// queue. Do not weaken Send, `/goal`, or quoted-body skip tests.
+    /// queue. Do not weaken Send, `/goal`, or quoted-body skip tests. This diverges
+    /// from upstream xAI because the catalog WAL table pins restore and skip tests.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn restore_prompt_wal_does_not_enqueue_committed_interject_or_queue() {

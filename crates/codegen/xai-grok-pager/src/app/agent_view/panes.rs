@@ -9,7 +9,9 @@ use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::types::DisplayMode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 impl AgentView {
-    /// Selected foldable entry that is collapsed or truncated (hidden body).
+    /// Selected collapsed or truncated transcript block: Enter expands
+    /// (same as `:expand`), including a collapsed tool whose body is not
+    /// yet `is_foldable` (read_file without content still paints Collapsed).
     /// Group headers keep Enter as OpenBlockViewer (toggles the group).
     fn selected_hidden_foldable(&self) -> bool {
         if self.scrollback.is_selected_group_header() {
@@ -18,7 +20,10 @@ impl AgentView {
         self.scrollback
             .selected()
             .and_then(|idx| self.scrollback.entry(idx))
-            .is_some_and(|e| e.is_foldable() && e.display_mode != DisplayMode::Expanded)
+            .is_some_and(|e| {
+                e.display_mode != DisplayMode::Expanded
+                    && (e.is_foldable() || e.block.is_tool_call())
+            })
     }
     /// Scrollback-focused key handling.
     ///

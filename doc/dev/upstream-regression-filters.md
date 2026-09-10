@@ -164,7 +164,7 @@ check after these `fn`s exist.
 | `paint_composer_box_cursor_uses_human_green_not_agent_magenta` + `focused_composer_paints_human_green_box_caret_*` + `doge_human_box_caret_plate_is_rgb_0_255_0` | Box caret is Human green, never agent magenta; DOGE plate is `Rgb(0,255,0)` not named ANSI Green |
 | `agent_message_block_accent_is_magenta_rail_under_doge_while_running` | Running agent rail is magenta |
 | `info_line_model_name_uses_accent_model_not_gray` | Model label uses `accent_model` (magenta under DOGE) |
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `included SuperGrok period limits · N%` |
+| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `SuperGrok period · N%` |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `ShowLimits` |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA |
@@ -230,8 +230,8 @@ SuperGrok is paid.
 | `sampling_config_auto_use_fills_console_hop_after_included_full` | `sampling_config` fills console failover when included SuperGrok period limits are full |
 | `sampling_config_auto_use_omits_console` / `sampling_config_auto_use_omits_console_while_supergrok_included_headroom` | While included SuperGrok period limits still have room, stay on SuperGrok (no console hop) |
 | `resolve_model_to_sampling_config_auto_use` | Resolve path uses the same auto-use hop policy |
-| `sampling_config_auto_use_extras_keep_session_console_failover` | SuperGrok dollar credits keep session plus console failover (single SuperGrok identity) |
-| `sampling_config_hops_to_sibling_included_before_extras` | Personal included SuperGrok period limits full hops to Business included before SuperGrok dollar credits |
+| `sampling_config_auto_use_dollar_credits_keep_session_console_failover` | SuperGrok dollar credits keep session plus console failover (single SuperGrok identity) |
+| `sampling_config_hops_to_sibling_included_before_dollar_credits` | Personal included SuperGrok period limits full hops to Business included before SuperGrok dollar credits |
 | `sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console` | Team included remaining + personal exhausted stays Team, not SuperGrok dollar credits or console |
 | `sampling_config_hop_personal_remaining_team_exhausted` | Personal included remaining + Team exhausted hops to personal |
 | `sampling_config_hop_both_remaining_team_first_then_personal` | Both included remaining: Team / Business first, then personal |
@@ -266,7 +266,7 @@ Rank neighbors (not hop by themselves; do not treat these as class 5 proof):
 `hop_dollar_credits_on_both_missing_heavy_keeps_personal_remaining`.
 
 ```bash
-cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
+cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_dollar_credits \
   sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console \
   sampling_config_hop_personal_remaining_team_exhausted \
   sampling_config_hop_both_remaining_team_first_then_personal \
@@ -873,6 +873,7 @@ A 75% centered overlay is a failed land for default soft park.
 | `plan_preview_session_multiline_shift_enter_sends` | Preview session Multiline Shift+Enter sends; Enter still inserts a newline |
 | `composer_multiline_off_shift_enter_sends_not_newline` | Main Human box Shift+Enter sends when `[ui] composer_multiline` is false |
 | `composer_multiline_on_shift_enter_inserts_newline` | Main Human box Shift+Enter inserts a newline when the persist flag is on |
+| `composer_shift_enter_inserts_newline_and_does_not_submit` | Composer Shift+Enter inserts a newline and does not submit, including at the end of the last line and when session Multiline is on. Bare Enter at the end of the last line still submits (idle send / mid-turn interject). Do not steal #85. After Shift+Enter the composer still has the text plus newline |
 | `plan_prompt_ctrl_z_restores_wiped_human_box` | Prompt-focused Ctrl+Z restores a wiped Human box |
 | `preview_typed_comment_rides_along_on_approve` | Preview type-after-park notes ride along with Approve |
 | `prompt_tab_typed_comment_rides_along_on_approve` | Tab to Prompt then Approve still sends typed notes |
@@ -903,6 +904,7 @@ cargo test -p xai-grok-pager --lib -- \
   plan_preview_session_multiline_shift_enter_sends \
   composer_multiline_off_shift_enter_sends_not_newline \
   composer_multiline_on_shift_enter_inserts_newline \
+  composer_shift_enter_inserts_newline_and_does_not_submit \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -947,13 +949,13 @@ Wire JSON field `supergrok_extras` may stay. Human chrome must not nickname Supe
 
 | path::test | Contract |
 |------------|----------|
-| `compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct` | Compact meter paints SuperGrok dollar credits, not a nickname |
-| `format_supergrok_session_with_weekly_and_extras` | `/limits` human text says SuperGrok dollar credits |
+| `compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct` | Compact meter paints SuperGrok dollar credits, not a nickname |
+| `format_supergrok_session_with_weekly_and_dollar_credits` | `/limits` human text says SuperGrok dollar credits |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
-  compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct \
-  format_supergrok_session_with_weekly_and_extras
+  compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct \
+  format_supergrok_session_with_weekly_and_dollar_credits
 ```
 
 #### No two live same-description Subagent rows
@@ -993,23 +995,37 @@ cargo test -p xai-grok-pager --lib -- \
 
 #### Nested L2 measured tokens (not billing meters)
 
-Subagents list shows `measured N tokens` from in-memory nested L2 session
-usage. Layout must not read the session transcript jsonl. TECH.md records
-spawn, usage tick, and L2 exit. Those counts are not included SuperGrok
+Subagents list shows a compact count plus `tokens` (for example `53.4k
+tokens`) from in-memory nested L2 session usage. Operator-visible chrome
+must not contain the word `measured` and must not paint a raw integer like
+53407. The nested L2 token accumulator is an `AtomicU64` high-water
+(`fetch_max`) so concurrent ACP usage ticks do not race. Grok OSS: this
+map is not upstream xAI. A racy last-write `u64` can drop 10232 when a
+stale smaller tick lands last. Layout must not read the session transcript
+jsonl. TECH.md records spawn, usage tick, and L2 exit, including the
+measured number in the table. Those counts are not included SuperGrok
 period limits, not SuperGrok dollar credits, and not console team prepaid
-/ console API credits.
+/ console API credits. `format_subagent_label` calls
+`format_live_subagents_list_row` so `format_measured_tokens_suffix` is
+used in the shipped lib.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-pager` `subagents_list_shows_measured_tokens_per_nested_l2` | After spawn and a 12400 usage tick, the Subagents list row contains `measured 12400 tokens` |
+| `xai-grok-pager` `subagents_list_shows_measured_tokens_per_nested_l2` | After spawn and a 53407 usage tick, the Subagents list row contains `53.4k tokens`, does not contain `measured`, and does not contain `53407` |
+| `xai-grok-pager` `format_subagents_list_description_shows_measured_tokens_suffix` | Shared description helper paints `12.4k tokens` after a 12400 usage tick, does not contain `measured`, and omits the suffix before the first tick |
+| `xai-grok-pager` `format_subagent_label_shows_measured_tokens_suffix` | Operator-visible `format_subagent_label` description contains `12.4k tokens` after an in-memory 12400 usage tick and does not contain `measured` |
 | `xai-grok-pager` `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit` | Temp TECH.md has the measured number, L1 to L2 to L3 tree, aspect table columns, and the not-billing-meters sentence |
 | `xai-grok-pager` `subagents_list_layout_does_not_read_chat_history_jsonl` | Paint takes in-memory counts only and does not open the session transcript file |
+| `xai-grok-pager` `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water` | Concurrent 10232 and 8000 usage ticks keep high-water 10232 on AtomicU64; Subagents row contains `10.2k tokens`, does not contain `measured`, and does not contain `10232` |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   subagents_list_shows_measured_tokens_per_nested_l2 \
+  format_subagents_list_description_shows_measured_tokens_suffix \
+  format_subagent_label_shows_measured_tokens_suffix \
   tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
-  subagents_list_layout_does_not_read_chat_history_jsonl
+  subagents_list_layout_does_not_read_chat_history_jsonl \
+  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water
 ```
 
 #### Nested overlay hang, duplicate prompt, L3 click (Surmount / grok-oss fork)
@@ -1318,6 +1334,12 @@ or weaken these tests in recon.
 | `empty_ctrl_enter_mid_turn_does_not_send` | Empty composer does not send. Not last-known-good. |
 | `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
 | `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute. Performance contract; not last-known-good. |
+| `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer` | After bare mid-turn Enter soft-interjects, the Human box must not still hold that body. Not last-known-good. |
+| `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer` | L2 overlay Enter interject clears the parent Human box on success. Not last-known-good. |
+| `enter_send_must_not_leave_duplicate_prompt_in_composer` | Idle Enter send clears the Human box on success. Not last-known-good. |
+| `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline` | Enter at the end of the last Human-box line must send immediately. It must not insert a silent extra newline. Not last-known-good. |
+| `enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline` | Mid-turn Enter at the end of the last Human-box line must interject immediately. Not last-known-good. |
+| `arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path` | Left then Right then Enter must submit the same body on the same send or interject path. Not last-known-good. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -1325,7 +1347,13 @@ cargo test -p xai-grok-pager --lib -- \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
   prompt_wal_appends_on_mid_turn_interject \
-  interject_does_not_wait_minutes_or_block_paint
+  interject_does_not_wait_minutes_or_block_paint \
+  enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_send_must_not_leave_duplicate_prompt_in_composer \
+  enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
+  enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline \
+  arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path
 ```
 
 #### TUI performance (typing, cancel, interject)
@@ -1380,6 +1408,25 @@ cargo test -p xai-grok-shell --lib -- \
   keystroke_burst_does_not_flush_unsent_draft_every_char
 ```
 
+#### Operator and Agent speaker labels (2026-09-09)
+
+Speaker labels are Operator and Agent. Operator is any sapient that is
+operating a machine agent. Agent is vendor-neutral. Do not say You or
+Human for the operator. Do not say Me or Grok as the speaker label for
+the machine. This diverges from upstream xAI You/Human / Me/Grok copy
+because the Operator said so. Do not weaken Job / State / Operator /
+Next. Do not delete or weaken this named test in recon, onto, import,
+or join.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | `/what` instruction and the in-tree what skill prefer Operator and Agent and forbid You or Human / Me or Grok as speaker labels |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  what_instruction_prefers_operator_and_agent_speaker_labels
+```
+
 #### Compact must not re-enqueue occupancy
 
 Fork-owned. Successful `/compact` and AUTO compact must not copy the
@@ -1401,6 +1448,7 @@ must not enqueue a Human turn already in chat history.
 | `sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty` | After Compact empties live scrollback, the painted queue still drops `shared_queue` Prompt wires whose text is already a parsed user turn in `chat_history.jsonl` |
 | `compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn` | Compact-fail unstick after occupancy drop requeues `/compact` only, not the last Human turn |
 | `session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history` | `apply_canceled_turn_resume_on_load` must not enqueue a Human turn already recorded in chat history |
+| `handle_queue_changed_drops_shared_queue_rows_matching_issued_human_text` | `handle_queue_changed` must drop stale `[Send now]` / `shared_queue` rows whose text already issued as a Human turn |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -1408,7 +1456,8 @@ cargo test -p xai-grok-pager --lib -- \
   auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt \
   sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty \
   compact_fail_unstick_after_occupancy_drop_requeues_compact_only_not_last_human_turn \
-  session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history
+  session_load_cancel_resume_does_not_enqueue_human_turn_already_in_chat_history \
+  handle_queue_changed_drops_shared_queue_rows_matching_issued_human_text
 ```
 
 #### Compact standing-law reminder (not AGENTS.md)
@@ -1766,7 +1815,7 @@ Do not call SuperGrok free.
 
 | Filter identifier | Contract | Land |
 |-------------------|----------|------|
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `included SuperGrok period limits · N%` | **Keep** (`credit_bar` helpers alone do not count) |
+| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `SuperGrok period · N%` | **Keep** (`credit_bar` helpers alone do not count) |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
@@ -1782,7 +1831,7 @@ Do not call SuperGrok free.
 | `second_click_on_already_selected_cta_still_submits` | Second click on the already-selected CTA still submits | **Keep** |
 | `letter_key_types_and_is_not_the_only_submit` | Letter keys type; they are not the only submit | **Keep** |
 | `sampling_config_auto_use_*` | `sampling_config_for_model` / `prepare_sampling_config_for_model` fills console failover when included SuperGrok period limits are full | **Keep** |
-| `sampling_config_hops_to_sibling_included_before_extras` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
+| `sampling_config_hops_to_sibling_included_before_dollar_credits` | Next stored SuperGrok login's included SuperGrok period limits beat this login's SuperGrok dollar credits | **Keep** |
 | `limits_snapshot_second_process_within_the_hour_does_not_http` | Second grok-oss process within the hour reads the flock snapshot and does not HTTP SuperGrok credits or Management credits APIs | **Keep** |
 | `limits_snapshot_honor_ttl_fresh_within_hour_does_not_http` | HonorTtl with a snapshot younger than one hour does not HTTP | **Keep** |
 | `limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour` | ForceRefresh still fetches when the snapshot is younger than one hour | **Keep** |
@@ -1822,7 +1871,7 @@ cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included
   forked_session_status_header_paints_switcher_and_dashboard \
   forked_session_status_header_clicks_open_dashboard_and_cycle \
   load_session_restores_fork_family_from_disk
-cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
+cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_dollar_credits \
   limits_snapshot_second_process_within_the_hour_does_not_http \
   limits_snapshot_honor_ttl_fresh_within_hour_does_not_http \
   limits_snapshot_force_refresh_leader_http_fetches_when_snapshot_is_younger_than_one_hour \
@@ -1970,7 +2019,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   nested_l2_overlay_todo_toggle_stays_findable
 
 # 5. Dual-auth hop after included SuperGrok period limits are full
-cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_extras \
+cargo test -p xai-grok-shell --lib -- sampling_config_auto_use sampling_config_hops_to_sibling_included_before_dollar_credits \
   sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console \
   sampling_config_hop_personal_remaining_team_exhausted \
   sampling_config_hop_both_remaining_team_first_then_personal \
@@ -2069,6 +2118,7 @@ cargo test -p xai-grok-pager --lib -- \
   plan_preview_session_multiline_shift_enter_sends \
   composer_multiline_off_shift_enter_sends_not_newline \
   composer_multiline_on_shift_enter_inserts_newline \
+  composer_shift_enter_inserts_newline_and_does_not_submit \
   plan_prompt_ctrl_z_restores_wiped_human_box \
   preview_typed_comment_rides_along_on_approve \
   prompt_tab_typed_comment_rides_along_on_approve \
@@ -2095,8 +2145,8 @@ cargo test -p xai-grok-pager --lib -- \
   plan_feedback_ctrl_v_defers_clipboard_image_probe \
   agent_empty_bracketed_paste_defers_probe_for_clipboard_image \
   approve_or_revise_drains_plan_composer_images \
-  compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct \
-  format_supergrok_session_with_weekly_and_extras \
+  compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct \
+  format_supergrok_session_with_weekly_and_dollar_credits \
   live_subagent_list_does_not_show_two_rows_with_the_same_description \
   format_activity_label_unlimited_retry_has_no_u32_max_fraction \
   live_subagent_list_shows_only_l2_and_reports_live_l3_count \
@@ -2144,6 +2194,12 @@ cargo test -p xai-grok-pager --lib -- \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
   interject_does_not_wait_minutes_or_block_paint \
+  enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_send_must_not_leave_duplicate_prompt_in_composer \
+  enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
+  enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline \
+  arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path \
   session_load_restores_wal_send_missing_from_prompt_history \
   restore_prompt_wal_does_not_enqueue_committed_goal_slash_or_quoted_send \
   restore_prompt_wal_does_not_enqueue_committed_interject_or_queue \

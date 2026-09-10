@@ -214,6 +214,17 @@ impl QueueDrain {
 }
 
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+    maybe_drain_queue_protecting(agent, None)
+}
+
+/// Drain the next queued entry. `protect_queue_id` is the row this dispatch
+/// just enqueued: occupancy must not treat that body as leftover because
+/// WAL Send, live scrollback, or `chat_history.jsonl` already recorded the
+/// same words. After this drain paints, leftover copies still drop.
+pub(super) fn maybe_drain_queue_protecting(
+    agent: &mut AgentView,
+    protect_queue_id: Option<u64>,
+) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -230,7 +241,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         }
     };
 
-    agent.drop_stale_queue_occupancy();
+    agent.drop_stale_queue_occupancy_protecting(protect_queue_id);
 
     if !agent.session.state.is_idle() {
         log_blocked("turn_running", sid.as_deref());

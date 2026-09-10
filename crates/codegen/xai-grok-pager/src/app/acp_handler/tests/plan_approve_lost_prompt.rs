@@ -1,6 +1,8 @@
-//! Surmount / grok-oss fork (ours). Named tests in this file are
+//! Grok OSS / Surmount fork (ours). Named tests in this file are
 //! **contracts**, not optional chrome. Do not delete or weaken them on
-//! recon / onto / import.
+//! recon / onto / import. This diverges from upstream xAI because FORK.md
+//! lost-prompt extra and the catalog Clickable Approve table pin that click
+//! Approve must not drop the Human-box prompt.
 //!
 //! Clickable Approve on an isolated present must not lose a Human-box
 //! prompt. Unit tests that only call `AgentView::approve_plan` or
@@ -274,10 +276,11 @@ fn assert_acp_approved_notes_not_in_feedback(
     );
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Case A: text already in the Human box at isolated present (stash match).
 /// Click Approve via App handle_input, then dispatch. The prompt must not
-/// vanish into an empty composer with no Interject copy.
+/// vanish into an empty composer with no Interject copy. This diverges from
+/// upstream xAI because FORK.md lost-prompt extra and the catalog Clickable Approve table.
 #[test]
 fn isolated_present_preview_click_approve_does_not_drop_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -317,10 +320,12 @@ fn isolated_present_preview_click_approve_does_not_drop_human_box_prompt() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Case B: composer empty at present, then type in isolated Preview, then
 /// click Approve. Stash does not match. The typed string must still go on
-/// the implement turn. Leftover composer without Interject is a miss.
+/// the implement turn. Leftover composer without Interject is a miss. This
+/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
 #[test]
 fn isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -359,9 +364,11 @@ fn isolated_present_preview_typed_after_present_click_approve_sends_human_box_pr
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Prompt-focused: Comment CTA (same as Tab to Prompt), type the same
-/// Human-box string, click Approve through App handle_input + dispatch.
+/// Human-box string, click Approve through App handle_input + dispatch. This
+/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
 #[test]
 fn isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -409,10 +416,12 @@ fn isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt() 
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// The live event loop is handle_input then dispatch. Interject must
 /// carry the typed prompt and paint UserPrompt / interjection_prompt
-/// scrollback. ACP stays `"approved"` with no feedback field.
+/// scrollback. ACP stays `"approved"` with no feedback field. This diverges
+/// from upstream xAI because FORK.md lost-prompt extra and the catalog Clickable
+/// Approve table.
 #[test]
 fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     let mut app = make_app_with_agent("sess-1");
@@ -460,9 +469,11 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Isolated Preview Enter must stash the typed critique, not start a
+/// Grok OSS: Isolated Preview Enter must stash the typed critique, not start a
 /// Waiting-for-the-model Prompt. Empty Enter never Approves. Click
-/// Approve still completes the live waiter and wraps review comments.
+/// Approve still completes the live waiter and wraps review comments. This
+/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
 #[test]
 fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments() {
     let mut app = make_app_with_agent("sess-1");
@@ -593,9 +604,10 @@ fn notes_queued_as_prompt(app: &AppView, after: &AfterClickApprove, needle: &str
     queued || send_prompt
 }
 
-/// Isolated Preview Approve with notes in the plan composer must submit
+/// Grok OSS: Isolated Preview Approve with notes in the plan composer must submit
 /// those notes with Approve, not queue them as a Prompt, and not drop
-/// them. Empty Enter never Approves.
+/// them. Empty Enter never Approves. This diverges from upstream xAI because
+/// FORK.md lost-prompt extra and the catalog Clickable Approve table.
 #[test]
 fn isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt() {
     let mut app = make_app_with_agent("sess-1");

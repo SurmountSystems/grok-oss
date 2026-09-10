@@ -1037,6 +1037,7 @@ mod resolve_auto_compact {
 /// `[models].default_reasoning_effort` remains the operator override.
 /// Upstream grok-4.5 / high must not silently become the product default.
 #[test]
+// Grok OSS: baked default_model() is grok-4.6 at medium reasoning effort. This diverges from upstream xAI because upstream baked default is still grok-4.5 plus high.
 fn baked_default_is_grok_46_medium_fork_contract() {
     use crate::agent::config::{EndpointsConfig, ModelsConfig, default_model_entries};
     use xai_grok_sampling_types::ReasoningEffort;

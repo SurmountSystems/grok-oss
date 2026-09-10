@@ -10,8 +10,8 @@ use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
-    retire_optimistic_echo,
+    maybe_drain_queue, maybe_drain_queue_protecting, note_peek_page_flip, push_and_page_flip,
+    push_server_queue_echo, retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
@@ -605,6 +605,7 @@ pub(super) fn dispatch_send_prompt_inner(
     // shown after the agent borrow ends so we can re-enter via the tip helper.
     let mut tip_send_now_after_queue = false;
     let mut skip_drain = false;
+    let mut protect_queue_id: Option<u64> = None;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
@@ -622,9 +623,18 @@ pub(super) fn dispatch_send_prompt_inner(
                 agent.show_toast(
                     "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
                 );
+                // Refuse must not wipe the Human box. The Operator can Esc the
+                // overlay and send again on L1 or the L2 coordinator view.
                 return vec![];
             }
             interject::OverlayOperatorClarify::L2(_) => {
+                // Same clear contract as bare mid-turn Enter: after a successful
+                // interject (or local enqueue fallback), the composer must not
+                // still hold that body. Draft-preserving sends keep the stash.
+                if consume_input {
+                    let images = agent.prompt.drain_images();
+                    return enqueue_if_interject_dropped(app, id, text, images);
+                }
                 return interject::dispatch_interject(app, text, Vec::new());
             }
             interject::OverlayOperatorClarify::None => {}
@@ -914,6 +924,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 );
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
+                protect_queue_id = Some(id);
                 agent.start_pending_live_prompt_task(&display_text);
                 agent
                     .session
@@ -968,9 +979,11 @@ pub(super) fn dispatch_send_prompt_inner(
                     &agent.prompt.images,
                 );
                 agent.start_pending_live_prompt_task(&pass_text);
-                agent
-                    .session
-                    .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
+                protect_queue_id = Some(
+                    agent
+                        .session
+                        .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges),
+                );
             }
         }
         if consume_input {
@@ -1025,16 +1038,22 @@ pub(super) fn dispatch_send_prompt_inner(
         // Mid-turn composer Enter with text merges into the running turn
         // (soft interject). A parked sendable wait (task-output / wait-all)
         // is send-now, not interject — the named tests encode immediate
-        // `SendPrompt`. Named `/queue` hold and empty Enter (plan Approve /
-        // force-send of a queued row) are other paths. Ctrl+Enter / Send now
-        // is the explicit InterjectPrompt path (`SendInterject`), not
-        // cancel-and-send.
-        if consume_input
-            && agent.session.state.is_turn_running()
-            && !agent.is_parked_on_sendable_wait()
-        {
-            let images = agent.prompt.drain_images();
-            return enqueue_if_interject_dropped(app, id, text, images);
+        // `SendPrompt`. Exception: main-thread text that uniquely names a
+        // live L2 soft-interjects that L2 even while L1 is parked waiting on
+        // it (do not cancel-and-send L1, do not wait for the L2 to exit).
+        // Named `/queue` hold and empty Enter (plan Approve / force-send of
+        // a queued row) are other paths. Ctrl+Enter / Send now is the
+        // explicit InterjectPrompt path (`SendInterject`), not cancel-and-send.
+        if consume_input && agent.session.state.is_turn_running() {
+            let named_live_l2 = matches!(
+                interject::overlay_operator_clarify(agent),
+                interject::OverlayOperatorClarify::None
+            ) && interject::resolve_uniquely_named_live_l2(agent, &text)
+                .is_some();
+            if named_live_l2 || !agent.is_parked_on_sendable_wait() {
+                let images = agent.prompt.drain_images();
+                return enqueue_if_interject_dropped(app, id, text, images);
+            }
         }
 
         // If the user queues a follow-up while a turn is already running, surface
@@ -1193,9 +1212,10 @@ pub(super) fn dispatch_send_prompt_inner(
             &agent.prompt.images,
         );
         agent.start_pending_live_prompt_task(&text);
-        agent
+        let qid = agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
+        protect_queue_id = Some(qid);
         let enqueued_ok = agent
             .session
             .pending_prompts
@@ -1271,7 +1291,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
         }
-        maybe_drain_queue(agent)
+        maybe_drain_queue_protecting(agent, protect_queue_id)
     };
     effects.extend(drain.effects);
     note_peek_page_flip(app, id, drain.page_flip_entry);
@@ -1381,10 +1401,10 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         }];
     }
 
-    agent.session.enqueue_bash_command(command.clone());
+    let protect_queue_id = Some(agent.session.enqueue_bash_command(command.clone()));
     agent.prompt.set_text("");
 
-    let drain = maybe_drain_queue(agent);
+    let drain = maybe_drain_queue_protecting(agent, protect_queue_id);
     note_peek_page_flip(app, id, drain.page_flip_entry);
     drain.effects
 }

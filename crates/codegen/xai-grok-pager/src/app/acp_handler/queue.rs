@@ -60,7 +60,7 @@ impl PromptCompletePayload {
     }
 }
 
-pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+pub(crate) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
     else {
@@ -145,7 +145,20 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             .get(&aid)
             .map(|p| p.prompt_id.clone());
         if let Some(agent) = app.agents.get_mut(&aid) {
+            let incoming_ids: Vec<String> = snapshot.iter().map(|e| e.id.clone()).collect();
             agent.shared_queue = snapshot;
+            // Live [Send now] paint reads this mirror. Drop issued Human
+            // turns before the next layout so a queue/changed broadcast
+            // cannot resurrect occupancy that Compact emptied from scrollback.
+            agent.drop_stale_queue_occupancy_with_chat_history();
+            let kept: std::collections::HashSet<String> =
+                agent.shared_queue.iter().map(|e| e.id.clone()).collect();
+            for pid in &incoming_ids {
+                if !kept.contains(pid) {
+                    agent.retire_send_now_painted_block(pid);
+                }
+            }
+            agent.sync_queue_pane();
             // A re-keyed echo's id is dead everywhere (only its content
             // matched the broadcast): drop it from the optimistic set and
             // any send-now parked on it — the row is visible under its new
@@ -200,6 +213,14 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                     "exiting EditingQueued: row is no longer in the shared queue"
                 );
                 agent.cancel_editing_queued_for_lost_row();
+            }
+        }
+        if let Some(agent) = app.agents.get(&aid) {
+            let cleaned = agent.shared_queue.clone();
+            if cleaned.is_empty() {
+                app.shared_prompt_queues.remove(&session_id);
+            } else {
+                app.shared_prompt_queues.insert(session_id.clone(), cleaned);
             }
         }
         // Resolve a queue-row send-now that was parked while its row was

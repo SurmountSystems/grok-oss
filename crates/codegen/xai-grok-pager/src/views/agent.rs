@@ -2414,6 +2414,7 @@ mod tests {
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
     }
+    // Grok OSS: hide_header zeros the in-app agent status bar height. This diverges from upstream xAI because FORK.md and catalog class 2 pin hide_header as a shipped runtime reader, not serde-only.
     #[test]
     fn hide_header_zeroes_status_bar_height() {
         std::thread::spawn(|| {

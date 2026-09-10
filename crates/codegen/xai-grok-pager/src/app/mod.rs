@@ -2462,6 +2462,7 @@ mod tests {
             summary: None,
         }
     }
+    // Grok OSS: quit resume hint is grok-oss --resume, never grok --resume. This diverges from upstream xAI because FORK.md and catalog class 1 pin CLI identity on relaunch paste.
     #[test]
     fn print_exit_resume_hint_writes_expected_lines() {
         let mut buf = Vec::new();
@@ -2476,6 +2477,7 @@ mod tests {
             "must not tell operators to run upstream grok --resume:\n{out}"
         );
     }
+    // Grok OSS: minimal quit resume hint is grok-oss --minimal --resume. This diverges from upstream xAI because catalog class 1 requires the product CLI on resume paste.
     #[test]
     fn print_exit_resume_hint_includes_minimal_flag() {
         let mut buf = Vec::new();

@@ -319,7 +319,7 @@ pub fn enrich_candidates_with_included_billing(
 ///
 /// `None` (not observed) and `Some(0)` / non-positive are **not** after-burner
 /// headroom — console may lead after included exhaust.
-pub fn has_positive_supergrok_dollar_extras(prepaid_balance_cents: Option<i64>) -> bool {
+pub fn has_positive_supergrok_dollar_credits(prepaid_balance_cents: Option<i64>) -> bool {
     prepaid_balance_cents.map(|c| c > 0).unwrap_or(false)
 }
 
@@ -851,33 +851,36 @@ pub fn order_credentials_for_preferred_auto_with_pin(
     let exhausted_all = ranked.exhausted_all_included || !sessions.is_empty();
     let personal_present = personal_supergrok_login_present(sessions);
 
-    // After-burner: SuperGrok $ extras before console when known positive on a
-    // live (not hard-expired) **paying** SuperGrok JWT. Team JWT extras are
+    // After-burner: SuperGrok dollar credits before console when known positive on a
+    // live (not hard-expired) **paying** SuperGrok JWT. Team JWT SuperGrok dollar credits are
     // omitted while a personal SuperGrok login exists (Team JWT settles the
     // Billing Credits card, not SuperGrok dollar credits).
-    let mut with_extras: Vec<&SupergrokSessionCandidate> = sessions
+    let mut with_dollar_credits: Vec<&SupergrokSessionCandidate> = sessions
         .iter()
         .filter(|c| {
             !c.hard_expired
-                && has_positive_supergrok_dollar_extras(c.prepaid_balance_cents)
+                && has_positive_supergrok_dollar_credits(c.prepaid_balance_cents)
                 && is_supergrok_paying_session(c, personal_present, identity_pin)
         })
         .collect();
-    if !with_extras.is_empty() {
-        // Prefer larger remaining extras; stable id tie-break.
-        with_extras.sort_by(|a, b| {
+    if !with_dollar_credits.is_empty() {
+        // Prefer larger remaining SuperGrok dollar credits; stable id tie-break.
+        with_dollar_credits.sort_by(|a, b| {
             b.prepaid_balance_cents
                 .cmp(&a.prepaid_balance_cents)
                 .then_with(|| a.headroom.identity_id.cmp(&b.headroom.identity_id))
         });
-        let mut tokens: Vec<String> = with_extras.iter().map(|c| c.access_token.clone()).collect();
+        let mut tokens: Vec<String> = with_dollar_credits
+            .iter()
+            .map(|c| c.access_token.clone())
+            .collect();
         // Drop SuperGrok tokens that collide with console key strings.
         tokens.retain(|t| !console.iter().any(|k| k == t));
         if !tokens.is_empty() {
             let primary = tokens.remove(0);
             let session_key = primary.clone();
             let mut failover = tokens;
-            // Console only after SuperGrok extras chain (failover on true 402).
+            // Console only after the SuperGrok dollar credits chain (failover on true 402).
             console.retain(|k| k != &primary && !failover.iter().any(|t| t == k));
             failover.extend(console);
             return AutoCredentialOrder {
@@ -1056,6 +1059,7 @@ mod tests {
     /// / team OAuth settlement). Among two Team (or two personal), sooner reset
     /// then identity_id still applies.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn pick_prefers_business_included_before_personal_when_both_have_remaining() {
         let personal = id("personal-1", SupergrokAccountRole::Personal, 80, Some(100));
         let business = id(
@@ -1301,10 +1305,10 @@ mod tests {
         reset: Option<i64>,
         token: &str,
     ) -> SupergrokSessionCandidate {
-        cand_with_extras(identity_id, role, remaining, reset, token, None)
+        cand_with_dollar_credits(identity_id, role, remaining, reset, token, None)
     }
 
-    fn cand_with_extras(
+    fn cand_with_dollar_credits(
         identity_id: &str,
         role: SupergrokAccountRole,
         remaining: u64,
@@ -1705,8 +1709,10 @@ mod tests {
     /// Team included remaining is not a SuperGrok paying source (Team JWT
     /// settles Billing Credits). Console stays omitted from primary.
     #[test]
-    fn order_credentials_personal_full_with_extras_hops_to_business_included_before_extras() {
-        let personal_full_with_extras = cand_with_extras(
+    // Grok OSS: rank helper, not hop proof. SuperGrok dollar credits (identifier extras) stay on the personal JWT until sampling_config hop keys prove the hop. SuperGrok is paid.
+    fn order_credentials_personal_full_with_dollar_credits_hops_to_business_included_before_dollar_credits()
+     {
+        let personal_full_with_dollar_credits = cand_with_dollar_credits(
             "personal-1",
             SupergrokAccountRole::Personal,
             0,
@@ -1722,7 +1728,7 @@ mod tests {
             "tok-business-included",
         );
         let order = order_credentials_for_preferred_auto(
-            &[personal_full_with_extras, business_included],
+            &[personal_full_with_dollar_credits, business_included],
             &["console-after-extras".into()],
         );
         assert_eq!(
@@ -1755,6 +1761,7 @@ mod tests {
     /// period limits remaining. Primary is personal SuperGrok included.
     /// Team JWT is omitted (Billing Credits settlement). Console stays omitted.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn order_credentials_business_included_before_personal_when_both_have_room() {
         let personal = cand(
             "personal-1",
@@ -1836,10 +1843,11 @@ mod tests {
 
     /// Named contract: hop list omits console while a stored Business login
     /// still has included SuperGrok period remaining. Same order as
-    /// `order_credentials_personal_full_with_extras_hops_to_business_included_before_extras`.
+    /// `order_credentials_personal_full_with_dollar_credits_hops_to_business_included_before_dollar_credits`.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn hop_does_not_switch_to_console_while_stored_business_included_remaining() {
-        let personal_full_with_extras = cand_with_extras(
+        let personal_full_with_dollar_credits = cand_with_dollar_credits(
             "personal-1",
             SupergrokAccountRole::Personal,
             0,
@@ -1855,7 +1863,7 @@ mod tests {
             "tok-business-included",
         );
         let order = order_credentials_for_preferred_auto(
-            &[personal_full_with_extras, business_included],
+            &[personal_full_with_dollar_credits, business_included],
             &["console-after-extras".into()],
         );
         assert_eq!(
@@ -1880,8 +1888,9 @@ mod tests {
     /// the Team SuperGrok identity. Not personal SuperGrok dollar credits.
     /// Not console.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn hop_team_included_remaining_personal_exhausted_not_dollar_credits_or_console() {
-        let personal_exhausted_with_dollars = cand_with_extras(
+        let personal_exhausted_with_dollars = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             0,
@@ -1929,7 +1938,7 @@ mod tests {
     /// Sampling must stay on the personal SuperGrok JWT.
     #[test]
     fn live_operator_numbers_omit_team_jwt_while_personal_included_and_dollar_credits_remain() {
-        let personal = cand_with_extras(
+        let personal = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             72,
@@ -1981,6 +1990,7 @@ mod tests {
     /// Personal included SuperGrok period remaining + Team exhausted: hop to
     /// the personal SuperGrok identity.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn hop_personal_included_remaining_team_exhausted_to_personal() {
         let personal_remaining = cand(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
@@ -1989,7 +1999,7 @@ mod tests {
             Some(1_000),
             "tok-personal-included",
         );
-        let team_exhausted_with_dollars = cand_with_extras(
+        let team_exhausted_with_dollars = cand_with_dollar_credits(
             "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
             SupergrokAccountRole::Business,
             0,
@@ -2027,6 +2037,7 @@ mod tests {
     /// Both included SuperGrok period pools still have remaining: Team /
     /// Business first, then personal. Console omitted.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn hop_both_included_remaining_team_business_first_then_personal() {
         let personal = cand(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
@@ -2065,8 +2076,9 @@ mod tests {
     /// Both included SuperGrok period pools exhausted: SuperGrok dollar
     /// credits next, not console primary.
     #[test]
+    // Grok OSS: rank helper, not hop proof. SuperGrok dollar credits before console is rank order, not sampling_config hop keys. SuperGrok is paid.
     fn hop_both_included_exhausted_supergrok_dollar_credits_before_console() {
-        let personal = cand_with_extras(
+        let personal = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             0,
@@ -2074,7 +2086,7 @@ mod tests {
             "tok-personal-dollars",
             Some(10_029),
         );
-        let team = cand_with_extras(
+        let team = cand_with_dollar_credits(
             "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
             SupergrokAccountRole::Business,
             0,
@@ -2112,6 +2124,7 @@ mod tests {
     /// false 100%. Never invent included SuperGrok period used percent on the
     /// client.
     #[test]
+    // Grok OSS: rank helper, not hop proof. Ranking is not sampling_config hop keys after included SuperGrok period limits are full. SuperGrok is paid.
     fn hop_missing_heavy_or_false_100_does_not_exhaust_sibling_with_remaining() {
         use std::collections::BTreeMap;
 
@@ -2123,7 +2136,7 @@ mod tests {
             Some(1_000),
             "tok-team-included",
         );
-        let personal = cand_with_extras(
+        let personal = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             1,
@@ -2215,10 +2228,11 @@ mod tests {
     }
 
     #[test]
+    // Grok OSS: rank helper, not hop proof. SuperGrok dollar credits on both plus missing SuperGrok Heavy must not flatten Team remaining. SuperGrok is paid.
     fn hop_dollar_credits_on_both_missing_heavy_keeps_team_remaining() {
         use std::collections::BTreeMap;
 
-        let team = cand_with_extras(
+        let team = cand_with_dollar_credits(
             "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
             SupergrokAccountRole::Business,
             88,
@@ -2226,7 +2240,7 @@ mod tests {
             "tok-team-included",
             Some(10_029),
         );
-        let personal = cand_with_extras(
+        let personal = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             1,
@@ -2288,13 +2302,14 @@ mod tests {
     }
 
     #[test]
+    // Grok OSS: rank helper, not hop proof. SuperGrok dollar credits on both plus missing SuperGrok Heavy must not flatten personal remaining. SuperGrok is paid.
     fn hop_dollar_credits_on_both_missing_heavy_keeps_personal_remaining() {
         use std::collections::BTreeMap;
 
         // Team prior remaining is already 0 (honest exhaust). Personal still
         // has remaining. Both rows are the snapshot shape (100%, SuperGrok
         // dollar credits, missing Heavy). Do not flatten personal remaining.
-        let team = cand_with_extras(
+        let team = cand_with_dollar_credits(
             "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
             SupergrokAccountRole::Business,
             0,
@@ -2302,7 +2317,7 @@ mod tests {
             "tok-team-dollars",
             Some(8_000),
         );
-        let personal = cand_with_extras(
+        let personal = cand_with_dollar_credits(
             "58c5f686-4270-4d6d-9c3b-df44559f8457",
             SupergrokAccountRole::Personal,
             72,
@@ -2362,8 +2377,8 @@ mod tests {
     /// Included full but SuperGrok $ extras remain → stay on SuperGrok session;
     /// console only as failover (after-burner).
     #[test]
-    fn auto_order_keeps_supergrok_when_included_full_but_extras_remain() {
-        let session = cand_with_extras(
+    fn auto_order_keeps_supergrok_when_included_full_but_dollar_credits_remain() {
+        let session = cand_with_dollar_credits(
             "team-live",
             SupergrokAccountRole::Business,
             0, // included exhausted
@@ -2435,7 +2450,7 @@ mod tests {
 
     /// Live SuperGrok with extras wins after-burner over a hard-expired sibling.
     #[test]
-    fn auto_afterburner_prefers_live_extras_over_hard_expired_sibling() {
+    fn auto_afterburner_prefers_live_dollar_credits_over_hard_expired_sibling() {
         let dead = cand_full(
             "dead",
             SupergrokAccountRole::Personal,
@@ -2466,10 +2481,10 @@ mod tests {
     }
 
     /// Fail-open: remaining 0 and SuperGrok dollar credits 0 or unknown keep
-    /// SuperGrok primary. Console is failover. Identifier keeps the old name.
+    /// SuperGrok primary. Console is failover.
     #[test]
-    fn auto_after_included_and_extras_gone_console_primary() {
-        let zero_extras = cand_with_extras(
+    fn auto_after_included_and_dollar_credits_gone_console_primary() {
+        let zero_dollar_credits = cand_with_dollar_credits(
             "team-live",
             SupergrokAccountRole::Business,
             0,
@@ -2478,7 +2493,7 @@ mod tests {
             Some(0),
         );
         let order_zero =
-            order_credentials_for_preferred_auto(&[zero_extras], &["console-key".into()]);
+            order_credentials_for_preferred_auto(&[zero_dollar_credits], &["console-key".into()]);
         assert_eq!(
             order_zero.primary.as_deref(),
             Some("tok-supergrok"),

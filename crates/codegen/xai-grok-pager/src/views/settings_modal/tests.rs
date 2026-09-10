@@ -665,6 +665,10 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // composer_multiline`. Sits immediately below session
             // Multiline).
             "composer_multiline",
+            // SHELL-owned allow_session_multiline (Editor; persist `[ui]
+            // allow_session_multiline`. Sits immediately below
+            // composer_multiline).
+            "allow_session_multiline",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
             // ghost text, live cache).
             "prompt_suggestions",

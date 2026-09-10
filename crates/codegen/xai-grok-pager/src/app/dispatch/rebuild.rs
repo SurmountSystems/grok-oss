@@ -1286,10 +1286,11 @@ mod tests {
         );
     }
 
-    /// Named contract: TUI `/rebuild` compiles this session's workspace, not
+    /// Grok OSS Named contract: TUI `/rebuild` compiles this session's workspace, not
     /// a random process cwd. After rebuild exec of a workspace-matching
     /// identity, `/limits` parse is this tree's `limits_cmd.rs` words.
-    /// Do not claim the live TUI already has them.
+    /// Do not claim the live TUI already has them. This diverges from upstream xAI
+    /// because FORK.md `/rebuild` SHA-aware extra and the catalog pin session workspace.
     #[test]
     fn tui_rebuild_starts_from_session_workspace_not_process_cwd() {
         use crate::app::actions::{Action, Effect};
@@ -1735,10 +1736,11 @@ mod tests {
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
     }
 
+    /// Grok OSS: successful `/rebuild` must exec-replace this grok-oss TUI onto the
+    /// newly installed binary even while nested agents are running. This diverges from
+    /// upstream xAI because FORK.md `/rebuild` SHA-aware extra pins a real restart.
     /// Operator: "Wait, that process hasn't restarted? I literally ran rebuild.
     /// Maybe the bug is in the rebuild command?"
-    /// Successful `/rebuild` must exec-replace this grok-oss TUI onto the
-    /// newly installed binary even while nested agents are running.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn operator_ran_rebuild_and_the_grok_oss_process_did_not_restart() {
@@ -1855,10 +1857,10 @@ mod tests {
         }
     }
 
-    /// Surmount / grok-oss fork; tests are contracts.
-    /// This TUI persist path does not cancel nested subagent ids. The
+    /// Grok OSS / Surmount fork; tests are contracts. This TUI persist path does not cancel nested subagent ids. The
     /// Subagents list must not go empty here. Leader `RelaunchForUpdate`
-    /// keeps nested ids on that leader the same way a TUI disconnect does.
+    /// keeps nested ids on that leader the same way a TUI disconnect does. This
+    /// diverges from upstream xAI because FORK.md `/rebuild` persist extra pins nested ids.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_keeps_nested_subagents_for_resume() {
@@ -1966,8 +1968,9 @@ mod tests {
         );
     }
 
-    /// Named contract: `/rebuild` starts while nested agents are running.
-    /// Nested work is not a gate.
+    /// Grok OSS Named contract: `/rebuild` starts while nested agents are running.
+    /// Nested work is not a gate. This diverges from upstream xAI because FORK.md
+    /// `/rebuild` is not a nested-work gate.
     #[test]
     fn rebuild_and_relaunch_starts_while_nested_subagents_are_running() {
         use crate::app::actions::{Action, Effect};
@@ -2004,9 +2007,10 @@ mod tests {
         agent.restore_prompt_wal_from_disk();
     }
 
-    /// Surmount / grok-oss fork; tests are contracts.
-    /// A WAL send that never made it into prompt_history or the queue is
-    /// restored as a pending Human turn on session load.
+    /// Grok OSS / Surmount fork; tests are contracts. A WAL send that never made it into prompt_history or the queue is
+    /// restored as a pending Human turn on session load. This diverges from upstream
+    /// xAI because the catalog WAL table pins restore. Restore is a contract, not
+    /// operator-verified known good from 2026-09-02.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn session_load_restores_wal_send_missing_from_prompt_history() {
@@ -2051,9 +2055,11 @@ mod tests {
         }
     }
 
-    /// Named contract: an unsent composer draft survives `/rebuild` the same
+    /// Grok OSS Named contract: an unsent composer draft survives `/rebuild` the same
     /// way it survives a disconnect. Reopen must not leave an empty composer
-    /// when the draft was non-empty.
+    /// when the draft was non-empty. This diverges from upstream xAI because FORK.md
+    /// wasted-human-time and the catalog WAL table pin rebuild-flush. Operator-verified
+    /// known good (2026-09-02) for live `rebuild-flush` WAL lines.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it() {
@@ -2135,8 +2141,10 @@ mod tests {
         }
     }
 
-    /// Named contract: queued operator prompts, including mid-turn interject
-    /// text, survive `/rebuild`. The operator must not retype them.
+    /// Grok OSS Named contract: queued operator prompts, including mid-turn interject
+    /// text, survive `/rebuild`. The operator must not retype them. This diverges from
+    /// upstream xAI because FORK.md `/rebuild` persist extra and the catalog WAL table
+    /// pin rebuild-flush. Operator-verified known good (2026-09-02) for live `rebuild-flush`.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them()
@@ -2228,8 +2236,9 @@ mod tests {
         }
     }
 
-    /// Named contract: plan Human-box `feedback_draft` and session `plan.md`
-    /// operator notes survive `/rebuild`.
+    /// Grok OSS Named contract: plan Human-box `feedback_draft` and session `plan.md`
+    /// operator notes survive `/rebuild`. This diverges from upstream xAI because
+    /// FORK.md `/rebuild` persist extra pins plan notes plus `plan.md`.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_persists_plan_feedback_draft_and_plan_md() {

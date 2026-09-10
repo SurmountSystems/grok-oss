@@ -46,9 +46,13 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
     if text.trim().is_empty() {
         return None;
     }
+    if agent.operator_prompt_already_issued_as_human_turn(&text) {
+        // `/start` must not requeue a finished Human turn as continue_prior_work.
+        // Occupancy drop spares that flag, so chat-history skip lives here.
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return None;
+    }
     agent.show_toast(auto_resume_toast());
-    // Cancel-resume re-drives the interrupted prompt; keep it even when
-    // that text is already a Human turn in scrollback.
     agent.session.enqueue_continue_prior_work_front(text);
     let _ = clear_canceled_turn_resume(&cwd, &sid);
     Some(maybe_drain_queue_and_note_peek(app, id))

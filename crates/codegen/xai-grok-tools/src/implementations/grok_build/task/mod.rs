@@ -950,6 +950,7 @@ mod tests {
         let _ = drain.await;
     }
 
+    // Grok OSS: default max depth lets L2 spawn L3. This diverges from upstream xAI because FORK.md agent-depth is L1 / L2 / L3 max.
     #[tokio::test]
     async fn default_max_allows_l2_to_spawn_l3() {
         let (backend, rx) = make_backend();

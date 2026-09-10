@@ -3494,9 +3494,10 @@ mod plan_pane_letter_a_contract_tests {
         assert_approve_notes_rode_along(&mut agent, outcome, "ship the named tests as contracts");
     }
 
-    /// Surmount / grok-oss fork; tests are contracts.
-    /// Plan Human-box notes that ride Approve append `prompt_wal.jsonl`
-    /// (`PlanNotes`) before the model is asked.
+    /// Grok OSS / Surmount fork; tests are contracts. Plan Human-box notes that ride Approve append `prompt_wal.jsonl`
+    /// (`PlanNotes`) before the model is asked. This diverges from upstream xAI because
+    /// FORK.md wasted-human-time and the catalog WAL table pin plan-notes. Operator-verified
+    /// known good (2026-09-02) for live `plan-notes` appends.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn prompt_wal_appends_on_approve_notes() {

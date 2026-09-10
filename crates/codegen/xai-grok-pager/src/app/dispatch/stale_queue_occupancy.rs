@@ -357,7 +357,7 @@ mod tests {
             "duplicate occupancy rows for the same already-issued text must not remain in the pager queue; painted={painted:?}"
         );
         assert!(
-            painted.iter().any(|t| *t == STILL_UNSENT),
+            painted.contains(&STILL_UNSENT),
             "a truly unsent follow-up must still paint as a queue row; painted={painted:?}"
         );
         assert_eq!(

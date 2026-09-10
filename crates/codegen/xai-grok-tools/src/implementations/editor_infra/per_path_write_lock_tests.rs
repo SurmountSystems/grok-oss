@@ -90,6 +90,7 @@ fn assert_no_human_lock_menu(message: &str) {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins exclusive writes so two agents cannot edit the same path at once.
 #[tokio::test]
 async fn two_agents_cannot_write_the_same_path_at_once() {
     let tmp = TempDir::new().unwrap();
@@ -122,6 +123,7 @@ async fn two_agents_cannot_write_the_same_path_at_once() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a silent happy path when the first writer holds the path.
 #[tokio::test]
 async fn happy_path_first_writer_succeeds_silently() {
     let tmp = TempDir::new().unwrap();
@@ -150,6 +152,7 @@ async fn happy_path_first_writer_succeeds_silently() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins the lock to the tool call, then a later call may write.
 #[tokio::test]
 async fn lock_releases_after_the_tool_call_so_a_later_call_can_write() {
     let tmp = TempDir::new().unwrap();
@@ -176,6 +179,7 @@ async fn lock_releases_after_the_tool_call_so_a_later_call_can_write() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins search_replace, apply_patch, and write to the same exclusive lock.
 #[tokio::test]
 async fn search_replace_apply_patch_and_write_all_take_the_lock() {
     let tmp = TempDir::new().unwrap();
@@ -250,6 +254,7 @@ async fn search_replace_apply_patch_and_write_all_take_the_lock() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a named holder and file, not a steal/skip/wait menu.
 #[tokio::test]
 async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() {
     let tmp = TempDir::new().unwrap();
@@ -271,6 +276,7 @@ async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins sequential writes after the first tool call returns, even when both agents share write_paths.
 #[tokio::test]
 async fn sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths()
  {
@@ -310,6 +316,7 @@ async fn sequential_search_replace_succeeds_after_the_first_tool_call_returns_wh
     release_holder(&second);
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins spawn-time write_paths as a reminder, not an exclusive block.
 #[tokio::test]
 async fn search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment() {
     let tmp = TempDir::new().unwrap();
@@ -350,6 +357,7 @@ fn hashline_write_input(file_path: &str, content: &str) -> HashlineEditInput {
     }
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins hashline_edit to the same exclusive lock.
 #[tokio::test]
 async fn hashline_edit_refuses_when_another_agent_holds_the_path() {
     let tmp = TempDir::new().unwrap();
@@ -383,6 +391,7 @@ async fn hashline_edit_refuses_when_another_agent_holds_the_path() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a silent hashline happy path.
 #[tokio::test]
 async fn hashline_edit_happy_path_does_not_mention_the_lock() {
     let tmp = TempDir::new().unwrap();

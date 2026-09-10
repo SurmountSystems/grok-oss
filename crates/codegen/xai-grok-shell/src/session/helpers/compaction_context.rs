@@ -495,6 +495,7 @@ mod tests {
     /// fire-and-return for long builder L2s) must be injected on compact/recap
     /// so it is in the first screen.
     #[test]
+    // Grok OSS: empty live-state still injects standing law as the first system-reminder section after compact. This diverges from upstream xAI because Surmount standing law must not be a buried AGENTS.md paragraph.
     fn post_compact_reminder_includes_surmount_standing_law() {
         let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None)
             .expect("standing law must produce a post-compact reminder even with empty live state");

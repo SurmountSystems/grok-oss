@@ -24,8 +24,10 @@ use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
 use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::prompt_queue::QueueEntryWire;
 use crate::scrollback::EntryId;
+use crate::scrollback::block::RenderBlock;
+use crate::scrollback::blocks::SessionEvent;
 use crate::views::queue_pane::visible_held_server_row;
-use xai_grok_shell::session::prompt_wal::PromptWalImage;
+use xai_grok_shell::session::prompt_wal::{PromptWalImage, PromptWalKind};
 
 /// How chrome should read an open turn's wait.
 ///
@@ -135,6 +137,105 @@ pub(crate) fn apply_persisted_pending_prompts(
             kind_from_persist_label(&row.kind),
         ));
     }
+}
+
+fn last_compact_stuck_index(scrollback: &ScrollbackState) -> Option<usize> {
+    for idx in (0..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => {
+                if matches!(
+                    ev.event,
+                    SessionEvent::CompactionFailed { .. }
+                        | SessionEvent::CompactionSkippedTinySavings
+                        | SessionEvent::ContextTooLarge
+                ) {
+                    return Some(idx);
+                }
+                if compact_stuck_scan_skips_session_event(&ev.event) {
+                    continue;
+                }
+                return None;
+            }
+            Some(RenderBlock::System(_)) | Some(RenderBlock::UserPrompt(_)) => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn compact_stuck_scan_skips_session_event(ev: &SessionEvent) -> bool {
+    matches!(
+        ev,
+        SessionEvent::TurnFailed { .. }
+            | SessionEvent::TurnCompleted { .. }
+            | SessionEvent::TurnCancelled { .. }
+            | SessionEvent::TurnHalted { .. }
+            | SessionEvent::RetryFailed { .. }
+            | SessionEvent::RequestFailed { .. }
+            | SessionEvent::CompactionStarted { .. }
+            | SessionEvent::CompactionCancelled
+    )
+}
+
+fn last_real_user_prompt_for_compact_continue(scrollback: &ScrollbackState) -> Option<String> {
+    let compact_idx = last_compact_stuck_index(scrollback);
+    let len = scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::UserPrompt(block) = &entry.block else {
+            continue;
+        };
+        if block.is_bash || block.is_cron {
+            continue;
+        }
+        let text = block.text.trim();
+        if text.is_empty() || crate::slash::queue_schedule::is_compact_slash(text) {
+            continue;
+        }
+        if compact_idx.is_some_and(|c| idx > c)
+            && is_slash_resume_artifact(text)
+            && !http_502_after_compact_fail(scrollback, compact_idx)
+        {
+            continue;
+        }
+        return Some(text.to_string());
+    }
+    None
+}
+
+fn is_slash_resume_artifact(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with('/') && !t.starts_with("//")
+}
+
+fn session_event_is_http_502(ev: &SessionEvent) -> bool {
+    match ev {
+        SessionEvent::RequestFailed {
+            status: Some(502), ..
+        } => true,
+        SessionEvent::RequestFailed {
+            headline, detail, ..
+        } if headline.contains("502") || detail.contains("502") => true,
+        SessionEvent::RetryFailed { error, .. } if error.contains("502") => true,
+        _ => false,
+    }
+}
+
+fn http_502_after_compact_fail(scrollback: &ScrollbackState, compact_idx: Option<usize>) -> bool {
+    let Some(compact_idx) = compact_idx else {
+        return false;
+    };
+    for idx in (compact_idx + 1..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) if session_event_is_http_502(&ev.event) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 impl AgentView {
@@ -319,6 +420,52 @@ impl AgentView {
         std::fs::read_to_string(path).ok()
     }
 
+    /// WAL Send and Interject bodies. Those already issued as Human turns.
+    /// Compact can replace `chat_history.jsonl` with a summary; WAL still
+    /// has the issued text.
+    fn wal_issued_operator_texts(&self) -> Vec<String> {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return Vec::new();
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Ok(records) =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd, session_id.0.as_ref())
+        else {
+            return Vec::new();
+        };
+        records
+            .into_iter()
+            .filter(|r| matches!(r.kind, PromptWalKind::Send | PromptWalKind::Interject))
+            .map(|r| r.text)
+            .filter(|t| !t.trim().is_empty())
+            .collect()
+    }
+
+    /// Compact-fail continue identity: last real Human prompt, not `/compact`.
+    /// Occupancy drop uses this so issued text is not a Prompt row. Unstick
+    /// requeues `/compact` only when this text already issued as a Human turn.
+    pub(crate) fn continue_prompt_after_compact(&self) -> Option<String> {
+        if let Some(held) = self.session.compact_held_prompt.as_ref() {
+            let t = held.text.trim();
+            if !t.is_empty() && !crate::slash::queue_schedule::is_compact_slash(t) {
+                return Some(held.text.clone());
+            }
+        }
+        last_real_user_prompt_for_compact_continue(&self.scrollback)
+    }
+
+    pub(crate) fn last_compact_stuck_index(&self) -> Option<usize> {
+        last_compact_stuck_index(&self.scrollback)
+    }
+
+    /// True when `text` already issued as a Human turn in scrollback, chat
+    /// history, or WAL Send/Interject. Compact-fail unstick and `/start`
+    /// must not requeue that text as a Prompt.
+    pub(crate) fn operator_prompt_already_issued_as_human_turn(&self, text: &str) -> bool {
+        let committed = self.committed_human_turn_texts(true, true);
+        Self::queue_text_matches_committed_human_turn(text, &committed)
+    }
+
     fn operator_queue_text_already_in_history(&self, text: &str, chat_blob: Option<&str>) -> bool {
         xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
             text,
@@ -331,7 +478,18 @@ impl AgentView {
     /// Human-turn bodies already in the transcript. `prompt_history` is not
     /// used: composer send records history at enqueue time, before the row
     /// becomes a Human turn.
-    fn committed_human_turn_texts(&self, include_chat_history: bool) -> Vec<String> {
+    ///
+    /// `include_wal` is for restore, persist, unstick, and `/rebuild`: WAL
+    /// Send/Interject after compact can still mean the Human turn issued.
+    /// Live drain must not pass `include_wal`. Idle Enter writes WAL Send
+    /// before enqueue as durability, then drains that same row. Treating
+    /// that WAL line as occupancy leftover drops the row and returns no
+    /// `Effect::SendPrompt`.
+    fn committed_human_turn_texts(
+        &self,
+        include_chat_history: bool,
+        include_wal: bool,
+    ) -> Vec<String> {
         use crate::scrollback::block::RenderBlock;
         let mut texts = Vec::new();
         for i in 0..self.scrollback.len() {
@@ -349,6 +507,9 @@ impl AgentView {
                 xai_grok_shell::session::prompt_wal::user_texts_from_chat_history_jsonl(&blob),
             );
         }
+        if include_wal {
+            texts.extend(self.wal_issued_operator_texts());
+        }
         texts
     }
 
@@ -363,19 +524,42 @@ impl AgentView {
     /// (server rows first, then local). Compact can empty UserPrompt blocks
     /// while chat history still has the Human turn; paint and drain must
     /// still drop that occupancy.
+    ///
+    /// Live drain does not treat WAL Send as occupancy. That WAL line is
+    /// written before enqueue so Enter durability exists before the model
+    /// wait. Restore and persist still use WAL via
+    /// [`Self::drop_stale_queue_occupancy_with_chat_history`].
+    ///
+    /// A just-submitted local queue id is not leftover occupancy. Idle
+    /// Enter writes WAL Send, then enqueues, then drains that same row.
+    /// Parallel quality runs also share `cwd=/tmp` `test-session`
+    /// `chat_history.jsonl`. Matching that body (or an earlier Human turn
+    /// of the same words) must not drop this Enter before `SendPrompt`.
     pub(crate) fn drop_stale_queue_occupancy(&mut self) {
-        self.drop_stale_queue_occupancy_inner(true);
+        self.drop_stale_queue_occupancy_inner(true, false, None);
     }
 
-    /// Same occupancy drop, including Human turns recorded in
-    /// `chat_history.jsonl`. Persist, restore, rebuild, and queue-pane paint
-    /// use this path.
+    /// Live drain before dequeue: same as [`Self::drop_stale_queue_occupancy`],
+    /// but keep `protect_queue_id` so this dispatch's enqueue can become a
+    /// Human turn. After paint, call [`Self::drop_stale_queue_occupancy`]
+    /// with no protect so leftover copies still collapse.
+    pub(crate) fn drop_stale_queue_occupancy_protecting(&mut self, protect_queue_id: Option<u64>) {
+        self.drop_stale_queue_occupancy_inner(true, false, protect_queue_id);
+    }
+
+    /// Occupancy drop for persist, restore, rebuild, and queue-pane paint.
+    /// Includes Human turns in `chat_history.jsonl` and WAL Send/Interject.
     pub(crate) fn drop_stale_queue_occupancy_with_chat_history(&mut self) {
-        self.drop_stale_queue_occupancy_inner(true);
+        self.drop_stale_queue_occupancy_inner(true, true, None);
     }
 
-    fn drop_stale_queue_occupancy_inner(&mut self, include_chat_history: bool) {
-        let committed = self.committed_human_turn_texts(include_chat_history);
+    fn drop_stale_queue_occupancy_inner(
+        &mut self,
+        include_chat_history: bool,
+        include_wal: bool,
+        protect_queue_id: Option<u64>,
+    ) {
+        let committed = self.committed_human_turn_texts(include_chat_history, include_wal);
         self.shared_queue
             .retain(|wire| !Self::queue_text_matches_committed_human_turn(&wire.text, &committed));
         self.session.pending_prompts.retain(|prompt| {
@@ -385,6 +569,7 @@ impl AgentView {
             // Command rows, not Human-turn replays.
             prompt.continue_prior_work
                 || prompt.kind == QueueEntryKind::Command
+                || protect_queue_id == Some(prompt.id)
                 || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
         });
         let mut last_kept: Option<String> = None;
@@ -400,9 +585,13 @@ impl AgentView {
             true
         });
         self.session.pending_prompts.retain(|prompt| {
-            // Re-drive and slash-hold rows must survive collapse against a
-            // shared-queue echo or an earlier Human-turn body of the same text.
-            if prompt.continue_prior_work || prompt.kind == QueueEntryKind::Command {
+            // Re-drive, slash-hold, and this-dispatch enqueue must survive
+            // collapse against a shared-queue echo or an earlier Human-turn
+            // body of the same text.
+            if prompt.continue_prior_work
+                || prompt.kind == QueueEntryKind::Command
+                || protect_queue_id == Some(prompt.id)
+            {
                 let trimmed = prompt.text.trim();
                 if !trimmed.is_empty() {
                     last_kept = Some(trimmed.to_string());
@@ -434,7 +623,7 @@ impl AgentView {
         };
         let cwd = self.session.cwd.to_string_lossy();
         let chat_blob = self.chat_history_blob_for_session();
-        let committed = self.committed_human_turn_texts(true);
+        let committed = self.committed_human_turn_texts(true, true);
         let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
             &cwd,
             session_id.0.as_ref(),

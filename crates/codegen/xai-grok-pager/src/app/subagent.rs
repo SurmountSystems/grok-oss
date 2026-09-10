@@ -571,12 +571,13 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
         Some(c) => c.to_uppercase().chain(chars).collect(),
         None => raw_label,
     };
-    // Suffix owned by agent_view::l2_token_tracking (`measured N tokens`).
-    // In-memory `tokens_used` only. Do not open session transcript files here.
-    let desc = match info.tokens_used {
-        Some(n) => format!("{clean_desc} (measured {n} tokens)"),
-        None => clean_desc.to_string(),
-    };
+    // Suffix owned by agent_view::l2_token_tracking (compact count plus `tokens`).
+    // In-memory tracker, then `tokens_used`. Do not open session transcript files here.
+    let desc = crate::app::agent_view::l2_token_tracking::format_live_subagents_list_row(
+        info.child_session_id.as_ref(),
+        clean_desc,
+        info.tokens_used,
+    );
     (label, desc)
 }
 
@@ -1237,6 +1238,28 @@ mod tests {
             " (grok-3)"
         );
     }
+    /// Contract A: Subagents nested token chrome must not contain the word
+    /// `measured`, must not paint a raw integer like 53407, and must contain
+    /// compact plus `tokens` (`53.4k tokens`).
+    #[test]
+    fn format_subagent_label_measured_tokens_use_compact_counts() {
+        let mut info = make_info();
+        info.tokens_used = Some(53407);
+        info.description = "Stale prompt still live".into();
+        let (_, desc) = format_subagent_label(&info);
+        assert!(
+            desc.contains("53.4k tokens"),
+            "nested L2 token chrome must use the same compact count style as the rest of grok-oss (K/M), not a raw integer like 53407, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("53407"),
+            "must not paint a raw integer token count, got {desc:?}"
+        );
+    }
     #[test]
     fn label_uses_persona_when_set() {
         let mut info = make_info();
@@ -1332,6 +1355,47 @@ mod tests {
         info.persona = Some("Reviewer".into());
         let (label, _) = format_subagent_label(&info);
         assert_eq!(label, "Reviewer");
+    }
+    /// Contract A: Subagents list description suffix is `12.4k tokens` after
+    /// an in-memory 12400 usage tick. Must not contain `measured`. Must not
+    /// paint the raw integer 12400. Layout uses `l2_token_tracking`. It must
+    /// not open the session transcript file.
+    #[test]
+    fn format_subagent_label_shows_measured_tokens_suffix() {
+        let mut info = make_info();
+        info.description = "rate-limit implementer".into();
+        info.tokens_used = Some(12400);
+        let (_, desc) = format_subagent_label(&info);
+        assert!(
+            desc.contains("12.4k tokens"),
+            "Subagents list row must contain 12.4k tokens, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("12400"),
+            "must not paint a raw integer token count, got {desc:?}"
+        );
+        assert!(
+            desc.contains("rate-limit implementer"),
+            "row uses the description label, got {desc:?}"
+        );
+        assert_eq!(
+            desc,
+            crate::app::agent_view::l2_token_tracking::format_subagents_list_description(
+                "rate-limit implementer",
+                Some(12400),
+            )
+        );
+        info.tokens_used = None;
+        let (_, before) = format_subagent_label(&info);
+        assert_eq!(before, "rate-limit implementer");
+        assert!(
+            !before.contains("tokens"),
+            "no token suffix before the first usage tick, got {before:?}"
+        );
     }
     fn write_meta_json(dir: &std::path::Path, subagent_id: &str, json: &str) {
         let meta_dir = dir.join("subagents").join(subagent_id);

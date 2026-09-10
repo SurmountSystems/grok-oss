@@ -601,9 +601,10 @@ fn auth_manager_new_auto_use_aligns_sticky_team_base_to_ranked_free_period_prima
 /// flattened) plus SuperGrok dollar credits, and Team used 40%, keep the
 /// personal SuperGrok JWT. Team JWT is not the paying source.
 #[test]
+// Grok OSS: hop-neighbor. After billing, sticky personal included-full switches to Business included remaining. Rank helpers are not hop proof. SuperGrok is paid.
 fn align_after_billing_switches_sticky_personal_full_to_business_included() {
     use crate::auth::{
-        clear_included_billing_cache, remember_supergrok_dollar_extras,
+        clear_included_billing_cache, remember_supergrok_dollar_credits,
         remember_supergrok_included_billing,
     };
 
@@ -637,7 +638,7 @@ fn align_after_billing_switches_sticky_personal_full_to_business_included() {
         Some("2026-08-20T00:00:00Z"),
         Some("USAGE_PERIOD_TYPE_WEEKLY"),
     );
-    remember_supergrok_dollar_extras("58c5f686-4270-4d6d-9c3b-df44559f8457", 10_029);
+    remember_supergrok_dollar_credits("58c5f686-4270-4d6d-9c3b-df44559f8457", 10_029);
     remember_supergrok_included_billing(
         "61fab250-b2c1-40cf-b5b8-628e673a2eeb",
         40.0,

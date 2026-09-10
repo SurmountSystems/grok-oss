@@ -894,6 +894,7 @@ mod tests {
 
     /// Named contract: this git tree must not grow non-excepted Python under
     /// project skill roots. Host `~/.agents/skills` is out of scope.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because a restack must not install junk .py under skill roots.
     #[test]
     fn product_repo_skill_roots_have_no_non_excepted_python() {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -939,6 +940,7 @@ mod tests {
     /// office/docx/pptx/xlsx/pdf scripts may stay. A restack that reintroduces
     /// helper `.py` files (review JSON builders, invented uuid helpers, the
     /// Python unit test for `memory.py`) is a failed land.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because sanitize must drop junk .py so restack cannot install them.
     #[test]
     fn sanitize_rejects_non_excepted_skill_python() {
         assert_eq!(
@@ -1117,6 +1119,7 @@ mod tests {
     /// Named contract: a network restack archive that contains junk `.py`
     /// under skills must not write those files into `~/.grok/bundled/skills`.
     /// Allowlisted intercept CLI stubs still extract.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because extract must skip junk .py so restack cannot install them.
     #[test]
     fn extract_archive_skips_non_excepted_skill_python() {
         let tmp = TempDir::new().unwrap();

@@ -322,7 +322,7 @@ Always-approve remains the preferred daily autonomy mode. Context-only is an exp
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables newlines entirely; `/multiline` cannot restore them while that persist flag is off.
+Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` always inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.
 
 ### `/history`
 

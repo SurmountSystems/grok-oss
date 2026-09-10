@@ -2128,6 +2128,9 @@ pub(crate) async fn run(
                 let voice_auth = crate::voice::build_voice_auth(voice_auth_factory.clone());
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
+                // Grok OSS: Until the Operator stops recording, PCM forks to
+                // audio WAL beside prompt_wal.jsonl. Temp fallback if no session.
+                app.voice_config.audio_wal_session_dir = app.audio_wal_session_dir_for(target);
                 let voice_config = app.voice_config.clone();
                 tokio::spawn(xai_grok_voice::run_voice_pipeline(
                     voice_config,
@@ -2640,12 +2643,7 @@ pub(crate) async fn run(
             _ = billing_poll => {
                 billing_poll_at = None;
                 if let ActiveView::Agent(id) = app.active_view {
-                    let effs = vec![Effect::FetchBilling {
-                        agent_id: id,
-                        silent: true,
-                        nonce: 0,
-                        force_refresh: dispatch::BACKGROUND_BILLING_POLL_FORCE_REFRESH,
-                    }];
+                    let effs = vec![dispatch::background_billing_poll_fetch_billing(id)];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
                     }
@@ -4310,9 +4308,28 @@ mod tests {
             Duration::from_secs(3600),
             "near-full included SuperGrok period background poll must not HTTP every 30s"
         );
-        assert!(
-            !dispatch::BACKGROUND_BILLING_POLL_FORCE_REFRESH,
+        assert_eq!(
+            dispatch::background_billing_poll_snapshot_mode(),
+            xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
             "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        let Effect::FetchBilling {
+            force_refresh,
+            silent,
+            nonce,
+            ..
+        } = dispatch::background_billing_poll_fetch_billing(crate::app::agent::AgentId(0))
+        else {
+            panic!("background billing poll must queue FetchBilling");
+        };
+        assert!(
+            !force_refresh,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        assert!(silent, "background billing poll is silent chrome refresh");
+        assert_eq!(
+            nonce, 0,
+            "background billing poll is not a usage-modal fetch"
         );
     }
 

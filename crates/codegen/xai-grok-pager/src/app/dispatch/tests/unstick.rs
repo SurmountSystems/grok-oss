@@ -26,6 +26,7 @@ fn unstick_resend_text(effects: &[Effect]) -> Option<&str> {
 
 /// Operator: resend the last L1 prompt as if the network had been interrupted.
 /// Not a duplicate prompt (do not paint a second Human line).
+// Grok OSS: /unstick resends the last L1 prompt and must not paint a second Human line. This diverges from upstream xAI because FORK.md and catalog pin /unstick as a grok-oss slash, not /resume.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn unstick_resends_last_l1_prompt_without_duplicate_human_line() {
@@ -120,6 +121,7 @@ fn unstick_resends_last_l1_prompt_without_duplicate_human_line() {
 /// Operator: without unwinding any work or tokens. Do not cancel nested
 /// agents, rewind tool results, drop the transcript, reset sampler usage
 /// meters, or compact-away the turn.
+// Grok OSS: /unstick must not cancel nested work, rewind, or reset usage meters. This diverges from upstream xAI because FORK.md and catalog pin /unstick as resend-not-unwind, not send-now cancel.
 #[test]
 fn unstick_does_not_cancel_nested_subagents_or_rewind_tokens() {
     let mut app = test_app_with_agent();
@@ -212,6 +214,7 @@ fn unstick_does_not_cancel_nested_subagents_or_rewind_tokens() {
 
 /// Operator: must not conflict with resume. `/resume` / continue interrupted
 /// turn stay as they are.
+// Grok OSS: /unstick is not /resume (session picker). This diverges from upstream xAI because FORK.md and catalog pin /unstick as a distinct grok-oss slash.
 #[test]
 fn unstick_does_not_collide_with_resume_slash() {
     let mut app = test_app_with_agent();
@@ -259,6 +262,7 @@ fn unstick_does_not_collide_with_resume_slash() {
 
 /// Operator: if there is no last L1 prompt, fail loud with a short toast.
 /// Do not invent text.
+// Grok OSS: /unstick with no last prompt fails loud and must not invent text. This diverges from upstream xAI because FORK.md and catalog pin that no-last-prompt toast as the grok-oss contract.
 #[test]
 fn unstick_with_no_last_prompt_fails_loud() {
     let mut app = test_app_with_agent();
@@ -295,6 +299,7 @@ fn unstick_with_no_last_prompt_fails_loud() {
 
 /// Operator: WAL image file ids resend as resource links, not only
 /// `[Image #N]` text, and never as data URLs.
+// Grok OSS: /unstick resends WAL image file ids as resource links, never data URLs. This diverges from upstream xAI because FORK.md and catalog pin WAL image resend as a grok-oss /unstick contract.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn unstick_resends_wal_images_as_resource_blocks_not_data_urls() {

@@ -48,7 +48,12 @@ vim_mode = false                       # vim-style scrollback navigation keys (d
 composer_multiline = true              # Human box may insert newlines (default on). Set false
                                        # so Enter and Shift+Enter send (or interject) and never
                                        # open a second line. Session Multiline cannot restore
-                                       # newlines while this is false.
+                                       # newlines while this is false. Ctrl+Enter still inserts
+                                       # a newline.
+allow_session_multiline = true         # Allow Ctrl+M / /multiline / Multiline settings to turn
+                                       # session Multiline on (default on). Set false to block
+                                       # enabling session Multiline. Distinct from
+                                       # composer_multiline.
 max_thoughts_width = 120               # max column width for reasoning display
 default_selected_permission = "always_allow_all_sessions" # preselected row on the FIRST approval prompt
 remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
@@ -128,7 +133,8 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
-| `[ui] composer_multiline` | true | Settings → Editor | When false, the Human box stays single-line. Enter and Shift+Enter send (or interject if a turn is running) and never insert a newline. Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
+| `[ui] composer_multiline` | true | Settings → Editor | When false, the Human box stays single-line for Enter and Shift+Enter (they send or interject and never insert a newline). Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. `Ctrl+Enter` still inserts a newline. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
+| `[ui] allow_session_multiline` | true | Settings → Editor | When false, `Ctrl+M`, `/multiline`, and the session Multiline settings row cannot turn session Multiline on. Distinct from `composer_multiline`. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. Default on. |
 | `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
 | `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
 | `[ui] always_expand_thinking` | false | Settings | Keep thinking fully expanded. Off paints collapsed Thought-for headers, including nested overlays. Ctrl+T writes this same key so the next thought and the next session match the last toggle. Distinct from `show_thinking_blocks`. |
@@ -182,16 +188,29 @@ You can also flip it from the settings pane (`/settings` → **Disable vim input
 
 #### Composer multiline
 
-`[ui] composer_multiline` is whether the Human box may insert newlines. Default is on, so Shift+Enter still inserts a newline when session Multiline is off, and `Ctrl+M` / `/multiline` still swaps Enter and Shift+Enter for that session.
+`[ui] composer_multiline` is whether the Human box may insert newlines from Enter / Shift+Enter. Default is on, so Shift+Enter still inserts a newline when session Multiline is off. Session Multiline (`Ctrl+M` / `/multiline`) still makes mid-line Enter insert a newline, and Shift+Enter still sends. Enter at the end of the last line still sends or interjects. It does not insert a silent extra newline. `Ctrl+Enter` always inserts a newline and is not gated by this flag.
 
-Set it false when you want a single-line Human box:
+Set it false when you want Enter / Shift+Enter to stay single-line:
 
 ```toml
 [ui]
 composer_multiline = false
 ```
 
-Then Enter sends (or interjects if a turn is running). Shift+Enter also sends. Neither key opens a second line. Session Multiline cannot restore newlines while this is false. Plan Preview and the main Prompt use the same flag. `/settings` → **Composer multiline** writes the same key.
+Then Enter sends (or interjects if a turn is running). Shift+Enter also sends. Neither of those keys opens a second line. `Ctrl+Enter` still inserts a newline. Session Multiline cannot restore Enter / Shift+Enter newlines while this is false. Plan Preview and the main Prompt use the same flag. `/settings` → **Composer multiline** writes the same key.
+
+#### Allow session Multiline
+
+`[ui] allow_session_multiline` is whether session Multiline can be turned on. Default is on. Distinct from `[ui] composer_multiline`.
+
+Set it false when you want to block accidental session Multiline:
+
+```toml
+[ui]
+allow_session_multiline = false
+```
+
+Then `Ctrl+M`, `/multiline`, and the Multiline settings row cannot turn session Multiline on. Turning the allow flag off also forces any active session Multiline off. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. `/settings` → **Allow session Multiline** writes the same key.
 
 #### Default selected permission
 

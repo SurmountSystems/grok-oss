@@ -274,7 +274,7 @@ pub enum ActiveSpendDriver {
     SuperGrokFreePeriod,
     /// Included SuperGrok period limits full and SuperGrok dollar credits known
     /// positive (after-burner).
-    SuperGrokExtras,
+    SuperGrokDollarCredits,
     /// Console API key is the live sampling principal.
     ConsoleKey,
 }
@@ -284,7 +284,7 @@ impl ActiveSpendDriver {
     pub fn as_wire(self) -> &'static str {
         match self {
             Self::SuperGrokFreePeriod => "supergrok_free_period",
-            Self::SuperGrokExtras => "supergrok_extras",
+            Self::SuperGrokDollarCredits => "supergrok_extras",
             Self::ConsoleKey => "console_key",
         }
     }
@@ -292,8 +292,8 @@ impl ActiveSpendDriver {
     /// Human label for `/limits` **Active:** line (plain American English).
     pub fn as_human(self) -> &'static str {
         match self {
-            Self::SuperGrokFreePeriod => "included SuperGrok period limits",
-            Self::SuperGrokExtras => "SuperGrok dollar credits",
+            Self::SuperGrokFreePeriod => "SuperGrok period",
+            Self::SuperGrokDollarCredits => "SuperGrok dollar credits",
             Self::ConsoleKey => "console key",
         }
     }
@@ -371,14 +371,17 @@ pub fn active_spend_driver(
     live: SamplingIdentityKind,
     included_usage_known: bool,
     included_usage_pct: f64,
-    supergrok_extras_cents: Option<i64>,
+    super_grok_dollar_credits_cents: Option<i64>,
 ) -> ActiveSpendDriver {
     if live.is_console() {
         return ActiveSpendDriver::ConsoleKey;
     }
     if included_usage_known && included_usage_pct >= 100.0 {
-        if supergrok_extras_cents.map(i64::abs).is_some_and(|c| c > 0) {
-            return ActiveSpendDriver::SuperGrokExtras;
+        if super_grok_dollar_credits_cents
+            .map(i64::abs)
+            .is_some_and(|c| c > 0)
+        {
+            return ActiveSpendDriver::SuperGrokDollarCredits;
         }
         return ActiveSpendDriver::SuperGrokFreePeriod;
     }
@@ -800,7 +803,7 @@ pub fn format_usage_summary_with_live_identity_gap_and_honesty(
     console_team_prepaid_gap: ConsoleTeamPrepaidGap,
     flat_poll_unproven_debit: bool,
     flat_poll_observed_build: bool,
-    flat_poll_observed_extras: bool,
+    flat_poll_observed_dollar_credits: bool,
     oauth_postpaid_dominates: bool,
 ) -> String {
     if sampling_identity.is_console() {
@@ -886,7 +889,7 @@ pub fn format_usage_summary_with_live_identity_gap_and_honesty(
             has_included_reading,
             flat_poll_unproven_debit,
             flat_poll_observed_build,
-            flat_poll_observed_extras,
+            flat_poll_observed_dollar_credits,
             oauth_postpaid_dominates,
             has_console_team_prepaid_reading: console_team_prepaid_cents.is_some(),
             // Default credits live on `/limits` postpaid preview, not `/usage`.
@@ -1479,9 +1482,9 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
     // Included SuperGrok period limits % path may append linear-burn pacing.
     // SuperGrok dollar credits $ path does not (period is full; pacing is about
     // included burn).
-    let on_extras = meter.contains("SuperGrok dollar credits");
+    let on_dollar_credits = meter.contains("SuperGrok dollar credits");
     let on_console = meter.starts_with("console");
-    let text = if on_extras || on_console {
+    let text = if on_dollar_credits || on_console {
         meter
     } else {
         match balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now()) {
@@ -1500,7 +1503,7 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
     } else {
         balance.usage_pct
     };
-    let color = if on_extras {
+    let color = if on_dollar_credits {
         let cents = balance.prepaid_balance_cents.map(i64::abs).unwrap_or(0);
         if cents <= LOW_BALANCE_CENTS {
             theme.warning
@@ -1519,7 +1522,7 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
     // fmt_pct5 at the default chip width. Only when this chip is naming
     // included SuperGrok period limits. SuperGrok dollar credits stay `$`.
     // CreditBalance has used %, not a remaining count. Do not invent 490/510.
-    if hovered && !on_extras && !on_console {
+    if hovered && !on_dollar_credits && !on_console {
         const PCT_WIDTH: u16 = 5;
         const BAR_PCT_GAP: u16 = 1;
         let min_width = BAR_PCT_GAP + PCT_WIDTH;
@@ -1548,8 +1551,8 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
 /// not warmed yet. Always visible and clickable (`ShowLimits`); never blank
 /// until the first successful fetch.
 ///
-/// Prefixed with `included SuperGrok period limits ·` so cold chrome names the
-/// real meter (not secondary team prepaid, not a bare abstraction). SuperGrok
+/// Prefixed with `SuperGrok period ·` so cold chrome names the meter in short
+/// human words (not secondary team prepaid, not a bare abstraction). SuperGrok
 /// is paid; do not paint "free SuperGrok period". ASCII `...` only (no unicode
 /// ellipsis). Dim so warm percent still reads as the primary signal once data
 /// arrives.
@@ -1565,8 +1568,9 @@ pub fn credit_bar_loading_line(hovered: bool, theme: &Theme) -> Line<'static> {
 /// Compact status-bar name for included SuperGrok period limits (used %).
 ///
 /// SuperGrok is a paid product. Compact status and `/limits` **Active:**
-/// ([`ActiveSpendDriver::as_human`]) both name included SuperGrok period limits.
-const INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT: &str = "included SuperGrok period limits";
+/// ([`ActiveSpendDriver::as_human`]) both paint short `SuperGrok period`.
+/// Do not paint the long string `included SuperGrok period limits` in TUI chrome.
+const INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT: &str = "SuperGrok period";
 
 /// Workspace word for compact included SuperGrok period limits chrome.
 ///
@@ -1676,7 +1680,7 @@ pub fn compact_live_principal_role_from_process() -> Option<&'static str> {
 ///
 /// Design A (active meter only = spend-order chrome, not settlement proof):
 /// - **Included SuperGrok period limits known with room** (`included < 100%`) →
-///   `included SuperGrok period limits · N%` (workspace word when known).
+///   `SuperGrok period · N%` (workspace word when known).
 ///   Console sampling identity and Management prepaid `$N` do not lead the
 ///   compact chip while that included pool is still the primary meter.
 /// - **Console live** (included full or unknown) → console team prepaid `$N`
@@ -1686,18 +1690,18 @@ pub fn compact_live_principal_role_from_process() -> Option<&'static str> {
 ///   dollar credits → SuperGrok dollar credits `$` (not bare `100%` as if included
 ///   period still drives after-burner spend).
 /// - **SuperGrok live + included period full + no SuperGrok dollar credits** →
-///   `included SuperGrok period limits · 100%` (included pool is empty; no
+///   `SuperGrok period · 100%` (included pool is empty; no
 ///   second meter).
 /// - **SuperGrok live + cold included** → honest
-///   `included SuperGrok period limits · ...%`.
+///   `SuperGrok period · ...%`.
 /// - **SuperGrok live + active poll auth-failed** → honest
-///   `included SuperGrok period limits · ...%` (never sibling-only success).
+///   `SuperGrok period · ...%` (never sibling-only success).
 ///
 /// Team prepaid / Grok Build class never paint on this compact meter while free
 /// SuperGrok period has room (team wallets stay on `/limits`; after free SuperGrok
 /// period is full they may appear as footer **not the active spend path** chips).
 ///
-/// `supergrok_extras_cents` is session billing prepaid (SuperGrok dollar credits),
+/// `super_grok_dollar_credits_cents` is session billing prepaid (SuperGrok dollar credits),
 /// never console team Management prepaid.
 pub fn compact_meter_text_for_live_identity(
     live: SamplingIdentityKind,
@@ -1705,7 +1709,7 @@ pub fn compact_meter_text_for_live_identity(
     included_usage_pct: f64,
     console_prepaid_cents: Option<i64>,
     console_gap: ConsoleTeamPrepaidGap,
-    supergrok_extras_cents: Option<i64>,
+    super_grok_dollar_credits_cents: Option<i64>,
 ) -> String {
     compact_meter_text_for_live_identity_with_workspace(
         live,
@@ -1713,7 +1717,7 @@ pub fn compact_meter_text_for_live_identity(
         included_usage_pct,
         console_prepaid_cents,
         console_gap,
-        supergrok_extras_cents,
+        super_grok_dollar_credits_cents,
         None,
     )
 }
@@ -1726,7 +1730,7 @@ pub fn compact_meter_text_for_live_identity_with_workspace(
     included_usage_pct: f64,
     console_prepaid_cents: Option<i64>,
     console_gap: ConsoleTeamPrepaidGap,
-    supergrok_extras_cents: Option<i64>,
+    super_grok_dollar_credits_cents: Option<i64>,
     workspace: Option<&str>,
 ) -> String {
     compact_meter_text_for_live_identity_with_active_poll(
@@ -1735,7 +1739,7 @@ pub fn compact_meter_text_for_live_identity_with_workspace(
         included_usage_pct,
         console_prepaid_cents,
         console_gap,
-        supergrok_extras_cents,
+        super_grok_dollar_credits_cents,
         false,
         workspace,
     )
@@ -1753,7 +1757,7 @@ pub fn compact_meter_text_for_live_identity_with_active_poll(
     included_usage_pct: f64,
     console_prepaid_cents: Option<i64>,
     console_gap: ConsoleTeamPrepaidGap,
-    supergrok_extras_cents: Option<i64>,
+    super_grok_dollar_credits_cents: Option<i64>,
     active_supergrok_poll_auth_failed: bool,
     workspace: Option<&str>,
 ) -> String {
@@ -1777,7 +1781,10 @@ pub fn compact_meter_text_for_live_identity_with_active_poll(
         // Included SuperGrok period limits full: after-burner spend is SuperGrok
         // $ credits when any remain. Do not paint bare included % as the live
         // driver.
-        match supergrok_extras_cents.map(i64::abs).filter(|c| *c > 0) {
+        match super_grok_dollar_credits_cents
+            .map(i64::abs)
+            .filter(|c| *c > 0)
+        {
             Some(cents) => format!("SuperGrok dollar credits · {}", fmt_dollars(cents)),
             None => included_supergrok_period_limits_compact_meter(
                 &format!("{included_usage_pct:.0}%"),
@@ -1803,7 +1810,7 @@ pub fn compact_meter_text_for_meter_source(
     included_usage_pct: f64,
     console_prepaid_cents: Option<i64>,
     console_gap: ConsoleTeamPrepaidGap,
-    supergrok_extras_cents: Option<i64>,
+    super_grok_dollar_credits_cents: Option<i64>,
     workspace: Option<&str>,
 ) -> String {
     use xai_grok_shell::auth::limits_pins::MeterSource;
@@ -1815,14 +1822,14 @@ pub fn compact_meter_text_for_meter_source(
             included_usage_pct,
             console_prepaid_cents,
             console_gap,
-            supergrok_extras_cents,
+            super_grok_dollar_credits_cents,
             false,
             workspace,
         ),
         Some(MeterSource::Included) => {
             included_compact_pct(included_usage_known, included_usage_pct, workspace)
         }
-        Some(MeterSource::DollarCredits) => match supergrok_extras_cents.map(i64::abs) {
+        Some(MeterSource::DollarCredits) => match super_grok_dollar_credits_cents.map(i64::abs) {
             Some(cents) => format!("SuperGrok dollar credits · {}", fmt_dollars(cents)),
             None => "SuperGrok dollar credits · ...".to_string(),
         },
@@ -1848,7 +1855,7 @@ pub fn compact_meter_text_for_meter_source(
                     included_usage_pct,
                     console_prepaid_cents,
                     console_gap,
-                    supergrok_extras_cents,
+                    super_grok_dollar_credits_cents,
                     false,
                     workspace,
                 )
@@ -2799,7 +2806,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             true,  // flat_poll_unproven_debit
             false, // observed_build
-            true,  // observed_extras
+            true,  // observed_dollar_credits
             false, // oauth_postpaid_dominates
         );
         assert!(
@@ -3010,7 +3017,7 @@ mod tests {
     /// Contract: live primary = SuperGrok with SuperGrok dollar credits → the
     /// SuperGrok dollar credits path still works and is labeled SuperGrok.
     #[test]
-    fn warning_supergrok_primary_still_shows_labeled_extras() {
+    fn warning_supergrok_primary_still_shows_labeled_dollar_credits() {
         let b = CreditBalance {
             prepaid_balance_cents: Some(996),
             ..bal(100.0)
@@ -3277,13 +3284,59 @@ mod tests {
         );
     }
 
+    /// Contract B: user-facing TUI chrome must NOT paint the long string
+    /// `included SuperGrok period limits`. Short human chrome, e.g.
+    /// `SuperGrok period · business · 9%`. SuperGrok is paid. Do not teach
+    /// extras. Do not mash SuperGrok dollar credits into that chip.
+    #[test]
+    fn user_facing_tui_chrome_must_not_paint_included_supergrok_period_limits() {
+        let theme = Theme::default();
+        let text = line_text(&credit_bar_line(&bal(9.0), false, &theme));
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "user-facing TUI chrome must not paint included SuperGrok period limits, got {text:?}"
+        );
+        assert_eq!(text, "SuperGrok period · 9%");
+        assert!(
+            !text.to_ascii_lowercase().contains("extras"),
+            "must not teach extras as a nickname: {text}"
+        );
+        assert!(
+            !text.contains("dollar credits") && !text.contains('$'),
+            "must not mash SuperGrok dollar credits into the SuperGrok period chip: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("free"),
+            "must not call SuperGrok free: {text}"
+        );
+
+        let business = compact_meter_text_for_live_identity_with_workspace(
+            SamplingIdentityKind::SuperGrokSession,
+            true,
+            9.0,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            None,
+            Some("business"),
+        );
+        assert!(
+            !business.contains("included SuperGrok period limits"),
+            "compact chip must not paint included SuperGrok period limits, got {business:?}"
+        );
+        assert_eq!(business, "SuperGrok period · business · 9%");
+        assert!(
+            !business.contains("dollar credits") && !business.contains('$'),
+            "must not mash SuperGrok dollar credits into that chip: {business}"
+        );
+    }
+
     #[test]
     fn test_credit_bar_line_shows_percentage() {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
         let text = line_text(&line);
-        // Compact status: included SuperGrok period limits used % (no "Credits used").
-        assert_eq!(text, "included SuperGrok period limits · 24%");
+        // Compact status: SuperGrok period used % (no "Credits used").
+        assert_eq!(text, "SuperGrok period · 24%");
         assert!(!text.contains("Credits"));
         assert!(
             !text.contains("intent ·") && !text.split_whitespace().any(|w| w == "intent"),
@@ -3375,10 +3428,7 @@ mod tests {
         );
         let line = credit_bar_line(&bal_with_weekly_period_end(usage, end), false, &theme);
         let text = line_text(&line);
-        assert_eq!(
-            text,
-            format!("included SuperGrok period limits · 62% · {expected_chip}")
-        );
+        assert_eq!(text, format!("SuperGrok period · 62% · {expected_chip}"));
         assert!(
             !text.to_ascii_lowercase().contains("remaining"),
             "must not invent remaining: {text:?}"
@@ -3437,7 +3487,7 @@ mod tests {
     fn included_supergrok_period_limits_omits_pace_when_period_end_unknown() {
         let theme = Theme::default();
         let text = line_text(&credit_bar_line(&bal(24.0), false, &theme));
-        assert_eq!(text, "included SuperGrok period limits · 24%");
+        assert_eq!(text, "SuperGrok period · 24%");
         assert!(!text.contains("ahead of linear burn"));
         assert!(!text.contains("behind linear burn"));
         assert!(!text.contains("on linear burn"));
@@ -3466,13 +3516,13 @@ mod tests {
     #[test]
     fn supergrok_dollar_credits_hover_does_not_paint_included_period_bar() {
         let theme = Theme::default();
-        let extras = CreditBalance {
+        let dollar_credits = CreditBalance {
             prepaid_balance_cents: Some(453),
             ..bal(100.0)
         };
-        let default = credit_bar_line_for_session(&extras, false, &theme, false)
+        let default = credit_bar_line_for_session(&dollar_credits, false, &theme, false)
             .expect("SuperGrok dollar credits meter must paint");
-        let hover = credit_bar_line_for_session(&extras, true, &theme, false)
+        let hover = credit_bar_line_for_session(&dollar_credits, true, &theme, false)
             .expect("SuperGrok dollar credits meter must paint");
         let hover_text = line_text(&hover);
         assert_eq!(line_text(&default), hover_text);
@@ -3554,7 +3604,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            included, "included SuperGrok period limits · 100%",
+            included, "SuperGrok period · 100%",
             "included pin must name included SuperGrok period limits, not SuperGrok dollar credits after-burner: {included}"
         );
         assert_ne!(included, "100%", "must not paint a bare unlabeled percent");
@@ -3614,7 +3664,7 @@ mod tests {
             Some("combined"),
         );
         assert!(
-            combined.contains("included SuperGrok period limits")
+            combined.contains("SuperGrok period")
                 && combined.contains("combined")
                 && combined.contains("100%"),
             "combined pin when honest must name combined included SuperGrok period limits: {combined}"
@@ -3663,7 +3713,7 @@ mod tests {
 
         let honest = compact(Some("combined"));
         assert!(
-            honest.contains("included SuperGrok period limits")
+            honest.contains("SuperGrok period")
                 && honest.contains("combined")
                 && honest.contains("100%"),
             "combined pin plus two distinct SuperGrok identities must name combined: {honest}"
@@ -3830,7 +3880,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(warm, "included SuperGrok period limits · 24%");
+        assert_eq!(warm, "SuperGrok period · 24%");
         assert!(
             !warm.contains("intent ·") && !warm.split_whitespace().any(|w| w == "intent"),
             "paying-path label must not be bare intent: {warm}"
@@ -3844,20 +3894,17 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(cold, "included SuperGrok period limits · ...%");
+        assert_eq!(cold, "SuperGrok period · ...%");
         assert!(
             !cold.contains("intent ·") && !cold.split_whitespace().any(|w| w == "intent"),
             "cold chrome must not use bare intent: {cold}"
         );
 
-        assert_eq!(
-            INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT,
-            "included SuperGrok period limits"
-        );
+        assert_eq!(INCLUDED_SUPERGROK_PERIOD_LIMITS_COMPACT, "SuperGrok period");
         assert_eq!(
             ActiveSpendDriver::SuperGrokFreePeriod.as_human(),
-            "included SuperGrok period limits",
-            "/limits Active-line copy names included SuperGrok period limits"
+            "SuperGrok period",
+            "/limits Active-line copy names SuperGrok period"
         );
     }
 
@@ -3880,7 +3927,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(0.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · 0%");
+        assert_eq!(text, "SuperGrok period · 0%");
         assert_eq!(line.spans[0].style.fg, Some(theme.accent_success));
     }
 
@@ -3892,7 +3939,7 @@ mod tests {
         unknown.included_usage_known = false;
         let line = credit_bar_line(&unknown, false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · ...%");
+        assert_eq!(text, "SuperGrok period · ...%");
         assert!(!text.contains("0%"), "unknown must not look like true zero");
     }
 
@@ -3907,7 +3954,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(text, "included SuperGrok period limits · 0%");
+        assert_eq!(text, "SuperGrok period · 0%");
     }
 
     /// Console live meter is prepaid dollars (or honest gap), never SuperGrok %.
@@ -4042,7 +4089,7 @@ mod tests {
             None,
         );
         assert!(
-            compact.starts_with("included SuperGrok period limits ·")
+            compact.starts_with("SuperGrok period ·")
                 && compact.contains('%')
                 && !compact.to_ascii_lowercase().contains("grok build"),
             "Design A compact stays free SuperGrok period %, not team $: {compact}"
@@ -4253,7 +4300,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(150.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · 150%");
+        assert_eq!(text, "SuperGrok period · 150%");
         assert_eq!(line.spans[0].style.fg, Some(theme.accent_error));
     }
 
@@ -4262,7 +4309,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(33.7), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · 34%");
+        assert_eq!(text, "SuperGrok period · 34%");
     }
 
     #[test]
@@ -4279,7 +4326,7 @@ mod tests {
         // The credit bar uses usage_pct (not effective_usage_pct).
         let line = credit_bar_line(&balance, false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · 50%");
+        assert_eq!(text, "SuperGrok period · 50%");
     }
 
     #[test]
@@ -4297,7 +4344,7 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_loading_line(false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "included SuperGrok period limits · ...%");
+        assert_eq!(text, "SuperGrok period · ...%");
         assert!(!text.contains("Credits"));
         assert_eq!(line.spans[0].style.fg, Some(theme.gray_dim));
         // No unicode ellipsis.
@@ -4320,7 +4367,7 @@ mod tests {
         .expect("Build session must paint the compact meter");
         let warm_text: String = warm.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            warm_text.contains("included SuperGrok period limits") && warm_text.contains("24%"),
+            warm_text.contains("SuperGrok period") && warm_text.contains("24%"),
             "warm Build chip: {warm_text}"
         );
         let cold = credit_status_line_for_live_session(
@@ -4334,7 +4381,7 @@ mod tests {
         )
         .expect("cold Build session still paints a clickable placeholder");
         let cold_text: String = cold.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(cold_text, "included SuperGrok period limits · ...%");
+        assert_eq!(cold_text, "SuperGrok period · ...%");
         assert!(
             credit_status_line_for_live_session(
                 Some(&bal(24.0)),
@@ -4405,7 +4452,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(sg_cold, "included SuperGrok period limits · ...%");
+        assert_eq!(sg_cold, "SuperGrok period · ...%");
     }
 
     /// Named contract: hop destination console + SuperGrok dollar credits
@@ -4501,7 +4548,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            text, "included SuperGrok period limits · ...%",
+            text, "SuperGrok period · ...%",
             "active auth fail must be cold free-period chrome, not 6%: {text}"
         );
         assert!(
@@ -4515,7 +4562,7 @@ mod tests {
     /// shows SuperGrok dollar credits $, not included-period used % as if
     /// included still drives after-burner spend. Must not teach extras.
     #[test]
-    fn compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct() {
+    fn compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct() {
         let on_credits = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,
@@ -4553,7 +4600,7 @@ mod tests {
     /// room → included-period %. SuperGrok dollar credits on the account are
     /// not the live driver yet.
     #[test]
-    fn compact_status_supergrok_free_period_room_shows_pct_not_extras() {
+    fn compact_status_supergrok_free_period_room_shows_pct_not_dollar_credits() {
         let mid = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,
@@ -4562,7 +4609,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             Some(12_500),
         );
-        assert_eq!(mid, "included SuperGrok period limits · 42%");
+        assert_eq!(mid, "SuperGrok period · 42%");
         assert!(
             !mid.to_ascii_lowercase().contains("extras"),
             "free period with room must not paint extras as live: {mid}"
@@ -4573,7 +4620,7 @@ mod tests {
     /// left → included-period-labeled 100% is honest (included empty; no
     /// second meter).
     #[test]
-    fn compact_status_supergrok_full_without_extras_shows_100_pct() {
+    fn compact_status_supergrok_full_without_dollar_credits_shows_100_pct() {
         let full = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,
@@ -4582,8 +4629,8 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(full, "included SuperGrok period limits · 100%");
-        let zero_extras = compact_meter_text_for_live_identity(
+        assert_eq!(full, "SuperGrok period · 100%");
+        let zero_dollar_credits = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,
             100.0,
@@ -4591,7 +4638,7 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             Some(0),
         );
-        assert_eq!(zero_extras, "included SuperGrok period limits · 100%");
+        assert_eq!(zero_dollar_credits, "SuperGrok period · 100%");
     }
 
     /// Named contract (P1 smoking gun): SuperGrok live + free period 6% + exhaust
@@ -4619,7 +4666,7 @@ mod tests {
             ConsoleTeamPrepaidGap::Loading,
             Some(10_029), // SuperGrok dollar credits on account; not live driver
         );
-        assert_eq!(text, "included SuperGrok period limits · 6%");
+        assert_eq!(text, "SuperGrok period · 6%");
         assert!(
             !text.to_ascii_lowercase().contains("console"),
             "must not paint console while free period has room: {text}"
@@ -4666,7 +4713,7 @@ mod tests {
                 "{path}: compact bar with SuperGrok live and included SuperGrok period limits known must not lead with console · $12.45: {text}"
             );
             assert!(
-                text.contains("included SuperGrok period limits") && text.contains("15%"),
+                text.contains("SuperGrok period") && text.contains("15%"),
                 "{path}: compact must name included SuperGrok period limits: {text}"
             );
             assert!(
@@ -4705,7 +4752,7 @@ mod tests {
             ConsoleTeamPrepaidGap::Loading,
             Some(4_703),
         );
-        assert_eq!(text, "included SuperGrok period limits · 47%");
+        assert_eq!(text, "SuperGrok period · 47%");
         assert!(
             !text.contains("$47.03") && !text.contains("$89.94") && !text.contains('$'),
             "included used % must not paint as Billing Credits dollars: {text}"
@@ -4729,7 +4776,7 @@ mod tests {
         .expect("Build session paints compact credits");
         let painted = line_text(&line);
         assert!(
-            painted.contains("included SuperGrok period limits") && painted.contains('%'),
+            painted.contains("SuperGrok period") && painted.contains('%'),
             "compact must name included SuperGrok period limits, not Credits-card dollars: {painted}"
         );
         assert!(
@@ -4798,7 +4845,7 @@ mod tests {
     /// → active driver is included SuperGrok period limits even when SuperGrok
     /// dollar credits and team prepaid are known on the account.
     #[test]
-    fn active_driver_free_period_headroom_even_with_extras_and_team_prepaid() {
+    fn active_driver_free_period_headroom_even_with_dollar_credits_and_team_prepaid() {
         let d = active_spend_driver(
             SamplingIdentityKind::SuperGrokSession,
             true,
@@ -4807,7 +4854,7 @@ mod tests {
         );
         assert_eq!(d, ActiveSpendDriver::SuperGrokFreePeriod);
         assert_eq!(d.as_wire(), "supergrok_free_period");
-        assert_eq!(d.as_human(), "included SuperGrok period limits");
+        assert_eq!(d.as_human(), "SuperGrok period");
         // Team prepaid is not an input; driver ignores it by construction.
         assert_ne!(d.as_wire(), "console_key");
         assert_ne!(d.as_wire(), "supergrok_extras");
@@ -4885,7 +4932,7 @@ mod tests {
             None,
             compact_included_workspace_qualifier(1, Some("personal")),
         );
-        assert_eq!(text, "included SuperGrok period limits · personal · 5%");
+        assert_eq!(text, "SuperGrok period · personal · 5%");
         assert!(
             !text.to_ascii_lowercase().contains("business"),
             "must not imply the business principal: {text}"
@@ -4911,7 +4958,7 @@ mod tests {
             None,
             compact_included_workspace_qualifier(1, Some("business")),
         );
-        assert_eq!(text, "included SuperGrok period limits · business · 5%");
+        assert_eq!(text, "SuperGrok period · business · 5%");
         assert!(
             !text.to_ascii_lowercase().contains("personal"),
             "must not imply the personal principal: {text}"
@@ -4997,7 +5044,7 @@ mod tests {
             workspace,
         );
         assert_ne!(
-            text, "included SuperGrok period limits · business · 5%",
+            text, "SuperGrok period · business · 5%",
             "must not stamp business on a percent that workspace did not poll: {text}"
         );
         assert!(
@@ -5033,7 +5080,7 @@ mod tests {
             workspace_unknown,
         );
         assert_ne!(
-            unlabeled, "included SuperGrok period limits · 5%",
+            unlabeled, "SuperGrok period · 5%",
             "unlabeled only when the painted percent is the live JWT's own poll: {unlabeled}"
         );
         assert!(
@@ -5063,7 +5110,7 @@ mod tests {
         // two independent polls (business independently polled 40%). Do not
         // stamp personal on that combined remaining either.
         assert_ne!(
-            personal_text, "included SuperGrok period limits · personal · 5%",
+            personal_text, "SuperGrok period · personal · 5%",
             "must not stamp personal when a distinct business poll exists: {personal_text}"
         );
         assert!(
@@ -5167,8 +5214,8 @@ mod tests {
             workspace,
         );
         assert!(
-            text.contains("included SuperGrok period limits"),
-            "must stay on included SuperGrok period limits: {text}"
+            text.contains("SuperGrok period"),
+            "must stay on SuperGrok period chrome: {text}"
         );
         assert!(
             text.contains("combined"),
@@ -5220,8 +5267,8 @@ mod tests {
             Some(10_029),
         );
         assert!(
-            text.contains("included SuperGrok period limits"),
-            "must stay on included SuperGrok period limits while a sibling pool has remaining: {text}"
+            text.contains("SuperGrok period"),
+            "must stay on SuperGrok period chrome while a sibling pool has remaining: {text}"
         );
         assert!(
             !text.to_ascii_lowercase().contains("extras"),
@@ -5261,22 +5308,22 @@ mod tests {
             Some(10_029),
         );
         assert_eq!(d, ActiveSpendDriver::SuperGrokFreePeriod);
-        assert_eq!(d.as_human(), "included SuperGrok period limits");
+        assert_eq!(d.as_human(), "SuperGrok period");
         assert_ne!(d.as_wire(), "supergrok_extras");
     }
 
     /// Design A after-burner: included SuperGrok period limits ≥ 100% plus
     /// SuperGrok dollar credits → SuperGrok dollar credits driver
-    /// (`ActiveSpendDriver::SuperGrokExtras` / wire `supergrok_extras`).
+    /// (`ActiveSpendDriver::SuperGrokDollarCredits` / wire `supergrok_extras`).
     #[test]
-    fn active_driver_afterburner_extras_when_free_period_full() {
+    fn active_driver_afterburner_dollar_credits_when_free_period_full() {
         let d = active_spend_driver(
             SamplingIdentityKind::SuperGrokSession,
             true,
             100.0,
             Some(453),
         );
-        assert_eq!(d, ActiveSpendDriver::SuperGrokExtras);
+        assert_eq!(d, ActiveSpendDriver::SuperGrokDollarCredits);
         assert_eq!(d.as_wire(), "supergrok_extras");
         assert_eq!(d.as_human(), "SuperGrok dollar credits");
         assert!(
@@ -5319,7 +5366,7 @@ mod tests {
             Some(10_029),
         );
         assert_eq!(
-            compact, "included SuperGrok period limits · 15%",
+            compact, "SuperGrok period · 15%",
             "compact must name free SuperGrok period %, got {compact}"
         );
         assert!(
@@ -5376,7 +5423,7 @@ mod tests {
             ConsoleTeamPrepaidGap::Loading,
             None,
         );
-        assert_eq!(compact, "included SuperGrok period limits · 27%");
+        assert_eq!(compact, "SuperGrok period · 27%");
         assert_eq!(
             active_spend_driver(SamplingIdentityKind::SuperGrokSession, true, 27.0, None),
             ActiveSpendDriver::SuperGrokFreePeriod
@@ -5505,7 +5552,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            compact, "included SuperGrok period limits · 15%",
+            compact, "SuperGrok period · 15%",
             "compact free SuperGrok period still paints when footer secondary team $ is gated off"
         );
     }
@@ -5541,7 +5588,7 @@ mod tests {
             Some(10_029),
         );
         assert!(
-            compact.starts_with("included SuperGrok period limits ·") && compact.contains("6%"),
+            compact.starts_with("SuperGrok period ·") && compact.contains("6%"),
             "compact stays free SuperGrok period: {compact}"
         );
         assert!(
@@ -5571,14 +5618,14 @@ mod tests {
             ConsoleTeamPrepaidGap::Loading,
             supergrok_dollar_credits,
         );
-        assert_eq!(compact, "included SuperGrok period limits · 6%");
+        assert_eq!(compact, "SuperGrok period · 6%");
         assert!(
             !compact.to_ascii_lowercase().contains("console"),
             "compact must not name console as live payer: {compact}"
         );
 
         let driver = active_spend_driver(live, true, included_pct, supergrok_dollar_credits);
-        assert_eq!(driver.as_human(), "included SuperGrok period limits");
+        assert_eq!(driver.as_human(), "SuperGrok period");
         assert_ne!(driver.as_wire(), "console_key");
 
         let mut balance = bal(included_pct);
@@ -5595,7 +5642,7 @@ mod tests {
         )
         .expect("SuperGrok OIDC Build session paints compact status");
         let status_text: String = status.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(status_text, "included SuperGrok period limits · 6%");
+        assert_eq!(status_text, "SuperGrok period · 6%");
         assert!(
             !status_text.to_ascii_lowercase().contains("console"),
             "status line must not name console as live payer: {status_text}"

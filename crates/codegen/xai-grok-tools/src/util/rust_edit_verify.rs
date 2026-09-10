@@ -1043,6 +1043,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because rustfmt must take the edited paths, not cargo fmt --all.
     #[test]
     fn rustfmt_argv_edition_2024_config_and_absolute_files() {
         let first = PathBuf::from("/tmp/edit-verify-fixture/src/lib.rs");
@@ -1071,6 +1072,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must lint the edited file, not cargo clippy --lib.
     #[test]
     fn clippy_argv_lints_the_edited_file_not_crate_lib() {
         let lib = PathBuf::from("/tmp/edit-verify-fixture/src/lib.rs");
@@ -1078,6 +1080,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&lib));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a bin path must be linted as that file, not the crate lib.
     #[test]
     fn clippy_argv_includes_bin_path_not_package_lib() {
         let bin = PathBuf::from("/tmp/edit-verify-fixture/src/bin/tool.rs");
@@ -1085,6 +1088,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&bin));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because an integration test path must be linted as that file, not the crate lib.
     #[test]
     fn clippy_argv_includes_integration_test_path_not_package_lib() {
         let test_file = PathBuf::from("/tmp/edit-verify-fixture/tests/owns_this.rs");
@@ -1092,6 +1096,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&test_file));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must not become cargo clippy -p --lib.
     #[test]
     fn clippy_argv_is_file_level_not_package_lib() {
         let file = PathBuf::from(
@@ -1107,6 +1112,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because tests/owns_this.rs must run cargo test -p --test owns_this, not --workspace.
     #[test]
     fn test_plan_integration_file_runs_package_test_filter() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1161,6 +1167,7 @@ mod tests {
         }
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a src module must use cargo test -p --lib <module>, not the whole crate.
     #[test]
     fn test_plan_src_module_uses_lib_filter_from_path() {
         let file = PathBuf::from("/tmp/edit-verify-fixture/src/util/rust_edit_verify.rs");
@@ -1321,6 +1328,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because several structured writes must clippy each edited file, not crate-wide cargo.
     #[test]
     fn several_rust_writes_run_file_level_clippy_per_file() {
         let _g = RuntimeGuard::lock();
@@ -1446,6 +1454,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must emit into a temp out-dir, not rust_out at the workspace root.
     #[test]
     fn clippy_driver_uses_temp_out_dir_not_the_workspace_root() {
         let _g = RuntimeGuard::lock();

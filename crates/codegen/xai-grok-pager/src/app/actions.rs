@@ -448,14 +448,21 @@ pub enum Action {
     /// that preserves the `default` canonical (the `bool` variant
     /// collapses `default` to `ask`).
     SetPermissionMode(PermissionModeKind),
-    /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
+    /// Toggle multiline input mode (mid-line Enter inserts a newline;
+    /// Enter at the end of the last line still sends).
     ToggleMultiline,
-    /// Set multiline input mode (swap Enter and Shift+Enter behavior).
-    /// Pager-owned, NOT persisted to disk — reset each session.
+    /// Set multiline input mode (mid-line Enter inserts a newline;
+    /// Enter at the end of the last line still sends).
+    /// Pager-owned, NOT persisted to disk. Reset each session.
     SetMultilineMode(bool),
     /// Allow newlines in the Human box from Enter / Shift+Enter.
     /// SHELL-owned: cache + `[ui].composer_multiline`. Default on.
     SetComposerMultiline(bool),
+    /// Allow session Multiline to be enabled (`Ctrl+M` / `/multiline` /
+    /// settings Multiline row). SHELL-owned: cache +
+    /// `[ui].allow_session_multiline`. Default on. When false, those paths
+    /// cannot set `multiline_mode = true`.
+    SetAllowSessionMultiline(bool),
     /// Open the prompt-history search panel on the active agent (composer
     /// as filter query). Dispatched by `/history`.
     OpenHistorySearch,

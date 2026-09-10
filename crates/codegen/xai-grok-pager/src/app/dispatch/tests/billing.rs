@@ -802,9 +802,28 @@ fn billing_fetched_high_usage_enables_poll() {
 
 #[test]
 fn background_billing_poll_wanted_is_honor_ttl_not_force_refresh() {
-    assert!(
-        !BACKGROUND_BILLING_POLL_FORCE_REFRESH,
+    assert_eq!(
+        background_billing_poll_snapshot_mode(),
+        xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
         "near-full included SuperGrok period poll FetchBilling is HonorTtl"
+    );
+    let Effect::FetchBilling {
+        force_refresh,
+        silent,
+        nonce,
+        ..
+    } = background_billing_poll_fetch_billing(AgentId(0))
+    else {
+        panic!("background billing poll must queue FetchBilling");
+    };
+    assert!(
+        !force_refresh,
+        "near-full included SuperGrok period poll FetchBilling is HonorTtl, not ForceRefresh"
+    );
+    assert!(silent, "background billing poll is silent chrome refresh");
+    assert_eq!(
+        nonce, 0,
+        "background billing poll is not a usage-modal fetch"
     );
     assert_eq!(
         crate::app::event_loop::BILLING_POLL_INTERVAL,

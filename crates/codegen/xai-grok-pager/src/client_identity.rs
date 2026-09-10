@@ -67,6 +67,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: PRODUCT_CLI_NAME is grok-oss, never bare grok. This diverges from upstream xAI because FORK.md and catalog class 1 pin the product command as grok-oss.
     #[test]
     fn product_cli_name_is_grok_oss() {
         assert_eq!(PRODUCT_CLI_NAME, "grok-oss");
@@ -74,6 +75,7 @@ mod tests {
         assert_ne!(PRODUCT_CLI_NAME, "grok");
     }
 
+    // Grok OSS: grok-oss --version first token is grok-oss, not grok. This diverges from upstream xAI because catalog class 1 forbids helper-green on the substring grok (operator saw grok 1.0.3).
     #[test]
     fn product_version_line_uses_grok_oss_not_bare_grok() {
         // Operator report: `grok 1.0.3 (f1abb5fd33b6)` is the wrong product token.
@@ -83,6 +85,7 @@ mod tests {
         assert_ne!(line.split_whitespace().next(), Some("grok"));
     }
 
+    // Grok OSS: pasteable resume is grok-oss --resume. This diverges from upstream xAI because FORK.md and catalog class 1 require resume and relaunch hints to name grok-oss.
     #[test]
     fn resume_session_command_uses_grok_oss() {
         assert_eq!(resume_session_command("01", false), "grok-oss --resume 01");
@@ -92,6 +95,7 @@ mod tests {
         );
     }
 
+    /// Grok OSS: pasteable resume never teaches grok --resume, even when argv0 is grok. This diverges from upstream xAI because FORK.md class 1 and the 2026-09-01 operator report pin grok-oss --resume.
     /// Operator report 2026-09-01: quit / rebuild handoff taught `grok --resume`.
     /// Pasteable resume is always this product CLI, including when argv0 is `grok`.
     #[test]

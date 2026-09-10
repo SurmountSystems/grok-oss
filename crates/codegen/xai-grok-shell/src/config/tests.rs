@@ -1287,6 +1287,7 @@ fn subagents_config_allow_worktree_true_via_resolve() {
 }
 
 #[test]
+// Grok OSS: [subagents] allow_worktree is copied onto the runtime config. This diverges from upstream xAI because a toml field that deserializes is not shipped unless spawn can honor it.
 fn resolve_subagents_copies_allow_worktree() {
     without_grok_subagents(|| {
         let mut cfg = crate::agent::config::Config::default();

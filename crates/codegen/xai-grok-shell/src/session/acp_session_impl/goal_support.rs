@@ -949,12 +949,14 @@ mod goal_rules_depth_tests {
     }
 
     #[test]
+    // Grok OSS: live goal_rules.md / goal_rules_legacy.md match parent-coordinates and L2-must-spawn-L3 for tools. This diverges from upstream xAI because Surmount /goal is coordinate-and-spawn, not deliver-yourself.
     fn goal_rules_templates_parent_coordinates_and_l2_must_spawn_l3_for_tools() {
         assert_l1_coordinates(GOAL_RULES_TEMPLATE);
         assert_l1_coordinates(GOAL_RULES_TEMPLATE_LEGACY);
     }
 
     #[test]
+    // Grok OSS: live /goal still injects discipline so L1 spawns L2 and does not run product tools. This diverges from upstream xAI because Surmount /goal is coordinate-and-spawn, not deliver-yourself.
     fn goal_task_discipline_parent_spawns_l2_not_product_tools() {
         let text = GOAL_TASK_DISCIPLINE_TEMPLATE;
         assert!(

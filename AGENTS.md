@@ -377,7 +377,8 @@ less than product code and tests. Do not invent long essays or git nags.
    work is not this tree, say the other path there. Do not
    use an unexplained heuristic. Maximally truthseeking. In reports and
    this restatement, speaker labels are **Operator** (not You, not Human)
-   and **Agent** (not Me, not Grok when Grok means the assistant). Do not
+   and **Agent** (not Me, not Grok when Grok means the assistant). See
+   § *Operator and Agent*. Do not
    rename grok-oss, Grok OSS, or a Grok model id. Do not rename the
    product composer Human box (`accent_user`). Host dual-pin:
    `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
@@ -419,6 +420,9 @@ less than product code and tests. Do not invent long essays or git nags.
    the operator. Wrong: "I tracked the nits. I did not spawn a mop." Right:
    name the leftover comments, tests, or chrome and do that work. Host
    dual-pin: `~/.grok/AGENTS.md` § Prose + tone.
+   **Never name that Anthropic assistant (pinned 2026-09-09):** Operator:
+   never name that Anthropic assistant product. See the named subsection.
+   Host dual-pin: `~/.grok/AGENTS.md` same heading.
    **ISA vs cores vs cargo targets (pinned 2026-08-23).** aarch64 versus
    x86_64 is instruction-set architecture (ISA), not "extra CPUs." CPU in
    that sentence reads as cores or VM size (GitHub `CI_LOW_MEM` versus
@@ -448,12 +452,15 @@ less than product code and tests. Do not invent long essays or git nags.
    build still does not match) is a named failure mode under § *The
    operator's words are the spec*. A dropped operator prompt is a
    product defect under § *Wasted human time* (hard constraint 24).
-   Operator speech is work. Take the Operator seriously. Report
-   finished nested work the same turn the host says the nested agent
-   exited. Full host pin:
+   Operator speech is work. Take the Operator seriously. Prefer
+   Operator and Agent as speaker labels. Never name
+   that Anthropic assistant. Report finished nested work the same turn
+   the host says the nested agent exited. Full host pin:
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
-   speech is work*, § *Take the Operator seriously*, § *Report
-   finished nested work the same turn*.
+   speech is work*, § *Take the Operator seriously*, § *Operator and
+   Agent*, § *Never name
+   that Anthropic assistant*, § *Report finished nested work the same
+   turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -797,6 +804,40 @@ you edit code at L1*, or § *Fire-and-return*. Dual-pin: this file and
 host `~/.grok/AGENTS.md` same heading. Process pointer:
 [`FORK.md`](FORK.md) Process.
 
+## Operator and Agent (pinned 2026-09-09)
+
+Prefer **Operator** and **Agent** as speaker labels. Operator is any
+sapient that is operating a machine agent. Silicon sapience can
+revisit later. Agent is vendor-neutral. Grok is one specific agent and
+the Operator's favorite, not the only one.
+
+Do not say You or Human for the operator. Do not say Me or Grok as the
+speaker label for the machine. Do not rename grok-oss, Grok OSS, or a
+Grok model id. Do not rename the product composer Human box.
+
+This is what speaker-label sentences mean. Dual-pin: this file (hard
+constraint 4) and host `~/.grok/AGENTS.md` same heading. This pin does
+not weaken Job / State / Operator / Next.
+
+## Never name that Anthropic assistant (pinned 2026-09-09)
+
+Operator: never name that Anthropic assistant product. Always remember.
+
+This D1 pin names the refuse list once so later agents can refuse it.
+Do not repeat those names in chat-facing copy. Never mention Claude,
+Anthropic Claude, Claude-3, or lookalike demo rows in thoughts,
+examples, tests, spawn descriptions, user-facing chrome, or product
+comments. Do not invent Subagents-list examples that pair invented Grok
+model rows with that assistant.
+
+Thought for N.s, thinking dumps, and similar chrome are operator-visible.
+Do not write that product name there, including sentences of the form
+"don't name X". The Operator must not see that name through this
+interface at all.
+
+This pin does not weaken § *Take the Operator seriously*. Dual-pin:
+this file (hard constraint 4) and host `~/.grok/AGENTS.md` same heading.
+
 ## Report finished nested work the same turn (pinned 2026-09-02)
 
 Report finished nested work the same turn the host says the nested agent
@@ -994,7 +1035,10 @@ Host: § *Hard stop* default loop.
   board, remaining-work pointer, spawn. Do not wait for the current turn
   to finish, and do not wait for “all subagents done,” to record the work.
   Named hold (`/queue /finish`, `/queue` compact/plan/reports) still waits.
-  Ctrl+Enter is still cancel-and-send. Empty Enter does not Approve a plan.
+  Ctrl+Enter inserts a newline. Soft interject remains bare Enter with text
+  while a turn is running (plus Ctrl+I / Apple Ctrl+O / VS Code family
+  Ctrl+L / queue [Send now] / empty-composer mid-turn Enter on a queued
+  row). Empty Enter does not Approve a plan.
   Product: pager `dispatch/prompt.rs`. Report:
   `/home/hunter/.agents/reports/fix-prompt-queue-blocks-explain.md`.
   Host dual-pin: `~/.grok/AGENTS.md` § *Additive asks*.

@@ -225,7 +225,7 @@ identifier that has no matching `fn`.
   `sampling_config_auto_use_omits_console`,
   `sampling_config_auto_use_omits_console_while_supergrok_included_headroom`,
   `resolve_model_to_sampling_config_auto_use`,
-  `sampling_config_auto_use_extras_keep_session_console_failover`.
+  `sampling_config_auto_use_dollar_credits_keep_session_console_failover`.
   Per-turn reconstruct:
   `prepare_sampler_for_turn_aligns_to_ranked_included_primary`
   (`session/acp_session_impl/sampler_turn.rs`).
@@ -255,11 +255,11 @@ identifier that has no matching `fn`.
   `sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team`,
   `prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling`,
   `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both`.
-  Existing identifiers
-  `sampling_config_hops_to_sibling_included_before_extras` and
-  `sampling_config_auto_use_extras_keep_session_console_failover` stay `fn`
-  names. Human prose next to them says SuperGrok dollar credits. This
-  file does not claim live Business remaining or a live window hop.
+  Identifiers
+  `sampling_config_hops_to_sibling_included_before_dollar_credits` and
+  `sampling_config_auto_use_dollar_credits_keep_session_console_failover`
+  name SuperGrok dollar credits. This file does not claim live Business
+  remaining or a live window hop.
 - [x] **Personal SuperGrok JWT is the paying identity**: spend included SuperGrok
   period limits on a stored personal SuperGrok login first when those included
   SuperGrok period limits have room. A Team / Business SuperGrok JWT is not
@@ -282,7 +282,7 @@ identifier that has no matching `fn`.
   (personal JWT) beat SuperGrok dollar credits. Team JWT remaining is not a
   SuperGrok paying source while a personal SuperGrok login exists. After-burner
   skip only when every paying included pool is exhausted. Tests:
-  `sampling_config_hops_to_sibling_included_before_extras`,
+  `sampling_config_hops_to_sibling_included_before_dollar_credits`,
   `afterburner_does_not_skip_mark_when_sibling_has_included_remaining`
   (`auth/allowance_exhaust_from_billing.rs`). Compact meter stays on included
   SuperGrok period limits while a sibling pool has remaining:
@@ -330,14 +330,14 @@ identifier that has no matching `fn`.
   console API credits**. SuperGrok is paid. Never call SuperGrok free. Desired
   spend order: included SuperGrok period limits first, then SuperGrok dollar
   credits, then console team prepaid / console API credits. Compact chrome
-  paints `included SuperGrok period limits · N%` for the included-period meter;
+  paints `SuperGrok period · N%` for the included-period meter;
   SuperGrok dollar credits paint `SuperGrok dollar credits · $N` (live chrome
   must not nickname that meter); console still `console · $N`. `/limits --json`
   `activeDriver` wire values (`supergrok_free_period` | `supergrok_extras` |
   `console_key`) stay wire labels after that plain thought. Land paint: class
   4 compact-meter tests plus
-  `compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct` and
-  `format_supergrok_session_with_weekly_and_extras`.
+  `compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct` and
+  `format_supergrok_session_with_weekly_and_dollar_credits`.
   Dual `/limits` honesty (neighbor, not hop): grok-oss limits JSON and
   compact chrome are a client printout, not xAI billing truth; identical
   `nextReset` or included % across SuperGrok (personal) and SuperGrok
@@ -721,15 +721,18 @@ identifier that has no matching `fn`.
   `crates/codegen/xai-grok-bundle/skills/what/SKILL.md`, installed into
   `~/.grok/bundled/skills/what/`. Live cache is not the source. Do not
   recreate repo `.agents/skills/what/`. Not an apology. Reply shape is
-  four complete thoughts: Job, State, Operator, Next. Address the
-  person as Operator, not Human. Speaker labels are Operator not You
-  or Human, and Agent not Me or Grok when Grok means the assistant.
+  four complete thoughts: Job, State, Operator, Next. Prefer Operator
+  and Agent as speaker labels. Address the person as Operator, not
+  Human. Do not say You or Human for the operator. Do not say Me or
+  Grok as the speaker label for the machine. This diverges from
+  upstream xAI You/Human / Me/Grok copy because the Operator said so.
   Do not rename the product composer Human box or DOGE Human green.
   Follow
   `0005_CATE.md`. When the operator asks to revise a skill in grok-oss,
   edit `crates/codegen/xai-grok-bundle/skills/` and keep named tests so
   skill maintenance cannot drop it. Tests:
   `what_empty_args_injects_what_skill`,
+  `what_instruction_prefers_operator_and_agent_speaker_labels`,
   `what_registered_in_builtin_commands`, `what_registered_in_builtins`,
   `default_product_skills_include_polish_and_subagent` (names include
   `what`).
@@ -1018,8 +1021,18 @@ identifier that has no matching `fn`.
   Named tests: `ctrl_enter_mid_turn_dispatches_send_interject`,
   `queue_send_now_click_dispatches_send_interject`,
   `empty_ctrl_enter_mid_turn_does_not_send`,
-  `interject_does_not_wait_minutes_or_block_paint`. Do not delete or weaken
-  `prompt_wal_appends_on_mid_turn_interject`. Catalog:
+  `interject_does_not_wait_minutes_or_block_paint`,
+  `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_send_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline`,
+  `enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline`,
+  `arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path`.
+  After Enter that interjects or sends, the Human box must not still hold
+  that body. Enter at the end of the last composer line must send or
+  interject immediately. It must not insert a silent extra newline.
+  Arrow keys then Enter must submit the same body on the same path.
+  Do not delete or weaken `prompt_wal_appends_on_mid_turn_interject`. Catalog:
   [`doc/dev/upstream-regression-filters.md`](doc/dev/upstream-regression-filters.md)
   § Interject Ctrl+Enter and Send now.
 - [x] **Leader `RelaunchForUpdate` nested work and parent-turn busy survive like a TUI
@@ -1086,7 +1099,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   is yellow**:
   `titled_doge_composer_frame_is_prompt_border_not_context_yellow`.
 - [x] **Compact included SuperGrok period limits meter**: status chip
-  `included SuperGrok period limits · N%`; click opens `/limits`. Tests:
+  `SuperGrok period · N%`; click opens `/limits`. Tests:
   `status_bar_pushes_credits_compact_included_supergrok_period_limits`,
   `hit_credits_click_dispatches_show_limits` (`app/agent_view/render.rs`).
 - [x] **Forked-session upper-left header switcher plus dashboard**: a
@@ -1218,8 +1231,17 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `l2_row_shows_live_l3_count_not_specialist_names`
   (`views/tasks_pane.rs`).
 - [ ] **Subagents list measured L2 tokens and TECH.md**: nested L2 session
-  usage is an in-memory map (`agent_view::l2_token_tracking`). The
-  Subagents list suffix is `measured N tokens`. TECH.md at the workspace
+  usage is an in-memory map (`agent_view::l2_token_tracking`). The nested
+  L2 token accumulator is an `AtomicU64` high-water (`fetch_max`) so
+  concurrent ACP usage ticks do not race. Grok OSS: this map is not
+  upstream xAI. A racy last-write `u64` can drop 10232 when a stale
+  smaller tick lands last. The Subagents list suffix is a compact count
+  (`format_tokens_compact`) plus `tokens` (for example `53.4k tokens`,
+  not a raw integer like 53407, and not the word `measured`). Internal
+  field names such as `measured_tokens` and the TECH.md table column
+  "measured tokens" stay. `format_subagent_label`
+  calls `format_subagents_list_description` so `format_measured_tokens_suffix`
+  is used in the shipped lib. TECH.md at the workspace
   root (tests inject a temp path) has a description-label L1 to L2 to L3
   tree and a table with columns id, contract/aspect, owner, measured
   tokens, estimate, status. Layout must not parse the session transcript
@@ -1227,8 +1249,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   SuperGrok dollar credits, and not console team prepaid / console API
   credits. Tests:
   `subagents_list_shows_measured_tokens_per_nested_l2`,
+  `format_subagents_list_description_shows_measured_tokens_suffix`,
+  `format_subagent_label_shows_measured_tokens_suffix`,
   `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit`,
-  `subagents_list_layout_does_not_read_chat_history_jsonl`.
+  `subagents_list_layout_does_not_read_chat_history_jsonl`,
+  `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water`.
 - [x] **Always-on bubble copy is paint plus click**: flag on paints `⧉`. A
   full-width first line still paints a hit. Click on the human glyph copies
   that prompt. Click on the assistant glyph copies that message. Paint-only
@@ -1347,6 +1372,14 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `composer_multiline_defaults_on`,
   `prime_applies_composer_multiline_from_ui`. Do not weaken Ctrl-Z,
   `?` insert, or Approve-with-comment.
+- [x] **Composer Shift+Enter is newline (2026-09-09)**: Shift+Enter inserts
+  a newline and does not submit, including at the end of the last line
+  and when session Multiline is on, so the Operator can write a
+  multiline prompt without submitting. Bare Enter at the end of the
+  last line still submits (idle send / mid-turn interject). Do not
+  steal #85. `[ui] composer_multiline = false` still sends on
+  Shift+Enter. Test:
+  `composer_shift_enter_inserts_newline_and_does_not_submit`.
 - [x] **Enter and double-click expand hidden blocks (2026-09-09)**: after
   selecting a collapsed or hidden transcript block (image attachment
   ellipsis and other folded hidden bodies), Enter expands it, same as
@@ -1969,10 +2002,10 @@ keeps Surmount pages. Do not paste those pages here.
 | [`01-getting-started`](crates/codegen/xai-grok-pager/docs/user-guide/01-getting-started.md) | Binary is `grok-oss`. Bare interactive open is last session for this cwd, not Welcome. | Last-session sentences shipped in code; no dedicated `fn`. |
 | [`02-authentication`](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) | SuperGrok is paid. Distinct meters. `/limits` and compact chip. Hop after included SuperGrok period limits are full. Fail-open: a client 100% / remaining 0 / $0 printout must not mark SuperGrok used up. Named `/limits` words and `limits_pins.json`. grok-oss limits is not xAI billing truth. Machine console API key for host surmount-1: console API credits / console team prepaid, install under that host grok home (`$GROK_HOME` or `~/.grok`), never commit the key, no guest git, GPG sign on the laptop, attach SSH + tmux as user grok, L0 is not `/dashboard`. | `user_guide_does_not_claim_automatic_host_hop_is_unshipped`, `user_guide_limits_names_fail_open_and_named_commands`, `user_guide_machine_console_api_key_for_surmount_1`. Zero `/limits` hits is a failed land in catalog prose; no cargo hit-count `fn`. |
 | [`03-keyboard-shortcuts`](crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md) | Plan keys and Enter cue (send / queue / interject). Empty Enter never approves a plan. Nested L2/L3 overlay Esc dismisses the view and does not cancel. | Plan honesty `fn`s under Chrome. Overlay Esc: `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`. |
-| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. L0 is Surmount GPUI and must not merge with `/dashboard` or `/running`. L0 action set remote host console API key is laptop-side for a machine console API key (never prints the key; no guest git). `/start` starts paused or interrupted work in this process; not `/resume`. `/unstick` resends the last parent prompt as if the network dropped it; orphans a hung in-flight prompt; WAL images resend as resource links, never data URLs; not `/resume`, not a second Human line, not unwind. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (Job, State, Operator, Next) when chat is unclear. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid, plus last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` for the current sampling model (serving-path config, not a SHA of the weights, not on the status bar). `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. Once `prompt_wal.jsonl` exists in the tree, `/rebuild` must say relaunch preserves that WAL. Do not document that preservation as shipped while the file is absent. | `running_slash_lists_sibling_fixture_row`; L0 `surmount-coordinator-gui` `write_enqueue_creates_per_session_file`, `omits_prompt_text`, `keeps_pid_session_cwd`, `enqueue_drop_path_is_per_session_id`, `CoordinatorApp_selects_row`, `CoordinatorApp_omits_prompt_in_displayed_fields`, `CoordinatorApp_enqueue_writes_drop_file`, `set_remote_host_console_api_key_never_prints_the_key`, `set_remote_host_console_api_key_is_not_pager_dashboard`; `user_guide_machine_console_api_key_for_surmount_1`; `/start` cite `start_*` tests; `/unstick` cite `unstick_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `show_session_metadata_includes_fingerprint_fields_from_stored_samples`; `user_guide_metadata_documents_serving_fingerprints`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
+| [`04-slash-commands`](crates/codegen/xai-grok-pager/docs/user-guide/04-slash-commands.md) | `/running` (alias `/windows`) lists live grok-oss TUI windows. Not Agent Dashboard. L0 is Surmount GPUI and must not merge with `/dashboard` or `/running`. L0 action set remote host console API key is laptop-side for a machine console API key (never prints the key; no guest git). `/start` starts paused or interrupted work in this process; not `/resume`. `/unstick` resends the last parent prompt as if the network dropped it; orphans a hung in-flight prompt; WAL images resend as resource links, never data URLs; not `/resume`, not a second Human line, not unwind. `/finish` writes a session post-mortem (work continues; leftover and next features stay first-class; not `/dream`, not `/recap`, not `/reports`). `/reports` writes a checkpoint while work continues (host overlay `~/.agents/skills/reports` plus pager slash). `/polish` is a polish pass as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/polish`, installed into `~/.grok/bundled/skills/polish`; not host overlay, not a pager builtin, not a project `.agents/skills/polish` pack; not `/finish`, not `/reports`). `/subagent` (and `/subagent this`) spawns one L2 coordinator as a **default Grok OSS skill** (in-tree `crates/codegen/xai-grok-bundle/skills/subagent`, installed into `~/.grok/bundled/skills/subagent`; not host overlay, not a pager builtin, not a project `.agents/skills/subagent` pack; L1 does not do the job). `/what` restates this session in four complete thoughts (Job, State, Operator, Next) when chat is unclear. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Default Grok OSS skill at `crates/codegen/xai-grok-bundle/skills/what`, installed into `~/.grok/bundled/skills/what`. Not host overlay as the grok-oss source. Not repo `.agents/skills/what`. Follow Concise American Technical English (`0005_CATE.md`). `/compaction` aliases `/compact`. Named hold (`queue`/`later` or `/queue <slash>`) puts `/compaction`, `/plan`, `/reports`, `/finish` on the existing composer prompt queue without running them this turn. Immediate invoke stays. Present is not Approve. `/metadata` shows ULID, UUID, cwd, model, started, pid, plus last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` for the current sampling model (serving-path config, not a SHA of the weights, not on the status bar). `/limits` named words: stay-supergrok, use-console, meter included or dollar-credits or console or combined, refresh. Fail-open printout must not mark SuperGrok used up. Once `prompt_wal.jsonl` exists in the tree, `/rebuild` must say relaunch preserves that WAL. Do not document that preservation as shipped while the file is absent. | `running_slash_lists_sibling_fixture_row`; L0 `surmount-coordinator-gui` `write_enqueue_creates_per_session_file`, `omits_prompt_text`, `keeps_pid_session_cwd`, `enqueue_drop_path_is_per_session_id`, `CoordinatorApp_selects_row`, `CoordinatorApp_omits_prompt_in_displayed_fields`, `CoordinatorApp_enqueue_writes_drop_file`, `set_remote_host_console_api_key_never_prints_the_key`, `set_remote_host_console_api_key_is_not_pager_dashboard`; `user_guide_machine_console_api_key_for_surmount_1`; `/start` cite `start_*` tests; `/unstick` cite `unstick_*` tests; `finish_empty_args_injects_postmortem_skill`; `finish_skill_copy_does_not_say_work_is_closed_forever`; `reports_empty_args_injects_reports_skill`; `what_empty_args_injects_what_skill`; `what_instruction_prefers_operator_and_agent_speaker_labels`; `what_registered_in_builtin_commands`; `queue_compaction_does_not_invoke_immediately`; `queue_plan_does_not_invoke_immediately`; `metadata_command_emits_show_session_metadata`; `show_session_metadata_includes_fingerprint_fields_from_stored_samples`; `user_guide_metadata_documents_serving_fingerprints`; `user_guide_limits_names_fail_open_and_named_commands`. No `user_guide_*start*` `fn`. Guide still documents `grok-oss rebuild`; that page is not cargo-proven for CLI rebuild. |
 | [`05-configuration`](crates/codegen/xai-grok-pager/docs/user-guide/05-configuration.md) | `hide_header` is in-app only. Titles use `title.enabled`. `[subagents] allow_worktree` defaults false. `[ui] composer_multiline` defaults on; false makes the Human box single-line. | Class 2 readers. **Do not claim** Token Economy `/settings` table rows as proven. |
 | [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-theming.md) | Default theme is DOGE. Human green / agent magenta roles. | Class 4 theme + rail `fn`s. |
-| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill` |
+| [`08-skills`](crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md) | Product skills are not a Python runtime (allowlisted CLI stubs + office/docx/pptx/xlsx/pdf only). `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (in-tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Revising a skill in grok-oss edits that tree. Not repo `.agents/skills/what`. | `user_guide_skills_are_not_a_python_runtime`; `default_product_skills_include_polish_and_subagent`; `what_empty_args_injects_what_skill`; `what_instruction_prefers_operator_and_agent_speaker_labels` |
 | [`16-subagents`](crates/codegen/xai-grok-pager/docs/user-guide/16-subagents.md) | Worktree isolation off by default. Soft interject never cancels. Three-layer paragraph. Hierarchical fast path (L1-only). L1 Subagents list is L2-only plus a live L3 count. L2 overlay is a mid-turn ask to that L2. L3 overlays stay unbothered. Esc on the nested view dismisses it and leaves the L2 running (not Cancelling). New reports under `~/.agents/reports/`. L1 AUTO compact uses catalog 500k. L2 nested 200k may compact. L3 never compact and must not compact-and-continue. | Three-layer / fast-path / L2-only guide text shipped in code; no dedicated user-guide `fn`. Cargo: `child_task_description_is_concise`, `live_subagent_list_shows_only_l2_and_reports_live_l3_count`, `l2_overlay_send_prompt_interjects_l2_not_l1`, `nested_reparent_stamps_l3_depth_and_immediate_parent`, `l2_overlay_esc_leaves_overlay_without_cancelling`, `l2_overlay_app_esc_dismisses_without_cancel_or_cancelling`, `l2_overlay_esc_does_not_fire_armed_parent_cancel`. |
 | [`17-sessions`](crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md) | Last-session on start vs `-c` / `--resume` vs `/start` vs leftover `canceled_turn_resume.json` drop after a successful primary-turn finish. Running grok-oss sessions vs disk `grok-oss sessions`. Resume examples use `grok-oss`. | `user_guide_resume_and_version_examples_use_grok_oss`; `/start` + marker-drop cite `start_*` and `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`. |
 | [`19-plan-mode`](crates/codegen/xai-grok-pager/docs/user-guide/19-plan-mode.md) | Present is not Approve. Idle footer is Approve / Comment / Revise / Exit. Clarify only after Comment. Empty Enter never approves. Copy/`y` is not a fifth idle CTA (title bar + hint). Approve files a GitHub issue with the plan text (`docs/github-tracking.md`). Selected CTA is marked. Enter submits the marked CTA. Click marks the CTA and runs it. First click on Approve still Approves. Letter keys type. Freeform questions, not the questionnaire modal. `/plan --soft` docks Isolated Preview and does not enter plan mode. | Extra class B `fn`s. Keep identifier `plan_approval_footer_paints_five_cta_vocabulary`. `user_guide_plan_soft_docks_isolated_preview`. Copy/`y` and selected-CTA Enter: `y_copies_the_plan_while_the_comment_overlay_is_open`, `plan_approval_pane_has_a_clickable_copy_control`, `plan_approval_cta_row_does_not_paint_copy`, `plan_approval_copy_button_click_copies_the_plan`, `selected_idle_cta_is_visually_marked`, `enter_submits_the_marked_idle_cta`, `enter_while_composing_a_comment_still_saves_the_comment`, `empty_enter_never_approves_even_when_approve_is_marked`, `click_selects_a_cta_and_first_click_approve_still_submits`, `second_click_on_already_selected_cta_still_submits`, `letter_key_types_and_is_not_the_only_submit`. |
@@ -2322,7 +2355,13 @@ that drops them while keeping the seven is still a seam loss):
   `ctrl_enter_mid_turn_dispatches_send_interject`,
   `queue_send_now_click_dispatches_send_interject`,
   `empty_ctrl_enter_mid_turn_does_not_send`,
-  `interject_does_not_wait_minutes_or_block_paint`. Keep
+  `interject_does_not_wait_minutes_or_block_paint`,
+  `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_send_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline`,
+  `enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline`,
+  `arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path`. Keep
   `prompt_wal_appends_on_mid_turn_interject`.
 - TUI performance contracts are fork-owned. They are not last-known-good
   until typing, cancel, and interject stay responsive. Hang/cancel,
@@ -2375,8 +2414,8 @@ that drops them while keeping the seven is still a seam loss):
   `agent_empty_bracketed_paste_defers_probe_for_clipboard_image`,
   `approve_or_revise_drains_plan_composer_images`).
 - Live chrome names SuperGrok dollar credits, not a nickname
-  (`compact_status_supergrok_on_extras_shows_dollars_not_free_period_pct`,
-  `format_supergrok_session_with_weekly_and_extras`).
+  (`compact_status_supergrok_on_dollar_credits_shows_dollars_not_free_period_pct`,
+  `format_supergrok_session_with_weekly_and_dollar_credits`).
 - No two live same-description Subagent rows; unlimited retry is not a
   `u32::MAX` fraction
   (`live_subagent_list_does_not_show_two_rows_with_the_same_description`,
@@ -2567,7 +2606,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
 
 # 5. Dual-auth hop after included SuperGrok period limits are full (rank helpers are not hop)
 cargo test -p xai-grok-shell --lib -- sampling_config_auto_use \
-  sampling_config_hops_to_sibling_included_before_extras \
+  sampling_config_hops_to_sibling_included_before_dollar_credits \
   afterburner_does_not_skip_mark_when_sibling_has_included_remaining \
   resolve_model_to_sampling_config_auto_use \
   align_after_billing_switches_sticky_personal_full_to_business_included \
@@ -2659,6 +2698,12 @@ cargo test -p xai-grok-pager --lib -- \
   ctrl_enter_mid_turn_dispatches_send_interject \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
+  enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_send_must_not_leave_duplicate_prompt_in_composer \
+  enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
+  enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline \
+  arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path \
   session_load_restores_wal_send_missing_from_prompt_history
 cargo test -p xai-grok-update --lib -- export_git_index_omits_unstaged_dirty_file \
   stash_keep_index_hides_unstaged_wip_from_compile_worktree
@@ -2704,8 +2749,11 @@ cargo test -p xai-grok-pager --lib -- \
 # Extra: Subagents list measured L2 tokens and TECH.md (not billing meters)
 cargo test -p xai-grok-pager --lib -- \
   subagents_list_shows_measured_tokens_per_nested_l2 \
+  format_subagents_list_description_shows_measured_tokens_suffix \
+  format_subagent_label_shows_measured_tokens_suffix \
   tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
-  subagents_list_layout_does_not_read_chat_history_jsonl
+  subagents_list_layout_does_not_read_chat_history_jsonl \
+  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water
 
 # Extra: /start + leftover cancel-resume marker drop
 cargo test -p xai-grok-pager --lib -- \

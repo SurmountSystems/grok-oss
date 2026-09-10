@@ -204,8 +204,15 @@ pub struct UiConfig {
     /// turn is running). Session Multiline (`Ctrl+M` / `/multiline`)
     /// cannot turn newline-on-Enter on. `None` = on (client default:
     /// Shift+Enter still inserts a newline; Ctrl+M still works).
+    /// Ctrl+Enter always inserts a newline and is not gated by this flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composer_multiline: Option<bool>,
+    /// When false, session Multiline cannot be turned on via `/multiline`,
+    /// `/ml`, `Ctrl+M`, or the Multiline settings row. `None` = on (current
+    /// sessions may still enable session Multiline). Distinct from
+    /// [`Self::composer_multiline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_session_multiline: Option<bool>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line
     /// selection. Superseded by `keep_text_selection = "word_select"`. Still
     /// read only when `keep_text_selection` is unset; Settings clears this on
@@ -381,6 +388,7 @@ impl Default for UiConfig {
             cursor_blink: None,
             screen_mode: None,
             composer_multiline: None,
+            allow_session_multiline: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -489,6 +497,17 @@ impl UiConfig {
         self.composer_multiline
             .unwrap_or(Self::COMPOSER_MULTILINE_DEFAULT)
     }
+
+    /// Default for [`Self::allow_session_multiline`] when unset (on: slash,
+    /// Ctrl+M, and settings may enable session Multiline).
+    pub const ALLOW_SESSION_MULTILINE_DEFAULT: bool = true;
+
+    /// Whether session Multiline may be enabled. When false, `/multiline`,
+    /// Ctrl+M, and the Multiline settings row cannot set it on.
+    pub fn allow_session_multiline_enabled(&self) -> bool {
+        self.allow_session_multiline
+            .unwrap_or(Self::ALLOW_SESSION_MULTILINE_DEFAULT)
+    }
 }
 
 #[cfg(test)]
@@ -573,6 +592,27 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "composer_multiline": false }))
                 .expect("deserializes composer_multiline false");
         assert!(!off_parsed.composer_multiline_enabled());
+    }
+
+    #[test]
+    fn allow_session_multiline_defaults_on() {
+        assert!(UiConfig::default().allow_session_multiline_enabled());
+        let off = UiConfig {
+            allow_session_multiline: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.allow_session_multiline_enabled());
+        let on: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": true }))
+                .expect("deserializes allow_session_multiline true");
+        assert!(on.allow_session_multiline_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.allow_session_multiline_enabled());
+        let off_parsed: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": false }))
+                .expect("deserializes allow_session_multiline false");
+        assert!(!off_parsed.allow_session_multiline_enabled());
     }
 
     #[test]

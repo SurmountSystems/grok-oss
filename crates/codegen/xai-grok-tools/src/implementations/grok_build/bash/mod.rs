@@ -5346,6 +5346,7 @@ mod tests {
         (resources, called)
     }
 
+    // Grok OSS: implement memory.py snapshot is a Rust intercept, not a Python runtime. This diverges from upstream xAI because product skills must not spawn python3 for that CLI stub.
     #[tokio::test]
     async fn implement_memory_snapshot_intercept_does_not_spawn_shell() {
         let (resources, called) = make_tracking_resources();
@@ -5433,6 +5434,7 @@ mod tests {
         }
     }
 
+    // Grok OSS: validate-plan.py is a Rust intercept, not a Python runtime. This diverges from upstream xAI because product skills must not spawn python3 for that CLI stub.
     #[tokio::test]
     async fn plan_validate_intercept_does_not_spawn_shell() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -5474,6 +5476,7 @@ mod tests {
         }
     }
 
+    // Grok OSS: session_reader.py list is a Rust intercept, not a Python runtime. This diverges from upstream xAI because product skills must not spawn python3 for that CLI stub.
     #[tokio::test]
     async fn session_reader_list_intercept_does_not_spawn_shell() {
         let (resources, called) = make_tracking_resources();
@@ -5571,6 +5574,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because crate-wide cargo fmt --all must be refused and must not spawn a shell.
     #[tokio::test]
     async fn dangerous_cargo_fmt_all_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo fmt --all";
@@ -5578,6 +5582,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo fmt -p without a file list is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_fmt_package_without_file_list_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo fmt -p xai-grok-pager";
@@ -5585,6 +5590,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo clippy --all-targets is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_clippy_all_targets_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo clippy --all-targets";
@@ -5592,6 +5598,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo clippy -p --all-targets is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_clippy_package_all_targets_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo clippy -p xai-grok-pager --all-targets -- -D warnings";
@@ -5599,6 +5606,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo clippy --workspace is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_clippy_workspace_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo clippy --workspace";
@@ -5606,6 +5614,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo test --workspace is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_test_workspace_is_refused_and_does_not_spawn_shell() {
         let cmd = "cargo test --workspace";
@@ -5613,6 +5622,7 @@ mod tests {
         assert_dangerous_cargo_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because cargo nextest run without a package or filter is crate-wide and must be refused.
     #[tokio::test]
     async fn dangerous_cargo_nextest_run_without_package_or_filter_is_refused_and_does_not_spawn_shell()
      {
@@ -5665,6 +5675,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a workspace rustc oneshot (no --out-dir) must be refused.
     #[tokio::test]
     async fn rustc_oneshot_without_out_dir_is_refused_and_does_not_spawn_shell() {
         let cmd = "rustc foo.rs";
@@ -5672,6 +5683,7 @@ mod tests {
         assert_compiler_probe_junk_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because rustc - writing rust_out at the workspace root must be refused.
     #[tokio::test]
     async fn rustc_stdin_rust_out_is_refused_and_does_not_spawn_shell() {
         let cmd = "rustc -";
@@ -5679,6 +5691,7 @@ mod tests {
         assert_compiler_probe_junk_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because rustc -o a.out at the workspace root must be refused.
     #[tokio::test]
     async fn rustc_dash_o_a_out_at_workspace_root_is_refused_and_does_not_spawn_shell() {
         let cmd = "rustc foo.rs -o a.out";
@@ -5686,6 +5699,7 @@ mod tests {
         assert_compiler_probe_junk_refused(result, &called, cmd);
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because writing compiler probe junk at the workspace root must be refused.
     #[tokio::test]
     async fn redirect_rmeta_at_workspace_root_is_refused_and_does_not_spawn_shell() {
         let cmd = "echo probe > libfixture.rmeta";

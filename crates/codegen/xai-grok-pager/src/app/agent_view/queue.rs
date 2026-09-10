@@ -680,8 +680,8 @@ impl AgentView {
 #[cfg(test)]
 mod queue_edit_routing_tests {
     use super::test_fixtures::{
-        force_interject_key, make_running_agent, non_vscode_registry, running_agent_local_only,
-        test_pasted_image, vscode_family_registry, vscode_interject_key,
+        force_interject_key, make_agent, make_running_agent, non_vscode_registry,
+        running_agent_local_only, test_pasted_image, vscode_family_registry, vscode_interject_key,
     };
     use super::*;
     use crate::app::actions::Action;
@@ -1422,8 +1422,9 @@ mod queue_edit_routing_tests {
         );
     }
 
-    /// Multiline + non-empty composer: bare Enter still inserts a newline
-    /// (does not queue/send), even mid-turn with a queue present.
+    /// Multiline + caret in the middle of a draft: bare Enter still inserts
+    /// a newline (does not queue/send), even mid-turn with a queue present.
+    /// Enter at the end of the last line is a different contract (submit).
     #[test]
     fn multiline_enter_with_text_inserts_newline_not_send_now() {
         let mut agent = running_agent_local_only();
@@ -1431,6 +1432,7 @@ mod queue_edit_routing_tests {
         agent.active_pane = AgentPane::Prompt;
         agent.queue.overlay.focused = false;
         agent.prompt.set_text("draft line");
+        agent.prompt.set_cursor("draft".len());
 
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_prompt_key_for_test(&enter);
@@ -1448,6 +1450,84 @@ mod queue_edit_routing_tests {
             1,
             "queued follow-up must remain (text Enter is not send-now)"
         );
+    }
+
+    /// Composer Shift+Enter inserts a newline and does not submit. Bare
+    /// Enter at the end of the last line still submits (idle send /
+    /// mid-turn interject). Do not steal #85. After Shift+Enter the
+    /// composer still has the text plus newline.
+    #[test]
+    fn composer_shift_enter_inserts_newline_and_does_not_submit() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let body = "write a multiline prompt";
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let bare_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+
+        for multiline_mode in [false, true] {
+            let mut agent = make_agent();
+            agent.multiline_mode = multiline_mode;
+            agent.active_pane = AgentPane::Prompt;
+            agent.prompt.set_text(body);
+            agent.prompt.set_cursor(body.len());
+            let outcome = agent.handle_prompt_key_for_test(&shift_enter);
+            assert!(
+                matches!(outcome, InputOutcome::Changed),
+                "Shift+Enter must insert a newline and not submit (session Multiline={multiline_mode}), got {outcome:?}"
+            );
+            assert_eq!(
+                agent.prompt.text(),
+                format!("{body}\n"),
+                "after Shift+Enter the composer still has the text plus newline (session Multiline={multiline_mode})"
+            );
+        }
+
+        let mut agent = make_agent();
+        agent.multiline_mode = true;
+        agent.active_pane = AgentPane::Prompt;
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        match agent.handle_prompt_key_for_test(&bare_enter) {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, body, "idle send must keep the typed body");
+            }
+            other => panic!(
+                "bare Enter at the end of the last line still submits (idle send), got {other:?}"
+            ),
+        }
+
+        let mut agent = running_agent_local_only();
+        agent.multiline_mode = true;
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        let outcome = agent.handle_prompt_key_for_test(&shift_enter);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "mid-turn Shift+Enter must insert a newline and not interject, got {outcome:?}"
+        );
+        assert_eq!(
+            agent.prompt.text(),
+            format!("{body}\n"),
+            "after Shift+Enter the composer still has the text plus newline"
+        );
+
+        let mut agent = running_agent_local_only();
+        agent.multiline_mode = true;
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        match agent.handle_prompt_key_for_test(&bare_enter) {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, body, "mid-turn interject must keep the typed body");
+            }
+            other => panic!(
+                "bare Enter at the end of the last line still submits (mid-turn interject), got {other:?}"
+            ),
+        }
+
+        crate::appearance::cache::set_composer_multiline(true);
     }
 
     /// When the composer has text, that wins over a queued follow-up.
