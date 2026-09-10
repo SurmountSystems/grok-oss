@@ -105,6 +105,18 @@ pub(crate) fn format_request_failure(
             .flatten()
     });
     let extracted = extract_error_detail(raw);
+    if is_headers_timeout_cold_start(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(is_headers_timeout_cold_start)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Cold start: response headers timed out".to_string(),
+            detail: "The model host may still be starting. Retry is in progress. This is not Thought-only."
+                .to_string(),
+        };
+    }
     let team_prepaid = xai_grok_sampling_types::is_console_team_prepaid_message(raw)
         || extracted
             .as_deref()
@@ -369,6 +381,14 @@ fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     }
     let code: u16 = s[..3].parse().ok()?;
     (400..600).contains(&code).then_some(code)
+}
+
+/// Header-timeout / cold-start class: TCP accepted but no HTTP response
+/// headers within the stream-headers budget (default 2m). Not billing.
+pub(crate) fn is_headers_timeout_cold_start(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("timed out waiting for response headers")
+        || (lower.contains("response headers") && lower.contains("timed out"))
 }
 
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
@@ -795,6 +815,45 @@ mod tests {
         assert_eq!(
             parse_http_status("Server error (500) \u{2014} Something went wrong on our side."),
             Some(500)
+        );
+    }
+
+    /// Operator: "Connection failed – request error stream: timed out waiting
+    /// for response headers after 2m0s"; retry attempt 2; "might be caused by
+    /// it being a cold start, not warm." Chrome must name the cold-start
+    /// class and keep a retry path. Not Thought-only. Not billing.
+    #[test]
+    fn header_timeout_is_named_cold_start_class_with_retry_path() {
+        let raw = "Connection failed – request error stream: timed out waiting for response headers after 2m0s";
+        let formatted = format_request_failure(None, Some("http"), raw);
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Cold start") && msg.contains("response headers timed out"),
+            "header timeout must name the cold-start class, got {msg}"
+        );
+        assert!(
+            msg.contains("Retry is in progress"),
+            "must keep a retry path, not Thought-only, got {msg}"
+        );
+        assert!(
+            !msg.contains("Thought") || msg.contains("not Thought-only"),
+            "must not leave Thought-only chrome, got {msg}"
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("dollar")
+                && !msg.to_ascii_lowercase().contains("billing"),
+            "must not invent billing, got {msg}"
+        );
+        let retry = crate::app::subagent::format_activity_label(
+            &crate::acp::tracker::TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: u32::MAX,
+                reason: "cold start: response headers timed out".into(),
+            },
+        );
+        assert!(
+            retry.contains("Retrying (2)"),
+            "retry attempt 2 must stay Retrying chrome, got {retry}"
         );
     }
 

@@ -204,7 +204,8 @@ pub struct UiConfig {
     /// turn is running). Session Multiline (`Ctrl+M` / `/multiline`)
     /// cannot turn newline-on-Enter on. `None` = on (client default:
     /// Shift+Enter still inserts a newline; Ctrl+M still works).
-    /// Ctrl+Enter always inserts a newline and is not gated by this flag.
+    /// Ctrl+Enter inserts a newline when interject is not appropriate,
+    /// and is not gated by this flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composer_multiline: Option<bool>,
     /// When false, session Multiline cannot be turned on via `/multiline`,

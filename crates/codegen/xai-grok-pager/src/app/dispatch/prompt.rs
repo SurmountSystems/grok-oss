@@ -628,14 +628,17 @@ pub(super) fn dispatch_send_prompt_inner(
                 return vec![];
             }
             interject::OverlayOperatorClarify::L2(_) => {
-                // Same clear contract as bare mid-turn Enter: after a successful
-                // interject (or local enqueue fallback), the composer must not
-                // still hold that body. Draft-preserving sends keep the stash.
-                if consume_input {
-                    let images = agent.prompt.drain_images();
-                    return enqueue_if_interject_dropped(app, id, text, images);
+                // `/goal` is GoalSet, not an L2 interject string.
+                if !crate::slash::queue_schedule::is_goal_slash(&text) {
+                    // Same clear contract as bare mid-turn Enter: after a successful
+                    // interject (or local enqueue fallback), the composer must not
+                    // still hold that body. Draft-preserving sends keep the stash.
+                    if consume_input {
+                        let images = agent.prompt.drain_images();
+                        return enqueue_if_interject_dropped(app, id, text, images);
+                    }
+                    return interject::dispatch_interject(app, text, Vec::new());
                 }
-                return interject::dispatch_interject(app, text, Vec::new());
             }
             interject::OverlayOperatorClarify::None => {}
         }
@@ -962,28 +965,42 @@ pub(super) fn dispatch_send_prompt_inner(
             }
             CommandResult::PassThrough(pass_text) => {
                 // Mid-turn Enter: slash PassThrough that is not a named hold
-                // (`/goal ...`, unknown shell builtins) merges into this turn.
-                // `/queue /finish` is QueueLater above, not this arm.
-                if consume_input && agent.session.state.is_turn_running() {
+                // merges into this turn. `/goal ...` is a shell GoalSet: queue
+                // it so Send now is a real goal action, not an interjected
+                // composer string. `/queue /finish` is QueueLater above.
+                if consume_input
+                    && agent.session.state.is_turn_running()
+                    && crate::slash::queue_schedule::is_goal_slash(&pass_text)
+                {
+                    agent.append_prompt_wal(
+                        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+                        &pass_text,
+                        &agent.prompt.images,
+                    );
+                    agent.start_pending_live_prompt_task(&pass_text);
+                    agent.session.enqueue_prompt(pass_text);
+                    skip_drain = true;
+                } else if consume_input && agent.session.state.is_turn_running() {
                     let images = agent.prompt.drain_images();
                     return enqueue_if_interject_dropped(app, id, pass_text, images);
+                } else {
+                    // A recognized token later in the passthrough text still styles the echo.
+                    let skill_token_ranges = agent
+                        .prompt
+                        .slash_controller
+                        .recognized_token_ranges(&pass_text, &agent.session.models);
+                    agent.append_prompt_wal(
+                        xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+                        &pass_text,
+                        &agent.prompt.images,
+                    );
+                    agent.start_pending_live_prompt_task(&pass_text);
+                    protect_queue_id = Some(
+                        agent
+                            .session
+                            .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges),
+                    );
                 }
-                // A recognized token later in the passthrough text still styles the echo.
-                let skill_token_ranges = agent
-                    .prompt
-                    .slash_controller
-                    .recognized_token_ranges(&pass_text, &agent.session.models);
-                agent.append_prompt_wal(
-                    xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
-                    &pass_text,
-                    &agent.prompt.images,
-                );
-                agent.start_pending_live_prompt_task(&pass_text);
-                protect_queue_id = Some(
-                    agent
-                        .session
-                        .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges),
-                );
             }
         }
         if consume_input {

@@ -1329,9 +1329,17 @@ or weaken these tests in recon.
 
 | path::test | Contract |
 |------------|----------|
-| `ctrl_enter_mid_turn_dispatches_send_interject` | Mid-turn Ctrl+Enter dispatches `SendInterject`, not `SendPromptNow`. Not last-known-good. |
+| `ctrl_enter_mid_turn_dispatches_send_interject` | Mid-turn Ctrl+Enter with text dispatches `SendInterject` when interject is appropriate, not newline and not `SendPromptNow`. Not last-known-good. |
 | `queue_send_now_click_dispatches_send_interject` | Mouse Down on queue `[Send now]` for a local row dispatches `SendInterject`. Key and click must not diverge. Not last-known-good. |
 | `empty_ctrl_enter_mid_turn_does_not_send` | Empty composer does not send. Not last-known-good. |
+| `enter_while_other_work_is_live_must_still_clear_composer` | Human Enter still clears the composer when a turn and queue row are live. Not last-known-good. |
+| `send_now_while_retrying_must_still_clear_composer` | Send-now still clears the composer while Retrying chrome is up. Not last-known-good. |
+| `queued_prompt_edit_must_not_steal_later_send_clear` | Editing a queued prompt must not steal a later send clear. Not last-known-good. |
+| `queued_goal_send_now_is_goal_action_not_stuck_composer_string` | Queued `/goal` after Send now is GoalSet via send-now, not an interjected string. Not last-known-good. |
+| `limits_help_lists_named_words_and_hyphenated_aliases` | `/limits --help` lists named words and hyphenated aliases. Not last-known-good. |
+| `limits_hyphenated_aliases_match_unhyphenated_words` | Hyphenated `/limits` words match unhyphenated, including `--use-credits`. Not last-known-good. |
+| `header_timeout_is_named_cold_start_class_with_retry_path` | Header-timeout chrome names cold start and keeps Retrying. Not last-known-good. |
+| `user_guide_ctrl_enter_interjects_when_appropriate` | User-guide defines when Ctrl+Enter interjects vs newline. Not last-known-good. |
 | `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
 | `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute. Performance contract; not last-known-good. |
 | `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer` | After bare mid-turn Enter soft-interjects, the Human box must not still hold that body. Not last-known-good. |
@@ -1346,6 +1354,14 @@ cargo test -p xai-grok-pager --lib -- \
   ctrl_enter_mid_turn_dispatches_send_interject \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
+  enter_while_other_work_is_live_must_still_clear_composer \
+  send_now_while_retrying_must_still_clear_composer \
+  queued_prompt_edit_must_not_steal_later_send_clear \
+  queued_goal_send_now_is_goal_action_not_stuck_composer_string \
+  limits_help_lists_named_words_and_hyphenated_aliases \
+  limits_hyphenated_aliases_match_unhyphenated_words \
+  header_timeout_is_named_cold_start_class_with_retry_path \
+  user_guide_ctrl_enter_interjects_when_appropriate \
   prompt_wal_appends_on_mid_turn_interject \
   interject_does_not_wait_minutes_or_block_paint \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
@@ -2193,6 +2209,14 @@ cargo test -p xai-grok-pager --lib -- \
   ctrl_enter_mid_turn_dispatches_send_interject \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
+  enter_while_other_work_is_live_must_still_clear_composer \
+  send_now_while_retrying_must_still_clear_composer \
+  queued_prompt_edit_must_not_steal_later_send_clear \
+  queued_goal_send_now_is_goal_action_not_stuck_composer_string \
+  limits_help_lists_named_words_and_hyphenated_aliases \
+  limits_hyphenated_aliases_match_unhyphenated_words \
+  header_timeout_is_named_cold_start_class_with_retry_path \
+  user_guide_ctrl_enter_interjects_when_appropriate \
   interject_does_not_wait_minutes_or_block_paint \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
   l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \

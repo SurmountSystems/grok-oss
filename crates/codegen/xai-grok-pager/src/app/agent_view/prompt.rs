@@ -22,6 +22,31 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 }
 
 impl AgentView {
+    /// When Ctrl+Enter must interject (`x.ai/interject`) instead of inserting
+    /// a newline. Appropriate: a sampler turn is running, the Human box has
+    /// text or images, and the target can take it (L1 or L2 overlay). Not
+    /// appropriate: idle, empty composer, L3 specialist overlay. Cancel-and-send
+    /// is a different chord.
+    pub(crate) fn interjection_is_appropriate(&self) -> bool {
+        let has_payload = !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty();
+        if !has_payload {
+            return false;
+        }
+        if !self.session.state.is_turn_running() {
+            return false;
+        }
+        if let Some(child_sid) = self.active_subagent.as_deref()
+            && self.subagent_views.contains_key(child_sid)
+            && !crate::app::subagent::overlay_child_is_l2_coordinator(
+                &self.subagent_sessions,
+                child_sid,
+            )
+        {
+            return false;
+        }
+        true
+    }
+
     pub fn prompt_history_loading(&self) -> bool {
         self.session.prompt_history_loading && self.prompt.text().is_empty()
     }
@@ -555,12 +580,25 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Grok OSS: Operator uses Control Space for the microphone and
-        // confuses that with wanting Shift+Enter; Ctrl+Enter must insert a
-        // newline and must not submit. Always newline (idle and mid-turn),
-        // even when session Multiline is on or [ui] composer_multiline is
-        // false. Handle before InterjectPrompt / send-now.
+        // Ctrl+Enter is newline (Shift+Enter analog) only when interject is
+        // not appropriate. Mid-turn with text to a turn that can take
+        // x.ai/interject: Ctrl+Enter interjects. Idle, empty, or L3 overlay:
+        // newline. Cancel-and-send is SendPromptNow (parked wait / queued
+        // /goal), not this chord. Handle before InterjectPrompt.
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.interjection_is_appropriate() {
+                if let Some(outcome) = self.interject_editing_queued_intercept() {
+                    return outcome;
+                }
+                let text = self.prompt.text().trim().to_string();
+                if self.paste_probe_in_flight > 0 {
+                    self.deferred_send = Some(AgentDeferredSend::Interject);
+                    return InputOutcome::Changed;
+                }
+                let images = self.prompt.drain_images();
+                self.prompt.set_text("");
+                return InputOutcome::Action(Action::Interject { text, images });
+            }
             self.prompt.textarea.insert_str("\n");
             return InputOutcome::Changed;
         }

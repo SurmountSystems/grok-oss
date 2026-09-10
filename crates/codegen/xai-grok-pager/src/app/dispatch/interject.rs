@@ -640,43 +640,54 @@ mod tests {
         );
     }
 
-    /// Operator contract: Composer Ctrl+Enter inserts a newline and does not
-    /// submit, same as Shift+Enter. Mid-turn with text must not Interject,
-    /// SendPrompt, or SendPromptNow. After Ctrl+Enter the composer still has
-    /// the text plus newline. Send-now remains Ctrl+I / Ctrl+O / Ctrl+L and
-    /// queue [Send now].
+    /// Operator: "ctrl-enter could make it so we can't interject properly
+    /// still. it should only act like shift-enter if interjection isn't
+    /// appropriate." Mid-turn with text: interject is appropriate. Ctrl+Enter
+    /// dispatches SendInterject, not newline, not cancel-and-send.
     #[test]
-    fn ctrl_enter_mid_turn_inserts_newline_not_interject() {
+    fn ctrl_enter_mid_turn_dispatches_send_interject() {
         use crate::app::agent::AgentState;
         use crate::app::agent_view::ActivePane;
 
         let mut app = test_app_with_agent();
         let id = AgentId(0);
         let body = "steer this running turn";
-        let outcome = {
+        let action = {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnRunning;
             agent.set_active_pane(ActivePane::Prompt, true);
             agent.prompt.set_text(body);
             agent.prompt.set_cursor(body.len());
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("Ctrl+Enter mid-turn with text must interject, got {other:?}"),
+            }
         };
         assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Ctrl+Enter mid-turn must insert a newline (Changed), not Interject/send, got {outcome:?}"
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "Ctrl+Enter when interject is appropriate must be Interject, got {action:?}"
         );
-        assert_eq!(
-            app.agents[&id].prompt.text(),
-            format!("{body}\n"),
-            "composer must keep the text plus newline"
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject, got {other:?}"),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
+            "Ctrl+Enter must not cancel-and-send, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Ctrl+Enter that interjects, the composer must clear; got {:?}",
+            app.agents[&id].prompt.text()
         );
         assert!(
             app.agents[&id].session.state.is_turn_running(),
             "current turn must keep running"
-        );
-        assert!(
-            app.agents[&id].session.pending_prompts.is_empty(),
-            "Ctrl+Enter must not invent a queued row"
         );
     }
 
@@ -1141,6 +1152,216 @@ mod tests {
             app.agents[&id].prompt.text().is_empty(),
             "after Enter that sends, the composer must not still hold that same body; got {:?}",
             app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Operator: "the prompt is inconsistent about clearing"; "enter clears
+    /// the prompt input"; "not sure why it happens sometimes and not others...
+    /// it's a heisenbug." When other work is live (tool running, queue row,
+    /// retrying model), Human Enter must still clear the composer the same way
+    /// a quiet send does.
+    #[test]
+    fn enter_while_other_work_is_live_must_still_clear_composer() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "follow-up while other work is live";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.enqueue_prompt("already queued".into());
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("mid-turn Enter with text must send/interject, got {other:?}"),
+            }
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { text, .. } if text == body
+            )),
+            "Enter with other work live must still interject, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "Enter must still clear the composer while a tool and queue row are live; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Same heisenbug contract for send-now while Retrying chrome is up.
+    #[test]
+    fn send_now_while_retrying_must_still_clear_composer() {
+        use crate::acp::tracker::TurnActivity;
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "retrying still must clear";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent
+                .session
+                .set_retry_activity(Some(TurnActivity::Retrying {
+                    attempt: 2,
+                    max_retries: u32::MAX,
+                    reason: "response headers timed out".into(),
+                }));
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent.handle_prompt_key_for_test(&KeyEvent::new(
+                KeyCode::Char('i'),
+                KeyModifiers::CONTROL,
+            )) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Ctrl+I send-now must Interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "send-now while retrying must Interject, got {action:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "send-now must clear the composer while Retrying; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        let _ = dispatch(action, &mut app);
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "dispatch must not restore the composer after send-now clear"
+        );
+    }
+
+    /// Operator: "seems to work fine for editing a queued prompt". Editing an
+    /// existing queued prompt must not steal that clear for a later send.
+    #[test]
+    fn queued_prompt_edit_must_not_steal_later_send_clear() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let queued_id = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            let qid = agent.session.enqueue_prompt("queued body".into());
+            agent.sync_queue_pane();
+            qid
+        };
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.enter_queue_edit(queued_id, false, None);
+            agent.prompt.set_text("edited queued body");
+            agent.set_active_pane(ActivePane::Prompt, true);
+            let outcome = agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(
+                !matches!(outcome, InputOutcome::Unchanged),
+                "Enter while editing a queued prompt must save, got {outcome:?}"
+            );
+            assert!(
+                agent.prompt.text().is_empty()
+                    || !matches!(
+                        agent.prompt_mode,
+                        crate::app::queue_edit::PromptMode::EditingQueued { .. }
+                    ),
+                "queued edit Enter must leave editing and not keep the draft as a steal; mode={:?} text={:?}",
+                agent.prompt_mode,
+                agent.prompt.text()
+            );
+        }
+        let body = "new send after queued edit";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("later Enter must still send/interject, got {other:?}"),
+            }
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { text, .. } if text == body
+            )),
+            "later Enter after a queued edit must interject, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "queued-prompt edit must not steal the later send clear; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Operator queued `/goal` (green queue row): after Send now it must be a
+    /// real goal action, not a stuck composer string.
+    #[test]
+    fn queued_goal_send_now_is_goal_action_not_stuck_composer_string() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "/goal also now do a /goal to check everything remotely if you can't set your own goal, make it so you can";
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+        }
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendInterject { .. })),
+            "queued /goal must not interject the slash as chat, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text == body),
+            "mid-turn /goal must land as a queue row, pending={:?}",
+            app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "queued /goal must not stick in the composer; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        let row_id = app.agents[&id].session.pending_prompts[0].id;
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.sync_queue_pane();
+            match agent.force_interject_queue_row(row_id) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Send now on queued /goal must dispatch, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPromptNow { text, .. } if text == body),
+            "Send now on queued /goal must GoalSet via send-now, not Interject, got {action:?}"
         );
     }
 

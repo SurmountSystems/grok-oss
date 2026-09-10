@@ -354,6 +354,14 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         if let Some(prompt) = self.remove_local_queue_row(id) {
+            // Queued `/goal` is GoalSet on the next prompt, not an interject
+            // string. Send now cancel-and-sends so handle_prompt can set it.
+            if crate::slash::queue_schedule::is_goal_slash(&prompt.text) {
+                return InputOutcome::Action(Action::SendPromptNow {
+                    text: prompt.text,
+                    images: prompt.images,
+                });
+            }
             return InputOutcome::Action(Action::Interject {
                 text: prompt.text,
                 images: prompt.images,

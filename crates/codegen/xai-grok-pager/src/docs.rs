@@ -594,8 +594,10 @@ mod tests {
         assert!(
             slash.content.contains("meter included")
                 && slash.content.contains("dollar-credits")
-                && slash.content.contains("refresh"),
-            "04-slash-commands.md must name meter included|dollar-credits|console|combined and refresh"
+                && slash.content.contains("refresh")
+                && slash.content.contains("--help")
+                && slash.content.contains("--use-credits"),
+            "04-slash-commands.md must name meter included|dollar-credits|console|combined, refresh, --help, and --use-credits"
         );
         assert!(
             slash.content.contains("preferred_method") && slash.content.contains("api_key"),
@@ -879,6 +881,28 @@ mod tests {
             slash.content.contains("resource links")
                 && slash.content.contains("never re-inlines data URLs"),
             "04-slash-commands must say WAL images resend as resource links, never data URLs"
+        );
+    }
+
+    /// Operator: Ctrl+Enter should only act like Shift+Enter if interjection
+    /// is not appropriate. Guide and FORK must say when it interjects.
+    #[test]
+    fn user_guide_ctrl_enter_interjects_when_appropriate() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("interjects when interjection is appropriate")
+                && content.contains("otherwise inserts a newline"),
+            "03-keyboard-shortcuts.md must define when Ctrl+Enter interjects: {content}"
+        );
+        assert!(
+            content.contains("L3 specialist overlay")
+                && content.contains("idle")
+                && content.contains("composer is empty"),
+            "03-keyboard-shortcuts.md must say when interject is not appropriate"
         );
     }
 

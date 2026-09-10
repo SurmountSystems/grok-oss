@@ -393,6 +393,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Remote quality check-remote gate
     - L3 specialists (when spawned)
+  - L2 Remote quality gate after 689c9d1
+    - L3 specialists (when spawned)
   - L2 Remove unused no_speech_error
     - L3 specialists (when spawned)
   - L2 Rename extras identifiers to credits
@@ -653,6 +655,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 [reviewer] Stale queue patch
     - L3 specialists (when spawned)
+  - L2 check-remote after 689c9d1
+    - L3 specialists (when spawned)
   - L2 check-remote after dollar-credits rename
     - L3 specialists (when spawned)
   - L2 check-remote after idle-send fix
@@ -900,6 +904,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Rebuild must exec workspace grok-oss | nested L2 session usage | L2 | 135604 | estimate | exited |
 | Rebuild workspace binary exec | nested L2 session usage | L2 | 200081 | estimate | exited |
 | Remote quality check-remote gate | nested L2 session usage | L2 | 161619 | estimate | exited |
+| Remote quality gate after 689c9d1 | nested L2 session usage | L2 | 110748 | estimate | exited |
 | Remove unused no_speech_error | nested L2 session usage | L2 | 85445 | estimate | exited |
 | Rename extras identifiers to credits | nested L2 session usage | L2 | 167380 | estimate | exited |
 | Rename extras meter identifiers | nested L2 session usage | L2 | 192759 | estimate | exited |
@@ -1030,6 +1035,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | [reviewer] Hang and copy slice | nested L2 session usage | L2 | 70060 | estimate | exited |
 | [reviewer] Image embed slice | nested L2 session usage | L2 | 71649 | estimate | exited |
 | [reviewer] Stale queue patch | nested L2 session usage | L2 | 67517 | estimate | exited |
+| check-remote after 689c9d1 | nested L2 session usage | L2 | 90077 | estimate | exited |
 | check-remote after dollar-credits rename | nested L2 session usage | L2 | 84296 | estimate | exited |
 | check-remote after idle-send fix | nested L2 session usage | L2 | 108834 | estimate | exited |
 | check-remote fix contracts | nested L2 session usage | L2 | 111358 | estimate | exited |

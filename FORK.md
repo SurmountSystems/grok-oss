@@ -871,11 +871,13 @@ identifier that has no matching `fn`.
   `xai-grok-compaction` `wrap_system_reminder`). Named test:
   `post_compact_reminder_includes_surmount_standing_law`.
 - [x] **Soft interject only + Enter cue honesty**: mid-turn interject
-  (Ctrl+Enter) injects into the current turn and **never cancels**. Cancel is
-  Esc/stop only. Composer footer Enter cue (send / queue / interject) is
-  shipped in code with no named footer `fn`. Proven never-cancel:
-  `interject_contract_*`. User-guide `03-keyboard-shortcuts`,
-  `16-subagents`.
+  (plain Enter with text, and Ctrl+Enter when interjection is
+  appropriate) injects into the current turn and **never cancels**.
+  Ctrl+Enter inserts a newline when interjection is not appropriate
+  (idle, empty composer, L3 overlay). Cancel is Esc/stop only. Composer
+  footer Enter cue (send / queue / interject) is shipped in code with no
+  named footer `fn`. Proven never-cancel: `interject_contract_*`.
+  User-guide `03-keyboard-shortcuts`, `16-subagents`.
 - [x] **Todo board survives auto-compact**:
   `auto_compact_completed_preserves_todo_board`
   (`app/acp_handler/tests/subagents.rs`).
@@ -1008,19 +1010,33 @@ identifier that has no matching `fn`.
   stay contracts. Do not delete or weaken those tests in recon, onto,
   import, or join.
 - [x] **Interject Ctrl+Enter and Send now are fork-owned.** Mid-turn
-  Ctrl+Enter and the clickable queue `[Send now]` control dispatch
-  `SendInterject` (`x.ai/interject`). They must not drop the text, queue-only,
-  no-op, or cancel-and-send. Enter with text while a turn runs is the
-  separate soft-interject path. Empty composer does not send. A successful
-  interject still appends WAL `kind=interject`. Product: InterjectPrompt
-  (`agent_view/prompt.rs`) and local-row `force_interject_queue_row`
-  (`agent_view/queue.rs`; mouse Down on `[Send now]` in `app/mouse.rs`)
-  emit `Action::Interject`, not `SendPromptNow`. Grok OSS 1.0.3 is **not**
+  Ctrl+Enter interjects when interjection is appropriate, and otherwise
+  inserts a newline (the Shift+Enter analog). Interjection is appropriate
+  when a sampler turn is running, the Human box has text or images, and
+  the target can take `x.ai/interject` (this session or an open L2
+  overlay). It is not appropriate when idle, when the composer is empty,
+  or when an L3 specialist overlay is open. Cancel-and-send is not
+  Ctrl+Enter. The clickable queue `[Send now]` control on a plain prompt
+  row dispatches `SendInterject`. A queued `/goal` row after Send now is
+  a GoalSet via `SendPromptNow`, not an interjected composer string.
+  They must not drop the text, queue-only, or no-op. Enter with text
+  while a turn runs is the separate soft-interject path. Empty composer
+  does not send. A successful interject still appends WAL `kind=interject`.
+  Product: InterjectPrompt (`agent_view/prompt.rs`) and local-row
+  `force_interject_queue_row` (`agent_view/queue.rs`; mouse Down on
+  `[Send now]` in `app/mouse.rs`). Grok OSS 1.0.3 is **not**
   last-known-good for this UI. Operator-verified WAL send / rebuild-flush /
   interject / plan-notes appends do **not** mean live Interject UI works.
   Named tests: `ctrl_enter_mid_turn_dispatches_send_interject`,
   `queue_send_now_click_dispatches_send_interject`,
   `empty_ctrl_enter_mid_turn_does_not_send`,
+  `enter_while_other_work_is_live_must_still_clear_composer`,
+  `send_now_while_retrying_must_still_clear_composer`,
+  `queued_prompt_edit_must_not_steal_later_send_clear`,
+  `queued_goal_send_now_is_goal_action_not_stuck_composer_string`,
+  `limits_help_lists_named_words_and_hyphenated_aliases`,
+  `limits_hyphenated_aliases_match_unhyphenated_words`,
+  `header_timeout_is_named_cold_start_class_with_retry_path`,
   `interject_does_not_wait_minutes_or_block_paint`,
   `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
   `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,
@@ -2347,14 +2363,20 @@ that drops them while keeping the seven is still a seam loss):
   § Prompt write-ahead log. Queue enqueue is not that mark. Restore tests
   stay contracts. Do not delete or weaken those tests in recon.
 - Interject Ctrl+Enter and Send now are fork-owned. Mid-turn Ctrl+Enter
-  and queue `[Send now]` dispatch `SendInterject` via `Action::Interject`
-  (not `SendPromptNow`). Grok OSS 1.0.3 is
+  interjects when appropriate and otherwise inserts a newline. Queue
+  `[Send now]` on a plain prompt row dispatches `SendInterject` via
+  `Action::Interject`. A queued `/goal` row is GoalSet via `SendPromptNow`.
+  Grok OSS 1.0.3 is
   **not** last-known-good. WAL known-good for send / rebuild-flush /
   interject / plan-notes appends is a separate contract and does not
   prove live Interject UI. Named tests:
   `ctrl_enter_mid_turn_dispatches_send_interject`,
   `queue_send_now_click_dispatches_send_interject`,
   `empty_ctrl_enter_mid_turn_does_not_send`,
+  `enter_while_other_work_is_live_must_still_clear_composer`,
+  `queued_goal_send_now_is_goal_action_not_stuck_composer_string`,
+  `header_timeout_is_named_cold_start_class_with_retry_path`,
+  `limits_help_lists_named_words_and_hyphenated_aliases`,
   `interject_does_not_wait_minutes_or_block_paint`,
   `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
   `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,

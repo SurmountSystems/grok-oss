@@ -37,6 +37,12 @@ pub fn is_plan_slash(text: &str) -> bool {
     first_slash_token(text) == "/plan"
 }
 
+/// `/goal` is a shell builtin (GoalSet). A queued row must stay a goal
+/// action after Send now, not an interjected composer string.
+pub fn is_goal_slash(text: &str) -> bool {
+    first_slash_token(text) == "/goal"
+}
+
 pub fn compact_command_text(rest: &str) -> String {
     if rest.is_empty() {
         "/compact".to_string()
@@ -146,5 +152,15 @@ mod tests {
         );
         assert_eq!(split_schedule_token("queue --soft"), (true, "--soft"));
         assert_eq!(split_schedule_token("later --soft"), (true, "--soft"));
+    }
+
+    #[test]
+    fn is_goal_slash_detects_queued_goal_body() {
+        assert!(is_goal_slash(
+            "/goal also now do a /goal to check everything remotely"
+        ));
+        assert!(is_goal_slash("/goal"));
+        assert!(!is_goal_slash("/goals"));
+        assert!(!is_goal_slash("goal check remotely"));
     }
 }

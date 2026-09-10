@@ -322,7 +322,7 @@ Always-approve remains the preferred daily autonomy mode. Context-only is an exp
 
 ### `/multiline`
 
-Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` always inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.
+Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` interjects when a running turn can take it, and otherwise inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.
 
 ### `/history`
 
@@ -689,11 +689,15 @@ Only one `grok-oss` process fetches billing and limits. Other live TUIs read a s
 
 ```
 /limits
+/limits --help
 /limits --json
 /limits stay-supergrok
+/limits --stay-supergrok
 /limits use-console
+/limits --use-console
 /limits use-personal
 /limits use-business
+/limits --use-credits
 /limits meter included
 /limits refresh
 ```
@@ -702,7 +706,7 @@ Only one `grok-oss` process fetches billing and limits. Other live TUIs read a s
 
 A grok-oss limits JSON or compact printout of included 100%, remaining 0, or SuperGrok dollar credits $0 must not mark SuperGrok used up or hop to console so this session cannot self-fix. grok-oss limits is a client printout, not xAI billing truth. Matching `nextReset` is not proof of a shared pool. Operator Usage (grok.com for that workspace) and the console.x.ai Billing page they can see win. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. Never invent remaining. Never call any pool used up.
 
-Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Personal SuperGrok and business SuperGrok are distinct weekly pools; they do not combine. SuperGrok is a paid product. `use-business` is valid even when business has no included period-limits payload. grok-oss fails loud if no stored Team login exists. A second `grok-oss login` stores the Team principal. Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up or hop to console. Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. The compact meter names the driving meter (included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits, or combined when remaining is across distinct SuperGrok identities). `/limits meter` chooses which of those named meters the compact line emphasizes.
+Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). `/limits --help` (also `help` and `-h`) lists those words. Hyphenated aliases match the unhyphenated words (`--stay-supergrok`, `--use-console`, `--use-personal`, `--use-business`, `--refresh`, `--meter`). `/limits --use-credits` pins compact chrome to SuperGrok dollar credits (same as `meter dollar-credits`). `/limits use credits` is that same pin. `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Personal SuperGrok and business SuperGrok are distinct weekly pools; they do not combine. SuperGrok is a paid product. `use-business` is valid even when business has no included period-limits payload. grok-oss fails loud if no stored Team login exists. A second `grok-oss login` stores the Team principal. Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up or hop to console. Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. The compact meter names the driving meter (included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits, or combined when remaining is across distinct SuperGrok identities). `/limits meter` chooses which of those named meters the compact line emphasizes.
 
 See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
 

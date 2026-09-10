@@ -41,10 +41,40 @@ pub const LIMITS_WORD_USE_BUSINESS: &str = "use-business";
 pub const LIMITS_WORD_METER: &str = "meter";
 /// Named ForceRefresh collect (same policy as explicit `/limits` open).
 pub const LIMITS_WORD_REFRESH: &str = "refresh";
+/// Pin compact chrome to SuperGrok dollar credits (`meter dollar-credits`).
+pub const LIMITS_WORD_USE_CREDITS: &str = "use-credits";
 
 /// Usage listing for unknown extra args (slash and CLI share these words).
 pub fn limits_named_words_usage() -> &'static str {
-    "/limits, /limits --json, /limits stay-supergrok, /limits use-console, /limits use-personal, /limits use-business, /limits meter included|dollar-credits|console|combined, or /limits refresh"
+    "/limits, /limits --help, /limits --json, /limits stay-supergrok, /limits use-console, /limits use-personal, /limits use-business, /limits --use-credits, /limits meter included|dollar-credits|console|combined, or /limits refresh"
+}
+
+/// Operator-facing `/limits --help` / `help` body. Hyphenated aliases match
+/// the unhyphenated words. SuperGrok is paid. Never call SuperGrok free.
+pub fn limits_help_text() -> String {
+    format!(
+        "\
+/limits help. Same words on TUI /limits and CLI grok-oss limits.
+  --help | help | -h
+  --json | json
+  stay-supergrok | --stay-supergrok
+  use-console | --use-console
+  use-personal | --use-personal
+  use-business | --use-business
+  use-credits | --use-credits   (meter SuperGrok dollar credits)
+  meter included|dollar-credits|console|combined
+  refresh | --refresh
+Meters stay distinct: included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits.
+SuperGrok is a paid product. Never call SuperGrok free. grok-oss limits is a client printout, not xAI billing truth.
+Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up.
+Usage: {}",
+        limits_named_words_usage()
+    )
+}
+
+/// Strip one leading `--` so `/limits --stay-supergrok` matches `stay-supergrok`.
+fn limits_word_alias(w: &str) -> &str {
+    w.strip_prefix("--").unwrap_or(w)
 }
 
 /// CLI args for `grok limits` / `grok limits multipoll`.
@@ -132,6 +162,7 @@ impl LimitsMeterWord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LimitsNamedAction {
     Show,
+    Help,
     Json,
     StaySupergrok,
     UseConsole,
@@ -146,23 +177,39 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
     let parts: Vec<&str> = args.split_whitespace().collect();
     match parts.as_slice() {
         [] => Ok(LimitsNamedAction::Show),
+        ["--help"] | ["-h"] | ["help"] => Ok(LimitsNamedAction::Help),
         ["--json"] | ["json"] => Ok(LimitsNamedAction::Json),
-        [w] if *w == LIMITS_WORD_STAY_SUPERGROK => Ok(LimitsNamedAction::StaySupergrok),
-        [w] if *w == LIMITS_WORD_USE_CONSOLE => Ok(LimitsNamedAction::UseConsole),
-        [w] if *w == LIMITS_WORD_USE_PERSONAL => Ok(LimitsNamedAction::UsePersonal),
-        [w] if *w == LIMITS_WORD_USE_BUSINESS => Ok(LimitsNamedAction::UseBusiness),
-        [w] if *w == LIMITS_WORD_REFRESH => Ok(LimitsNamedAction::Refresh),
-        [w] if *w == LIMITS_WORD_METER => Err(format!(
+        [w] if limits_word_alias(w) == LIMITS_WORD_STAY_SUPERGROK => {
+            Ok(LimitsNamedAction::StaySupergrok)
+        }
+        [w] if limits_word_alias(w) == LIMITS_WORD_USE_CONSOLE => Ok(LimitsNamedAction::UseConsole),
+        [w] if limits_word_alias(w) == LIMITS_WORD_USE_PERSONAL => {
+            Ok(LimitsNamedAction::UsePersonal)
+        }
+        [w] if limits_word_alias(w) == LIMITS_WORD_USE_BUSINESS => {
+            Ok(LimitsNamedAction::UseBusiness)
+        }
+        [w] if limits_word_alias(w) == LIMITS_WORD_USE_CREDITS => {
+            Ok(LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits))
+        }
+        [w] if limits_word_alias(w) == LIMITS_WORD_REFRESH => Ok(LimitsNamedAction::Refresh),
+        [w] if limits_word_alias(w) == LIMITS_WORD_METER => Err(format!(
             "Unknown argument: {args}. Use {}",
             limits_named_words_usage()
         )),
-        [w, src] if *w == LIMITS_WORD_METER => match LimitsMeterWord::from_word(src) {
-            Some(src) => Ok(LimitsNamedAction::Meter(src)),
-            None => Err(format!(
-                "Unknown argument: {args}. Use {}",
-                limits_named_words_usage()
-            )),
-        },
+        [w, src] if limits_word_alias(w) == LIMITS_WORD_METER => {
+            match LimitsMeterWord::from_word(limits_word_alias(src)) {
+                Some(src) => Ok(LimitsNamedAction::Meter(src)),
+                None => Err(format!(
+                    "Unknown argument: {args}. Use {}",
+                    limits_named_words_usage()
+                )),
+            }
+        }
+        // Operator typed `/limits use credits` (two tokens, no hyphen).
+        ["use", "credits"] | ["--use", "credits"] => {
+            Ok(LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits))
+        }
         _ => Err(format!(
             "Unknown argument: {args}. Use {}",
             limits_named_words_usage()
@@ -177,9 +224,10 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
         apply_use_business, apply_use_console, apply_use_personal,
     };
     match action {
-        LimitsNamedAction::Show | LimitsNamedAction::Json | LimitsNamedAction::Refresh => {
-            Ok(String::new())
-        }
+        LimitsNamedAction::Show
+        | LimitsNamedAction::Help
+        | LimitsNamedAction::Json
+        | LimitsNamedAction::Refresh => Ok(String::new()),
         LimitsNamedAction::StaySupergrok => match apply_stay_supergrok() {
             Ok(StaySupergrokApply::Applied) => Ok(
                 "Stay SuperGrok: next request uses SuperGrok session on the cli-chat-proxy host (session JWT). Exhaust memo cleared. Stock [auth] preferred_method = api_key still pins console."

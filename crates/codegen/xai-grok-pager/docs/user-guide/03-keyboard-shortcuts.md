@@ -224,7 +224,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+.` (alt: `Ctrl+X`) | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker. `[ui] composer_multiline = false` disables newlines in the Human box entirely. Session Multiline cannot turn them back on while that flag is false. `[ui] allow_session_multiline = false` (Settings → Editor → Allow session Multiline) blocks turning session Multiline on via `Ctrl+M`, `/multiline`, or the Multiline settings row. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged.
+**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker. `[ui] composer_multiline = false` disables newlines in the Human box entirely. Session Multiline cannot turn them back on while that flag is false. `[ui] allow_session_multiline = false` (Settings → Editor → Allow session Multiline) blocks turning session Multiline on via `Ctrl+M`, `/multiline`, or the Multiline settings row. `Shift+Enter` newline behavior is unchanged. `Ctrl+Enter` still interjects when that is appropriate.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
@@ -281,9 +281,9 @@ The composer footer Enter cue is **send**, **queue**, or **interject**. It names
 
 While the agent is generating:
 
-- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends, and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold).
+- **Plain `Enter`** (with text in the composer) **soft-interjects** into this turn (`x.ai/interject`). It does not wait as a serial queue row. Named `/queue` hold still waits.
 - **Empty `Enter` mid-turn** with a queued follow-up **soft-interjects** the top queued row into the current turn.
-- **Soft interject** injects into the current turn and **never cancels**. Cancel is `Esc` or status **`[stop]`** only. This is not send-now.
+- **Soft interject** injects into the current turn and **never cancels**. Cancel is `Esc` or status **`[stop]`** only.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
@@ -291,9 +291,9 @@ While the agent is generating:
 | Apple Terminal | `Ctrl+O` | `Ctrl+I`, queue **[Send now]** | Soft interject / send-now |
 | VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | queue **[Send now]** | Soft interject / send-now (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
-`Ctrl+Enter` inserts a newline in the Human box (same family as `Shift+Enter`). It is not send and not soft interject. Soft interject / send-now remaining chords are named above: `Ctrl+I`, Apple Terminal `Ctrl+O`, VS Code family `Ctrl+L`, the queue **[Send now]** control, and empty-composer mid-turn `Enter` on a queued row. Do not invent a third Enter chord.
+`Ctrl+Enter` interjects when interjection is appropriate, and otherwise inserts a newline (the `Shift+Enter` analog). Interjection is appropriate when a sampler turn is running, the Human box has text or images, and the target can take `x.ai/interject` (this session, or an open L2 overlay). It is not appropriate when idle, when the composer is empty, or when an L3 specialist overlay is open (specialists stay unbothered). Cancel-and-send is not this chord. Empty `Ctrl+Enter` does not send. Soft interject remaining chords are still `Ctrl+I`, Apple Terminal `Ctrl+O`, VS Code family `Ctrl+L`, the queue **[Send now]** control (plain prompt rows), and empty-composer mid-turn `Enter` on a queued row. A queued `/goal` row is a goal action after **[Send now]**, not an interjected string.
 
-In session Multiline (`Ctrl+M` / `/multiline`), `Shift+Enter` (or `Alt+Enter`) still sends. Plain `Enter` at the end of the last composer line sends immediately (or interjects if a turn is running). It does not insert a silent extra newline. Plain `Enter` in the middle of a multiline draft still inserts a newline. Empty composer mid-turn with a queued follow-up still force-sends the top row. When `[ui] composer_multiline = false`, Enter and Shift+Enter send or interject and never insert a newline; `Ctrl+Enter` still inserts a newline. When `[ui] allow_session_multiline = false`, you cannot turn session Multiline on. Plan Preview still inserts a newline on session-Multiline Enter even at the end of the last line; the main Human box submits there.
+In session Multiline (`Ctrl+M` / `/multiline`), `Shift+Enter` (or `Alt+Enter`) still sends. Plain `Enter` at the end of the last composer line sends immediately (or interjects if a turn is running). It does not insert a silent extra newline. Plain `Enter` in the middle of a multiline draft still inserts a newline. Empty composer mid-turn with a queued follow-up still force-sends the top row. When `[ui] composer_multiline = false`, Enter and Shift+Enter send or interject and never insert a newline. `Ctrl+Enter` still inserts a newline when interjection is not appropriate, and still interjects when it is. When `[ui] allow_session_multiline = false`, you cannot turn session Multiline on. Plan Preview still inserts a newline on session-Multiline Enter even at the end of the last line; the main Human box submits there.
 
 To hand the agent a note **without** stopping it, queue with plain `Enter` or use the soft-interject chord.
 
@@ -311,7 +311,7 @@ Three work controls exist. They are not interchangeable:
 
 Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause that cancels a running turn writes continue interrupted turn (`canceled_turn_resume.json`) so last-session on start and `/start` can continue if this process dies. The pause gate itself stays in this process in RAM. See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
 
-> **WezTerm**: Modified Enter / Ctrl chords that need Kitty keyboard protocol still want `enable_kitty_keyboard = true` in your WezTerm config. Full steps are in the [terminal support guide](21-terminal-support.md). Soft interject uses `Ctrl+I` (not `Ctrl+Enter`).
+> **WezTerm**: Modified Enter / Ctrl chords that need Kitty keyboard protocol still want `enable_kitty_keyboard = true` in your WezTerm config. Full steps are in the [terminal support guide](21-terminal-support.md). Mid-turn `Ctrl+Enter` with text interjects when that is appropriate; otherwise it inserts a newline.
 
 > **Windows (non–VS Code family)**: Prefer `Ctrl+I` for soft interject. Letter-key Ctrl chords are stable everywhere. On VS Code family, use **`Ctrl+L`**.
 
@@ -330,7 +330,7 @@ Actions available from any screen.
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
 | `F9` | | Capture the current TUI frame as a PNG (`/screenshot`). When plan approval is open, auto-attach that PNG. | No |
 
-**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn soft interject / send-now uses **`Ctrl+L`** (plus queue **[Send now]**). `Ctrl+Enter` inserts a newline. Extensions are opened via `/plugins` instead of `Ctrl+L`.
+**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn soft interject / send-now uses **`Ctrl+L`** (plus queue **[Send now]**). `Ctrl+Enter` interjects when appropriate and otherwise inserts a newline. Extensions are opened via `/plugins` instead of `Ctrl+L`.
 
 > **Returning to the welcome screen has no key binding** — use the `/home` slash command (alias `/welcome`) from inside a session. See [Slash Commands](04-slash-commands.md).
 
@@ -440,7 +440,7 @@ Focus prompt:     i, Tab, or Space
 
 ```
 Send:             Enter
-Newline:          Ctrl+Enter, Shift+Enter, or Alt+Enter
+Newline:          Shift+Enter, Alt+Enter, or Ctrl+Enter when interject is not appropriate
 Multiline:        Ctrl+M (toggle; blocked when allow_session_multiline is false)
 Soft interject:   Ctrl+I (Apple Ctrl+O; VS Code family Ctrl+L; queue [Send now])
 Buffer start:     Ctrl+Home or Ctrl+PageUp (whole draft)

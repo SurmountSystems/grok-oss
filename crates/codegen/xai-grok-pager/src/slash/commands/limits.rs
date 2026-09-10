@@ -24,7 +24,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits [--json | stay-supergrok | use-console | use-personal | use-business | meter included|dollar-credits|console|combined | refresh]"
+        "/limits [--help | --json | stay-supergrok | use-console | use-personal | use-business | --use-credits | meter included|dollar-credits|console|combined | refresh]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -83,6 +83,18 @@ impl SlashCommand for LimitsCommand {
                 insert_text: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
                 description: "Force-refresh live meters".into(),
             },
+            ArgItem {
+                display: "--help".into(),
+                match_text: "--help".into(),
+                insert_text: "--help".into(),
+                description: "List /limits named words and hyphenated aliases".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                description: "Pin meter chrome to SuperGrok dollar credits".into(),
+            },
         ])
     }
 
@@ -91,6 +103,9 @@ impl SlashCommand for LimitsCommand {
             Ok(crate::limits_cmd::LimitsNamedAction::Show)
             | Ok(crate::limits_cmd::LimitsNamedAction::Refresh) => {
                 CommandResult::Action(Action::ShowLimits)
+            }
+            Ok(crate::limits_cmd::LimitsNamedAction::Help) => {
+                CommandResult::Message(crate::limits_cmd::limits_help_text())
             }
             Ok(crate::limits_cmd::LimitsNamedAction::Json) => {
                 CommandResult::Action(Action::ShowLimitsJson)
@@ -372,5 +387,77 @@ mod tests {
             !desc.to_ascii_lowercase().contains("extras"),
             "slash picker must not teach extras as a nickname: {desc}"
         );
+    }
+
+    /// Operator: "would be nice if the limits command took help". `/limits
+    /// --help` used to print `Unknown argument: --help`. Help must list the
+    /// named words and hyphenated aliases.
+    #[test]
+    fn limits_help_lists_named_words_and_hyphenated_aliases() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        for args in ["--help", "help", "-h"] {
+            let result = LimitsCommand.run(&mut ctx, args);
+            match result {
+                CommandResult::Message(msg) => {
+                    assert!(
+                        msg.contains("stay-supergrok")
+                            && msg.contains("--stay-supergrok")
+                            && msg.contains("use-console")
+                            && msg.contains("--use-console")
+                            && msg.contains("use-personal")
+                            && msg.contains("use-business")
+                            && msg.contains("--use-credits")
+                            && msg.contains("meter")
+                            && msg.contains("refresh")
+                            && msg.contains("included SuperGrok period limits")
+                            && msg.contains("SuperGrok dollar credits"),
+                        "/limits {args} help must list named words and hyphen aliases: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("Unknown argument"),
+                        "/limits {args} must not print Unknown argument: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("free SuperGrok")
+                            && !msg.to_ascii_lowercase().contains("extras"),
+                        "help must not call SuperGrok free or teach extras: {msg}"
+                    );
+                }
+                other => panic!("/limits {args} must print help, got {other:?}"),
+            }
+        }
+    }
+
+    /// Operator: `/limits use credits` printed unknown argument. Hyphenated
+    /// options must match the unhyphenated words. `--use-credits` pins
+    /// SuperGrok dollar credits.
+    #[test]
+    fn limits_hyphenated_aliases_match_unhyphenated_words() {
+        use crate::limits_cmd::{LimitsMeterWord, LimitsNamedAction, parse_limits_named_args};
+
+        let pairs = [
+            ("stay-supergrok", "--stay-supergrok"),
+            ("use-console", "--use-console"),
+            ("use-personal", "--use-personal"),
+            ("use-business", "--use-business"),
+            ("refresh", "--refresh"),
+        ];
+        for (bare, hyphen) in pairs {
+            let a = parse_limits_named_args(bare).expect(bare);
+            let b = parse_limits_named_args(hyphen).expect(hyphen);
+            assert_eq!(a, b, "{bare} must match {hyphen}");
+        }
+        assert_eq!(
+            parse_limits_named_args("meter included").unwrap(),
+            parse_limits_named_args("--meter included").unwrap()
+        );
+        for credits in ["--use-credits", "use-credits", "use credits"] {
+            assert_eq!(
+                parse_limits_named_args(credits).expect(credits),
+                LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits),
+                "{credits} must pin SuperGrok dollar credits"
+            );
+        }
     }
 }
