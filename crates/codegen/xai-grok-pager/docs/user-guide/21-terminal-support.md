@@ -222,13 +222,13 @@ If Grok stops receiving mouse input, re-enable mouse reporting in the terminal:
 
 ### Voice dictation records nothing
 
-After about 10 seconds without a transcript, Grok stops capture and shows
-**“No speech was detected. Voice stopped.”** with microphone fix steps. On macOS,
-a denied microphone grant can look the same as silence because permission belongs
-to the terminal hosting Grok. Open **System Settings → Privacy & Security →
-Microphone**, enable the terminal, and restart it. If access is already on, check
-the input device and level under **System Settings → Sound → Input** and try
-again.
+Recording stays open until you stop it (Esc, Enter, chord release, or `/voice`).
+Grok does not stop capture after 10 seconds of silence. If the composer stays
+empty, the microphone may be silent or denied. On macOS, a denied microphone
+grant can look the same as silence because permission belongs to the terminal
+hosting Grok. Open **System Settings → Privacy & Security → Microphone**, enable
+the terminal, and restart it. If access is already on, check the input device
+and level under **System Settings → Sound → Input** and try again.
 
 Run `grok-oss doctor`, or run `/doctor` while voice mode is on. The **Voice** section
 shows the microphone Grok would use. If no input device is available, Doctor

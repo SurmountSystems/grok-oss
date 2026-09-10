@@ -219,16 +219,6 @@ async fn forward_pcm(
     finish_wal(&mut wal);
 }
 
-/// Kept for tests. Must not fire automatically: silent 10s teardown without a
-/// visible recording state is a miss. Recording ends on Operator stop only.
-#[cfg(feature = "audio")]
-fn no_speech_error() -> (String, Option<String>) {
-    (
-        "No speech was detected. Voice stopped.".to_owned(),
-        Some(crate::probe::mic_fix_help().to_owned()),
-    )
-}
-
 #[cfg(feature = "audio")]
 async fn start_capture_session(
     config: &VoiceConfig,
@@ -420,12 +410,5 @@ mod tests {
         mic_tx.send(vec![1]).await.unwrap();
         drop(tx_tx);
         task.await.unwrap();
-    }
-
-    #[test]
-    fn no_speech_error_carries_permission_hint() {
-        let (message, hint) = no_speech_error();
-        assert_eq!(message, "No speech was detected. Voice stopped.");
-        assert!(hint.is_some_and(|hint| hint.contains(crate::probe::mic_fix_help())));
     }
 }

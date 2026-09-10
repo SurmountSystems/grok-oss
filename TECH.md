@@ -393,6 +393,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Remote quality check-remote gate
     - L3 specialists (when spawned)
+  - L2 Remove unused no_speech_error
+    - L3 specialists (when spawned)
   - L2 Rename extras identifiers to credits
     - L3 specialists (when spawned)
   - L2 Rename extras meter identifiers
@@ -898,6 +900,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Rebuild must exec workspace grok-oss | nested L2 session usage | L2 | 135604 | estimate | exited |
 | Rebuild workspace binary exec | nested L2 session usage | L2 | 200081 | estimate | exited |
 | Remote quality check-remote gate | nested L2 session usage | L2 | 161619 | estimate | exited |
+| Remove unused no_speech_error | nested L2 session usage | L2 | 85445 | estimate | exited |
 | Rename extras identifiers to credits | nested L2 session usage | L2 | 167380 | estimate | exited |
 | Rename extras meter identifiers | nested L2 session usage | L2 | 192759 | estimate | exited |
 | Rename leftover plan CTA names | nested L2 session usage | L2 | 95896 | estimate | exited |
