@@ -55,7 +55,7 @@ This is **not** last-session-on-start, and it is **not** the `/resume` picker.
 
 When a mid-turn is interrupted in a cancel-resumable way, Grok OSS may write `canceled_turn_resume.json` with the in-flight prompt identity (not secrets). On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`** is on (default **true**, Settings → Session → **Continue interrupted turn on restart**), Grok OSS re-queues that prompt once and clears the marker.
 
-**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, `/rebuild` mid-turn before self re-exec, and fearless global pause when it cancels a running turn (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted).
+**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, and fearless global pause when it cancels a running turn (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted). Mid-turn `/rebuild` does not write this marker and does not cancel the parent; the new TUI adopts the live turn like a disconnect.
 
 **Does not write a durable cancel-resume marker:**
 

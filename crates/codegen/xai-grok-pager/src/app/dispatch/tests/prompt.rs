@@ -1819,6 +1819,62 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
     );
 }
 
+/// Operator: "Connection failed – request error stream: error sending request."
+/// Transport miss chrome must not wipe the Human image line.
+#[test]
+fn request_error_stream_error_sending_request_does_not_wipe_human_image_line() {
+    let operator = "Connection failed – request error stream: error sending request.";
+    assert!(operator.contains("request error stream: error sending request"));
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent
+            .scrollback
+            .push_block(RenderBlock::UserPrompt(UserPromptBlock::new(
+                "weird [Image #1]",
+            )));
+    }
+    let formatted = crate::app::error_display::format_request_failure(
+        None,
+        Some("http"),
+        "Connection failed – request error stream: error sending request.",
+    );
+    let msg = formatted.message();
+    assert!(
+        msg.contains("Transport miss") && msg.contains("not a silent hang"),
+        "must name a transport miss, not a hang, got {msg}"
+    );
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        !lower.contains("billing") && !lower.contains("dollar"),
+        "must not invent billing, got {msg}"
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(msg.clone()),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    let human_texts: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i))
+        .filter_map(|e| match &e.block {
+            RenderBlock::UserPrompt(ub) => Some(ub.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        human_texts.iter().any(|t| t.contains("[Image #1]") && t.contains("weird")),
+        "Human image line must stay, got {human_texts:?}"
+    );
+}
+
 /// The 401/402 race fallbacks must fire on the banner-formatted error text
 /// PromptResponse now carries (the RetryState notification may lose the race,
 /// so no ReAuthRequired block exists yet).

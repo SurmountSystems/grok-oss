@@ -6,6 +6,8 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **`/rebuild` adopt-like-disconnect is in the tree; this running TUI is not that binary (2026-09-11).** Mid-turn `/rebuild` no longer cancels the parent and no longer writes `canceled_turn_resume.json` for a still-live parent turn. The new TUI `--resume` adopts `runningPromptId` the same way a TUI disconnect does. Nested ids stay uncancelled. Idle completed turns still do not re-fire. A Human turn already in chat history is still not re-queued. Named tests: `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`, `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`. This stock Grok Build debugger will not show that resume until the Operator installs grok-oss and reopens. Named cargo on horizon was not the proof host. Leader `RelaunchForUpdate` drain is unchanged. Auto-resume after an error-terminal turn with no marker is still not shipped. Report: `/home/hunter/.agents/reports/l3-rebuild-resume-implement.md`.
+
 - **Eleven named nextest fails after the reliability slice (source 2026-09-10; leftover is quality proof and live TUI).** `just check-remote` reported 11 failed named tests (quality, not flake 502). Product edits restore those contracts without rewriting asserts: WAL restore occupancy must not drop missing Send/Interject; live `queue/changed` must not treat WAL Send as occupancy; mid-turn `/goal` interjects; `/compact` must clear the composer; HTTP 502 leftover `/implement` continues after compact; Enter expands a collapsed tool; recording height must fit spoken text; `/what` skill keeps Operator/Agent speaker labels. Named cargo on horizon is still forbidden. One `just check-remote` starts after those edits. `just test-remote` stays operator-owned. This Grok Build debugger will not show the pager fixes until the Operator installs grok-oss and reopens. Reports: `/home/hunter/.agents/reports/fix-nextest-11-reliability-regressions-2026-09-10.md`, `/home/hunter/.agents/reports/remaining-2026-09-10-nextest-11.md`.
 
 - **Reliability composer, `/limits` help, Ctrl+Enter, cold-start chrome, queued `/goal` (source 2026-09-10; leftover is live TUI and named cargo).** The tree now has named tests that quote the operator screenshot: composer Enter/send-now still clears while other work is live; `/limits --help` and hyphenated aliases including `--use-credits`; Ctrl+Enter interjects only when interjection is appropriate; header-timeout chrome names a cold-start class and keeps Retrying; queued `/goal` after Send now is GoalSet via send-now. Named tests: `enter_while_other_work_is_live_must_still_clear_composer`, `send_now_while_retrying_must_still_clear_composer`, `queued_prompt_edit_must_not_steal_later_send_clear`, `ctrl_enter_mid_turn_dispatches_send_interject`, `empty_ctrl_enter_mid_turn_does_not_send`, `limits_help_lists_named_words_and_hyphenated_aliases`, `limits_hyphenated_aliases_match_unhyphenated_words`, `header_timeout_is_named_cold_start_class_with_retry_path`, `queued_goal_send_now_is_goal_action_not_stuck_composer_string`, `user_guide_ctrl_enter_interjects_when_appropriate`. This L2 did not run cargo or rustc on this laptop and did not run `just test-remote`. `just install` and `/rebuild` stay operator-owned. This stock Grok Build TUI debugger is not the product under test. Some PTY e2e comments may still inject `CTRL_ENTER` as send-now. Existing prompt WAL, rebuild persist, occupancy-drop, and identity chrome tests were not deleted. Reports: `/home/hunter/.agents/reports/impl-reliability-composer-limits-interject-tests.md`, `/home/hunter/.agents/reports/remaining-2026-09-10-reliability-tests.md`.
@@ -119,11 +121,13 @@ or code — not only here. Closed campaign history:
   shows `(deleted)` until that process exits. Checklist:
   [`.agents/reports/d0-dogfood-checklist-2026-08-09.md`](.agents/reports/d0-dogfood-checklist-2026-08-09.md).
   Handoff: [`FORK.md`](FORK.md) § *Dogfood / next session handoff (2026-08-09)*.
-  **Shipped in source:** mid-turn `/rebuild` writes continue-interrupted-turn
-  (`canceled_turn_resume.json`) before re-exec; session load continues that
-  turn. Idle completed turns do not write a marker and do not re-fire the
-  last prompt. A leftover marker after a successful primary-turn finish is
-  dropped on load. Named tests:
+  **Shipped in source:** mid-turn `/rebuild` does not cancel the parent and
+  does not write `canceled_turn_resume.json` for a still-live parent turn;
+  the new TUI adopts the live turn like a disconnect. Idle completed turns
+  do not write a marker and do not re-fire the last prompt. A leftover
+  marker after a successful primary-turn finish is dropped on load. Named
+  tests:
+  `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`,
   `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
   `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
   `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`.

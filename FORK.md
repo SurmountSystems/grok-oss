@@ -901,10 +901,14 @@ identifier that has no matching `fn`.
   (`same_batch_plan_write_before_exit_plan_mode_returns_new_body`). Dated
   2026-08-09 wave filter; not one of the seven product land classes.
 - [x] **Continue interrupted turn on restart**: `canceled_turn_resume.json`;
-  distinct from last-session on start. Mid-turn `/rebuild` writes the
-  marker. Idle completed turns do not write a marker and do not re-fire
-  the last prompt. Load drops a leftover marker after a successful
-  primary-turn finish. Tests:
+  distinct from last-session on start. Mid-turn `/rebuild` does not cancel
+  the parent and does not write this marker; the new TUI adopts the live
+  turn like a disconnect (`runningPromptId`). Nested ids are still not
+  cancelled. `/rebuild` is not a nested-work gate. Idle completed turns
+  do not write a marker and do not re-fire the last prompt. Load drops a
+  leftover marker after a successful primary-turn finish. Stale-queue
+  skip of a Human turn already in chat history stays. Tests:
+  `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`,
   `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
   `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
   `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`
@@ -913,11 +917,12 @@ identifier that has no matching `fn`.
   soft-stop button; mid-sample freeze without cancel. FORK claims plus
   these named tests; not a land class. User-guide `17-sessions`.
 - [x] **`/rebuild` resume is fork-owned**: relaunch must preserve work the
-  same way a network disconnect does. Unsent composer draft
-  (`unsent_prompt_draft`), queued prompts including mid-turn interject
-  text (`pending_prompts.json`), plan Human-box `feedback_draft`, and
-  session `plan.md` survive. Nested subagent ids are not cancelled and
-  `/rebuild` is not blocked until nested work finishes. Compile source is
+  same way a network disconnect does. Mid-turn `/rebuild` does not cancel
+  the parent; the new TUI adopts the live turn (`runningPromptId`). Unsent
+  composer draft (`unsent_prompt_draft`), queued prompts including
+  mid-turn interject text (`pending_prompts.json`), plan Human-box
+  `feedback_draft`, and session `plan.md` survive. Nested subagent ids are
+  not cancelled and `/rebuild` is not blocked until nested work finishes. Compile source is
   the git index (staged files), not unstaged working-tree WIP. After
   `--resume` / last-session restore, that preserved work appears once:
   not composer plus queue #1 with the same body, not Enter:interject
@@ -2509,6 +2514,7 @@ that drops them while keeping the seven is still a seam loss):
   (`start_while_globally_paused_continues_interrupted_turn_once`,
   `start_on_idle_clean_session_does_not_invent_a_turn`,
   `start_with_cancel_resume_marker_continues_interrupted_turn`,
+  `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`,
   `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
   `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
   `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`).
@@ -2703,6 +2709,7 @@ cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_
 # Extra: /rebuild TUI persist like a network interrupt (fork-owned)
 # Leader drain is not that persist path.
 cargo test -p xai-grok-pager --lib -- \
+  handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect \
   handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it \
   handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
   handle_rebuild_done_persists_plan_feedback_draft_and_plan_md \
@@ -2782,6 +2789,7 @@ cargo test -p xai-grok-pager --lib -- \
   start_while_globally_paused_continues_interrupted_turn_once \
   start_on_idle_clean_session_does_not_invent_a_turn \
   start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect \
   handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
   handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
   session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully

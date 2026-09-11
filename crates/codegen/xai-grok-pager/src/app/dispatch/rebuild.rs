@@ -1,4 +1,4 @@
-//! `/rebuild` TaskResult handling: report, cancel mid-turn, arm self re-exec.
+//! `/rebuild` TaskResult handling: report, persist, arm self re-exec.
 //!
 //! Peer TUIs (other live product windows) receive `SIGUSR1` **after** a
 //! successful install and arm re-exec via
@@ -11,7 +11,6 @@
 //! instead of only quitting.
 
 use super::router::dispatch;
-use super::turn::do_cancel_turn_for;
 use crate::app::actions::{Action, Effect};
 use crate::app::agent::AgentId;
 use crate::app::app_view::{AppView, RebuildRelaunch};
@@ -96,76 +95,12 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
     })
 }
 
-/// Prompt text for continue-interrupted-turn on rebuild relaunch.
-///
-/// Prefer the in-flight rewind stash. After first server activity that stash
-/// is cleared, so fall back to the last real user prompt in scrollback.
-/// Skip bash/cron bubbles so a `!` or scheduled line is not re-queued as
-/// the interrupted turn.
-fn rebuild_cancel_resume_prompt(agent: &crate::app::agent_view::AgentView) -> Option<String> {
-    if let Some(stashed) = agent.session.in_flight_prompt.as_ref() {
-        let text = stashed.text.trim();
-        if !text.is_empty() {
-            return Some(text.to_string());
-        }
-    }
-    last_user_prompt_full_text(&agent.scrollback)
-}
-
-fn last_user_prompt_full_text(
-    scrollback: &crate::scrollback::state::ScrollbackState,
-) -> Option<String> {
-    let len = scrollback.len();
-    for idx in (0..len).rev() {
-        let Some(entry) = scrollback.entry(idx) else {
-            continue;
-        };
-        if let RenderBlock::UserPrompt(block) = &entry.block {
-            if block.is_bash || block.is_cron {
-                continue;
-            }
-            let text = block.text.trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Flush unsent composer text, plan Human-box notes, and the pager queue
 /// before re-exec. Keystroke persist is debounced and skipped in tests;
 /// rebuild must write the same files a disconnect restore reads.
 fn persist_session_work_for_rebuild(app: &AppView) {
     for agent in app.agents.values() {
         agent.persist_session_work_to_disk_for_rebuild();
-    }
-}
-
-/// Write `canceled_turn_resume.json` for every mid-turn agent before re-exec.
-///
-/// Session load already applies that marker. Rebuild must persist it: cancel
-/// and peer SIGUSR1 quit do not write the file.
-fn persist_running_turns_for_rebuild(app: &AppView) {
-    use xai_grok_shell::session::canceled_turn_resume::{
-        ProcessShutdownResumeArm, arm_and_persist_process_shutdown_cancel_resume,
-    };
-    for agent in app.agents.values() {
-        if !agent.session.state.is_turn_running() {
-            continue;
-        }
-        let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) else {
-            continue;
-        };
-        let Some(prompt_text) = rebuild_cancel_resume_prompt(agent) else {
-            continue;
-        };
-        arm_and_persist_process_shutdown_cancel_resume(ProcessShutdownResumeArm {
-            cwd: agent.session.cwd.to_string_lossy().into_owned(),
-            session_id,
-            prompt_text,
-            prompt_id: agent.session.current_prompt_id.clone(),
-        });
     }
 }
 
@@ -186,9 +121,10 @@ fn peer_rebuild_session_id(app: &AppView) -> Option<String> {
 /// applies.
 ///
 /// `signaled`: true when this process received cooperative rebuild `SIGUSR1`
-/// (force path: fresh request + exe + session is enough). Mid-turn
-/// continue-interrupted-turn is persisted here before quit. The quit path
-/// does not write `canceled_turn_resume.json`.
+/// (force path: fresh request + exe + session is enough). Drafts, queue,
+/// WAL, and plan notes are persisted here before quit. The parent turn is
+/// not cancelled; exec is the interrupt, same as a TUI disconnect. Do not
+/// write `canceled_turn_resume.json` for a still-live parent turn.
 /// Returns `true` when `app.rebuild_relaunch` was set.
 pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
     app: &mut AppView,
@@ -242,7 +178,6 @@ pub(crate) fn try_arm_peer_rebuild_relaunch_from_request(
         agent.show_toast("Rebuild on another window: relaunching on the new binary…");
     }
     persist_session_work_for_rebuild(app);
-    persist_running_turns_for_rebuild(app);
     app.rebuild_relaunch = Some(relaunch);
     true
 }
@@ -447,26 +382,14 @@ pub(super) fn handle_rebuild_done(
 
             let mut effects = Vec::new();
 
-            // Flush drafts and the pager queue before cancel. Cancel can
-            // rewind the in-flight prompt into the composer; that must not
-            // replace the operator's unsent text on disk.
+            // Flush drafts, queue, WAL, and plan notes. Exec is the interrupt:
+            // do not cancel the parent turn, and do not write
+            // `canceled_turn_resume.json` for a still-live parent turn. The
+            // new TUI `--resume` adopts `runningPromptId` the same way a TUI
+            // disconnect does. Nested ids are not cancelled. `/rebuild` is
+            // not a nested-work gate. Leader `RelaunchForUpdate` still waits
+            // while nested or parent-busy, then AutoUpdate.
             persist_session_work_for_rebuild(app);
-            // Persist continue-interrupted-turn before cancel. Cancel does not
-            // write the marker; first-activity also clears the in-flight stash.
-            persist_running_turns_for_rebuild(app);
-
-            // Mid-turn: cancel the parent turn so this process does not keep
-            // driving it. Do not cancel nested subagent ids in this TUI persist
-            // path. Nested work is not a reason to block `/rebuild`. This TUI
-            // still exec-replaces onto the new binary. Leader
-            // `RelaunchForUpdate` keeps nested ids on that leader (same as a
-            // TUI disconnect) and does not exec-replace the leader while they
-            // are live.
-            if let Some(agent) = app.agents.get(&agent_id)
-                && agent.session.state.is_turn_running()
-            {
-                effects.extend(do_cancel_turn_for(app, agent_id, false, true));
-            }
 
             // Arm self re-exec onto the new binary with the same session when possible.
             let session_id = app
@@ -1358,12 +1281,19 @@ mod tests {
         }
     }
 
-    /// Named contract: after a successful `/rebuild` while a turn is running
-    /// (in-flight stash already cleared, last user prompt still in scrollback),
-    /// the invoker must write continue-interrupted-turn
-    /// (`canceled_turn_resume.json`), arm self re-exec for the same session,
-    /// and the re-exec SessionLoaded path must auto-continue that prompt.
-    /// Silent idle or a lost session is a miss.
+    fn write_session_chat_history(cwd: &str, sid: &str, jsonl: &str) {
+        let path = xai_grok_shell::session::prompt_wal::chat_history_path(cwd, sid)
+            .expect("chat_history.jsonl path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, jsonl).unwrap();
+    }
+
+    /// Named contract: session load continues the turn. Mid-turn `/rebuild`
+    /// does not cancel the parent and does not write `canceled_turn_resume.json`.
+    /// The new TUI adopts `runningPromptId` like a disconnect. Do not re-queue
+    /// a Human turn that is already in chat history.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn() {
@@ -1378,6 +1308,7 @@ mod tests {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "rebuild-resume-mid-turn";
         let prompt = "finish the rebuild resume contract after first activity";
+        let pid = "pid-rebuild-resume";
         let installed = proj.path().join("grok-oss-installed");
         std::fs::write(&installed, b"stub").unwrap();
 
@@ -1394,7 +1325,7 @@ mod tests {
             agent.session.session_id = Some(sid.into());
             agent.session.cwd = cwd.clone();
             agent.session.state = AgentState::TurnRunning;
-            agent.session.current_prompt_id = Some("pid-rebuild-resume".into());
+            agent.session.current_prompt_id = Some(pid.into());
             agent
                 .scrollback
                 .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
@@ -1418,23 +1349,20 @@ mod tests {
             effects.iter().any(|e| matches!(e, Effect::Quit)),
             "successful rebuild must quit into re-exec, got {effects:?}"
         );
-
-        let marker =
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. })),
+            "mid-turn /rebuild must not cancel the parent; exec is the interrupt, got {effects:?}"
+        );
+        assert!(
             xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
                 .expect("load marker")
-                .expect(
-                    "successful /rebuild while mid-turn must write canceled_turn_resume.json \
-             so reopen continues the turn",
-                );
-        assert_eq!(marker.prompt_text, prompt);
-        assert!(
-            xai_grok_shell::session::canceled_turn_resume::should_auto_resume_on_restart(
-                true,
-                Some(&marker)
-            )
+                .is_none(),
+            "mid-turn /rebuild must not write canceled_turn_resume.json for a still-live parent turn"
         );
 
-        // Re-exec equivalent: cold SessionLoaded of the same session.
+        // Re-exec equivalent: disconnect-shaped SessionLoaded of the same session.
         let mut reopened = crate::app::app_view::tests::test_app_with_agent();
         reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
         {
@@ -1453,7 +1381,7 @@ mod tests {
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
-                running_prompt_id: None,
+                running_prompt_id: Some(pid.into()),
                 scheduler_background_loops: None,
             }),
             &mut reopened,
@@ -1465,10 +1393,10 @@ mod tests {
             .map(|(msg, _)| msg.as_str())
             .unwrap_or("");
         assert!(
-            toast.contains("Continuing interrupted turn"),
-            "re-exec session load must toast continue-interrupted-turn; got {toast:?}"
+            !toast.contains("Continuing interrupted turn"),
+            "adopt like disconnect must not toast cancel-resume re-queue; got {toast:?}"
         );
-        let continued = load_effects.iter().any(|e| {
+        let resent = load_effects.iter().any(|e| {
             matches!(
                 e,
                 Effect::SendPrompt { text, .. } if text == prompt
@@ -1478,13 +1406,18 @@ mod tests {
             )
         });
         assert!(
-            continued,
-            "re-exec session load must auto-continue the interrupted prompt, got {load_effects:?}"
+            !resent,
+            "session load must continue the live turn without SendPrompt of that Human text, got {load_effects:?}"
         );
         assert!(
             agent.session.state.is_turn_running(),
-            "continued turn must be running; state={:?}",
+            "after /rebuild exec, in-flight conversations must continue; they must not all stop; state={:?}",
             agent.session.state
+        );
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(pid),
+            "disconnect-shaped load must adopt runningPromptId"
         );
 
         let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
@@ -1493,8 +1426,171 @@ mod tests {
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
     }
 
-    /// Mid-turn cancel-resume plus leftover plan.md must continue the turn
-    /// and must not auto-open the plan side panel.
+    /// After `/rebuild` exec, in-flight conversations, parent turns, and nested
+    /// work must continue the same way a TUI disconnect / network interruption
+    /// does. They must not all stop. Do not re-queue a Human turn that is
+    /// already in chat history.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
+        use crate::app::subagent::live_subagent_list;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "rebuild-adopt-like-disconnect";
+        let prompt = "keep this mid-turn conversation after rebuild exec";
+        let pid = "pid-rebuild-adopt";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                })
+            ),
+        );
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        app.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some(pid.into());
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent.session.in_flight_prompt = None;
+            agent.subagent_sessions.insert(
+                "cs-rebuild-adopt".into(),
+                running_l2_subagent("nested work still live after rebuild"),
+            );
+        }
+
+        let effects = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        assert!(
+            app.rebuild_relaunch.is_some(),
+            "successful /rebuild must arm rebuild_relaunch into exec"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "successful /rebuild must quit into exec, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. })),
+            "after /rebuild exec, in-flight conversations, parent turns, and nested work must continue the same way a TUI disconnect / network interruption does. They must not all stop. handle_rebuild_done must not emit CancelTurn; got {effects:?}"
+        );
+        assert!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker")
+                .is_none(),
+            "must not write canceled_turn_resume.json for a still-live parent turn"
+        );
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
+            agent.subagent_sessions.insert(
+                "cs-rebuild-adopt".into(),
+                running_l2_subagent("nested work still live after rebuild"),
+            );
+        }
+        let load_effects = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: Some(pid.into()),
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        let agent = reopened.agents.get(&agent_id).unwrap();
+        let resent = load_effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { text, .. } if text == prompt
+            ) || matches!(
+                e,
+                Effect::SendPromptBlocks { .. } | Effect::SetModeThenPrompt { .. }
+            )
+        });
+        assert!(
+            !resent,
+            "Do not re-queue a Human turn that is already in chat history. SessionLoaded must not SendPrompt that text; got {load_effects:?}"
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text == prompt),
+            "no queue Prompt row for a Human turn already in chat history; queue={:?}",
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !agent.queue.entry_texts().iter().any(|t| t.trim() == prompt),
+            "Operator-visible queue must not show that Human turn as a Prompt row"
+        );
+        assert!(
+            agent.session.state.is_turn_running(),
+            "SessionLoaded with running_prompt_id must adopt like disconnect; they must not all stop; state={:?}",
+            agent.session.state
+        );
+        let nested = live_subagent_list(agent.subagent_sessions.values());
+        assert!(
+            !nested.is_empty() && !nested[0].finished,
+            "nested list must not be emptied or finished-as-dead after adopt; nested={nested:?}"
+        );
+
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Mid-turn leftover plan.md must continue the turn (adopt live
+    /// runningPromptId) and must not auto-open the plan side panel.
     #[test]
     fn rebuild_or_resume_does_not_auto_open_plan_side_panel_when_turn_is_owed() {
         use crate::app::actions::{Action, TaskResult};
@@ -1507,6 +1603,7 @@ mod tests {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "rebuild-resume-no-plan-dock";
         let prompt = "continue this turn without docking plan review";
+        let pid = "pid-rebuild-no-dock";
         let installed = proj.path().join("grok-oss-installed");
         std::fs::write(&installed, b"stub").unwrap();
 
@@ -1523,7 +1620,7 @@ mod tests {
             agent.session.session_id = Some(sid.into());
             agent.session.cwd = cwd.clone();
             agent.session.state = AgentState::TurnRunning;
-            agent.session.current_prompt_id = Some("pid-rebuild-no-dock".into());
+            agent.session.current_prompt_id = Some(pid.into());
             agent
                 .scrollback
                 .push_block(crate::scrollback::block::RenderBlock::user_prompt(prompt));
@@ -1559,21 +1656,17 @@ mod tests {
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
-                running_prompt_id: None,
+                running_prompt_id: Some(pid.into()),
                 scheduler_background_loops: None,
             }),
             &mut reopened,
         );
         {
             let agent = reopened.agents.get_mut(&agent_id).unwrap();
-            let toast = agent
-                .toast
-                .as_ref()
-                .map(|(msg, _)| msg.as_str())
-                .unwrap_or("");
             assert!(
-                toast.contains("Continuing interrupted turn"),
-                "re-exec session load must toast continue-interrupted-turn; got {toast:?}"
+                agent.session.state.is_turn_running(),
+                "rebuild/resume must keep the owed turn running via adopt; state={:?}",
+                agent.session.state
             );
             agent.surface_idle_plan_review_if_needed();
             assert!(

@@ -527,10 +527,11 @@ fn drain_blocked_while_paused() {
 }
 
 /// Named contract: fearless global pause that cancels a running primary
-/// turn must write `canceled_turn_resume.json` the same way `/rebuild`
-/// mid-turn does, so last-session on start and `/start` can continue the
-/// interrupted prompt after this process is gone. The in-memory pause
-/// gate is still RAM-only; this is only the interrupted-prompt marker.
+/// turn must write `canceled_turn_resume.json` so last-session on start
+/// and `/start` can continue the interrupted prompt after this process
+/// is gone. Mid-turn `/rebuild` does not write this marker (exec adopts
+/// the live turn). The in-memory pause gate is still RAM-only; this is
+/// only the interrupted-prompt marker.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn pause_mid_turn_writes_cancel_resume_marker_for_restart() {

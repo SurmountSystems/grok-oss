@@ -1103,16 +1103,19 @@ cargo test -p xai-grok-pager --lib -- \
 #### `/start` plus leftover cancel-resume marker
 
 `/start` is not `/resume`. Idle clean sessions do not invent a turn.
-Mid-turn `/rebuild` writes `canceled_turn_resume.json`. Idle completed
-turns do not write a marker and do not re-fire the last prompt. Load
-drops a leftover marker after a successful primary-turn finish.
+Mid-turn `/rebuild` does not cancel the parent and does not write
+`canceled_turn_resume.json`. The new TUI adopts the live turn like a
+disconnect. Idle completed turns do not write a marker and do not re-fire
+the last prompt. Load drops a leftover marker after a successful
+primary-turn finish.
 
 | path::test | Contract |
 |------------|----------|
 | `start_while_globally_paused_continues_interrupted_turn_once` | Global pause plus `/start` continues the interrupted turn once |
 | `start_on_idle_clean_session_does_not_invent_a_turn` | Idle clean `/start` does not invent a turn |
 | `start_with_cancel_resume_marker_continues_interrupted_turn` | Marker present: `/start` continues that turn |
-| `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn` | Mid-turn `/rebuild` writes the marker; load continues |
+| `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect` | Mid-turn `/rebuild` does not cancel; load adopts like disconnect |
+| `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn` | Mid-turn `/rebuild` continues the turn via adopt, not cancel-resume |
 | `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt` | Idle completed `/rebuild` does not write a marker or re-fire |
 | `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully` | Load drops a leftover marker after a successful primary-turn finish |
 
@@ -1121,6 +1124,7 @@ cargo test -p xai-grok-pager --lib -- \
   start_while_globally_paused_continues_interrupted_turn_once \
   start_on_idle_clean_session_does_not_invent_a_turn \
   start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect \
   handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
   handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
   session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully
@@ -1339,6 +1343,10 @@ or weaken these tests in recon.
 | `limits_help_lists_named_words_and_hyphenated_aliases` | `/limits --help` lists named words and hyphenated aliases. Not last-known-good. |
 | `limits_hyphenated_aliases_match_unhyphenated_words` | Hyphenated `/limits` words match unhyphenated, including `--use-credits`. Not last-known-good. |
 | `header_timeout_is_named_cold_start_class_with_retry_path` | Header-timeout chrome names cold start and keeps Retrying. Not last-known-good. |
+| `xai-grok-shell` `image_attach_must_not_fail_human_turn_when_describe_http_error_sending_request` | Image attach must not fail the whole Human turn when describe HTTP gets `error sending request`. Quotes the operator 10s transcription fail. Fail-open with named chrome. Not billing. |
+| `image_transcription_error_sending_request_is_named_transport_miss` | Fail-closed transcription ACP text is named transport miss, not generic Request failed. Not billing. |
+| `request_error_stream_error_sending_request_is_named_transport_miss` | `request error stream: error sending request` is a transport miss, not a silent hang. Not billing. |
+| `request_error_stream_error_sending_request_does_not_wipe_human_image_line` | That stream send miss must not wipe the Human `[Image #1]` line. |
 | `user_guide_ctrl_enter_interjects_when_appropriate` | User-guide defines when Ctrl+Enter interjects vs newline. Not last-known-good. |
 | `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
 | `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute. Performance contract; not last-known-good. |
@@ -1361,6 +1369,9 @@ cargo test -p xai-grok-pager --lib -- \
   limits_help_lists_named_words_and_hyphenated_aliases \
   limits_hyphenated_aliases_match_unhyphenated_words \
   header_timeout_is_named_cold_start_class_with_retry_path \
+  image_transcription_error_sending_request_is_named_transport_miss \
+  request_error_stream_error_sending_request_is_named_transport_miss \
+  request_error_stream_error_sending_request_does_not_wipe_human_image_line \
   user_guide_ctrl_enter_interjects_when_appropriate \
   prompt_wal_appends_on_mid_turn_interject \
   interject_does_not_wait_minutes_or_block_paint \
@@ -1370,6 +1381,8 @@ cargo test -p xai-grok-pager --lib -- \
   enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
   enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline \
   arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path
+cargo test -p xai-grok-shell --lib -- \
+  image_attach_must_not_fail_human_turn_when_describe_http_error_sending_request
 ```
 
 #### TUI performance (typing, cancel, interject)
@@ -2193,6 +2206,7 @@ cargo test -p xai-grok-pager --lib -- \
   start_while_globally_paused_continues_interrupted_turn_once \
   start_on_idle_clean_session_does_not_invent_a_turn \
   start_with_cancel_resume_marker_continues_interrupted_turn \
+  handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect \
   handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn \
   handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
   session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully \
@@ -2216,6 +2230,9 @@ cargo test -p xai-grok-pager --lib -- \
   limits_help_lists_named_words_and_hyphenated_aliases \
   limits_hyphenated_aliases_match_unhyphenated_words \
   header_timeout_is_named_cold_start_class_with_retry_path \
+  image_transcription_error_sending_request_is_named_transport_miss \
+  request_error_stream_error_sending_request_is_named_transport_miss \
+  request_error_stream_error_sending_request_does_not_wipe_human_image_line \
   user_guide_ctrl_enter_interjects_when_appropriate \
   interject_does_not_wait_minutes_or_block_paint \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
@@ -2258,6 +2275,7 @@ cargo test -p xai-grok-workspace --lib -- repeated_open_without_close_keeps_one_
 cargo test -p xai-grok-shell --test test_image_strip_recovery -- \
   poisoned_image_session_recovers_within_the_failing_turn
 cargo test -p xai-grok-shell --lib -- \
+  image_attach_must_not_fail_human_turn_when_describe_http_error_sending_request \
   limits_snapshot_mode_for_get_billing_explicit_is_force_refresh \
   main_session_sampling_window_is_catalog_500k_even_when_economic_is_on \
   nested_session_sampling_window_stays_200k_when_catalog_is_500k \
