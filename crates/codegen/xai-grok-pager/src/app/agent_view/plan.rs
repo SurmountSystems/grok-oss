@@ -314,7 +314,18 @@ impl AgentView {
     /// latest inline body, then disk `plan.md`. File-backed Isolated Preview
     /// re-reads session `plan.md` when that file was rewritten after the SQL
     /// snapshot so Revise does not keep painting the first draft.
+    ///
+    /// A parked empty `exit_plan_mode` present is authoritative emptiness:
+    /// leftover SQL or disk must not fill the body. Isolated Preview with no
+    /// park still uses SQL-then-disk.
     pub(crate) fn plan_body_for_preview(&self) -> Option<String> {
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| !p.has_plan)
+        {
+            return None;
+        }
         let inline = self
             .plan_approval_view
             .as_ref()
@@ -371,6 +382,15 @@ impl AgentView {
             .as_ref()
             .is_none_or(|p| p.source == PlanReviewSource::FileBacked);
         if !file_backed {
+            return;
+        }
+        // Empty live present is authoritative. Do not copy leftover SQL or
+        // disk plan.md into a parked empty approval (that sets has_plan).
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|p| !p.has_plan)
+        {
             return;
         }
         let Some(body) = self.plan_body_for_preview() else {
@@ -507,11 +527,15 @@ impl AgentView {
         self.refresh_file_backed_plan_from_live_file();
         // Park before open so feedback_active / footer CTAs arm on this open.
         self.park_local_idle_plan_decision_if_needed();
-        let body = self.plan_body_for_preview();
         let approval_empty = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|p| !p.has_plan);
+        let body = if approval_empty {
+            None
+        } else {
+            self.plan_body_for_preview()
+        };
         let Some(mut viewer) = (if let Some(content) = body {
             LineViewerState::open_markdown_content("plan.md", content, None)
         } else if approval_empty {
