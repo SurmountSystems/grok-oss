@@ -118,6 +118,63 @@ fn unstick_resends_last_l1_prompt_without_duplicate_human_line() {
     );
 }
 
+/// Operator: after Plan Exit, `/unstick` on a hung parent prompt must leave
+/// parked Isolated Preview. Not `/resume`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn unstick_leaves_parked_isolated_preview_when_hung() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "unstick-leave-iso-sess";
+    let cwd = grok_home.path().join("iso");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let hung = "continue the mill WATCHER plan";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("prompt-hung".into());
+        agent.scrollback.push_block(RenderBlock::user_prompt(hung));
+        agent.plan_decision_resolved = true;
+        let mut viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "plan.md",
+                "# TECH.md leftover\nstale Isolated Preview\n".to_owned(),
+                None,
+            )
+            .expect("Isolated Preview body");
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+    }
+    let send = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+        sid,
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+        hung,
+        vec![],
+    );
+    xai_grok_shell::session::prompt_wal::append_prompt_wal(&cwd_str, sid, &send).expect("wal send");
+
+    let effects = dispatch(Action::SendPrompt("/unstick".into()), &mut app);
+
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.line_viewer.is_none(),
+        "/unstick must leave parked Isolated Preview after Plan Exit"
+    );
+    assert_eq!(
+        unstick_resend_text(&effects),
+        Some(hung),
+        "must resend the hung mill prompt; effects={effects:?}"
+    );
+    assert!(
+        !app.session_picker_loading,
+        "/unstick must not open the session picker"
+    );
+}
+
 /// Operator: without unwinding any work or tokens. Do not cancel nested
 /// agents, rewind tool results, drop the transcript, reset sampler usage
 /// meters, or compact-away the turn.

@@ -364,7 +364,10 @@ impl AgentView {
                 return self.submit_marked_idle_plan_cta();
             }
         }
-        if in_plan_approval && plan_preview_key_is_composer_text(key) {
+        // Isolated Preview is the composer even after Plan Exit, when the
+        // live park is gone. Otherwise `/start` and Human text go into the
+        // viewer search bar and the session stays wedged on a leftover plan.
+        if (in_plan_approval || self.is_plan_viewer()) && plan_preview_key_is_composer_text(key) {
             return self.handle_plan_feedback_key(key);
         }
 
@@ -605,6 +608,14 @@ impl AgentView {
     pub(crate) fn cancel_line_viewer(&mut self) {
         self.line_viewer = None;
         self.view_plan_requested = false;
+        self.persist_session_plan_dock_open(false);
+        if let Some(sid) = self.session.session_id.as_ref() {
+            crate::slash::commands::plan::persist_isolated_preview_open(
+                &self.session.cwd.to_string_lossy(),
+                sid.0.as_ref(),
+                false,
+            );
+        }
         if self.plan_approval_view.is_some() {
             // Keep Revise / Comment box text. `cancel_undo_group` reverts the
             // open group and drops Undo, which is why revision notes vanished.

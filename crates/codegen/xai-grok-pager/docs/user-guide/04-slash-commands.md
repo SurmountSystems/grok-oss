@@ -22,6 +22,8 @@ Open the session picker to reload a previous session from disk.
 
 Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
 
+After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. Empty Enter never Approves.
+
 `/start` is not `/resume`. `/resume` only opens the session picker.
 
 ### `/unstick`
@@ -35,6 +37,8 @@ If a turn is hung in flight, `/unstick` orphans that hung prompt the way a dropp
 It prefers the last L1 operator text from `prompt_wal.jsonl` when that file exists. Otherwise it uses the last Human send on this session, not a nested overlay. Image tokens stay `[Image #N]`. WAL image file ids resend as resource links (`file://` under the session `images/` directory). It never re-inlines data URLs.
 
 If there is no last parent prompt, it fails with a short toast and does not invent text.
+
+After Plan Exit, `/unstick` leaves parked Isolated Preview when resending a hung parent prompt. Esc:close also leaves that pane. `/start` continues paused or interrupted work. Empty Enter never Approves.
 
 `/unstick` is not `/resume`. `/resume` still opens the session picker. Continue interrupted turn (`canceled_turn_resume.json`) still belongs to last-session on start and `/start`.
 

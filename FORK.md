@@ -1230,7 +1230,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   present that writes session `plan.md` must paint that file, not a
   frozen SQL snapshot and not a previous transcript plan body. Two
   different plan texts in the same window after Exit plus re-present is
-  a fail unless the panel matches disk. GitHub issue 96. Tests:
+  a fail unless the panel matches disk. After Plan Exit, Isolated
+  Preview must not wedge: Esc:close, `/start`, or `/unstick` (hung parent
+  prompt) leave the pane. `/start` continues paused or interrupted work
+  in this process. It is not `/resume`. Empty Enter never Approves.
+  GitHub issue 96 and issue 98. Tests:
   `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot`,
   `isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot`,
   `isolated_preview_reads_sql_first_then_disk_plan_md_fallback`,
@@ -1239,7 +1243,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open`,
   `isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent`,
   `isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready`,
-  `isolated_preview_after_exit_represent_paints_disk_not_frozen_sql`.
+  `isolated_preview_after_exit_represent_paints_disk_not_frozen_sql`,
+  `after_plan_exit_esc_closes_isolated_preview`,
+  `after_plan_exit_start_slash_enter_sends_and_does_not_approve`,
+  `after_plan_exit_empty_enter_never_approves`,
+  `after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md`,
+  `after_plan_exit_esc_clears_isolated_preview_open_marker`,
+  `start_leaves_parked_isolated_preview_and_continues_interrupted_work`,
+  `start_with_nothing_held_still_leaves_parked_isolated_preview`,
+  `unstick_leaves_parked_isolated_preview_when_hung`,
+  `user_guide_plan_exit_start_leaves_isolated_preview`.
 - [x] **Plan-review and Linux prompt screenshot paste**: `Event::Paste` and
   plan-review Ctrl+V run the clipboard image probe on every OS. Approve and
   Revise drain composer image chips. Tests:

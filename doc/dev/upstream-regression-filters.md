@@ -529,6 +529,15 @@ Present is not Approve. Empty Enter never Approves.
 | `isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent` | After Plan Exit and a new present that writes session plan.md, Isolated Preview paints that file, not frozen SQL and not a previous transcript plan body. |
 | `isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready` | Isolated Preview dock after Plan Exit paints current disk plan.md and does not re-arm Plan ready. |
 | `isolated_preview_after_exit_represent_paints_disk_not_frozen_sql` | Live present after Plan Exit paints current disk plan.md. Isolated Preview must not keep a TECH.md SQL snapshot. |
+| `after_plan_exit_esc_closes_isolated_preview` | After Plan Exit, Esc:close leaves parked Isolated Preview. Empty Enter never Approves. |
+| `after_plan_exit_start_slash_enter_sends_and_does_not_approve` | After Plan Exit, Isolated Preview types `/start` into the composer. Enter sends `/start`. Empty Enter never Approves. `/start` is not `/resume`. |
+| `after_plan_exit_empty_enter_never_approves` | After Plan Exit, empty Enter never Approves. |
+| `after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md` | Kept Isolated Preview after Plan Exit paints this session's current disk plan.md, not a leftover TECH.md snapshot. |
+| `after_plan_exit_esc_clears_isolated_preview_open_marker` | Esc:close after Plan Exit clears the Isolated Preview dock marker so `/rebuild` does not re-wedge the pane. |
+| `start_leaves_parked_isolated_preview_and_continues_interrupted_work` | `/start` leaves parked Isolated Preview and continues interrupted mill work. Not `/resume`. |
+| `start_with_nothing_held_still_leaves_parked_isolated_preview` | `/start` with nothing held still leaves parked Isolated Preview. |
+| `unstick_leaves_parked_isolated_preview_when_hung` | `/unstick` on a hung parent prompt leaves parked Isolated Preview. Not `/resume`. |
+| `user_guide_plan_exit_start_leaves_isolated_preview` | User-guide says after Plan Exit, Esc:close / `/start` / `/unstick` leave Isolated Preview. `/start` continues interrupted work. Empty Enter never Approves. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode \
@@ -545,7 +554,16 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open \
   isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent \
   isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready \
-  isolated_preview_after_exit_represent_paints_disk_not_frozen_sql
+  isolated_preview_after_exit_represent_paints_disk_not_frozen_sql \
+  after_plan_exit_esc_closes_isolated_preview \
+  after_plan_exit_start_slash_enter_sends_and_does_not_approve \
+  after_plan_exit_empty_enter_never_approves \
+  after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md \
+  after_plan_exit_esc_clears_isolated_preview_open_marker \
+  start_leaves_parked_isolated_preview_and_continues_interrupted_work \
+  start_with_nothing_held_still_leaves_parked_isolated_preview \
+  unstick_leaves_parked_isolated_preview_when_hung \
+  user_guide_plan_exit_start_leaves_isolated_preview
 ```
 
 #### Clickable Approve must not drop the Human-box prompt
@@ -2201,6 +2219,15 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent \
   isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready \
   isolated_preview_after_exit_represent_paints_disk_not_frozen_sql \
+  after_plan_exit_esc_closes_isolated_preview \
+  after_plan_exit_start_slash_enter_sends_and_does_not_approve \
+  after_plan_exit_empty_enter_never_approves \
+  after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md \
+  after_plan_exit_esc_clears_isolated_preview_open_marker \
+  start_leaves_parked_isolated_preview_and_continues_interrupted_work \
+  start_with_nothing_held_still_leaves_parked_isolated_preview \
+  unstick_leaves_parked_isolated_preview_when_hung \
+  user_guide_plan_exit_start_leaves_isolated_preview \
   plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
   main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
   plan_human_box_keystroke_burst_does_not_append_prompt_wal \

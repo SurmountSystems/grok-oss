@@ -56,6 +56,8 @@ If Approve still needs a live waiter, that waiter must not send cancel to nested
 
 **`/rebuild`** with Isolated Preview open restores that pane after relaunch. Resume does not auto-dock leftover `plan.md` when the pane was not open at persist.
 
+After Plan Exit, Isolated Preview must not trap the session on a leftover plan. Esc:close, `/start`, or `/unstick` (when the last parent prompt is hung) leave parked Isolated Preview. `/start` continues paused or interrupted work in this process. It is not `/resume`. The painted body is this session's current disk `plan.md`, not a leftover TECH.md snapshot. Empty Enter never Approves.
+
 ---
 
 ## The Plan File

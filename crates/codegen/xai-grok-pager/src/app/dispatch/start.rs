@@ -9,6 +9,12 @@ const NOTHING_HELD_TOAST: &str = "There is no paused or interrupted work to star
 
 /// Start held work. Never toggles pause on. Never opens the session picker.
 pub(super) fn dispatch_start_paused_or_interrupted(app: &mut AppView) -> Vec<Effect> {
+    // After Plan Exit, parked Isolated Preview must not trap `/start`.
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.leave_parked_isolated_preview();
+    }
     if app.global_work_pause.is_active() {
         return super::global_pause::dispatch_resume_global_pause(app);
     }

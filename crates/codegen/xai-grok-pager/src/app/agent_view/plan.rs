@@ -68,6 +68,16 @@ impl AgentView {
             v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
         })
     }
+
+    /// Leave parked Isolated Preview. After Plan Exit, Esc:close, `/start`,
+    /// and `/unstick` (hung parent prompt) must actually leave the pane so
+    /// the Operator can continue interrupted work.
+    pub(crate) fn leave_parked_isolated_preview(&mut self) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        self.cancel_line_viewer();
+    }
     /// Whether the user is currently composing a comment via the prompt
     /// input inside the *casual* plan preview (the modal opened with no
     /// `plan_approval_view`). Mirrors the `pav.focus == Commenting`
@@ -888,13 +898,26 @@ impl AgentView {
         self.plan_next_comment_id = pav.next_comment_id;
         self.restore_stashed_prompt_unless_composer_has_text(pav.stashed_prompt);
         // Exit may keep Isolated Preview as view-only. Approve still closes
-        // the pane. Never re-arm Plan ready for the exited present.
+        // the pane. Never re-arm Plan ready for the exited present. Re-read
+        // this session's current disk plan.md when it exists. If resolve
+        // fails, keep the pane so Esc:close / `/start` / `/unstick` can leave.
         let keep_isolated_preview = action == "abandon" && self.line_viewer.is_some();
-        self.line_viewer = None;
+        let kept_viewer = if keep_isolated_preview {
+            self.line_viewer.take()
+        } else {
+            self.line_viewer = None;
+            None
+        };
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
         if keep_isolated_preview {
             self.show_plan_preview();
+            if self.line_viewer.is_none()
+                && let Some(mut viewer) = kept_viewer
+            {
+                viewer.plan_mut().feedback_active = false;
+                self.line_viewer = Some(viewer);
+            }
         }
         self.persist_session_plan_dock_open(self.line_viewer.is_some());
         if let Some(sid) = self.session.session_id.as_ref() {
@@ -4808,7 +4831,29 @@ mod plan_rebuild_resume_and_esc_dismiss_tests {
 
 #[cfg(test)]
 mod session_plan_sql_preview_tests {
-    use crate::app::agent_view::test_agent_view;
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent_view::{AgentView, test_agent_view};
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::{PlanApprovalViewState, PlanReviewSource};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn park_then_exit(agent: &mut AgentView, body: &str) {
+        agent.plan_mode_active = true;
+        let mut pav = PlanApprovalViewState::for_idle_decision(Some(body.to_owned()));
+        pav.source = PlanReviewSource::FileBacked;
+        agent.plan_approval_view = Some(pav);
+        agent.show_plan_preview();
+        let _ = agent.abandon_plan();
+    }
+
+    fn type_esc(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        )
+    }
 
     /// Named contract: Isolated Preview reads SQL first, then disk `plan.md`.
     /// Leftover disk that is older than the SQL row must not win.
@@ -5110,6 +5155,200 @@ mod session_plan_sql_preview_tests {
         assert!(
             !painted.contains("TECH.md dependency tree"),
             "Isolated Preview must not keep the TECH.md tree after disk was rewritten; got {painted:?}"
+        );
+    }
+
+    /// Operator (2026-09-12): "Can't seem to resume the plan now... Like,
+    /// when it's parked like this, it's almost wedged... Also it's still
+    /// showing the stale plan. I can't unstuck it, and the old plan is
+    /// still there." After Plan Exit, Isolated Preview stays as view-only.
+    /// Esc:close must leave that pane. Empty Enter never Approves.
+    #[test]
+    fn after_plan_exit_esc_closes_isolated_preview() {
+        let mut agent = make_agent();
+        park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: Plan Exit may keep Isolated Preview as view-only"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        assert!(agent.plan_decision_resolved);
+
+        let outcome = type_esc(&mut agent);
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::Interject { .. })
+            ),
+            "Esc:close must not Approve; got {outcome:?}"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Esc:close must leave parked Isolated Preview after Plan Exit"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Esc:close must not re-park a live plan"
+        );
+    }
+
+    /// Operator: cannot continue mill work after Plan Exit. `/start` starts
+    /// paused or interrupted work. Isolated Preview must not swallow `/start`
+    /// as viewer search or casual commenting. Empty Enter never Approves.
+    #[test]
+    fn after_plan_exit_start_slash_enter_sends_and_does_not_approve() {
+        let mut agent = make_agent();
+        park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
+        agent.prompt.set_text("");
+        for ch in "/start".chars() {
+            let _ = agent.handle_input(
+                &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &ActionRegistry::defaults(),
+            );
+        }
+        assert_eq!(
+            agent.prompt.text(),
+            "/start",
+            "after Plan Exit, Isolated Preview must type `/start` into the composer, not the viewer search bar; got {:?}",
+            agent.prompt.text()
+        );
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(
+                    text.trim(),
+                    "/start",
+                    "non-empty Enter after Plan Exit must send `/start`; got {text:?}"
+                );
+            }
+            other => panic!(
+                "after Plan Exit, `/start` Enter must SendPrompt, not casual commenting; got {other:?} composer={:?}",
+                agent.prompt.text()
+            ),
+        }
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "sending `/start` must not re-arm a live plan park"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "sending `/start` must not undo Plan Exit"
+        );
+    }
+
+    /// Empty Enter never Approves, including after Plan Exit with Isolated
+    /// Preview still parked.
+    #[test]
+    fn after_plan_exit_empty_enter_never_approves() {
+        let mut agent = make_agent();
+        park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
+        agent.prompt.set_text("");
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+                    | InputOutcome::Action(Action::Interject { .. })
+            ),
+            "empty Enter never Approves; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "empty Enter after Plan Exit must not invent a live park"
+        );
+        assert!(
+            !agent.plan_decision_resolved || agent.plan_approval_view.is_none(),
+            "empty Enter never Approves"
+        );
+    }
+
+    /// Operator: Isolated Preview still showed TECH.md after mill Plan Exit.
+    /// Kept Isolated Preview must paint this session's current disk plan.md,
+    /// not a leftover TECH.md SQL snapshot.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "exit-keep-preview-sess";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+        let encoded = urlencoding::encode(&cwd);
+        let plan_md = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(session_id)
+            .join("plan.md");
+        std::fs::create_dir_all(plan_md.parent().unwrap()).unwrap();
+        let tech_tree = "# TECH.md dependency tree\nfirst Isolated Preview body\n";
+        std::fs::write(&plan_md, tech_tree).unwrap();
+        let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).unwrap();
+        store
+            .upsert_session_plan(
+                session_id,
+                xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+                Some("TECH.md dependency tree"),
+                tech_tree,
+                true,
+                "[]",
+            )
+            .unwrap();
+
+        let mut agent = test_agent_view(Some(session_id), std::path::PathBuf::from(&cwd));
+        agent.plan_mode_active = true;
+        let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(
+            Some(tech_tree.to_owned()),
+        );
+        pav.source = crate::views::plan_approval_view::PlanReviewSource::FileBacked;
+        agent.plan_approval_view = Some(pav);
+        agent.show_plan_preview();
+        let mill = "# Mill WATCHER plan\nlive disk plan.md after Exit\n";
+        write_newer_session_plan_md(&plan_md, mill);
+        let _ = agent.abandon_plan();
+
+        let painted = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("Plan Exit may keep Isolated Preview as view-only");
+        assert!(
+            painted.contains("Mill WATCHER plan") && painted.contains("live disk plan.md"),
+            "kept Isolated Preview after Plan Exit must paint current disk plan.md; got {painted:?}"
+        );
+        assert!(
+            !painted.contains("TECH.md dependency tree"),
+            "kept Isolated Preview must not keep a leftover TECH.md snapshot; got {painted:?}"
+        );
+    }
+
+    /// Esc:close after Plan Exit must clear the Isolated Preview dock marker
+    /// so `/rebuild` does not re-wedge the pane.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn after_plan_exit_esc_clears_isolated_preview_open_marker() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "exit-esc-marker-sess";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+        let mut agent = test_agent_view(Some(session_id), std::path::PathBuf::from(&cwd));
+        park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
+        crate::slash::commands::plan::persist_isolated_preview_open(&cwd, session_id, true);
+        let _ = type_esc(&mut agent);
+        assert!(
+            agent.line_viewer.is_none(),
+            "Esc:close must leave Isolated Preview"
+        );
+        assert!(
+            !crate::slash::commands::plan::take_isolated_preview_open(&cwd, session_id),
+            "Esc:close must clear the Isolated Preview dock marker"
         );
     }
 }

@@ -1057,6 +1057,60 @@ mod tests {
             "19-plan-mode.md must say Isolated Preview re-reads session plan.md after Revise, \
              not the first-draft snapshot"
         );
+        assert!(
+            plan.content.contains("After Plan Exit")
+                && plan.content.contains("Esc:close")
+                && plan.content.contains("`/start`")
+                && plan.content.contains("`/unstick`")
+                && plan.content.contains("leave parked Isolated Preview"),
+            "19-plan-mode.md must say after Plan Exit, Esc:close /start /unstick leave parked Isolated Preview"
+        );
+        assert!(
+            slash.content.contains("After Plan Exit")
+                && slash.content.contains("leaves parked Isolated Preview")
+                && slash.content.contains("`/start` is not `/resume`"),
+            "04-slash-commands.md must say after Plan Exit, /start leaves Isolated Preview and is not /resume"
+        );
+        assert!(
+            plan.content.contains("Empty Enter never Approves")
+                && slash.content.contains("Empty Enter never Approves"),
+            "user-guide must keep empty Enter never Approves after Plan Exit"
+        );
+    }
+
+    /// Operator: after Plan Exit, Isolated Preview must not wedge. `/start`
+    /// continues interrupted work. Esc:close / `/start` / `/unstick` leave
+    /// the pane. Painted body is this session's disk plan.md.
+    #[test]
+    fn user_guide_plan_exit_start_leaves_isolated_preview() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            slash.content.contains("After Plan Exit")
+                && slash.content.contains("leaves parked Isolated Preview")
+                && slash.content.contains("paused or interrupted work"),
+            "04-slash-commands.md must say /start after Plan Exit leaves Isolated Preview and continues interrupted work"
+        );
+        assert!(
+            slash.content.contains("`/start` is not `/resume`"),
+            "04-slash-commands.md must keep /start distinct from /resume"
+        );
+        assert!(
+            plan.content.contains("Esc:close")
+                && plan.content.contains("leave parked Isolated Preview")
+                && plan.content.contains("TECH.md snapshot"),
+            "19-plan-mode.md must say Esc:close leaves Isolated Preview and must not keep a leftover TECH.md snapshot"
+        );
+        assert!(
+            plan.content.contains("Empty Enter never Approves"),
+            "19-plan-mode.md must keep empty Enter never Approves"
+        );
     }
 
     /// Grok OSS Named contract: implement-loop effort in user-guide `05-configuration`
