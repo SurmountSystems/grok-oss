@@ -202,7 +202,7 @@ impl AgentView {
     }
 
     /// Keep-draft from before live present: Isolated Preview Enter still
-    /// SendPrompt. Comments typed after park still stash.
+    /// SendPrompt. Isolated Preview Preview Human text is also SendPrompt.
     fn composer_is_keep_draft_from_before_present(&self) -> bool {
         let Some(pav) = self.plan_approval_view.as_ref() else {
             return false;
@@ -213,11 +213,14 @@ impl AgentView {
             && (!notes.trim().is_empty() || !self.prompt.images.is_empty())
     }
 
-    /// Isolated Preview / Comment Enter stashes the Human-box critique so it
-    /// rides Approve. Keep-draft from before live present still SendPrompt.
-    /// Isolated Preview comments typed after park still stash. Empty Enter
-    /// never Approves. Line-comment overlay Enter still saves. Session
-    /// Multiline Enter still inserts a newline.
+    /// Isolated Preview composer is a Human box unless Comment was clicked.
+    /// Operator: soft planning is broken; lost that prompt; nothing happened;
+    /// cannot submit the prompt now. Human text while Isolated Preview is
+    /// open is a Human turn, not only plan comment 1. Comment CTA is the
+    /// comment path. Ride-Approve chrome must not block a later non-empty
+    /// Enter. Empty Enter never Approves. Keep-draft from before live
+    /// present still SendPrompt. Line-comment overlay Enter still saves.
+    /// Session Multiline Enter still inserts a newline.
     pub(super) fn hold_parked_plan_review_comments_from_enter(&mut self) -> bool {
         let text = self.prompt.text().to_string();
         let trimmed = text.trim();
@@ -247,20 +250,26 @@ impl AgentView {
         if self.composer_is_keep_draft_from_before_present() {
             return false;
         }
-        let pane_open = self.line_viewer.is_some();
+        let already_stashed = pav.comment_held_from_enter
+            && pav
+                .feedback_draft
+                .as_deref()
+                .is_some_and(|draft| draft.trim() == trimmed);
+        // Isolated Preview Preview is a Human send. Comment CTA stashes
+        // once. A matching ride-Approve draft must not recapture Enter.
+        // Keystroke snapshots of `feedback_draft` are not that Enter.
         let hold = match pav.prompt_intent {
-            PlanPromptIntent::Comment => true,
+            PlanPromptIntent::Comment => !already_stashed,
             PlanPromptIntent::Revise
             | PlanPromptIntent::Questions
-            | PlanPromptIntent::ApproveNotes => {
-                pane_open && pav.focus == PlanApprovalFocus::Preview
-            }
+            | PlanPromptIntent::ApproveNotes => false,
         };
         if !hold {
             return false;
         }
         if let Some(pav) = self.plan_approval_view.as_mut() {
             pav.feedback_draft = Some(text);
+            pav.comment_held_from_enter = true;
         }
         self.persist_unsent_composer_draft_now();
         self.show_toast("This comment will ride Approve. Click Approve, Clarify, or Revise.");
@@ -375,6 +384,12 @@ impl AgentView {
                     viewer.list_state.handle_key_event(key, &viewer.lines);
                     return InputOutcome::Changed;
                 }
+            }
+            // Esc closes ride-Approve capture. It does not Approve, and it
+            // does not wipe a mid-compose Human draft.
+            if let Some(pav) = self.plan_approval_view.as_mut() {
+                pav.feedback_draft = None;
+                pav.comment_held_from_enter = false;
             }
             self.cancel_line_viewer();
             return InputOutcome::Changed;

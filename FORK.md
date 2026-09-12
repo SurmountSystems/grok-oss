@@ -1173,7 +1173,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt`,
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
-  `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments`,
+  `isolated_present_preview_enter_is_human_turn_then_click_approve`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `preview_typed_comment_rides_along_on_approve`,
   `prompt_tab_typed_comment_rides_along_on_approve`,
@@ -1221,6 +1221,25 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt`,
   `plan_soft_is_not_the_queue_hold_token`,
   `user_guide_plan_soft_docks_isolated_preview`.
+- [x] **Isolated Preview re-reads rewritten `plan.md`**: after Revise
+  rewrites session `plan.md` and re-presents, Isolated Preview paints the
+  current file, not the first-draft `plan_content` snapshot. Opening the
+  panel re-reads the file. Older leftover disk still loses to a newer SQL
+  row. After Plan Exit, chrome must not keep **Plan ready. Side panel
+  open**. Idle CTAs must not stay armed for the exited present. A new
+  present that writes session `plan.md` must paint that file, not a
+  frozen SQL snapshot and not a previous transcript plan body. Two
+  different plan texts in the same window after Exit plus re-present is
+  a fail unless the panel matches disk. GitHub issue 96. Tests:
+  `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot`,
+  `isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot`,
+  `isolated_preview_reads_sql_first_then_disk_plan_md_fallback`,
+  `isolated_preview_and_present_read_sql_first_then_disk_plan_md_fallback`,
+  `after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present`,
+  `after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open`,
+  `isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent`,
+  `isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready`,
+  `isolated_preview_after_exit_represent_paints_disk_not_frozen_sql`.
 - [x] **Plan-review and Linux prompt screenshot paste**: `Event::Paste` and
   plan-review Ctrl+V run the clipboard image probe on every OS. Approve and
   Revise drain composer image chips. Tests:
@@ -1800,22 +1819,32 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `grok-nix-helper recon-status` + `just recon-status` (read-only probe); pin in
   `FORK_PATHS` + `assert-process-pins`.
 - [x] **Prefer Rust tools; product skills are not a Python runtime**:
-  standing preference plus land class 7. Sanitize rejects junk `.py`; archive
+  standing preference plus land class 7. Tool work is a named Rust function,
+  an ACP tool, or a shipped CLI bin of that function. Skills must not
+  generate Python or Bash and exec it. Sanitize rejects junk `.py`; archive
   extract skips junk `.py`; product skill roots have no junk `.py`. The three
-  allowlisted CLI stubs are Rust intercepts (`memory.py`, `validate-plan.py`,
-  `session_reader.py`). Exceptions: those stubs plus office/docx/pptx/xlsx/pdf
+  allowlisted stub **names** stay intercept surfaces (`memory.py`,
+  `validate-plan.py`, `session_reader.py`). grok-oss intercepts those names
+  and the CLI bins `grok-oss-implement-memory`, `grok-oss-plan-validate`,
+  `grok-oss-session-reader` to Rust. Grok Build compatibility is those bins,
+  not Python. Exceptions: those stub names plus office/docx/pptx/xlsx/pdf
   scripts. Host `~/.agents/skills` is operator-owned and is **not** this
-  class. Tests: `sanitize_rejects_non_excepted_skill_python`,
+  class. grok-oss sqlite new session/work ids are ULIDs; UUID is the Grok
+  Build wire id. Tests: `sanitize_rejects_non_excepted_skill_python`,
   `extract_archive_skips_non_excepted_skill_python`,
   `product_repo_skill_roots_have_no_non_excepted_python`,
-  `default_product_skills_include_polish_and_subagent`
+  `default_product_skills_include_polish_and_subagent`,
+  `default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash`
   (`xai-grok-bundle` `lib.rs` / `default_skills.rs`);
   `user_guide_skills_are_not_a_python_runtime` (`xai-grok-pager` `docs.rs`);
   `implement_memory_snapshot_intercept_does_not_spawn_shell`,
   `plan_validate_intercept_does_not_spawn_shell`,
-  `session_reader_list_intercept_does_not_spawn_shell`
+  `session_reader_list_intercept_does_not_spawn_shell`,
+  `grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell`,
+  `generated_python_payload_is_not_skill_stub_intercept`
   (`xai-grok-tools` `bash/mod.rs`). A restack that reintroduces non-excepted
-  Python, or that drops a Rust intercept, is a **failed land**. Research:
+  Python, drops a Rust intercept, or drops those CLI bins, is a **failed
+  land**. Research:
   [`doc/dev/research/python-to-rust-tools-2026-07-26.md`](doc/dev/research/python-to-rust-tools-2026-07-26.md)
 - [x] **File-level infer-from-path verify** (ACP `search_replace` /
   `apply_patch` and the other structured edit tools): a written `.rs`
@@ -2282,12 +2311,20 @@ cargo `fn`):
 6. **Last-session on start.** Interactive `grok-oss` opens the remembered
    last session for this working directory. It does not land on Welcome
    first.
-7. **Product skills are not a Python runtime.** A restack that installs
-   non-excepted Python under product skills, or that drops the Rust intercept
-   for `memory.py` / `validate-plan.py` / `session_reader.py`, is a failed
-   land. Office/docx/pptx/xlsx/pdf scripts and those three allowlisted CLI
-   stubs are the only exceptions. User-guide `08-skills.md` must keep that
-   sentence.
+7. **Product skills are not a Python runtime.** Tool work is a named Rust
+   function, an ACP tool, or a shipped CLI bin of that function. Skills
+   must not generate arbitrary Python or Bash payloads and then exec them.
+   A restack that installs non-excepted Python under product skills, that
+   drops the Rust intercept for the allowlisted stub names `memory.py` /
+   `validate-plan.py` / `session_reader.py`, or that drops the CLI bins
+   `grok-oss-implement-memory` / `grok-oss-plan-validate` /
+   `grok-oss-session-reader`, is a failed land. grok-oss intercepts those
+   stub names and bins to Rust. Grok Build compatibility is those bins, not
+   a second Python runtime. Office/docx/pptx/xlsx/pdf scripts and those
+   three allowlisted stub **names** are the only exceptions. Host
+   `~/.agents/skills` is operator-owned and is not this class. User-guide
+   `08-skills.md` must keep that sentence. grok-oss sqlite session/work
+   ids are ULIDs; UUID stays the Grok Build / ACP wire id.
 
 After restack the required classes are **all seven** above: CLI branding,
 `/settings` plus unread config, Token Economy ledger `/spend`, DOGE/chrome
@@ -2316,7 +2353,7 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt`,
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
-  `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments`,
+  `isolated_present_preview_enter_is_human_turn_then_click_approve`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`.
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
   Installed identity git SHA must match this workspace HEAD short SHA.
@@ -2667,10 +2704,13 @@ cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_wh
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
   extract_archive_skips_non_excepted_skill_python \
   product_repo_skill_roots_have_no_non_excepted_python \
-  default_product_skills_include_polish_and_subagent
+  default_product_skills_include_polish_and_subagent \
+  default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash
 cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
 cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
-  plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell
+  plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell \
+  grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell \
+  generated_python_payload_is_not_skill_stub_intercept
 
 # Extra: plan present != approve + modal-free typing
 cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_approve \

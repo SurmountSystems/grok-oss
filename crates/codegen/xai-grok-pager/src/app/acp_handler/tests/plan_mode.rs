@@ -2025,4 +2025,98 @@
         );
     }
 
+    /// Operator (2026-09-11): Isolated Preview showed TECH.md while the
+    /// transcript was mill/WATCHER. After Plan Exit and a new present,
+    /// Isolated Preview must paint current disk plan.md. Chrome must not
+    /// keep Plan ready. Side panel open for the exited present.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn isolated_preview_after_exit_represent_paints_disk_not_frozen_sql() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "sess-1";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+        let encoded = urlencoding::encode(&cwd);
+        let plan_md = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(session_id)
+            .join("plan.md");
+        std::fs::create_dir_all(plan_md.parent().unwrap()).unwrap();
+        let tech_tree = "# TECH.md dependency tree\nfirst Isolated Preview body\n";
+        std::fs::write(&plan_md, tech_tree).unwrap();
+        let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).unwrap();
+        store
+            .upsert_session_plan(
+                session_id,
+                xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+                Some("TECH.md dependency tree"),
+                tech_tree,
+                true,
+                "[]",
+            )
+            .unwrap();
+
+        let mut app = make_app_with_agent(session_id);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.cwd = std::path::PathBuf::from(&cwd);
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some(tech_tree));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open")
+            );
+            let _ = agent.abandon_plan();
+            assert!(agent.plan_approval_view.is_none());
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "after Plan Exit, chrome must not keep Plan ready. Side panel open"
+            );
+        }
+
+        let mill = "# Mill WATCHER plan\nlive disk plan.md after Exit\n";
+        std::fs::write(&plan_md, mill).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plan_md)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call-2", "CreatePlan");
+        }
+        let (ext2, _rx2) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call-2", Some(mill));
+        assert!(handle_exit_plan_mode(ext2, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("Isolated Preview must paint after re-present");
+        assert!(
+            painted.contains("Mill WATCHER plan") && painted.contains("live disk plan.md"),
+            "Isolated Preview must paint current disk plan.md after Exit+re-present; got {painted:?}"
+        );
+        assert!(
+            !painted.contains("TECH.md dependency tree"),
+            "Isolated Preview must not keep a frozen TECH.md snapshot; got {painted:?}"
+        );
+        let disk = std::fs::read_to_string(&plan_md).unwrap();
+        assert!(
+            disk.contains("live disk plan.md") && painted.contains("live disk plan.md"),
+            "two different plan texts after Exit+re-present is a fail unless the panel matches disk"
+        );
+    }
+
 

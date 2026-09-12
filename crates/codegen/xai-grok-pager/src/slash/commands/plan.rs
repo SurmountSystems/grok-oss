@@ -168,7 +168,13 @@ impl AgentView {
             self.reopen_plan_approval();
         } else {
             self.park_local_idle_plan_decision_if_needed();
-            if self.plan_approval_view.is_none() {
+            // `/plan --soft` docks Isolated Preview even when plan mode is
+            // off. After Plan Exit, plan_decision_resolved stays true so we
+            // must not invent a live idle park that paints Plan ready.
+            if self.plan_approval_view.is_none()
+                && !self.plan_decision_resolved
+                && self.plan_feedback_in_flight.is_none()
+            {
                 let stashed = self.prompt.stash();
                 let mut pav =
                     crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(
@@ -185,10 +191,10 @@ impl AgentView {
         }
         self.restore_plan_feedback_draft_if_composer_lost();
         self.clear_view_plan_request_if_waiter_bound();
-        self.persist_session_plan_dock_open(true);
-        if let Some(body) = self.plan_body_for_preview() {
-            self.persist_session_plan_body(&body);
-        }
+        self.persist_session_plan_dock_open(self.line_viewer.is_some());
+        // Isolated Preview dock must not re-stamp session_plans with the
+        // painted body. Present persist writes the live plan. Re-stamping
+        // here freezes Isolated Preview over a newer disk plan.md.
     }
 }
 

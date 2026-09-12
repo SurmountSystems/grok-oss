@@ -1870,7 +1870,9 @@ fn request_error_stream_error_sending_request_does_not_wipe_human_image_line() {
         })
         .collect();
     assert!(
-        human_texts.iter().any(|t| t.contains("[Image #1]") && t.contains("weird")),
+        human_texts
+            .iter()
+            .any(|t| t.contains("[Image #1]") && t.contains("weird")),
         "Human image line must stay, got {human_texts:?}"
     );
 }
@@ -5843,10 +5845,11 @@ fn comment_intent_send_prompt_does_not_start_model_wait() {
     );
 }
 
-/// Isolated Preview Human-box typing is the same comment path while the
-/// plan pane is open. Enter must not start Waiting for the model.
+/// Isolated Preview Human text is a Human turn. Operator: soft planning
+/// is broken; lost that prompt; nothing happened; cannot submit the
+/// prompt now. Empty Enter never Approves.
 #[test]
-fn isolated_preview_send_prompt_does_not_start_model_wait() {
+fn isolated_preview_send_prompt_is_human_turn_not_only_plan_comment() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
@@ -5864,16 +5867,60 @@ fn isolated_preview_send_prompt_does_not_start_model_wait() {
 
     let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
     assert!(
-        !effects_start_model_prompt(&effects),
-        "Isolated Preview critique must not start a Prompt; effects={effects:?}"
+        effects_start_model_prompt(&effects),
+        "Isolated Preview Human Enter must send; effects={effects:?}"
     );
     let agent = app.agents.get(&id).unwrap();
     assert!(
         agent.plan_approval_view.is_some(),
         "Isolated Preview Enter must not Approve"
     );
-    assert_eq!(agent.session.state, AgentState::Idle);
-    assert!(agent.prompt.text().contains(PLAN_COMMENT_CRITIQUE));
+}
+
+/// Isolated Preview Human send appends WAL. Operator: lost that prompt.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_human_text_enter_appends_wal() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let sid = "wal-isolated-preview-human";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        agent.plan_approval_view =
+            Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+        agent.show_plan_preview();
+        agent.prompt.set_text("");
+        agent.session.state = AgentState::Idle;
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        effects_start_model_prompt(&effects),
+        "Isolated Preview Human Enter must send; effects={effects:?}"
+    );
+    let rows =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+    assert!(
+        rows.iter().any(|r| {
+            matches!(
+                r.kind,
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+                    | xai_grok_shell::session::prompt_wal::PromptWalKind::Queue
+            ) && r.text.contains(PLAN_COMMENT_CRITIQUE)
+        }),
+        "lost Isolated Preview Human sentence must be on WAL, got {rows:?}"
+    );
+    assert!(
+        app.agents[&id].plan_approval_view.is_some(),
+        "Isolated Preview Enter must not Approve"
+    );
 }
 
 /// Held comments ride Approve with the review-comments lead. Empty Enter

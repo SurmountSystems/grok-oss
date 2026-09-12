@@ -63,12 +63,18 @@ fn isolated_present(
     tool_call_id: &str,
     plan: &str,
 ) -> tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>> {
-    {
+    let session_id = {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_pending_tool(agent, tool_call_id, "CreatePlan");
         agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
-    }
-    let (ext, rx) = make_exit_plan_ext_with_tool_call_id(tool_call_id, Some(plan));
+        agent
+            .session
+            .session_id
+            .as_ref()
+            .map(|s| s.0.to_string())
+            .unwrap_or_else(|| "sess-1".into())
+    };
+    let (ext, rx) = make_exit_plan_ext_for_session(&session_id, tool_call_id, Some(plan));
     assert!(
         handle_exit_plan_mode(ext, app),
         "isolated present must park the live waiter and dock the pane"
@@ -469,13 +475,14 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Grok OSS: Isolated Preview Enter must stash the typed critique, not start a
-/// Waiting-for-the-model Prompt. Empty Enter never Approves. Click
-/// Approve still completes the live waiter and wraps review comments. This
-/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Grok OSS: Isolated Preview Human text is a Human turn, not only plan
+/// comment 1. Operator: soft planning is broken; lost that prompt; nothing
+/// happened; cannot submit the prompt now. Empty Enter never Approves.
+/// Click Approve still completes the live waiter. This diverges from
+/// upstream xAI because FORK.md lost-prompt extra and the catalog
 /// Clickable Approve table.
 #[test]
-fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments() {
+fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
     let mut app = make_app_with_agent("sess-1");
     {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -528,22 +535,22 @@ fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_commen
         KeyModifiers::NONE,
     )));
     assert!(
-        !matches!(
+        matches!(
             enter,
             InputOutcome::Action(Action::SendPrompt(_))
                 | InputOutcome::ActionThenForward(Action::SendPrompt(_))
                 | InputOutcome::Action(Action::SendPromptNow { .. })
                 | InputOutcome::Action(Action::Interject { .. })
         ),
-        "Isolated Preview Enter must stash comments, not start a Prompt; got {enter:?}"
+        "Isolated Preview Human Enter must send, not only stash plan comment 1; got {enter:?}"
     );
     let enter_effects = dispatch_outcome(&mut app, enter);
     assert!(
-        !enter_effects.iter().any(|effect| matches!(
+        enter_effects.iter().any(|effect| matches!(
             effect,
             Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
         )),
-        "Isolated Preview Enter must not dispatch a model send; effects={enter_effects:?}"
+        "Isolated Preview Human Enter must dispatch a send; effects={enter_effects:?}"
     );
     {
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -551,25 +558,13 @@ fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_commen
             agent.plan_approval_view.is_some(),
             "Isolated Preview Enter must not Approve"
         );
-        assert!(
-            agent.prompt.text().contains(HUMAN_BOX_PROMPT),
-            "composer must keep the critique for Approve, got {:?}",
-            agent.prompt.text()
-        );
-        assert_eq!(
-            agent
-                .plan_approval_view
-                .as_ref()
-                .and_then(|p| p.feedback_draft.as_deref()),
-            Some(HUMAN_BOX_PROMPT)
-        );
     }
     assert!(
         matches!(
             rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ),
-        "stashing comments must leave the live waiter parked"
+        "Human send must leave the live waiter parked"
     );
 
     let after = click_approve_via_app(&mut app);
@@ -581,7 +576,7 @@ fn isolated_present_preview_enter_stashes_then_click_approve_wraps_review_commen
             .is_none(),
         "click Approve must decide the parked plan"
     );
-    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    let _ = after;
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 

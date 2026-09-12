@@ -5502,6 +5502,72 @@ mod tests {
         }
     }
 
+    // Grok OSS: Grok Build compatibility is CLI bins of the Rust functions,
+    // not Python. This diverges from upstream xAI because FORK.md land class 7
+    // names grok-oss-implement-memory / grok-oss-plan-validate /
+    // grok-oss-session-reader.
+    #[tokio::test]
+    async fn grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell() {
+        let (resources, called) = make_tracking_resources();
+        let tool = BashTool;
+        let cmd = "grok-oss-implement-memory snapshot";
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input(cmd))
+                .await
+                .expect("CLI bin intercept should succeed");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "grok-oss-implement-memory must not reach TerminalBackend"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(bash.exit_code, 0, "output={}", bash.output_for_prompt);
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
+    /// Operator: skills must not generate arbitrary Python or Bash and then
+    /// run it as a skill helper. Generated payloads are not intercepts;
+    /// unknown python still reaches the shell (user project), not a skill
+    /// stub.
+    #[tokio::test]
+    async fn generated_python_payload_is_not_skill_stub_intercept() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = TrackingTerminal {
+            called: called.clone(),
+            inner: MockTerminal::success("from-shell\n", 0),
+        };
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
+        resources.insert(Terminal(backend));
+        resources.insert(Cwd(PathBuf::from("/tmp")));
+        resources.insert(SessionFolder(PathBuf::from("/tmp/session")));
+        resources.insert(SessionEnv(Arc::new(HashMap::new())));
+        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
+        resources.insert(Params(BashParams::default()));
+        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
+
+        let tool = BashTool;
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("python3 -c 'print(1)'"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "generated python3 -c must not be treated as a skill stub intercept"
+        );
+        match result {
+            BashToolOutput::Foreground(bash) => {
+                assert_eq!(String::from_utf8_lossy(&bash.output), "from-shell\n");
+            }
+            BashToolOutput::Background(_) => panic!("expected foreground"),
+        }
+    }
+
     // ─── Dangerous crate-wide cargo refuse ───
     //
     // Agents must not spawn crate-wide / workspace cargo from bash. The

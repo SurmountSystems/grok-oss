@@ -336,21 +336,29 @@ cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_wh
 
 ### 7. Product skills are not a Python runtime
 
-A restack that installs non-excepted Python under product skills, or that
-drops the Rust intercept for the allowlisted CLI forms, is a failed land.
+Surmount land class. See [`FORK.md`](../../FORK.md) § *Land checklist*
+item 7 (product skills are not a Python runtime). Tool work is a named
+Rust function, an ACP tool, or a shipped CLI bin of that function.
+Skills must not generate Python or Bash and exec it. A restack that
+installs non-excepted Python under product skills, or that drops the
+Rust intercept for the allowlisted CLI forms, is a failed land.
 User-guide `08-skills.md` must keep that sentence. The host overlay under
-`~/.agents/skills` is operator-owned and is not this class.
+`~/.agents/skills` is operator-owned and is not this class. grok-oss
+sqlite session/work ids are ULIDs; UUID stays the Grok Build wire id.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-bundle` `sanitize_rejects_non_excepted_skill_python` | Bundle path sanitize rejects junk `.py`; keep only intercept CLI stubs and office/docx/pptx/xlsx/pdf |
-| `xai-grok-bundle` `extract_archive_skips_non_excepted_skill_python` | Network archive extract does not write non-excepted `.py` into the bundled cache |
-| `xai-grok-bundle` `product_repo_skill_roots_have_no_non_excepted_python` | Project `.agents/skills` and `.grok/skills` have no junk `.py` |
-| `xai-grok-bundle` `default_product_skills_include_polish_and_subagent` | In-tree Grok OSS default skills include polish, subagent, what, and pull-remote-tree |
-| `xai-grok-pager` `docs::user_guide_skills_are_not_a_python_runtime` | User-guide `08-skills.md` says skills are not a Python runtime and names the exceptions. `/polish` and `/subagent` are default Grok OSS skills, not project `.agents/skills` packs. |
-| `xai-grok-tools` `implement_memory_snapshot_intercept_does_not_spawn_shell` | `memory.py` CLI is Rust; no Python process |
-| `xai-grok-tools` `plan_validate_intercept_does_not_spawn_shell` | `validate-plan.py` CLI is Rust; no Python process |
-| `xai-grok-tools` `session_reader_list_intercept_does_not_spawn_shell` | `session_reader.py` CLI is Rust; no Python process |
+| `xai-grok-bundle` `sanitize_rejects_non_excepted_skill_python` | Surmount. Bundle path sanitize rejects junk `.py`; keep only intercept CLI stubs and office/docx/pptx/xlsx/pdf. [FORK land class 7](../../FORK.md) |
+| `xai-grok-bundle` `extract_archive_skips_non_excepted_skill_python` | Surmount. Network archive extract does not write non-excepted `.py` into the bundled cache. [FORK land class 7](../../FORK.md) |
+| `xai-grok-bundle` `product_repo_skill_roots_have_no_non_excepted_python` | Surmount. Project `.agents/skills` and `.grok/skills` have no junk `.py`. [FORK land class 7](../../FORK.md) |
+| `xai-grok-bundle` `default_product_skills_include_polish_and_subagent` | Surmount. In-tree Grok OSS default skills include polish, subagent, what, and pull-remote-tree. [FORK land class 7](../../FORK.md) |
+| `xai-grok-bundle` `default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash` | Surmount. Default product skill markdown must not teach write-then-exec Python or Bash. [FORK land class 7](../../FORK.md) |
+| `xai-grok-pager` `docs::user_guide_skills_are_not_a_python_runtime` | Surmount. User-guide `08-skills.md` says skills are not a Python runtime, names CLI bins, and names the exceptions. `/polish` and `/subagent` are default Grok OSS skills, not project `.agents/skills` packs. [FORK land class 7](../../FORK.md) |
+| `xai-grok-tools` `implement_memory_snapshot_intercept_does_not_spawn_shell` | Surmount. `memory.py` CLI is Rust; no Python process. [FORK land class 7](../../FORK.md) |
+| `xai-grok-tools` `plan_validate_intercept_does_not_spawn_shell` | Surmount. `validate-plan.py` CLI is Rust; no Python process. [FORK land class 7](../../FORK.md) |
+| `xai-grok-tools` `session_reader_list_intercept_does_not_spawn_shell` | Surmount. `session_reader.py` CLI is Rust; no Python process. [FORK land class 7](../../FORK.md) |
+| `xai-grok-tools` `grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell` | Surmount. `grok-oss-implement-memory` is the CLI bin of the Rust function; no Python process. [FORK land class 7](../../FORK.md) |
+| `xai-grok-tools` `generated_python_payload_is_not_skill_stub_intercept` | Surmount. Generated `python3 -c` is not a skill stub intercept. [FORK land class 7](../../FORK.md) |
 
 ```bash
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
@@ -511,13 +519,33 @@ Present is not Approve. Empty Enter never Approves.
 | `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt` | `/plan --soft add feature` seeds Isolated Preview and does not grow pending_prompts |
 | `plan_soft_is_not_the_queue_hold_token` | `--soft` is not `queue` / `later` |
 | `user_guide_plan_soft_docks_isolated_preview` | 04-slash-commands and 19-plan-mode say `--soft` does not enter plan mode |
+| `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview Human Enter is a Human turn, not only plan comment 1. Empty Enter never Approves. |
+| `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Non-empty Enter still sends while ride-Approve chrome is visible. Empty Enter never Approves. |
+| `isolated_preview_send_prompt_is_human_turn_not_only_plan_comment` | Isolated Preview SendPrompt is a Human turn. Empty Enter never Approves. |
+| `isolated_preview_human_text_enter_appends_wal` | Isolated Preview Human send appends prompt WAL. |
+| `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot` | After Revise rewrites session plan.md, Isolated Preview paints the current file, not the first-draft snapshot. Opening the panel re-reads the file. |
+| `after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present` | After Plan Exit, idle CTAs must not stay armed. Chrome must not keep Plan ready. Side panel open. |
+| `after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open` | After Plan Exit, the turn-status draw must not keep Plan ready. Side panel open. |
+| `isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent` | After Plan Exit and a new present that writes session plan.md, Isolated Preview paints that file, not frozen SQL and not a previous transcript plan body. |
+| `isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready` | Isolated Preview dock after Plan Exit paints current disk plan.md and does not re-arm Plan ready. |
+| `isolated_preview_after_exit_represent_paints_disk_not_frozen_sql` | Live present after Plan Exit paints current disk plan.md. Isolated Preview must not keep a TECH.md SQL snapshot. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode \
   plan_soft_docks_isolated_preview_without_entering_plan_mode \
   plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt \
   plan_soft_is_not_the_queue_hold_token \
-  user_guide_plan_soft_docks_isolated_preview
+  user_guide_plan_soft_docks_isolated_preview \
+  isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment \
+  isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible \
+  isolated_preview_send_prompt_is_human_turn_not_only_plan_comment \
+  isolated_preview_human_text_enter_appends_wal \
+  isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
+  after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
+  after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open \
+  isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent \
+  isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready \
+  isolated_preview_after_exit_represent_paints_disk_not_frozen_sql
 ```
 
 #### Clickable Approve must not drop the Human-box prompt
@@ -536,7 +564,7 @@ have a piece; never fit the contract to a wipe.
 | `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt` | Empty at present, type in Preview, click Approve still sends the typed string |
 | `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt` | Comment then Prompt focus, type, click Approve does not drop the Human-box prompt |
 | `isolated_present_click_approve_dispatches_interject_with_prompt_text` | Click Approve dispatches Interject that carries the prompt text |
-| `isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments` | Isolated Preview Enter stashes notes; empty Enter never Approves; click Approve wraps review comments |
+| `isolated_present_preview_enter_is_human_turn_then_click_approve` | Isolated Preview Human Enter is a Human turn, not only plan comment 1; empty Enter never Approves; click Approve still decides the parked plan |
 | `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt` | Isolated Preview Approve with notes in the plan composer submits those notes with Approve, not as a queued Prompt, and does not drop them. Empty Enter never Approves. |
 
 ```bash
@@ -545,7 +573,7 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
-  isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments \
+  isolated_present_preview_enter_is_human_turn_then_click_approve \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt
 ```
 
@@ -2089,10 +2117,13 @@ cargo test -p xai-grok-pager --lib -- materialize_new_auto_opens_last_session_wh
 cargo test -p xai-grok-bundle --lib -- sanitize_rejects_non_excepted_skill_python \
   extract_archive_skips_non_excepted_skill_python \
   product_repo_skill_roots_have_no_non_excepted_python \
-  default_product_skills_include_polish_and_subagent
+  default_product_skills_include_polish_and_subagent \
+  default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash
 cargo test -p xai-grok-pager --lib -- user_guide_skills_are_not_a_python_runtime
 cargo test -p xai-grok-tools --lib -- implement_memory_snapshot_intercept_does_not_spawn_shell \
-  plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell
+  plan_validate_intercept_does_not_spawn_shell session_reader_list_intercept_does_not_spawn_shell \
+  grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell \
+  generated_python_payload_is_not_skill_stub_intercept
 
 # Extra neighbors this catalog lists (not a second numbered board)
 cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_approve \
@@ -2126,6 +2157,7 @@ cargo test -p xai-grok-shell --lib -- \
   plan_soft_sets_dock_open_without_requiring_markdown_write_lock \
   present_upserts_session_plan_body_without_rewriting_plan_md \
   isolated_preview_and_present_read_sql_first_then_disk_plan_md_fallback \
+  isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot \
   grok_oss_db_session_plans_are_not_the_token_economy_spend_ledger
 cargo test -p xai-grok-shell --lib -- from_config_without_prefetch_produces_usable_catalog \
   baked_default_is_grok_46_medium_fork_contract \
@@ -2161,8 +2193,14 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
-  isolated_present_preview_enter_stashes_then_click_approve_wraps_review_comments \
+  isolated_present_preview_enter_is_human_turn_then_click_approve \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
+  isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
+  after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
+  after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open \
+  isolated_preview_must_paint_current_disk_plan_md_after_exit_and_represent \
+  isolated_preview_dock_after_exit_paints_disk_and_does_not_rearm_plan_ready \
+  isolated_preview_after_exit_represent_paints_disk_not_frozen_sql \
   plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char \
   main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char \
   plan_human_box_keystroke_burst_does_not_append_prompt_wal \

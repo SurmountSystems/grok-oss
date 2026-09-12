@@ -51,36 +51,63 @@ pub(crate) fn apply_schema_v6(store: &GrokOssStore) -> Result<()> {
 }
 
 /// Isolated Preview / present: SQL body first, then disk `plan.md`.
+///
+/// When session `plan.md` was rewritten after the SQL row, the file is the
+/// live plan. A leftover on-disk draft that is older than SQL stays fallback
+/// only. Opening Isolated Preview must not freeze the first-draft SQL
+/// snapshot after Revise rewrites the file.
 pub(crate) fn resolve_plan_body_sql_then_disk(
     store: &GrokOssStore,
     session_id: &str,
     plan_identity: &str,
     disk_plan_md: Option<&Path>,
 ) -> Option<String> {
-    if let Ok(Some(row)) = store.load_session_plan(session_id, plan_identity)
-        && !row.body.trim().is_empty()
-    {
-        return Some(row.body);
-    }
-    disk_plan_md
+    let sql_row = store
+        .load_session_plan(session_id, plan_identity)
+        .ok()
+        .flatten()
+        .filter(|row| !row.body.trim().is_empty());
+    let disk_body = disk_plan_md
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.trim().is_empty());
+    match (sql_row, disk_body, disk_plan_md) {
+        (Some(row), Some(disk), Some(path)) if disk_rewritten_after_sql(path, &row.updated_at) => {
+            Some(disk)
+        }
+        (Some(row), _, _) => Some(row.body),
+        (None, Some(disk), _) => Some(disk),
+        _ => None,
+    }
 }
 
-/// Fail-open present helper. Prefers SQL, then an already-read disk body.
+/// True when session `plan.md` mtime is strictly after the SQL `updated_at`.
+fn disk_rewritten_after_sql(disk_plan_md: &Path, sql_updated_at: &str) -> bool {
+    let Ok(mtime) = std::fs::metadata(disk_plan_md).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(sql) = chrono::DateTime::parse_from_rfc3339(sql_updated_at) else {
+        return true;
+    };
+    let sql_mtime: std::time::SystemTime = sql.with_timezone(&chrono::Utc).into();
+    mtime > sql_mtime
+}
+
+/// Fail-open present helper. Prefers SQL, then an already-read disk body,
+/// unless `disk_plan_md` was rewritten after the SQL row.
 /// Tests skip opening the operator store unless `[token_economy]
 /// grok_oss_database_path` is set.
 pub fn prefer_sql_plan_body_fail_open(
     session_id: &str,
+    disk_plan_md: Option<&Path>,
     disk_body: Option<String>,
 ) -> Option<String> {
     let cfg = crate::token_economy::token_economy_from_disk();
     if !(cfg!(test) && cfg.grok_oss_database_path.is_none())
         && let Some(store) = crate::grok_oss::try_open_from_token_economy_config(&cfg)
-        && let Ok(Some(row)) = store.load_session_plan(session_id, SESSION_PLAN_IDENTITY)
-        && !row.body.trim().is_empty()
+        && let Some(resolved) =
+            resolve_plan_body_sql_then_disk(&store, session_id, SESSION_PLAN_IDENTITY, disk_plan_md)
     {
-        return Some(row.body);
+        return Some(resolved);
     }
     disk_body.filter(|s| !s.trim().is_empty())
 }
@@ -103,6 +130,7 @@ impl GrokOssStore {
         self.ensure_session_plans_table()?;
         let now = Utc::now().to_rfc3339();
         let dock = i64::from(dock_open);
+        let store_id = self.grok_oss_store_session_key(session_id);
         self.connection()
             .execute(
                 "INSERT INTO session_plans
@@ -114,7 +142,7 @@ impl GrokOssStore {
                    dock_open = excluded.dock_open,
                    comments = excluded.comments,
                    updated_at = excluded.updated_at",
-                rusqlite::params![session_id, plan_identity, title, body, dock, comments, now],
+                rusqlite::params![store_id, plan_identity, title, body, dock, comments, now],
             )
             .context("upsert session_plans")?;
         Ok(())
@@ -127,27 +155,34 @@ impl GrokOssStore {
         plan_identity: &str,
     ) -> Result<Option<SessionPlanRow>> {
         self.ensure_session_plans_table()?;
-        self.connection()
-            .query_row(
-                "SELECT session_id, plan_identity, title, body, dock_open, comments, updated_at
-                 FROM session_plans
-                 WHERE session_id = ?1 AND plan_identity = ?2",
-                rusqlite::params![session_id, plan_identity],
-                |row| {
-                    let dock: i64 = row.get(4)?;
-                    Ok(SessionPlanRow {
-                        session_id: row.get(0)?,
-                        plan_identity: row.get(1)?,
-                        title: row.get(2)?,
-                        body: row.get(3)?,
-                        dock_open: dock != 0,
-                        comments: row.get(5)?,
-                        updated_at: row.get(6)?,
-                    })
-                },
-            )
-            .optional()
-            .context("load session_plans")
+        for key in self.grok_oss_session_lookup_keys(session_id) {
+            let row = self
+                .connection()
+                .query_row(
+                    "SELECT session_id, plan_identity, title, body, dock_open, comments, updated_at
+                     FROM session_plans
+                     WHERE session_id = ?1 AND plan_identity = ?2",
+                    rusqlite::params![key, plan_identity],
+                    |row| {
+                        let dock: i64 = row.get(4)?;
+                        Ok(SessionPlanRow {
+                            session_id: row.get(0)?,
+                            plan_identity: row.get(1)?,
+                            title: row.get(2)?,
+                            body: row.get(3)?,
+                            dock_open: dock != 0,
+                            comments: row.get(5)?,
+                            updated_at: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()
+                .context("load session_plans")?;
+            if row.is_some() {
+                return Ok(row);
+            }
+        }
+        Ok(None)
     }
 
     /// Isolated Preview / present: non-empty SQL body, if any.
@@ -163,6 +198,7 @@ impl GrokOssStore {
     }
 
     /// Isolated Preview / present: SQL body first, then disk `plan.md`.
+    /// A rewritten session `plan.md` newer than the SQL row wins.
     pub fn plan_body_sql_then_disk(
         &self,
         session_id: &str,
@@ -226,6 +262,7 @@ impl GrokOssStore {
         self.ensure_session_plans_table()?;
         let now = Utc::now().to_rfc3339();
         let dock = i64::from(dock_open);
+        let store_id = self.grok_oss_store_session_key(session_id);
         self.connection()
             .execute(
                 "INSERT INTO session_plans
@@ -234,7 +271,7 @@ impl GrokOssStore {
                  ON CONFLICT(session_id, plan_identity) DO UPDATE SET
                    dock_open = excluded.dock_open,
                    updated_at = excluded.updated_at",
-                rusqlite::params![session_id, plan_identity, dock, now],
+                rusqlite::params![store_id, plan_identity, dock, now],
             )
             .context("set session_plans.dock_open")?;
         Ok(dock_open)
@@ -471,6 +508,59 @@ CREATE TABLE IF NOT EXISTS meta (
         );
     }
 
+    fn write_newer_plan_md(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    /// Named contract: after Revise rewrites session `plan.md`, Isolated
+    /// Preview / present must prefer that file over a first-draft SQL
+    /// snapshot. Operator (2026-09-11): "The UI showed you a plan I had
+    /// already replaced."
+    #[test]
+    fn isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let plan_md = tmp.path().join("plan.md");
+        std::fs::write(&plan_md, "# One Info snapshot\nfirst draft\n").unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        store
+            .upsert_session_plan(
+                "sess-revise",
+                SESSION_PLAN_IDENTITY,
+                Some("One Info snapshot"),
+                "# One Info snapshot\nfirst draft\n",
+                true,
+                "[]",
+            )
+            .unwrap();
+        write_newer_plan_md(
+            &plan_md,
+            "# Third rewrite\nno Info page; this is the live plan\n",
+        );
+
+        let body = resolve_plan_body_sql_then_disk(
+            &store,
+            "sess-revise",
+            SESSION_PLAN_IDENTITY,
+            Some(&plan_md),
+        )
+        .expect("rewritten plan.md");
+        assert!(
+            body.contains("Third rewrite") && body.contains("no Info page"),
+            "rewritten session plan.md must win over the first-draft SQL snapshot; got {body:?}"
+        );
+        assert!(
+            !body.contains("One Info snapshot"),
+            "stale first-draft SQL must not win after Revise rewrote plan.md; got {body:?}"
+        );
+    }
+
     /// Named contract: grok_oss.db is not the Token Economy spend ledger;
     /// `/spend` is unchanged.
     #[test]
@@ -528,5 +618,33 @@ CREATE TABLE IF NOT EXISTS meta (
                 .any(|c| c.contains("cost") || c.contains("token")),
             "session_plans must not grow spend columns; got {cols:?}"
         );
+    }
+
+    /// Operator: grok-oss sqlite uses ULIDs. UUIDs stay for stock Grok Build.
+    /// Do not make UUID the grok-oss primary store key.
+    #[test]
+    fn new_session_plan_row_for_uuid_session_stores_ulid_not_uuid() {
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        let uuid = uuid::Uuid::now_v7().to_string();
+        store
+            .upsert_session_plan_body(&uuid, "# live plan\nULID store key\n")
+            .unwrap();
+        let loaded = store
+            .load_session_plan(&uuid, SESSION_PLAN_IDENTITY)
+            .unwrap()
+            .expect("row");
+        assert!(
+            xai_grok_tools::util::ulid::is_valid(&loaded.session_id),
+            "new grok-oss session_plans row must store a ULID, got {:?}",
+            loaded.session_id
+        );
+        assert_ne!(
+            loaded.session_id, uuid,
+            "UUID must not be the grok-oss primary store key"
+        );
+        let pair = store.lookup_by_uuid(&uuid).unwrap().expect("map");
+        assert_eq!(pair.session_ulid, loaded.session_id);
+        assert_eq!(pair.session_uuid, uuid);
     }
 }

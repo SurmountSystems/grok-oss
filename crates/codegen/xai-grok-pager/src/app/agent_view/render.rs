@@ -7626,6 +7626,43 @@ mod plan_turn_row_revising_copy_tests {
             !text.contains("Waiting on plan approval"),
             "must not re-arm parked wait after Quit:\n{text}"
         );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+    }
+
+    /// Operator (2026-09-11): Plan Exit, then footer still Plan ready.
+    /// Side panel open. Idle CTAs must not stay armed for that present.
+    #[test]
+    fn after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        agent.session.state = AgentState::Idle;
+        let before = draw_screen(&mut agent);
+        assert!(
+            before.contains("Plan ready. Side panel open"),
+            "fixture: live present paints Plan ready. Side panel open:\n{before}"
+        );
+
+        let _ = agent.abandon_plan();
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "after Plan Exit, idle CTAs must not stay armed for the exited present"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "after Plan Exit, the live park must be gone"
+        );
     }
 
     /// Busy rewrite yields the exclusive Revising chip so running turn

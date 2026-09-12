@@ -15,6 +15,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix 11 nextest quality fails
     - L3 specialists (when spawned)
+  - L2 Fix GHA just ci fail
+    - L3 specialists (when spawned)
+  - L2 Fix image describe request fail
+    - L3 specialists (when spawned)
   - L2 Fix last 2 nextest fails
     - L3 specialists (when spawned)
   - L2 Fix quality compile errors
@@ -59,6 +63,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Diagnose rebuild resume drain | nested L2 session usage | L2 | 157032 | estimate | exited |
 | Explore /rebuild exec path | nested L2 session usage | L2 | 143364 | estimate | exited |
 | Fix 11 nextest quality fails | nested L2 session usage | L2 | 210635 | estimate | exited |
+| Fix GHA just ci fail | nested L2 session usage | L2 | 87091 | estimate | exited |
+| Fix image describe request fail | nested L2 session usage | L2 | 198548 | estimate | exited |
 | Fix last 2 nextest fails | nested L2 session usage | L2 | 175479 | estimate | exited |
 | Fix quality compile errors | nested L2 session usage | L2 | 87986 | estimate | exited |
 | Fix rebuild resume like disconnect | nested L2 session usage | L2 | 105264 | estimate | exited |

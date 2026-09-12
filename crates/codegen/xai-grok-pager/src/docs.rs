@@ -653,8 +653,18 @@ mod tests {
         assert!(
             skills.content.contains("implement/scripts/memory.py")
                 && skills.content.contains("validate-plan.py")
-                && skills.content.contains("session_reader.py"),
-            "08-skills.md must name the allowlisted intercept CLI forms"
+                && skills.content.contains("session_reader.py")
+                && skills.content.contains("grok-oss-implement-memory")
+                && skills.content.contains("grok-oss-plan-validate")
+                && skills.content.contains("grok-oss-session-reader"),
+            "08-skills.md must name the allowlisted intercept CLI forms and CLI bins"
+        );
+        assert!(
+            skills
+                .content
+                .contains("must not generate arbitrary Python or Bash")
+                || skills.content.contains("must not generate Python or Bash"),
+            "08-skills.md must say skills must not generate Python or Bash and exec it"
         );
         assert!(
             skills.content.contains("docx")
@@ -1039,6 +1049,13 @@ mod tests {
         assert!(
             !plan.content.contains("also enters plan mode"),
             "19-plan-mode.md must not say /plan --soft add feature also enters plan mode"
+        );
+        assert!(
+            plan.content.contains("re-reads session")
+                && plan.content.contains("plan.md")
+                && plan.content.contains("first-draft snapshot"),
+            "19-plan-mode.md must say Isolated Preview re-reads session plan.md after Revise, \
+             not the first-draft snapshot"
         );
     }
 

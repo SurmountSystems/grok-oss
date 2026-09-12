@@ -216,6 +216,11 @@ pub(super) fn handle_exit_plan_mode(
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0;
     let mut carried_feedback_draft = None;
+    if !is_restore {
+        // Isolated Preview view-only after Exit has no park. Drop the
+        // leftover markdown so the new present cannot keep a frozen body.
+        agent.line_viewer = None;
+    }
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,

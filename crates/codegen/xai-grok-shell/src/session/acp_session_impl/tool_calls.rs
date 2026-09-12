@@ -158,18 +158,14 @@ pub(super) fn classify_plan_file_read(result: Result<String, std::io::Error>) ->
         Err(_) => PlanFileRead::Unreadable,
     }
 }
-/// Isolated Preview / present: SQL first, then an already-read disk body.
-fn prefer_sql_plan_body_then_disk(session_id: &str, disk_body: Option<String>) -> Option<String> {
-    let cfg = crate::token_economy::token_economy_from_disk();
-    if !(cfg!(test) && cfg.grok_oss_database_path.is_none())
-        && let Some(store) = crate::grok_oss::try_open_from_token_economy_config(&cfg)
-        && let Ok(Some(body)) =
-            store.load_session_plan_body(session_id, crate::grok_oss::SESSION_PLAN_IDENTITY)
-        && !body.trim().is_empty()
-    {
-        return Some(body);
-    }
-    disk_body.filter(|s| !s.trim().is_empty())
+/// Isolated Preview / present: SQL first, then an already-read disk body,
+/// unless session `plan.md` was rewritten after that SQL row.
+fn prefer_sql_plan_body_then_disk(
+    session_id: &str,
+    disk_plan_md: Option<&std::path::Path>,
+    disk_body: Option<String>,
+) -> Option<String> {
+    crate::grok_oss::prefer_sql_plan_body_fail_open(session_id, disk_plan_md, disk_body)
 }
 
 /// Whether to intercept exit-plan tools for client-side plan approval.
@@ -1496,8 +1492,11 @@ impl SessionActor {
             PlanFileRead::Present(s) => Some(s.clone()),
             PlanFileRead::Absent | PlanFileRead::Unreadable => None,
         };
-        let plan_content =
-            prefer_sql_plan_body_then_disk(self.session_info.id.0.as_ref(), disk_body);
+        let plan_content = prefer_sql_plan_body_then_disk(
+            self.session_info.id.0.as_ref(),
+            Some(plan_file_path.as_path()),
+            disk_body,
+        );
         if let Some(body) = plan_content.as_deref() {
             crate::grok_oss::GrokOssStore::upsert_session_plan_body_fail_open(
                 self.session_info.id.0.as_ref(),
@@ -1860,9 +1859,11 @@ impl SessionActor {
             Ok(s) if !s.trim().is_empty() => Some(s),
             _ => None,
         };
-        let Some(plan_content) =
-            prefer_sql_plan_body_then_disk(self.session_info.id.0.as_ref(), disk_body)
-        else {
+        let Some(plan_content) = prefer_sql_plan_body_then_disk(
+            self.session_info.id.0.as_ref(),
+            Some(plan_path.as_path()),
+            disk_body,
+        ) else {
             tracing::info!("[exit_plan_mode] resume: no plan body; clearing awaiting flag");
             self.plan_mode.lock().set_awaiting_plan_approval(false);
             self.persist_plan_mode_state();

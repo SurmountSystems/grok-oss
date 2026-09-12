@@ -348,7 +348,7 @@ A handful of commands only work in one of the two modes, because the surface the
 
 Enter plan mode. Immediate `/plan` (optionally with a description) enters plan mode when you want it now.
 
-`/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested subagents stay Working. Present is not Approve. Empty Enter never Approves. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Hard `/plan` without `--soft` enters plan mode. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
+`/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested subagents stay Working. Present is not Approve. Empty Enter never Approves. The Isolated Preview composer is a Human box unless you click Comment. Non-empty Enter sends a Human turn. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Hard `/plan` without `--soft` enters plan mode. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
 
 To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 

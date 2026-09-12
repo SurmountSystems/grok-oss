@@ -226,7 +226,7 @@ fn enqueue_if_interject_dropped(
     }
     if sent || enqueued {
         agent.prompt.set_text("");
-        agent.persist_unsent_composer_draft_now();
+        agent.clear_sent_human_from_plan_feedback_draft(&text);
     } else if agent.prompt.text().trim() != text.trim() {
         // Interject and enqueue both dropped: put the paste back.
         agent.prompt.set_text(&text);
@@ -461,15 +461,17 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
-/// Isolated Preview / Comment Enter stashes the Human-box critique so it
-/// rides Approve with [`PLAN_APPROVED_REVIEW_COMMENTS_LEAD`]. Empty text
-/// is not held and never Approves. Comment holds even if the pane is shut.
-/// Preview (Isolated Preview and rebuild resume with the pane shut) holds
-/// so a follow-up cannot become a Prompt that never gets a first token.
-/// Prompt-focused Revise still asks the model when a live waiter can
-/// answer. Plan Exit already decided (`plan_decision_resolved`) does not
-/// hold: that follow-up starts a real turn. Recognized slash commands are
-/// not comments: `/plan queue` / `/plan later` must still hold on the
+/// Isolated Preview composer is a Human box unless Comment was clicked.
+/// Operator: soft planning is broken; lost that prompt; nothing happened;
+/// cannot submit the prompt now. Human text while Isolated Preview is open
+/// is a Human turn and WAL, not only plan comment 1. Non-empty Enter still
+/// sends while ride-Approve chrome is visible. Empty text is not held and
+/// never Approves. Comment CTA stashes once. Pane-shut rebuild resume with
+/// no waiter still holds so a follow-up cannot Wait for the model with no
+/// sampler. Prompt-focused Revise still asks the model when a live waiter
+/// can answer. Plan Exit already decided (`plan_decision_resolved`) does
+/// not hold: that follow-up starts a real turn. Recognized slash commands
+/// are not comments: `/plan queue` / `/plan later` must still hold on the
 /// prompt queue, and `--soft` is not the queue hold token.
 fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
     use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
@@ -494,20 +496,25 @@ fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
     if agent.plan_decision_resolved {
         return false;
     }
-    // Isolated Preview / idle parked Preview (pane often shut after
-    // /rebuild resume) must not become a Prompt. The shell still
-    // awaits plan approval, so that Prompt never gets a first token
-    // and L1 sits on Waiting for the model. Prompt-focused Revise /
-    // Clarify / ApproveNotes still ask the model when a live waiter
-    // can answer. Dead park (no response_tx) cannot ACP-revise.
+    let pane_open = agent.line_viewer.is_some();
+    let already_stashed = pav
+        .feedback_draft
+        .as_deref()
+        .is_some_and(|draft| draft.trim() == trimmed);
     let hold = match pav.prompt_intent {
-        PlanPromptIntent::Comment => true,
+        PlanPromptIntent::Comment => !already_stashed,
         PlanPromptIntent::Revise | PlanPromptIntent::Questions | PlanPromptIntent::ApproveNotes => {
-            pav.response_tx.is_none()
-                || matches!(
-                    pav.focus,
-                    PlanApprovalFocus::Preview | PlanApprovalFocus::Commenting
-                )
+            // Isolated Preview pane open: Human send. Pane shut after
+            // rebuild with no waiter: still hold.
+            if pane_open {
+                false
+            } else {
+                pav.response_tx.is_none()
+                    || matches!(
+                        pav.focus,
+                        PlanApprovalFocus::Preview | PlanApprovalFocus::Commenting
+                    )
+            }
         }
     };
     if !hold {
@@ -1187,6 +1194,9 @@ pub(super) fn dispatch_send_prompt_inner(
                     &[],
                 );
                 agent.persist_pending_prompts();
+                if consume_input {
+                    agent.clear_sent_human_from_plan_feedback_draft(&text);
+                }
             }
             return vec![Effect::SendPrompt {
                 agent_id,
@@ -1273,6 +1283,9 @@ pub(super) fn dispatch_send_prompt_inner(
         app.show_toast("Queued on the prompt queue. It will not run this turn.");
         if let Some(agent) = app.agents.get_mut(&id) {
             agent.persist_pending_prompts();
+            if consume_input {
+                agent.clear_sent_human_from_plan_feedback_draft(&text);
+            }
         }
         return vec![];
     }
@@ -1307,6 +1320,8 @@ pub(super) fn dispatch_send_prompt_inner(
     }
     // Drain dropped with no model ask and no queued copy: put the paste back.
     // Do not fit a silent wipe. Pause-button chrome must not swallow Enter.
+    // Isolated Preview Human SendPrompt must also drop a leftover
+    // `feedback_draft` of that sent turn so unsent persist is not stale.
     if consume_input {
         let sent = effects.iter().any(|e| {
             matches!(
@@ -1318,9 +1333,11 @@ pub(super) fn dispatch_send_prompt_inner(
             ) || matches!(e, Effect::Compact { .. })
                 || matches!(e, Effect::SendBashCommand { .. })
         });
-        if !sent && let Some(agent) = app.agents.get_mut(&id) {
+        if let Some(agent) = app.agents.get_mut(&id) {
             let enqueued = agent.session.pending_prompts.iter().any(|p| p.text == text);
-            if !enqueued && agent.prompt.text().trim().is_empty() {
+            if sent || enqueued {
+                agent.clear_sent_human_from_plan_feedback_draft(&text);
+            } else if agent.prompt.text().trim().is_empty() {
                 agent.prompt.set_text(&text);
                 agent.persist_unsent_composer_draft_now();
             }

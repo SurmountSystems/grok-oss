@@ -195,6 +195,25 @@ mod tests {
         assert!(try_parse_plan_validate_intercept("ls -la").is_none());
     }
 
+    /// Operator: skills must not generate arbitrary Python or Bash and then run it.
+    #[test]
+    fn generated_python_or_bash_payload_is_not_allowlisted_plan_validate_intercept() {
+        assert!(try_parse_plan_validate_intercept("python3 -c 'print(1)'").is_none());
+        assert!(
+            try_parse_plan_validate_intercept(
+                "cat > /tmp/v.py <<'EOF'\nprint(1)\nEOF\npython3 /tmp/v.py /tmp/x.md"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn grok_oss_plan_validate_cli_bin_is_intercepted() {
+        let hit = try_parse_plan_validate_intercept("grok-oss-plan-validate /tmp/design.md")
+            .expect("CLI bin must intercept");
+        assert_eq!(hit.doc_path, std::path::PathBuf::from("/tmp/design.md"));
+    }
+
     #[test]
     fn missing_file_usage_exit() {
         let r = validate_path(std::path::Path::new("/no/such/design-doc-xyz.md"));

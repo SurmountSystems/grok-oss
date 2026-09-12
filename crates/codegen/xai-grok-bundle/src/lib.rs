@@ -912,6 +912,47 @@ mod tests {
         );
     }
 
+    /// Operator: skills must not generate arbitrary Python or Bash and then
+    /// run it. Default product skill markdown must not teach that.
+    #[test]
+    fn default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let mut hits = Vec::new();
+        collect_generated_script_steers(&root, &mut hits);
+        assert!(
+            hits.is_empty(),
+            "default product skills must not tell agents to write then exec Python or Bash: {hits:?}"
+        );
+    }
+
+    fn collect_generated_script_steers(root: &Path, hits: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_generated_script_steers(&path, hits);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "md") {
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let lower = body.to_ascii_lowercase();
+                if lower.contains("cat >") && (lower.contains(".py") || lower.contains(".sh")) {
+                    hits.push((path.clone(), "cat > generated script".into()));
+                }
+                if lower.contains("python3 -c") {
+                    hits.push((path.clone(), "python3 -c".into()));
+                }
+                if lower.contains("write a python") || lower.contains("write a bash") {
+                    hits.push((path.clone(), "write a python/bash".into()));
+                }
+            }
+        }
+    }
+
     fn collect_non_excepted_skill_python(root: &Path, bad: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(root) else {
             return;
