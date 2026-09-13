@@ -738,7 +738,7 @@ fn isolated_preview_stays_after_present_so_comment_then_approve_can_run() {
             "empty Enter must not start a Prompt; effects={empty_effects:?}"
         );
     }
-    let _ = rx;
+    std::mem::drop(rx);
 }
 
 /// Operator: "it still doesn't do approve with comment workflow."

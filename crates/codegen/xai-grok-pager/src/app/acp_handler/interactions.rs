@@ -338,7 +338,9 @@ pub(super) fn handle_exit_plan_mode(
         // the agent prompt. Click Revise / Clarify / Comment to arm feedback.
         viewer.plan_mut().feedback_active = true;
         viewer.plan_mut().show_action_buttons = true;
-        viewer.fullscreen = false;
+        // Soft park stays a side panel. Modal park paints fullscreen Isolated
+        // Preview. Stay-after-present is the dock persist below, not this flag.
+        viewer.fullscreen = app.current_ui.plan_approval_force_modal();
     }
     // Isolated Preview must stay after present so Comment then Approve can
     // run. Persist the dock so `/view-plan` and `/rebuild` reopen it.
