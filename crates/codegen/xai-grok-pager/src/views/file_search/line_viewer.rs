@@ -1923,7 +1923,10 @@ pub fn render_line_viewer(
                         total_w = total_w.saturating_add(choice_dot_w);
                     }
                 }
-                if total_w > inner.width {
+                // Isolated Preview side pane can be narrower than the
+                // preferred footer. Still paint Approve / Comment so the
+                // Comment then Approve workflow is clickable.
+                if total_w > inner.width && sep_w_here > 1 {
                     continue;
                 }
 

@@ -22,7 +22,7 @@ Open the session picker to reload a previous session from disk.
 
 Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
 
-After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. Empty Enter never Approves.
+After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` docks Isolated Preview from this session's current disk `plan.md`. Compact at 100% / over 500k must not swallow `/plan`. Empty Enter never Approves.
 
 `/start` is not `/resume`. `/resume` only opens the session picker.
 

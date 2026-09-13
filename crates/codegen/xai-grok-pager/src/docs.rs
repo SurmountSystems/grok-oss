@@ -1111,6 +1111,18 @@ mod tests {
             plan.content.contains("Empty Enter never Approves"),
             "19-plan-mode.md must keep empty Enter never Approves"
         );
+        assert!(
+            plan.content.contains("chrome must not stay plan")
+                && slash.content.contains("chrome must not stay plan"),
+            "user-guide must say after Plan Exit with Isolated Preview closed, chrome must not stay plan"
+        );
+        assert!(
+            plan.content.contains("`/plan` or `/plan --soft`")
+                && slash.content.contains("`/plan` or `/plan --soft`")
+                && plan.content.contains("must not swallow `/plan`")
+                && slash.content.contains("must not swallow `/plan`"),
+            "user-guide must say /plan after Exit docks Isolated Preview and compact must not swallow /plan"
+        );
     }
 
     /// Grok OSS Named contract: implement-loop effort in user-guide `05-configuration`

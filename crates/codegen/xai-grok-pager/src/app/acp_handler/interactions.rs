@@ -337,6 +337,18 @@ pub(super) fn handle_exit_plan_mode(
         // Isolated present is visual. Leave Preview so the composer stays
         // the agent prompt. Click Revise / Clarify / Comment to arm feedback.
         viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.fullscreen = false;
+    }
+    // Isolated Preview must stay after present so Comment then Approve can
+    // run. Persist the dock so `/view-plan` and `/rebuild` reopen it.
+    agent.persist_session_plan_dock_open(agent.line_viewer.is_some());
+    if let Some(sid) = agent.session.session_id.as_ref() {
+        crate::slash::commands::plan::persist_isolated_preview_open(
+            &agent.session.cwd.to_string_lossy(),
+            sid.0.as_ref(),
+            agent.line_viewer.is_some(),
+        );
     }
     agent.restore_plan_feedback_draft_if_composer_lost();
     agent.persist_unsent_composer_draft();

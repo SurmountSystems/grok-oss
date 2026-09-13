@@ -331,6 +331,120 @@ fn slash_plan_with_args_already_in_plan_is_noop() {
     assert!(read_toast(&app).contains("/view-plan"));
 }
 
+/// Operator (2026-09-12): "wait, actually, exiting the plan mode does
+/// unstick it if I type something, but a new /plan prompt got ignored"
+/// After Plan Exit, `/plan` must dock Isolated Preview. Compact must not
+/// swallow `/plan`. Empty Enter never Approves.
+#[test]
+fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent
+            .session
+            .start_command(crate::app::agent::AgentCommand::Compact);
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. }
+                | Effect::SetModeThenPrompt { .. }
+                | Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+        )),
+        "after Plan Exit, `/plan` must dock Isolated Preview, not enter plan mode or vanish into compact; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "after Plan Exit, `/plan` must dock Isolated Preview, not be ignored"
+    );
+    assert!(
+        agent.plan_decision_resolved,
+        "docking Isolated Preview after Exit must not undo Plan Exit"
+    );
+    assert!(
+        agent.plan_approval_view.is_none()
+            || agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_none_or(|p| !p.feedback_active)),
+        "empty Enter never Approves after Plan Exit `/plan` dock"
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "`/plan` during compact must not vanish onto pending_prompts; got {:?}",
+        agent.session.pending_prompts
+    );
+    assert!(
+        matches!(
+            agent.session.state,
+            AgentState::CommandRunning {
+                command: crate::app::agent::AgentCommand::Compact,
+                ..
+            }
+        ),
+        "docking Isolated Preview must not abort compact"
+    );
+}
+
+/// Operator: compact at 100% / over 500k must not swallow `/plan`.
+/// Auto-compact is a running turn. `/plan --soft` after Exit must dock.
+#[test]
+fn after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = Some(false);
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .session
+            .set_compaction_activity(Some(crate::acp::tracker::TurnActivity::AutoCompacting));
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. }
+                | Effect::SetModeThenPrompt { .. }
+                | Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+        )),
+        "after Plan Exit, `/plan --soft` during compact must dock Isolated Preview, not vanish; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "after Plan Exit, `/plan --soft` must dock Isolated Preview during compact"
+    );
+    assert_eq!(
+        agent.session.state,
+        AgentState::TurnRunning,
+        "`/plan --soft` must not park L1 during compact"
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "`/plan --soft` must not be swallowed onto pending_prompts"
+    );
+    assert!(agent.plan_decision_resolved, "empty Enter never Approves");
+}
+
 /// Named contract: `/plan --soft` docks Isolated Preview on the right.
 /// It does not enter plan mode. It does not park L1 exclusive. Nested
 /// L2s stay Working. Present is not Approve. Empty Enter never Approves.

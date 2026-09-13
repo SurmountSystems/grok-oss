@@ -681,3 +681,213 @@ fn isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);
 }
+
+/// Operator: Isolated Preview vanished after present, so Comment then
+/// Approve could not run. Present must keep Isolated Preview docked with
+/// idle Approve / Comment / Revise / Exit. Empty Enter never Approves.
+#[test]
+fn isolated_preview_stays_after_present_so_comment_then_approve_can_run() {
+    let mut app = make_app_with_agent("sess-stay-present");
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nPresent must keep Isolated Preview\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "present is not Approve"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay after present so Comment then Approve can run"
+        );
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(
+            viewer.feedback_active() || viewer.plan_ref().is_some_and(|p| p.show_action_buttons),
+            "Isolated Preview idle CTAs must stay armed after present"
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.prompt_intent),
+            Some(PlanPromptIntent::Revise)
+        );
+    }
+    let empty = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+            "empty Enter never Approves and must not vanish Isolated Preview"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    let _ = rx;
+}
+
+/// Operator: "it still doesn't do approve with comment workflow."
+/// Comment CTA, then composer notes, then click Approve submits as
+/// Approve-with-notes, not only as a Human SendPrompt. Isolated Preview
+/// Human Enter without Comment stays a Human send (lost-prompt).
+#[test]
+fn isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt() {
+    let mut app = make_app_with_agent("sess-comment-approve");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nComment then Approve\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay after present so Comment then Approve can run"
+        );
+    }
+
+    arm_comment_and_approve_hit_rects(&mut app);
+    let comment_outcome = app.handle_input(&mouse_down(32, 20));
+    assert!(
+        !matches!(
+            comment_outcome,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "Comment CTA is the hub; it must not Approve or send, got {comment_outcome:?}"
+    );
+    let _ = dispatch_outcome(&mut app, comment_outcome);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt)
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.prompt_intent),
+            Some(PlanPromptIntent::Comment)
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Comment CTA must not vanish Isolated Preview"
+        );
+    }
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "click Approve must decide the parked plan"
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(HUMAN_BOX_PROMPT)
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with Comment notes must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
+        "Comment then Approve must Interject, not SendPrompt; effects={:?} pending={:?}",
+        after.effects,
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+/// `/view-plan` must re-open Isolated Preview from current disk plan.md
+/// after Isolated Preview was closed. Comment then Approve still works.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "view-plan-reopen-iso";
+
+    let mut app = make_app_with_agent(sid);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.to_string().into());
+        agent.session.cwd = cwd;
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nReopen from disk\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some());
+        agent.cancel_line_viewer();
+        assert!(
+            agent.line_viewer.is_none(),
+            "fixture: Isolated Preview closed"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "closing Isolated Preview must keep the live waiter"
+        );
+    }
+
+    let _ = crate::app::dispatch::dispatch(Action::ShowPlan, &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must re-open Isolated Preview from current disk plan.md"
+        );
+        let painted = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .unwrap_or_default();
+        assert!(
+            painted.contains("Reopen from disk") || painted.contains("Isolated plan.md"),
+            "/view-plan must paint current disk plan.md; got {painted:?}"
+        );
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.response_tx.is_some()),
+            "/view-plan must keep the live waiter so Comment then Approve can run"
+        );
+    }
+
+    arm_comment_and_approve_hit_rects(&mut app);
+    let _ = app.handle_input(&mouse_down(32, 20));
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+

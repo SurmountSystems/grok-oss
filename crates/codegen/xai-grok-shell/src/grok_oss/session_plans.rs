@@ -269,8 +269,7 @@ impl GrokOssStore {
                    (session_id, plan_identity, title, body, dock_open, comments, updated_at)
                  VALUES (?1, ?2, NULL, '', ?3, '[]', ?4)
                  ON CONFLICT(session_id, plan_identity) DO UPDATE SET
-                   dock_open = excluded.dock_open,
-                   updated_at = excluded.updated_at",
+                   dock_open = excluded.dock_open",
                 rusqlite::params![store_id, plan_identity, dock, now],
             )
             .context("set session_plans.dock_open")?;
@@ -558,6 +557,53 @@ CREATE TABLE IF NOT EXISTS meta (
         assert!(
             !body.contains("One Info snapshot"),
             "stale first-draft SQL must not win after Revise rewrote plan.md; got {body:?}"
+        );
+    }
+
+    /// Isolated Preview dock_open must not bump SQL updated_at so leftover
+    /// TECH.md SQL cannot beat a current disk mill plan.md after Plan Exit.
+    #[test]
+    fn dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan_md = tmp.path().join("plan.md");
+        let tech = "# TECH.md dependency tree\nleftover Isolated Preview\n";
+        std::fs::write(&plan_md, tech).unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        store
+            .upsert_session_plan(
+                "sess-dock-stamp",
+                SESSION_PLAN_IDENTITY,
+                Some("TECH.md dependency tree"),
+                tech,
+                true,
+                "[]",
+            )
+            .unwrap();
+        std::fs::write(&plan_md, "# Mill WATCHER plan\ncurrent disk after Exit\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plan_md)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+        store
+            .set_session_plan_dock_open("sess-dock-stamp", SESSION_PLAN_IDENTITY, true)
+            .unwrap();
+
+        let body = resolve_plan_body_sql_then_disk(
+            &store,
+            "sess-dock-stamp",
+            SESSION_PLAN_IDENTITY,
+            Some(&plan_md),
+        )
+        .expect("resolve after dock_open");
+        assert!(
+            body.contains("Mill WATCHER plan") && body.contains("current disk after Exit"),
+            "dock_open must not make leftover TECH.md SQL win over current disk plan.md; got {body:?}"
+        );
+        assert!(
+            !body.contains("TECH.md dependency tree"),
+            "leftover TECH.md SQL must not win after dock_open stamped Isolated Preview; got {body:?}"
         );
     }
 

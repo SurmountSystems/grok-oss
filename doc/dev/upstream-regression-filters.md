@@ -534,6 +534,12 @@ Present is not Approve. Empty Enter never Approves.
 | `after_plan_exit_empty_enter_never_approves` | After Plan Exit, empty Enter never Approves. |
 | `after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md` | Kept Isolated Preview after Plan Exit paints this session's current disk plan.md, not a leftover TECH.md snapshot. |
 | `after_plan_exit_esc_clears_isolated_preview_open_marker` | Esc:close after Plan Exit clears the Isolated Preview dock marker so `/rebuild` does not re-wedge the pane. |
+| `after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan` | After Plan Exit with Isolated Preview closed, composer chrome must not stay plan. Typing a Human sentence after Exit still sends. |
+| `after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome` | After Plan Exit with Isolated Preview closed, the draw must not keep composer plan chrome. |
+| `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored` | After Plan Exit, `/plan` docks Isolated Preview. Compact must not swallow `/plan`. Empty Enter never Approves. |
+| `after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview` | After Plan Exit, `/plan --soft` during auto-compact docks Isolated Preview. Compact must not swallow `/plan`. |
+| `after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill` | After Plan Exit, Isolated Preview paints current disk mill plan.md, not leftover TECH.md. |
+| `dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md` | Isolated Preview dock_open must not bump SQL updated_at so leftover TECH.md SQL cannot beat current disk plan.md. |
 | `start_leaves_parked_isolated_preview_and_continues_interrupted_work` | `/start` leaves parked Isolated Preview and continues interrupted mill work. Not `/resume`. |
 | `start_with_nothing_held_still_leaves_parked_isolated_preview` | `/start` with nothing held still leaves parked Isolated Preview. |
 | `unstick_leaves_parked_isolated_preview_when_hung` | `/unstick` on a hung parent prompt leaves parked Isolated Preview. Not `/resume`. |
@@ -560,6 +566,12 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   after_plan_exit_empty_enter_never_approves \
   after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md \
   after_plan_exit_esc_clears_isolated_preview_open_marker \
+  after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan \
+  after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome \
+  after_plan_exit_slash_plan_docks_isolated_preview_not_ignored \
+  after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \
+  after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill \
+  dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md \
   start_leaves_parked_isolated_preview_and_continues_interrupted_work \
   start_with_nothing_held_still_leaves_parked_isolated_preview \
   unstick_leaves_parked_isolated_preview_when_hung \
@@ -584,6 +596,9 @@ have a piece; never fit the contract to a wipe.
 | `isolated_present_click_approve_dispatches_interject_with_prompt_text` | Click Approve dispatches Interject that carries the prompt text |
 | `isolated_present_preview_enter_is_human_turn_then_click_approve` | Isolated Preview Human Enter is a Human turn, not only plan comment 1; empty Enter never Approves; click Approve still decides the parked plan |
 | `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt` | Isolated Preview Approve with notes in the plan composer submits those notes with Approve, not as a queued Prompt, and does not drop them. Empty Enter never Approves. |
+| `isolated_preview_stays_after_present_so_comment_then_approve_can_run` | Isolated Preview stays after present so Comment then Approve can run. Empty Enter never Approves. |
+| `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt` | Comment CTA then composer notes then Approve submits as Approve-with-notes, not only as a Human SendPrompt. |
+| `view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed` | `/view-plan` re-opens Isolated Preview from current disk plan.md if the panel was closed. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -592,7 +607,10 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   isolated_present_preview_enter_is_human_turn_then_click_approve \
-  isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt
+  isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
+  isolated_preview_stays_after_present_so_comment_then_approve_can_run \
+  isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt \
+  view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed
 ```
 
 #### L2 spawn prompt (2026-08-20)
@@ -2224,6 +2242,12 @@ cargo test -p xai-grok-pager --lib -- \
   after_plan_exit_empty_enter_never_approves \
   after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md \
   after_plan_exit_esc_clears_isolated_preview_open_marker \
+  after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan \
+  after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome \
+  after_plan_exit_slash_plan_docks_isolated_preview_not_ignored \
+  after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \
+  after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill \
+  dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md \
   start_leaves_parked_isolated_preview_and_continues_interrupted_work \
   start_with_nothing_held_still_leaves_parked_isolated_preview \
   unstick_leaves_parked_isolated_preview_when_hung \

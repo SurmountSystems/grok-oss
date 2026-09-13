@@ -184,6 +184,25 @@ impl AgentView {
                 self.plan_approval_view = Some(pav);
             }
             self.show_plan_preview();
+            // After Plan Exit, idle park is not invented (empty Enter never
+            // Approves). `/plan` / `/plan --soft` must still dock Isolated
+            // Preview. Compact must not swallow that slash.
+            if self.line_viewer.is_none()
+                && self.plan_decision_resolved
+                && let Some(mut viewer) =
+                    crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                        "plan.md",
+                        crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER.to_owned(),
+                        None,
+                    )
+            {
+                viewer.fullscreen = false;
+                viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+                let plan = viewer.plan_mut();
+                plan.show_action_buttons = true;
+                plan.feedback_active = false;
+                self.line_viewer = Some(viewer);
+            }
         }
         if let Some(ref mut viewer) = self.line_viewer {
             viewer.fullscreen = false;

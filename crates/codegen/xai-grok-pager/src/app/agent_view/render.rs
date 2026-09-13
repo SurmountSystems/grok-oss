@@ -1071,7 +1071,7 @@ impl AgentView {
             .models
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
-        let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        let effective_plan = self.composer_plan_flag_visible();
         let casual_commenting = self.is_casual_commenting();
         // Plan present keeps the composer typeable (letter keys). Paint the
         // Human box caret even while Preview owns Tab/?/y so typing is not
@@ -7662,6 +7662,30 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             agent.plan_approval_view.is_none(),
             "after Plan Exit, the live park must be gone"
+        );
+    }
+
+    /// Operator (2026-09-12): Isolated Preview closed. Composer send.
+    /// Status still **plan**. After Plan Exit with Isolated Preview closed,
+    /// the turn-status draw must not keep composer `plan` chrome.
+    #[test]
+    fn after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        let _ = agent.abandon_plan();
+        agent.line_viewer = None;
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        assert!(
+            !agent.composer_plan_flag_visible(),
+            "after Plan Exit with Isolated Preview closed, chrome must not stay plan"
+        );
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
         );
     }
 

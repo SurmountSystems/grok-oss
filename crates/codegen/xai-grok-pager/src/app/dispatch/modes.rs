@@ -89,6 +89,15 @@ pub(super) fn dispatch_enter_plan_mode(
         return vec![];
     };
 
+    // Operator: after Plan Exit, a new `/plan` prompt must not be ignored.
+    // Dock Isolated Preview from current disk plan.md (or seed from the
+    // description). Empty Enter never Approves. Compact must not swallow
+    // this into the compact turn.
+    if agent.plan_decision_resolved {
+        agent.dock_isolated_preview_with_feature(description);
+        return vec![];
+    }
+
     let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
     if in_plan {
         app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
@@ -195,6 +204,14 @@ pub(super) fn set_plan_mode(
     // rapid toggles don't double-send.
     let prev = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
     let new = kind.to_bool();
+
+    // Operator: after Plan Exit, `/plan` must not be ignored. Shell plan
+    // mode can still be on. Dock Isolated Preview from current disk
+    // plan.md. Empty Enter never Approves. Compact must not swallow this.
+    if new && agent.plan_decision_resolved {
+        agent.dock_isolated_preview();
+        return vec![];
+    }
 
     // Idempotent: toast but skip the ACP round-trip.
     if prev == new {
