@@ -795,3 +795,216 @@ fn operator_stale_prompt_quote_is_a_human_turn_not_plan_comment_1() {
         "Operator quote Enter must not Approve"
     );
 }
+
+const LEFTOVER_PRESENT: &str = concat!(
+    "# Plan: why the agent stopped, and what we do instead\n\n",
+    "Leftover Isolated Preview present. TECH.md persist overwrite.\n",
+);
+const MILL_PLAN_MD: &str = "# Mill 69 of 69 GREEN\n\nCurrent mill plan.md after mill work continued.\n";
+const MILL_CONTINUE_HUMAN: &str = "continue mill 69 of 69";
+
+fn leftover_isolated_preview_body(app: &AppView) -> Option<String> {
+    app.agents
+        .get(&AgentId(0))
+        .unwrap()
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.markdown_content_for_test())
+        .map(str::to_owned)
+}
+
+fn write_mill_session_plan_md(cwd: &std::path::Path, sid: &str, body: &str) {
+    let cwd_str = cwd.to_string_lossy();
+    let encoded = urlencoding::encode(&cwd_str);
+    let plan_md = xai_grok_shell::util::grok_home::grok_home()
+        .join("sessions")
+        .join(encoded.as_ref())
+        .join(sid)
+        .join("plan.md");
+    std::fs::create_dir_all(plan_md.parent().unwrap()).unwrap();
+    std::fs::write(&plan_md, body).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&plan_md)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+}
+
+/// Operator: "Still suffering from stale plans :(" Isolated Preview
+/// stay-after-present is keeping leftover present after mill work
+/// continues. Human send that is not Comment notes must close Isolated
+/// Preview (or re-read mill plan.md). Empty Enter never Approves.
+#[test]
+fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
+    let mut app = make_app_with_agent("sess-mill-human");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay after present so Comment then Approve can run"
+        );
+        assert!(
+            leftover_isolated_preview_body(&app)
+                .is_some_and(|b| b.contains("why the agent stopped")),
+            "fixture: leftover present must paint Isolated Preview"
+        );
+    }
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+            "empty Enter never Approves and must not vanish Isolated Preview"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
+    let outcome = app.handle_input(&enter_key());
+    let effects = dispatch_outcome(&mut app, outcome);
+    assert!(
+        effects_send_human(&effects, MILL_CONTINUE_HUMAN),
+        "Isolated Preview Human send must continue mill; effects={effects:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Human send must not Approve"
+    );
+    assert!(
+        agent.line_viewer.is_none(),
+        "Isolated Preview must not stay parked on leftover present after mill work continues via Human send"
+    );
+}
+
+/// `/implement` continues mill. Isolated Preview leftover present must close.
+#[test]
+fn isolated_preview_implement_closes_leftover_present_after_mill_continues() {
+    let mut app = make_app_with_agent("sess-mill-implement");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    let effects = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/implement".into()),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text.contains("/implement")
+        )),
+        "/implement must continue mill; effects={effects:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "/implement must not Approve"
+    );
+    assert!(
+        agent.line_viewer.is_none(),
+        "Isolated Preview must not stay parked on leftover present after /implement"
+    );
+}
+
+/// Operator: Isolated Preview leftover present / TECH.md persist overwrite
+/// while mill 69 GREEN. If mill rewrote session plan.md, Isolated Preview
+/// must re-read that file.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "sess-mill-reread";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
+    let outcome = app.handle_input(&enter_key());
+    let _ = dispatch_outcome(&mut app, outcome);
+    let painted = leftover_isolated_preview_body(&app).expect("Isolated Preview after mill rewrite");
+    assert!(
+        painted.contains("Mill 69 of 69 GREEN") && painted.contains("Current mill plan.md"),
+        "Isolated Preview must re-read current session plan.md if mill rewrote it; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("why the agent stopped") && !painted.contains("TECH.md persist overwrite"),
+        "Isolated Preview must not keep leftover present after mill rewrite; got {painted:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "mill rewrite re-read must not Approve"
+    );
+}
+
+/// After mill completion, Isolated Preview must not still paint leftover
+/// present / TECH.md persist overwrite while chat is mill 69 GREEN.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "sess-mill-green";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .subagent_sessions
+            .insert("mill-69".into(), make_subagent_info("mill-69"));
+    }
+    let _ = crate::app::acp_handler::handle(
+        make_ext_session_notification(
+            sid,
+            XaiSessionUpdate::SubagentFinished {
+                subagent_id: "mill-69".into(),
+                child_session_id: "mill-69".into(),
+                status: "completed".into(),
+                error: None,
+                tool_calls: 1,
+                turns: 1,
+                duration_ms: 1000,
+                tokens_used: 0,
+                output: Some("mill 69 of 69 GREEN".into()),
+                will_wake: false,
+            },
+        ),
+        &mut app,
+    );
+    let painted = leftover_isolated_preview_body(&app);
+    if let Some(painted) = painted {
+        assert!(
+            painted.contains("Mill 69 of 69 GREEN") && !painted.contains("why the agent stopped"),
+            "after mill completion Isolated Preview must paint mill plan.md, not leftover present; got {painted:?}"
+        );
+        assert!(
+            !painted.contains("TECH.md persist overwrite"),
+            "after mill completion Isolated Preview must not paint TECH.md persist overwrite; got {painted:?}"
+        );
+    }
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "mill completion must not Approve leftover present"
+    );
+}

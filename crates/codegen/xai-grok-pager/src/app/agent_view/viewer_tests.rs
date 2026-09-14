@@ -1000,9 +1000,10 @@ fn composer_redo_n(agent: &mut AgentView, n: usize) {
     }
 }
 
-/// Empty-prompt `c` is still the line-comment gesture. A mid-type `c` is not.
+/// Isolated Preview Human box types `c` unless Comment was clicked.
+/// Empty-prompt `c` must not steal the first printable of a Human send.
 #[test]
-fn empty_preview_c_enters_line_commenting() {
+fn empty_preview_c_types_in_human_box() {
     let mut agent = agent_with_scrollable_plan();
     agent.prompt.set_text("");
     {
@@ -1017,12 +1018,18 @@ fn empty_preview_c_enters_line_commenting() {
     let pav = agent.plan_approval_view.as_ref().unwrap();
     assert_eq!(
         pav.focus,
-        PlanApprovalFocus::Commenting,
-        "empty-prompt `c` remains the explicit line-comment gesture"
+        PlanApprovalFocus::Preview,
+        "Isolated Preview must not arm Comment when Comment was not clicked"
     );
     assert!(
-        pav.commenting_range.is_some(),
-        "empty-prompt `c` must arm a line range"
+        pav.commenting_range.is_none(),
+        "empty-prompt `c` must not arm a line range; Comment CTA still does"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "c",
+        "typed Isolated Preview `c` must land in the Human box, got {:?}",
+        agent.prompt.text()
     );
 }
 

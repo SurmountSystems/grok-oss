@@ -1123,6 +1123,13 @@ mod tests {
                 && slash.content.contains("must not swallow `/plan`"),
             "user-guide must say /plan after Exit docks Isolated Preview and compact must not swallow /plan"
         );
+        assert!(
+            plan.content
+                .contains("must not stay parked on leftover present")
+                && plan.content.contains("if mill rewrote it")
+                && plan.content.contains("TECH.md persist overwrite"),
+            "19-plan-mode.md must say Isolated Preview does not stay parked on leftover present after mill work continues"
+        );
     }
 
     /// Grok OSS Named contract: implement-loop effort in user-guide `05-configuration`

@@ -599,6 +599,10 @@ have a piece; never fit the contract to a wipe.
 | `isolated_preview_stays_after_present_so_comment_then_approve_can_run` | Isolated Preview stays after present so Comment then Approve can run. Empty Enter never Approves. |
 | `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt` | Comment CTA then composer notes then Approve submits as Approve-with-notes, not only as a Human SendPrompt. |
 | `view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed` | `/view-plan` re-opens Isolated Preview from current disk plan.md if the panel was closed. |
+| `isolated_preview_human_send_closes_leftover_present_after_mill_continues` | Isolated Preview Human send that is not Comment notes closes leftover present after mill work continues. Empty Enter never Approves. |
+| `isolated_preview_implement_closes_leftover_present_after_mill_continues` | `/implement` closes leftover Isolated Preview present. Empty Enter never Approves. |
+| `isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it` | Isolated Preview re-reads current session plan.md if mill rewrote it. Must not paint leftover present or TECH.md persist overwrite. |
+| `isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md` | After mill completion Isolated Preview must not still paint leftover present / TECH.md persist overwrite. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -610,7 +614,11 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   isolated_preview_stays_after_present_so_comment_then_approve_can_run \
   isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt \
-  view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed
+  view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed \
+  isolated_preview_human_send_closes_leftover_present_after_mill_continues \
+  isolated_preview_implement_closes_leftover_present_after_mill_continues \
+  isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it \
+  isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md
 ```
 
 #### L2 spawn prompt (2026-08-20)

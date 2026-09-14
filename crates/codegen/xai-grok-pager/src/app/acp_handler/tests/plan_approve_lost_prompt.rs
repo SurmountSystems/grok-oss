@@ -558,6 +558,10 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
             agent.plan_approval_view.is_some(),
             "Isolated Preview Enter must not Approve"
         );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Human send continues mill: Isolated Preview must not stay parked on leftover present"
+        );
     }
     assert!(
         matches!(
@@ -566,6 +570,15 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
         ),
         "Human send must leave the live waiter parked"
     );
+
+    let _ = crate::app::dispatch::dispatch(Action::ShowPlan, &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must reopen Isolated Preview so Comment then Approve can run"
+        );
+    }
 
     let after = click_approve_via_app(&mut app);
     assert!(

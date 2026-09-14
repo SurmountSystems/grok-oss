@@ -162,7 +162,19 @@ impl AgentView {
         self.mark_selected_plan_cta(choice);
         match choice {
             SelectedPlanCta::Approve => self.approve_plan(),
-            SelectedPlanCta::Comment => self.focus_plan_prompt(PlanPromptIntent::Comment),
+            SelectedPlanCta::Comment => {
+                // Isolated Preview Comment CTA still arms a line range.
+                // Empty-prompt `c` types in the Human box; it is not this path.
+                // Restore the stashed Human box so Comment-then-Approve stays
+                // Prompt + Comment intent, not a wiped line-note overlay.
+                let _ = self.enter_plan_commenting();
+                if let Some(pav) = self.plan_approval_view.as_mut() {
+                    if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+                        self.prompt.restore(stashed);
+                    }
+                }
+                self.focus_plan_prompt(PlanPromptIntent::Comment)
+            }
             SelectedPlanCta::Clarify => {
                 if self.plan_cta_has_comment_payload() {
                     let text = self.prompt.text().to_string();
@@ -321,18 +333,10 @@ impl AgentView {
         // Backspace stay on the composer so present never steals typing.
         // Letter CTA keys type. Empty Preview `?` still arms Clarify. A
         // live draft or Prompt focus inserts `?`. Empty Preview `y` copies
-        // the plan (footer `y:copy`). A live draft inserts `y`. Empty-prompt
-        // `c` is the line-comment gesture (clicking a row is not). A live
-        // draft types `c` so Preview does not stash-and-wipe the Human box.
-        if in_plan_approval && key!('c').matches(key) {
-            let already_commenting = self
-                .plan_approval_view
-                .as_ref()
-                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-            if !already_commenting && self.prompt.text().trim().is_empty() {
-                return self.enter_plan_commenting();
-            }
-        }
+        // the plan (footer `y:copy`). A live draft inserts `y`. Isolated
+        // Preview types `c` in the Human box unless Comment was clicked.
+        // Comment CTA still arms line comments. Empty-prompt `c` must not
+        // eat the first printable of a Human send.
         if in_plan_approval && key!('y').matches(key) {
             let commenting = self
                 .plan_approval_view

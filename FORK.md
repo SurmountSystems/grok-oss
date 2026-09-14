@@ -1178,6 +1178,10 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
   `view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed`,
+  `isolated_preview_human_send_closes_leftover_present_after_mill_continues`,
+  `isolated_preview_implement_closes_leftover_present_after_mill_continues`,
+  `isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it`,
+  `isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md`,
   `preview_typed_comment_rides_along_on_approve`,
   `prompt_tab_typed_comment_rides_along_on_approve`,
   `esc_with_human_box_draft_keeps_feedback_draft`,
@@ -2384,7 +2388,11 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
-  `view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed`.
+  `view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed`,
+  `isolated_preview_human_send_closes_leftover_present_after_mill_continues`,
+  `isolated_preview_implement_closes_leftover_present_after_mill_continues`,
+  `isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it`,
+  `isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md`.
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
   Installed identity git SHA must match this workspace HEAD short SHA.
   TUI `/rebuild` starts from the session workspace. Named tests:

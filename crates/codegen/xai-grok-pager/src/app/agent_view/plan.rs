@@ -78,6 +78,70 @@ impl AgentView {
         }
         self.cancel_line_viewer();
     }
+
+    /// Isolated Preview stays after present so Comment then Approve can run.
+    /// After mill work continues (Human send that is not Comment notes,
+    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md),
+    /// Isolated Preview must not stay parked on leftover present.
+    /// Re-read current session plan.md if mill rewrote it. Else close Isolated
+    /// Preview. Empty Enter never Approves. Does not Approve the parked plan.
+    pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        let leftover = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback());
+        let disk = self
+            .plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty());
+        if let Some(disk) = disk {
+            let mill_rewrote = leftover.as_deref() != Some(disk.as_str())
+                && !disk.contains("TECH.md")
+                && !disk.contains("why the agent stopped");
+            if mill_rewrote {
+                self.paint_isolated_preview_from_mill_plan_md(disk);
+                return;
+            }
+        }
+        self.leave_parked_isolated_preview();
+    }
+
+    /// Mill rewrote session plan.md. Isolated Preview must paint that file,
+    /// not leftover present / TECH.md persist overwrite. Does not Approve.
+    fn paint_isolated_preview_from_mill_plan_md(&mut self, disk: String) {
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(disk.clone());
+            pav.has_plan = true;
+        }
+        self.latest_inline_plan_content = Some(disk.clone());
+        self.persist_session_plan_body(&disk);
+        let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", disk, None) else {
+            self.show_plan_preview();
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override = Some("plan.md".to_string());
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let recorded = self.recorded_plan_choice_for_paint();
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.recorded_choice = recorded;
+            plan.feedback_active = self.plan_approval_view.is_some();
+        }
+        if let Some(ref pav) = self.plan_approval_view
+            && !pav.comments.is_empty()
+        {
+            viewer.rebuild_with_comments(&pav.comments);
+        } else if !self.plan_comments.is_empty() {
+            viewer.rebuild_with_comments(&self.plan_comments);
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
+    }
     /// Whether the user is currently composing a comment via the prompt
     /// input inside the *casual* plan preview (the modal opened with no
     /// `plan_approval_view`). Mirrors the `pav.focus == Commenting`

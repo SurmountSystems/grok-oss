@@ -197,6 +197,9 @@ fn enqueue_if_interject_dropped(
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
     };
+    if mill_work_continues_after_isolated_preview(&text) {
+        agent.leave_or_reread_isolated_preview_after_mill_continues();
+    }
     let sent = effects
         .iter()
         .any(|e| matches!(e, Effect::SendInterject { .. }));
@@ -473,6 +476,21 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// not hold: that follow-up starts a real turn. Recognized slash commands
 /// are not comments: `/plan queue` / `/plan later` must still hold on the
 /// prompt queue, and `--soft` is not the queue hold token.
+fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let token = trimmed.trim_end_matches('/');
+    if matches!(token, "/view-plan" | "/show-plan" | "/plan-view") {
+        return false;
+    }
+    if token == "/plan" || trimmed.starts_with("/plan ") {
+        return false;
+    }
+    true
+}
+
 fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
     use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
     let trimmed = text.trim();
@@ -671,6 +689,13 @@ pub(super) fn dispatch_send_prompt_inner(
 
     if hold_parked_plan_review_comments(agent, &text) {
         return vec![];
+    }
+    // Isolated Preview stays after present so Comment then Approve can run.
+    // Human send that is not Comment notes, `/implement`, and mill rewrite
+    // must not keep leftover Isolated Preview parked. `/view-plan` and
+    // `/plan` still dock Isolated Preview. Empty Enter never Approves.
+    if mill_work_continues_after_isolated_preview(&text) {
+        agent.leave_or_reread_isolated_preview_after_mill_continues();
     }
 
     let trimmed = text.trim();

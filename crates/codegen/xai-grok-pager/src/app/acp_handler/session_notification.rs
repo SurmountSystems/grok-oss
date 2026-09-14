@@ -783,6 +783,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
             }
+            // Isolated Preview stay-after-present must not keep leftover
+            // present after mill L2 completion (mill 69 GREEN).
+            agent.leave_or_reread_isolated_preview_after_mill_continues();
             true
         }
         XaiSessionUpdate::HookAnnotation { message } => {
@@ -1535,6 +1538,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
+            agent.leave_or_reread_isolated_preview_after_mill_continues();
             true
         }
         _ => false,
