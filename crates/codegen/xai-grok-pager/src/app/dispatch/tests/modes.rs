@@ -343,9 +343,16 @@ fn slash_plan_with_args_already_in_plan_submits_plan_update() {
             .any(|p| p.text == "add auth to the app"),
         "`/plan <desc>` already in plan mode must submit a plan-update turn, got {effects:?}"
     );
+    // No toast is success. `read_toast` panics when none is set, which
+    // would fail a correct submit that does not toast `/view-plan`.
+    let toast = app.agents[&id]
+        .toast
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
     assert!(
-        !read_toast(&app).contains("/view-plan"),
-        "already in plan mode must not swallow `/plan` with extra Human text into a /view-plan toast"
+        !toast.contains("/view-plan"),
+        "already in plan mode must not swallow `/plan` with extra Human text into a /view-plan toast; toast={toast:?}"
     );
 }
 
