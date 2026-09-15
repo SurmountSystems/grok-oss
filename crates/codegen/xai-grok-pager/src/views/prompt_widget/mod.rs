@@ -359,7 +359,7 @@ pub struct VoicePromptOverlay<'a> {
 
 /// Greedy word-wrap the interim transcript into at most `max_rows` lines of
 /// `max_w` columns, appending an ellipsis to the last line when truncated.
-fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> {
+pub(super) fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
     if max_w == 0 || max_rows == 0 {
         return Vec::new();
@@ -599,6 +599,11 @@ pub struct PromptWidget {
     /// is NOT a user wipe, so the clear detector must skip observing it (it
     /// resyncs on the next genuine edit).
     completion_accepted: bool,
+
+    // Grok OSS: While recording, the prompt box grows with incoming transcript.
+    voice_recording_grow: bool,
+    /// Live interim used only to size the recording box (not committed text).
+    voice_recording_interim: Option<String>,
 }
 
 /// Prefix display width (`"❯ "` or `"> "` — both 2 columns).
@@ -648,6 +653,8 @@ impl PromptWidget {
             undo_tip_fire: false,
             plan_nudge_fire: false,
             completion_accepted: false,
+            voice_recording_grow: false,
+            voice_recording_interim: None,
         }
     }
 
@@ -666,6 +673,17 @@ impl PromptWidget {
 
     pub fn set_compact(&mut self, compact: bool) {
         self.compact = compact;
+    }
+
+    /// Grok OSS: While recording, the prompt box grows with incoming transcript
+    /// and must not clip spoken text.
+    pub fn set_voice_recording_grow(&mut self, grow: bool, interim: Option<&str>) {
+        self.voice_recording_grow = grow;
+        self.voice_recording_interim = if grow {
+            interim.filter(|t| !t.trim().is_empty()).map(str::to_owned)
+        } else {
+            None
+        };
     }
 
     /// Current compact flag (the derived render value fanned out by
@@ -1510,11 +1528,32 @@ impl PromptWidget {
         // freeze the box at its pre-open one-row height so stepping through
         // entries of different heights doesn't resize the layout per
         // keypress. The first real edit detaches and the box resizes then.
-        let text_height = if self.history_search.is_browse() {
+        let mut text_height = if self.history_search.is_browse() {
             1
         } else {
             self.textarea.desired_height(text_width).max(1)
         };
+        // Grok OSS: While recording (grow flag, or overlay-stamped interim),
+        // grow with wrapped transcript rows. Do not ellipsize spoken text.
+        // Cap only at the caller's widget max_height.
+        if self.voice_recording_grow || self.voice_recording_interim.is_some() {
+            let wrap_w = text_width.max(1);
+            // Chrome + prefix can leave a wrap width that packs one extra
+            // word versus a slightly narrower inner column. Grow to the
+            // conservative wrap so spoken text is not clipped.
+            let conservative = wrap_w.saturating_sub(3).max(1);
+            let rows = recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                wrap_w,
+            )
+            .max(recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                conservative,
+            ));
+            text_height = text_height.max(rows.max(1));
+        }
         let vpad_top = style.vpad_top;
         let info_block = style.info_block(has_info);
         let total = vpad_top + text_height + info_block;
@@ -2201,7 +2240,9 @@ impl PromptWidget {
     /// Handles:
     /// - Empty/whitespace rejection → returns None
     /// - Backslash continuation: trailing `\` before cursor → replaces with newline
-    /// - On success: returns the text and clears the widget
+    /// - On success: returns the text and leaves the widget intact. Dispatch
+    ///   clears the composer only after send, interject, or enqueue lands, so a
+    ///   failed submit does not wipe the Human box.
     pub fn try_send(&mut self) -> Option<String> {
         if self.apply_backslash_continuation() {
             return None;
@@ -3051,11 +3092,15 @@ impl PromptWidget {
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
 
-        let border_color = style.border_color_override.unwrap_or(if style.focused {
+        let idle_white = style.border_color_override.unwrap_or(if style.focused {
             theme.prompt_border_active
         } else {
             theme.prompt_border
         });
+        // Grok OSS: While recording, the composer frame paints red
+        // (`theme.accent_error`). When not recording, it is not red.
+        let border_color =
+            recording_frame::composer_frame_color(voice.is_some(), &theme, idle_white);
 
         // Fill entire area with fg + bg so every cell has RGB colors (needed for blending)
         buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
@@ -3345,10 +3390,20 @@ impl PromptWidget {
                 .bg(bg)
                 .add_modifier(Modifier::ITALIC);
             if self.textarea.text().is_empty() {
-                let lines =
-                    wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
+                // Grok OSS: Recording wrap must not ellipsize spoken text.
+                let max_rows = if voice.is_some() || self.voice_recording_grow {
+                    usize::MAX
+                } else {
+                    ta_area.height as usize
+                };
+                let lines = wrap_voice_interim(interim, ta_area.width as usize, max_rows);
+                let bottom = ta_area.y.saturating_add(ta_area.height);
                 for (i, line) in lines.iter().enumerate() {
-                    buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
+                    let y = ta_area.y.saturating_add(i as u16);
+                    if y >= bottom {
+                        break;
+                    }
+                    buf.set_string(ta_area.x, y, line, interim_style);
                 }
             } else {
                 // Ghost suffix after the finalized draft (not at the caret).
@@ -3358,10 +3413,40 @@ impl PromptWidget {
                         .screen_position_of(end, ta_area, self.textarea_state)
                 {
                     let display = format!(" {interim}");
-                    let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
-                    if avail > 0 {
-                        let truncated = crate::render::line_utils::truncate_str(&display, avail);
-                        buf.set_string(start_x, row_y, &truncated, interim_style);
+                    let recording = voice.is_some() || self.voice_recording_grow;
+                    if recording {
+                        use unicode_width::UnicodeWidthStr;
+                        let first_avail =
+                            (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                        let w = UnicodeWidthStr::width(display.as_str());
+                        if w <= first_avail {
+                            buf.set_string(start_x, row_y, &display, interim_style);
+                        } else {
+                            // Grok OSS: Do not ellipsize spoken text. Wrap onto
+                            // following rows; the box already grew to fit.
+                            let lines =
+                                wrap_voice_interim(interim, ta_area.width as usize, usize::MAX);
+                            let start_y = if first_avail == 0 {
+                                row_y
+                            } else {
+                                row_y.saturating_add(1)
+                            };
+                            let bottom = ta_area.y.saturating_add(ta_area.height);
+                            for (i, line) in lines.iter().enumerate() {
+                                let y = start_y.saturating_add(i as u16);
+                                if y >= bottom {
+                                    break;
+                                }
+                                buf.set_string(ta_area.x, y, line, interim_style);
+                            }
+                        }
+                    } else {
+                        let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                        if avail > 0 {
+                            let truncated =
+                                crate::render::line_utils::truncate_str(&display, avail);
+                            buf.set_string(start_x, row_y, &truncated, interim_style);
+                        }
                     }
                 }
             }
@@ -3963,6 +4048,8 @@ fn paste_chip_display_bytes(byte_len: usize) -> Line<'static> {
 fn images_high_water(images: &[PastedImage]) -> usize {
     images.iter().map(|i| i.display_number).max().unwrap_or(0)
 }
+
+pub mod recording_frame;
 
 #[cfg(test)]
 mod tests;

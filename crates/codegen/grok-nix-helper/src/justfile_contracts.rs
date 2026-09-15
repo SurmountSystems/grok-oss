@@ -552,6 +552,10 @@ fn workspace_quality_source_matches_just_test() {
         "quality must not invoke cargo clippy (external dispatcher)"
     );
     assert!(
+        quality.contains("workspace_run_make_jobserver cargo check"),
+        "clippy-as-check must be wrapped: workspace_run_make_jobserver cargo check (not an unused helper next to a bare cargo check)"
+    );
+    assert!(
         quality.contains("workspace_run_make_jobserver"),
         "quality must run clippy under workspace_run_make_jobserver"
     );
@@ -598,8 +602,12 @@ fn workspace_quality_source_matches_just_test() {
         "workspace rustc must require surmount-remote"
     );
     assert!(
-        quality.contains("CARGO_BUILD_JOBS = \"32\""),
-        "workspace-cargo-quality must set CARGO_BUILD_JOBS = \"32\""
+        quality.contains("CARGO_BUILD_JOBS = \"64\""),
+        "workspace-cargo-quality must set CARGO_BUILD_JOBS = \"64\""
+    );
+    assert!(
+        !quality.contains("CARGO_BUILD_JOBS = \"32\""),
+        "quality / artifacts / named-test owned by this helper must not keep CARGO_BUILD_JOBS = \"32\""
     );
     assert!(
         quality.contains("CARGO_PROFILE = \"dev\""),
@@ -614,8 +622,18 @@ fn workspace_quality_source_matches_just_test() {
         "cargo --jobs must be taken from NIX_BUILD_CORES"
     );
     assert!(
-        quality.contains("unset MAKEFLAGS"),
-        "must unset MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token jobserver cannot ignore cargo --jobs"
+        quality.contains("unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS"),
+        "must unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS so a 1-token jobserver cannot ignore cargo --jobs"
+    );
+    assert!(
+        quality.contains("env -u MAKEFLAGS")
+            && quality.contains("-u CARGO_MAKEFLAGS")
+            && quality.contains("-u MFLAGS"),
+        "make recipe must env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS so cargo owns --jobs \"$CARGO_BUILD_JOBS\" (does not join make's jobserver)"
+    );
+    assert!(
+        quality.contains("env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19"),
+        "make recipe must drop the inherited jobserver, then nice -n 19, then cargo: +env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 cargo"
     );
     for line in quality.lines() {
         let t = line.trim();
@@ -632,13 +650,55 @@ fn workspace_quality_source_matches_just_test() {
         "do not floor cargo jobs from CARGO_BUILD_JOBS"
     );
     assert!(
-        quality.contains("\"$cargoJobs\" -lt 2") || quality.contains("cargoJobs\" -lt 2"),
-        "when NIX_BUILD_CORES is 1, cargo jobs must still become 32"
+        !quality.contains("\"$cargoJobs\" -lt 2") && !quality.contains("cargoJobs\" -lt 2"),
+        "old promotion-only-for-0-or-1 must go; 2 through 63 must not remain cargo jobs"
+    );
+    assert!(
+        !quality.contains("\"$cargoJobs\" -le 32")
+            && !quality.contains("cargoJobs\" -le 32")
+            && !quality.contains("\"$cargoJobs\" -gt 32")
+            && !quality.contains("cargoJobs\" -gt 32"),
+        "do not leave a 32 cargo-jobs floor or cap in this helper"
+    );
+    assert!(
+        quality.contains("\"$cargoJobs\" -le 64") || quality.contains("cargoJobs\" -le 64"),
+        "when NIX_BUILD_CORES is 64 or less (including 0, 1, and 2 through 63), cargo jobs must become 64"
+    );
+    assert!(
+        quality.contains("\"$cargoJobs\" -gt 64") || quality.contains("cargoJobs\" -gt 64"),
+        "when NIX_BUILD_CORES is greater than 64, cargo jobs stay capped at 64"
     );
     assert!(
         !quality.contains("-j1") && !quality.contains("--jobs 1"),
         "quality clippy/jobserver must not pass -j1 / --jobs 1"
     );
+    assert!(
+        !quality.lines().any(|line| {
+            let t = line.trim();
+            !t.starts_with('#') && t.contains("for ") && t.contains(" in ") && t.contains("; do")
+        }),
+        "quality must not loop crates with for ... in ...; do"
+    );
+    for line in quality.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.starts_with("echo ") || t.starts_with("printf ") {
+            continue;
+        }
+        let is_cargo = t.contains("cargo fmt")
+            || t.contains("cargo check")
+            || t.contains("cargo build")
+            || t.contains("cargo test")
+            || t.contains("cargo nextest")
+            || t.contains("nextest run");
+        if !is_cargo {
+            continue;
+        }
+        let via_helper = t.contains("workspace_run_make_jobserver");
+        assert!(
+            t.contains("nice -n 19") || via_helper,
+            "quality cargo line must be nice -n 19 or go through the helper that prefixes nice: {t}"
+        );
+    }
 }
 
 #[test]
@@ -656,8 +716,8 @@ fn workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests() {
     );
     let ws_clippy = must_contain_at(
         phase,
-        "cargo check --profile \"$CARGO_PROFILE\" --jobs \"$CARGO_BUILD_JOBS\" --workspace --all-targets --locked",
-        "workspace clippy-as-check --all-targets",
+        "workspace_run_make_jobserver cargo check --profile \"$CARGO_PROFILE\" --jobs \"$CARGO_BUILD_JOBS\" --workspace --all-targets --locked",
+        "workspace clippy-as-check --all-targets under workspace_run_make_jobserver",
     );
     let unwrap = must_contain_at(
         phase,

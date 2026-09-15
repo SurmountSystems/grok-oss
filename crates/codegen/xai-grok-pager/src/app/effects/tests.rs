@@ -812,7 +812,7 @@ fn successful_tui_billing_map_paints_included_period_percent_not_ellipsis() {
     let theme = crate::theme::Theme::default();
     let line = crate::views::credit_bar::credit_bar_line(&bal, false, &theme);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, "included SuperGrok period limits · 36%");
+    assert_eq!(text, "SuperGrok period · 36%");
     assert!(
         !text.contains("...%"),
         "known included SuperGrok period usage must not paint the unknown placeholder"

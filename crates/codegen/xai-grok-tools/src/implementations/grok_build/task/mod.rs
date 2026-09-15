@@ -303,6 +303,15 @@ impl Drop for LiveWriteClaim {
     }
 }
 
+fn with_sibling_write_path_reminder(text: String, holder: &str) -> String {
+    match crate::implementations::editor_infra::per_path_write_lock::format_soft_assignment_reminder(
+        Some(holder),
+    ) {
+        Some(note) => format!("{text}\n\n{}", crate::reminders::wrap_reminder(&note)),
+        None => text,
+    }
+}
+
 impl xai_tool_runtime::Tool for TaskTool {
     type Args = TaskToolInput;
     type Output = ToolOutput;
@@ -557,11 +566,12 @@ impl xai_tool_runtime::Tool for TaskTool {
             .collect();
         let mut write_claim = LiveWriteClaim::none();
         if !write_paths.is_empty() {
+            // Soft assignment: overlapping write_paths do not fail spawn.
+            // Hard exclusive lock is only the in-flight edit-tool call.
             crate::implementations::editor_infra::per_path_write_lock::try_reserve_writes(
                 write_paths,
                 &id,
-            )
-            .map_err(|held| held.into_tool_error("task"))?;
+            );
             write_claim = LiveWriteClaim::armed(id.clone());
         }
 
@@ -622,12 +632,15 @@ impl xai_tool_runtime::Tool for TaskTool {
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
             return Ok(ToolOutput::Text(
-                xai_tool_types::format_subagent_started_background(
+                with_sibling_write_path_reminder(
+                    xai_tool_types::format_subagent_started_background(
+                        &id,
+                        &input.subagent_type,
+                        &input.description,
+                        &naming,
+                        continue_parent,
+                    ),
                     &id,
-                    &input.subagent_type,
-                    &input.description,
-                    &naming,
-                    continue_parent,
                 )
                 .into(),
             ));
@@ -663,13 +676,16 @@ impl xai_tool_runtime::Tool for TaskTool {
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
 
-            let text = xai_tool_types::format_subagent_auto_backgrounded(
+            let text = with_sibling_write_path_reminder(
+                xai_tool_types::format_subagent_auto_backgrounded(
+                    &id,
+                    &input.subagent_type,
+                    &input.description,
+                    &naming,
+                    notified_on_completion,
+                    continue_parent,
+                ),
                 &id,
-                &input.subagent_type,
-                &input.description,
-                &naming,
-                notified_on_completion,
-                continue_parent,
             );
             return Ok(ToolOutput::Text(text.into()));
         }
@@ -934,6 +950,7 @@ mod tests {
         let _ = drain.await;
     }
 
+    // Grok OSS: default max depth lets L2 spawn L3. This diverges from upstream xAI because FORK.md agent-depth is L1 / L2 / L3 max.
     #[tokio::test]
     async fn default_max_allows_l2_to_spawn_l3() {
         let (backend, rx) = make_backend();
@@ -1255,8 +1272,10 @@ mod tests {
                     text.text
                 );
                 assert!(
-                    text.text.contains("timeout_ms"),
-                    "should instruct the model to wait: {}",
+                    text.text.contains("timeout_ms")
+                        && text.text.contains("Keep working")
+                        && !text.text.contains("When you need its result"),
+                    "auto-bg notice must be fire-and-return, not a blocking wait: {}",
                     text.text
                 );
                 assert!(
@@ -1663,7 +1682,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_rejects_when_write_paths_overlap_a_live_claim() {
+    async fn spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error() {
+        // Operator: layer/L2 write_paths claims must be a soft lock. Other
+        // agents get an automated reminder that a sibling is working on that
+        // path. Spawn must not exclusive-block for the child's lifetime.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("shared.rs");
         std::fs::write(&path, "fn x() {}\n").unwrap();
@@ -1687,32 +1709,37 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert!(
             !run_a.is_finished(),
-            "first spawn must still be waiting on admit after claiming write_paths"
+            "first spawn must still be waiting on admit after assigning write_paths"
         );
 
-        let (backend_b, _rx) = make_backend();
+        let (backend_b, rx_b) = make_backend();
+        let drain_b = drain_spawn_ok(rx_b);
         let mut input_b = task_input("explore", true);
         input_b.task_id = Some(second_id);
         input_b.write_paths = vec![path.to_string_lossy().into_owned()];
-        let err = xai_tool_runtime::Tool::run(
+        let result = xai_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources_for_task(backend_b).into_shared()),
             input_b,
         )
         .await
-        .expect_err("second spawn must fail when write_paths overlap");
-        let detail = err.to_string();
+        .expect("second spawn must succeed when write_paths overlap");
+        let text = match result {
+            ToolOutput::Text(text) => text.text,
+            other => panic!("expected text output, got {other:?}"),
+        };
         assert!(
-            detail.contains(&first_id_for_run),
-            "error must name the live holder: {detail}"
+            text.contains(&format!("L2 {first_id_for_run} is assigned these paths")),
+            "soft-lock reminder must be observable on the sibling spawn: {text}"
         );
         assert!(
-            detail.contains("shared.rs"),
-            "error must name the file: {detail}"
+            text.contains("shared.rs"),
+            "reminder must name the file: {text}"
         );
 
         let _ = admit_tx.send(());
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_a).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain_b).await;
         crate::implementations::editor_infra::per_path_write_lock::release_holder(&first_id);
     }
 

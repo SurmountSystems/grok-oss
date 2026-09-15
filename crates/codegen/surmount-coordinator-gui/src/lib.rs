@@ -120,6 +120,7 @@ pub enum EnqueueError {
     RemoteHost {
         host: String,
     },
+    RemoteCopy(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -135,6 +136,7 @@ impl fmt::Display for EnqueueError {
                 f,
                 "session is on remote host {host}; this laptop grok home cannot drain that enqueue"
             ),
+            Self::RemoteCopy(err) => write!(f, "could not copy enqueue onto the guest: {err}"),
             Self::Io(err) => write!(f, "could not write enqueue drop file: {err}"),
             Self::Json(err) => write!(f, "could not encode enqueue drop file: {err}"),
         }
@@ -221,13 +223,43 @@ impl CoordinatorApp {
 
     /// Write the enqueue drop file for the selected **local** session.
     /// Remote-tagged rows error instead of writing a laptop drop file that
-    /// the remote grok-oss window will never drain.
+    /// the remote grok-oss window will never drain. Use
+    /// [`Self::enqueue_selected_on_remote`] to scp onto the guest grok home.
     pub fn enqueue_selected(&self, prompt: &str) -> Result<PathBuf, EnqueueError> {
         let session = self.selected().ok_or(EnqueueError::NoSessionSelected)?;
         if let SessionHost::Remote(host) = &session.host {
             return Err(EnqueueError::RemoteHost { host: host.clone() });
         }
         write_enqueue(&self.grok_home, &session.session_id, prompt)
+    }
+
+    /// Coordinate a VPS session: write a laptop staging drop, then scp it
+    /// to `{remote_grok_home}/l0-enqueue/{session_id}/enqueue.json` so the
+    /// guest grok-oss drain can queue it. Never writes laptop
+    /// `l0-enqueue/` for a remote session.
+    pub fn enqueue_selected_on_remote(
+        &self,
+        prompt: &str,
+        spec: &crate::remote_console_key::SshInstallSpec,
+        installer: &dyn crate::remote_console_key::HostFileInstall,
+    ) -> Result<RemoteEnqueueReport, EnqueueError> {
+        let session = self.selected().ok_or(EnqueueError::NoSessionSelected)?;
+        let host = match &session.host {
+            SessionHost::Remote(h) => h.clone(),
+            SessionHost::Local => {
+                return Err(EnqueueError::RemoteHost {
+                    host: "local".into(),
+                });
+            }
+        };
+        write_remote_enqueue(
+            &self.grok_home,
+            &host,
+            &session.session_id,
+            prompt,
+            spec,
+            installer,
+        )
     }
 
     /// Laptop-side action: set a machine console API key for a remote host.
@@ -307,6 +339,113 @@ pub fn write_enqueue(
     let body = serde_json::to_vec_pretty(&EnqueueDrop { prompt })?;
     std::fs::write(&path, body)?;
     Ok(path)
+}
+
+const REMOTE_ENQUEUE_STAGING_DIR: &str = "l0-remote-enqueue";
+
+/// Laptop staging path for a VPS enqueue. Not the local drain directory.
+pub fn remote_enqueue_staging_path(
+    grok_home: &Path,
+    host: &str,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let host = host.trim();
+    let sid = sanitize_session_id(session_id)?;
+    if host.is_empty() || host.contains('/') || host.contains('\0') {
+        return None;
+    }
+    Some(
+        grok_home
+            .join(REMOTE_ENQUEUE_STAGING_DIR)
+            .join(host)
+            .join(sid)
+            .join(ENQUEUE_FILE),
+    )
+}
+
+/// `ssh USER@HOST grok-oss running --json` — list VPS windows from the laptop.
+pub fn fetch_remote_running_ssh_argv(user_at_host: &str) -> Result<Vec<String>, EnqueueError> {
+    let user_at_host = user_at_host.trim();
+    if user_at_host.is_empty() || !user_at_host.contains('@') || user_at_host.contains(' ') {
+        return Err(EnqueueError::RemoteCopy(
+            "SSH target must look like grok@surmount-1".to_string(),
+        ));
+    }
+    Ok(vec![
+        "ssh".to_string(),
+        user_at_host.to_string(),
+        "grok-oss".to_string(),
+        "running".to_string(),
+        "--json".to_string(),
+    ])
+}
+
+/// Result of copying an enqueue onto the guest. Never includes the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEnqueueReport {
+    pub host: String,
+    pub session_id: String,
+    pub staging_file: PathBuf,
+    pub remote_dest: String,
+    pub ssh_copy_commands: Vec<String>,
+}
+
+/// Write a staging drop on the laptop, then copy it to the guest grok home
+/// so that host's grok-oss can drain it. Does not write laptop `l0-enqueue/`.
+pub fn write_remote_enqueue(
+    grok_home: &Path,
+    host: &str,
+    session_id: &str,
+    prompt: &str,
+    spec: &crate::remote_console_key::SshInstallSpec,
+    installer: &dyn crate::remote_console_key::HostFileInstall,
+) -> Result<RemoteEnqueueReport, EnqueueError> {
+    if prompt.trim().is_empty() {
+        return Err(EnqueueError::RemoteCopy("enqueue prompt is empty".into()));
+    }
+    let staging = remote_enqueue_staging_path(grok_home, host, session_id)
+        .ok_or(EnqueueError::UnsafeSessionId)?;
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(&EnqueueDrop { prompt })?;
+    std::fs::write(&staging, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
+    }
+    let user_at_host = spec.user_at_host.trim();
+    if user_at_host.is_empty() || !user_at_host.contains('@') {
+        return Err(EnqueueError::RemoteCopy(
+            "SSH target must look like grok@surmount-1".to_string(),
+        ));
+    }
+    let sid = sanitize_session_id(session_id).ok_or(EnqueueError::UnsafeSessionId)?;
+    let home = spec
+        .remote_grok_home
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let remote_dir = format!("{home}/{ENQUEUE_DIR}/{sid}");
+    let remote_file = format!("{remote_dir}/{ENQUEUE_FILE}");
+    let dest = format!("{user_at_host}:{remote_file}");
+    let mkdir = [
+        "ssh".to_string(),
+        user_at_host.to_string(),
+        format!("mkdir -p {remote_dir}"),
+    ];
+    let scp = crate::remote_console_key::scp_copy_argv(&staging, &dest);
+    installer
+        .install_owner_only_file(&staging, &dest)
+        .map_err(EnqueueError::RemoteCopy)?;
+    Ok(RemoteEnqueueReport {
+        host: host.to_string(),
+        session_id: sid.to_string(),
+        staging_file: staging,
+        remote_dest: dest,
+        ssh_copy_commands: vec![mkdir.join(" "), scp.join(" ")],
+    })
 }
 
 fn sanitize_session_id(session_id: &str) -> Option<&str> {
@@ -440,8 +579,9 @@ fn looks_like_jwt(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CoordinatorApp, SessionHost, enqueue_drop_path, format_running_sessions_json,
-        parse_running_json, parse_running_json_with_host, write_enqueue,
+        CoordinatorApp, SessionHost, enqueue_drop_path, fetch_remote_running_ssh_argv,
+        format_running_sessions_json, parse_running_json, parse_running_json_with_host,
+        write_enqueue,
     };
     use serde_json::Value;
     use std::fs;
@@ -676,6 +816,61 @@ mod tests {
         assert!(
             !home.join("l0-enqueue/sess-remote/enqueue.json").exists(),
             "must not write a local drop file for a remote session"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    struct RecordingInstall {
+        dests: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::remote_console_key::HostFileInstall for RecordingInstall {
+        fn install_owner_only_file(&self, _local: &Path, dest: &str) -> Result<(), String> {
+            self.dests.lock().unwrap().push(dest.to_string());
+            Ok(())
+        }
+    }
+
+    /// Named contract: VPS enqueue scp's to the guest grok home and never
+    /// writes laptop `l0-enqueue/` for that session.
+    #[allow(non_snake_case)]
+    #[test]
+    fn CoordinatorApp_enqueue_remote_session_copies_to_guest_grok_home() {
+        let home = test_home();
+        let remote_json = r#"[{"pid": 9, "session_id": "sess-remote", "cwd": "/tmp/r"}]"#;
+        let mut app =
+            CoordinatorApp::load(&home, two_session_json(), Some(("surmount-1", remote_json)))
+                .unwrap();
+        app.select(2);
+        let installer = RecordingInstall {
+            dests: std::sync::Mutex::new(Vec::new()),
+        };
+        let spec = crate::remote_console_key::SshInstallSpec {
+            user_at_host: "grok@surmount-1".into(),
+            remote_grok_home: PathBuf::from("/home/grok/.grok"),
+        };
+        let report = app
+            .enqueue_selected_on_remote("do the remote work", &spec, &installer)
+            .expect("remote enqueue");
+        assert_eq!(
+            report.remote_dest,
+            "grok@surmount-1:/home/grok/.grok/l0-enqueue/sess-remote/enqueue.json"
+        );
+        assert!(
+            !home.join("l0-enqueue/sess-remote/enqueue.json").exists(),
+            "must not write a local drain path for a remote session"
+        );
+        assert!(
+            home.join("l0-remote-enqueue/surmount-1/sess-remote/enqueue.json")
+                .exists(),
+            "laptop staging drop must exist for scp"
+        );
+        let dests = installer.dests.lock().unwrap().clone();
+        assert_eq!(dests, vec![report.remote_dest.clone()]);
+        let argv = fetch_remote_running_ssh_argv("grok@surmount-1").unwrap();
+        assert_eq!(
+            argv,
+            ["ssh", "grok@surmount-1", "grok-oss", "running", "--json"]
         );
         let _ = fs::remove_dir_all(&home);
     }

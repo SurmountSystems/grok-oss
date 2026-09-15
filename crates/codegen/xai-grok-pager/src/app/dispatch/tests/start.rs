@@ -200,3 +200,99 @@ fn start_with_cancel_resume_marker_continues_interrupted_turn() {
         xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
     xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
 }
+
+fn dock_isolated_preview_for_test(app: &mut AppView, id: AgentId, body: &str) {
+    let mut viewer =
+        crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+            "plan.md",
+            body.to_owned(),
+            None,
+        )
+        .expect("Isolated Preview body");
+    viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+    app.agents.get_mut(&id).unwrap().line_viewer = Some(viewer);
+}
+
+/// Operator: after Plan Exit, `/start` must leave parked Isolated Preview
+/// and continue interrupted mill work. Not `/resume`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn start_leaves_parked_isolated_preview_and_continues_interrupted_work() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "start-leave-iso-sess";
+    let cwd = grok_home.path().join("iso");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.plan_decision_resolved = true;
+    }
+    dock_isolated_preview_for_test(
+        &mut app,
+        id,
+        "# TECH.md dependency tree\nstale Isolated Preview\n",
+    );
+    let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+        "continue the mill WATCHER plan",
+        Some("pid-start-iso"),
+        "2026-09-12T12:00:00Z",
+    )
+    .expect("marker");
+    xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+        &cwd_str, sid, &marker,
+    )
+    .expect("write marker");
+
+    let effects = dispatch(Action::SendPrompt("/start".into()), &mut app);
+
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.line_viewer.is_none(),
+        "/start must leave parked Isolated Preview after Plan Exit"
+    );
+    let started = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text == "continue the mill WATCHER plan"
+        )
+    });
+    assert!(
+        started,
+        "/start must continue interrupted mill work; effects={effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "/start")),
+        "/start must not send itself as a prompt: {effects:?}"
+    );
+    assert!(
+        !app.session_picker_loading,
+        "/start must not open the session picker"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+}
+
+/// `/start` with nothing held still leaves parked Isolated Preview so the
+/// Operator is not wedged after Plan Exit.
+#[test]
+fn start_with_nothing_held_still_leaves_parked_isolated_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dock_isolated_preview_for_test(&mut app, id, "# TECH.md leftover\nstale body\n");
+    app.agents.get_mut(&id).unwrap().plan_decision_resolved = true;
+
+    let _ = dispatch(Action::SendPrompt("/start".into()), &mut app);
+
+    assert!(
+        app.agents[&id].line_viewer.is_none(),
+        "/start must leave parked Isolated Preview even when nothing is held"
+    );
+}

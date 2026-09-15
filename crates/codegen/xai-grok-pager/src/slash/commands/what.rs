@@ -23,7 +23,8 @@ Reply with this shape only, four labeled complete thoughts, nothing fluffier: \
 Job: one sentence, the real product outcome this session is trying to finish right now. \
 State: running, waiting, blocked, or done. Name the real file, command, crate, or test. Translate leftover jargon into ordinary words. \
 Operator: the operator action, or the word nothing if they do not need to act. Then say why. Name the evidence. Do not leave a bare nothing. \
-Next: the next concrete agent step. Do not say You or Human for the operator. Do not say Me or Grok for the assistant. \
+Next: the next concrete agent step. \
+Prefer Operator and Agent as speaker labels. Do not say You or Human for the operator. Do not say Me or Grok as the speaker label for the machine. \
 Complete American English thoughts. Short sentences. \
 No leftover board ids or hex run ids in the body. \
 No say the word if you want me to continue when the next step is already clear. \
@@ -99,6 +100,7 @@ mod tests {
         assert!(WhatCommand.aliases().is_empty());
     }
 
+    // Grok OSS: /what injects the in-tree default skill and requires Job, State, Operator, Next plus Name the evidence. This diverges from upstream xAI because FORK.md /what restatement pins those four complete thoughts. Speaker-label sentences live on what_instruction_prefers_operator_and_agent_speaker_labels.
     #[test]
     fn what_empty_args_injects_what_skill() {
         let models = ModelState::default();
@@ -158,6 +160,71 @@ mod tests {
         );
     }
 
+    fn assert_operator_agent_speaker_labels(text: &str) {
+        assert!(
+            text.contains("Prefer Operator and Agent as speaker labels"),
+            "prefer Operator and Agent; got {text}"
+        );
+        assert!(
+            text.contains("Do not say You or Human for the operator"),
+            "forbid You or Human for the operator; got {text}"
+        );
+        assert!(
+            text.contains("Do not say Me or Grok as the speaker label for the machine"),
+            "forbid Me or Grok as the speaker label; got {text}"
+        );
+        assert!(text.contains("Job: one sentence"), "{text}");
+        assert!(
+            text.contains("State: running, waiting, blocked, or done"),
+            "{text}"
+        );
+        assert!(text.contains("Operator: the operator action"), "{text}");
+        assert!(
+            text.contains("Next: the next concrete agent step"),
+            "{text}"
+        );
+    }
+
+    // Grok OSS: speaker labels are Operator / Agent. This diverges from upstream xAI You/Human / Me/Grok copy because the Operator said so.
+    #[test]
+    fn what_instruction_prefers_operator_and_agent_speaker_labels() {
+        let text = what_instruction("");
+        assert_operator_agent_speaker_labels(&text);
+        let models = ModelState::default();
+        let mut ctx = crate::slash::commands::tests::make_ctx(&models);
+        let injected_result = WhatCommand.run(&mut ctx, "");
+        let injected = text_of(&injected_result);
+        assert_operator_agent_speaker_labels(injected);
+        let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/what/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", skill_path.display()));
+        // Load path is the in-tree bundle skill (CARGO_MANIFEST_DIR sibling
+        // xai-grok-bundle/skills/what/SKILL.md). Nix quality uses that same
+        // source. Speaker-label contracts live in the markdown body after
+        // YAML frontmatter, not in the `---` block.
+        let skill_body = skill
+            .split_once("\n---\n")
+            .map(|(_, body)| body)
+            .unwrap_or(skill.as_str());
+        assert!(
+            skill_body.contains("Prefer Operator and Agent as speaker labels"),
+            "what skill must prefer Operator and Agent; got {skill}"
+        );
+        assert!(
+            skill_body.contains("Do not say You or Human for the operator"),
+            "what skill must forbid You or Human; got {skill}"
+        );
+        assert!(
+            skill_body.contains("Do not say Me or Grok as the speaker label for the machine"),
+            "what skill must forbid Me or Grok as the speaker label; got {skill}"
+        );
+        assert!(
+            skill_body.contains("Job / State / Operator / Next"),
+            "what skill must keep Job / State / Operator / Next; got {skill}"
+        );
+    }
+
     #[test]
     fn what_optional_focus_is_in_injected_prompt() {
         let models = ModelState::default();
@@ -173,6 +240,7 @@ mod tests {
         assert!(text.contains("the last status"), "{text}");
     }
 
+    // Grok OSS: /what is registered among pager builtins. This diverges from upstream xAI because FORK.md lists what_registered_in_builtins as a /what inventory named test.
     #[test]
     fn what_registered_in_builtins() {
         let names: Vec<_> = crate::slash::commands::builtin_commands()

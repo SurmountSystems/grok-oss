@@ -1027,13 +1027,14 @@ test-check-remote-vendor-unpacks-not-blocked-by-max-jobs-zero:
 # Remote rustc must not stay 8-wide or inherit CARGO_BUILD_JOBS=2 from the
 # low-memory package sandbox. Force-remote nix must pass --cores 64 so
 # NIX_BUILD_CORES follows the builder, and workspace-cargo-quality must set
-# CARGO_BUILD_JOBS to 32 (OOM hedge vs 64 rustc processes). Cargo clippy
-# and cargo test --doc must pass --jobs on argv from those cores (capped),
-# after the subcommand (`cargo clippy --jobs N`; cargo 1.97 has no global
-# `cargo --jobs`), and must drop MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token
-# jobserver cannot ignore --jobs. cargo nextest run uses CARGO_BUILD_JOBS
-# for rustc. Must use the dev profile like local `just test-clippy`,
-# not crane's default --release check (one rustc thread at opt-level 3).
+# CARGO_BUILD_JOBS to 64 (jobs 64 from --cores 64). Every cargo on that
+# path is nice -n 19. Cargo check and cargo test --doc must pass --jobs
+# on argv from those cores (capped at 64), after the subcommand
+# (`cargo check --jobs N`; cargo 1.97 has no global `cargo --jobs`),
+# and must drop MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token jobserver cannot
+# ignore --jobs. cargo nextest run uses CARGO_BUILD_JOBS for rustc.
+# Must use the dev profile like local `just test-clippy`, not crane's
+# default --release check (one rustc thread at opt-level 3).
 # Host machines max-jobs lives outside this tree. Does not realize the
 # derivation.
 test-check-remote-uses-builder-cores:
@@ -1052,28 +1053,36 @@ test-check-remote-uses-builder-cores:
       echo "${retry_body}" >&2
       exit 1
     fi
+    quality_nix="${root}/flake/workspace-quality.nix"
     jobs_helper="$(awk '
       $0 ~ /workspaceCargoJobsFromCores =/ { p=1 }
       p && $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { exit }
       p { print }
-    ' "${flake}")"
+    ' "${quality_nix}")"
     quality="$(awk '
       $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
-      p && $0 ~ /openrouter-credentials/ { exit }
+      p && $0 ~ /^in$/ { exit }
       p { print }
-    ' "${flake}")"
+    ' "${quality_nix}")"
     artifacts="$(awk '
       $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { p=1 }
       p && $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { exit }
       p { print }
-    ' "${flake}")"
-    if ! grep -q 'CARGO_BUILD_JOBS = "32"' <<<"${quality}"; then
-      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must set CARGO_BUILD_JOBS = \"32\" (not inherit 2 from commonArgs)." >&2
+    ' "${quality_nix}")"
+    if ! grep -q 'CARGO_BUILD_JOBS = "64"' <<<"${quality}"; then
+      echo "test-check-remote-uses-builder-cores: workspace-cargo-quality must set CARGO_BUILD_JOBS = \"64\" (not inherit 2 from commonArgs)." >&2
       echo "${quality}" >&2
       exit 1
     fi
-    if ! grep -q 'CARGO_BUILD_JOBS = "32"' <<<"${artifacts}"; then
-      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must set CARGO_BUILD_JOBS = \"32\"." >&2
+    if grep -q 'CARGO_BUILD_JOBS = "32"' <<<"${quality}${artifacts}${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: quality / artifacts / helper must not keep CARGO_BUILD_JOBS = \"32\"." >&2
+      echo "${quality}" >&2
+      echo "${artifacts}" >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'CARGO_BUILD_JOBS = "64"' <<<"${artifacts}"; then
+      echo "test-check-remote-uses-builder-cores: workspaceCargoArtifacts must set CARGO_BUILD_JOBS = \"64\"." >&2
       echo "${artifacts}" >&2
       exit 1
     fi
@@ -1126,7 +1135,7 @@ test-check-remote-uses-builder-cores:
       exit 1
     fi
     if ! grep -q 'NIX_BUILD_CORES' <<<"${jobs_helper}"; then
-      echo "test-check-remote-uses-builder-cores: cargo --jobs must be taken from NIX_BUILD_CORES (then capped at 32)." >&2
+      echo "test-check-remote-uses-builder-cores: cargo --jobs must be taken from NIX_BUILD_CORES (then 64 from --cores 64)." >&2
       echo "${jobs_helper}" >&2
       exit 1
     fi
@@ -1143,8 +1152,8 @@ test-check-remote-uses-builder-cores:
     fi
     sys="$(just current_system)"
     jobs="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.CARGO_BUILD_JOBS")"
-    if [[ "${jobs}" != "32" ]]; then
-      echo "test-check-remote-uses-builder-cores: expected CARGO_BUILD_JOBS=32 on workspace-cargo-quality, got ${jobs}" >&2
+    if [[ "${jobs}" != "64" ]]; then
+      echo "test-check-remote-uses-builder-cores: expected CARGO_BUILD_JOBS=64 on workspace-cargo-quality, got ${jobs}" >&2
       exit 1
     fi
     profile="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.CARGO_PROFILE")"
@@ -1157,7 +1166,7 @@ test-check-remote-uses-builder-cores:
     # CARGO_BUILD_JOBS and a 1-token jobserver ignores later --jobs.
     phase="$(nix eval --raw ".#packages.${sys}.workspace-cargo-quality.buildPhase")"
     if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS"' <<<"${phase}"; then
-      echo "test-check-remote-uses-builder-cores: instantiated buildPhase must pass cargo check --jobs from CARGO_BUILD_JOBS (cap 32 from NIX_BUILD_CORES) for workspace clippy." >&2
+      echo "test-check-remote-uses-builder-cores: instantiated buildPhase must pass cargo check --jobs from CARGO_BUILD_JOBS (jobs 64 from NIX_BUILD_CORES) for workspace clippy." >&2
       echo "${phase}" >&2
       exit 1
     fi
@@ -1209,40 +1218,64 @@ test-check-remote-uses-builder-cores:
       echo "${phase}" >&2
       exit 1
     fi
-    if ! grep -qE 'cargoJobs" -lt 2|"\$cargoJobs" -lt 2' <<<"${phase}"; then
-      echo "test-check-remote-uses-builder-cores: when NIX_BUILD_CORES is 1, cargo jobs must still become 32 (cap), not one rustc." >&2
+    if grep -qE 'cargoJobs" -lt 2|"\$cargoJobs" -lt 2' <<<"${phase}${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: old promotion-only-for-0-or-1 must go; 2 through 63 must not remain cargo jobs." >&2
+      echo "${jobs_helper}" >&2
       echo "${phase}" >&2
       exit 1
     fi
-    echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 32 from cores on argv; CARGO_PROFILE=dev; package sandbox still 2)"
+    if grep -qE 'cargoJobs" -le 32|"\$cargoJobs" -le 32|cargoJobs" -gt 32|"\$cargoJobs" -gt 32' <<<"${phase}${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: do not leave a 32 cargo-jobs floor or cap in this helper." >&2
+      echo "${jobs_helper}" >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -qE 'cargoJobs" -le 64|"\$cargoJobs" -le 64' <<<"${phase}${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: when NIX_BUILD_CORES is 64 or less (including 0, 1, and 2 through 63), cargo jobs must become 64." >&2
+      echo "${jobs_helper}" >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    if ! grep -q 'nice -n 19' <<<"${jobs_helper}" || ! grep -q 'env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19' <<<"${jobs_helper}"; then
+      echo "test-check-remote-uses-builder-cores: make recipe must env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 cargo." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'nice -n 19 cargo fmt' <<<"${phase}" || ! grep -q 'nice -n 19 cargo nextest' <<<"${phase}"; then
+      echo "test-check-remote-uses-builder-cores: direct quality cargo (fmt, nextest) must be nice -n 19." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
+    echo "test-check-remote-uses-builder-cores: ok (--cores 64; workspace cargo jobs 64 from cores on argv; nice -n 19; CARGO_PROFILE=dev; package sandbox still 2)"
 
 # `cargo clippy --workspace --jobs N` is an external cargo-clippy binary.
 # The outer cargo may start a 1-token GNU jobserver from
 # available_parallelism() (often 1 in a Nix sandbox). Inner `--jobs N` is
 # then ignored: one clippy-driver, sequential Checking, idle cores.
 # Quality must lint via builtin `cargo check` + clippy-driver under a GNU
-# make jobserver with $CARGO_BUILD_JOBS tokens (cap 32). Must not loop
-# `cargo clippy -p` with -j1. Does not realize rustc.
+# make jobserver with $CARGO_BUILD_JOBS tokens (64 from --cores 64).
+# Every cargo is nice -n 19. Must not loop `cargo clippy -p` with -j1.
+# Does not realize rustc.
 test-check-remote-clippy-uses-many-workers:
     #!/usr/bin/env bash
     set -euo pipefail
     root="{{ justfile_directory() }}"
-    flake="${root}/flake.nix"
+    quality_nix="${root}/flake/workspace-quality.nix"
+    named_nix="${root}/flake/workspace-named-test.nix"
     jobs_helper="$(awk '
       $0 ~ /workspaceCargoJobsFromCores =/ { p=1 }
       p && $0 ~ /workspaceCargoArtifacts = craneLib.buildDepsOnly/ { exit }
       p { print }
-    ' "${flake}")"
+    ' "${quality_nix}")"
     quality="$(awk '
       $0 ~ /workspace-cargo-quality = craneLib.mkCargoDerivation/ { p=1 }
-      p && $0 ~ /openrouter-credentials/ { exit }
+      p && $0 ~ /^in$/ { exit }
       p { print }
-    ' "${flake}")"
+    ' "${quality_nix}")"
     named="$(awk '
       $0 ~ /workspace-cargo-named-test = craneLib.mkCargoDerivation/ { p=1 }
-      p && $0 ~ /ciLowMemEnv/ { exit }
       p { print }
-    ' "${flake}")"
+    ' "${named_nix}")"
     if grep -qE -- 'cargo clippy --' <<<"${quality}"; then
       echo "test-check-remote-clippy-uses-many-workers: workspace-cargo-quality must not invoke cargo clippy (external dispatcher; 1-token jobserver). Use cargo check + clippy-driver." >&2
       echo "${quality}" >&2
@@ -1254,8 +1287,28 @@ test-check-remote-clippy-uses-many-workers:
       exit 1
     fi
     if ! grep -qE -- 'make -j"\$CARGO_BUILD_JOBS"' <<<"${jobs_helper}"; then
-      echo "test-check-remote-clippy-uses-many-workers: jobserver helper must run make -j\"\$CARGO_BUILD_JOBS\" (cap 32 from cores)." >&2
+      echo "test-check-remote-clippy-uses-many-workers: jobserver helper must run make -j\"\$CARGO_BUILD_JOBS\" (jobs 64 from cores)." >&2
       echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS' <<<"${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: helper must unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'env -u MAKEFLAGS' <<<"${jobs_helper}" || ! grep -q -- '-u CARGO_MAKEFLAGS' <<<"${jobs_helper}" || ! grep -q -- '-u MFLAGS' <<<"${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: make recipe must env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS so cargo owns --jobs (does not join make's jobserver)." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19' <<<"${jobs_helper}"; then
+      echo "test-check-remote-clippy-uses-many-workers: make recipe must drop the jobserver, then nice -n 19, then cargo." >&2
+      echo "${jobs_helper}" >&2
+      exit 1
+    fi
+    if ! grep -q 'workspace_run_make_jobserver cargo check' <<<"${quality}"; then
+      echo "test-check-remote-clippy-uses-many-workers: clippy-as-check must be wrapped: workspace_run_make_jobserver cargo check." >&2
+      echo "${quality}" >&2
       exit 1
     fi
     if ! grep -q 'RUSTC_WORKSPACE_WRAPPER' <<<"${quality}"; then
@@ -1316,6 +1369,11 @@ test-check-remote-clippy-uses-many-workers:
       echo "${phase}" >&2
       exit 1
     fi
+    if ! grep -q 'env -u MAKEFLAGS' <<<"${phase}" || ! grep -q -- '-u CARGO_MAKEFLAGS' <<<"${phase}"; then
+      echo "test-check-remote-clippy-uses-many-workers: instantiated make recipe must env -u MAKEFLAGS and -u CARGO_MAKEFLAGS so cargo owns --jobs." >&2
+      echo "${phase}" >&2
+      exit 1
+    fi
     if ! grep -qE -- 'check --profile "\$CARGO_PROFILE" --jobs "\$CARGO_BUILD_JOBS" --workspace --all-targets --locked' <<<"${phase}"; then
       echo "test-check-remote-clippy-uses-many-workers: instantiated clippy must be cargo check --workspace --all-targets --jobs from CARGO_BUILD_JOBS." >&2
       echo "${phase}" >&2
@@ -1346,7 +1404,7 @@ test-check-remote-clippy-uses-many-workers:
       echo "${named_clippy}" >&2
       exit 1
     fi
-    echo "test-check-remote-clippy-uses-many-workers: ok (cargo check + clippy-driver; make -j\$CARGO_BUILD_JOBS jobserver; no cargo clippy dispatcher; no -j1 crate loop)"
+    echo "test-check-remote-clippy-uses-many-workers: ok (cargo check + clippy-driver; make -j\$CARGO_BUILD_JOBS jobserver; nice -n 19; no cargo clippy dispatcher; no -j1 crate loop)"
 
 # Dummy workspace deps stubs do not need the pager build-id. GROK_GIT_SHA
 # from dirtyShortRev must not be on workspace-cargo-quality-deps or a dirty

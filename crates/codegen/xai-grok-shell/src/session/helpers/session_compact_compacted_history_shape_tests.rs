@@ -164,8 +164,8 @@ async fn test_compacted_history_raw_strings() {
     assert_eq!(compacted.len(), 10);
 }
 /// Compaction with no background tasks, no edited files, no AGENTS.md:
-/// the summary message should be just the summary wrapped in <user_query>
-/// with no <system-reminder> appended.
+/// live-state sections stay omitted, but Surmount standing law still
+/// occupies the post-compact `<system-reminder>` (first screen).
 #[tokio::test]
 async fn test_compacted_history_minimal_no_state_context() {
     let conversation = vec![
@@ -206,9 +206,23 @@ async fn test_compacted_history_minimal_no_state_context() {
     );
     assert!(
         !summary.contains("<system-reminder>"),
-        "No state context means no <system-reminder> block"
+        "Summary message should NOT contain system-reminder (it is now separate)"
     );
-    assert_eq!(compacted.len(), 5);
+    assert_eq!(compacted[5].role(), Role::User);
+    let reminder = compacted[5].text_content();
+    assert!(
+        reminder.contains("<system-reminder>"),
+        "empty live-state still injects standing law: {reminder}"
+    );
+    assert!(
+        reminder.contains("FORK.md is the Surmount divergence home. Read it after compact."),
+        "standing law must name FORK.md: {reminder}"
+    );
+    assert!(
+        !reminder.contains("## Files Edited This Session"),
+        "empty live-state must not invent a files section: {reminder}"
+    );
+    assert_eq!(compacted.len(), 6);
 }
 /// Regression guard: grok-build must DROP the working
 /// tail post-compaction. A prior change routed grok-build to keep `recent_messages`,

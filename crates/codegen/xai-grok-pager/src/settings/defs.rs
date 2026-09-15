@@ -1274,7 +1274,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Editor,
             owner: SettingOwner::Pager,
             label: "Multiline",
-            description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
+            description: "When on, Enter in the middle of a draft inserts a newline and Shift+Enter sends. Enter at the end of the last line still sends or interjects. Resets each session.",
             keywords: &["multiline", "newline", "input", "editor", "enter"],
             kind: SettingKind::Bool { default: false },
             restart_required: false,
@@ -1299,6 +1299,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.composer_multiline_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Grok OSS: Operator: gate so session Multiline cannot be enabled
+        // accidentally via slash, Ctrl+M, or the Multiline settings row.
+        SettingMeta {
+            key: "allow_session_multiline",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Allow session Multiline",
+            description: "When off, Ctrl+M, /multiline, and the session Multiline settings row \
+                          cannot turn session Multiline on. Ctrl+Enter and Shift+Enter newline \
+                          behavior is unchanged. Distinct from Composer multiline. Default on.",
+            keywords: &[
+                "multiline",
+                "session",
+                "allow",
+                "ctrl+m",
+                "slash",
+                "editor",
+                "newline",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.allow_session_multiline_enabled(),
             },
             restart_required: false,
             hidden_in_minimal: false,

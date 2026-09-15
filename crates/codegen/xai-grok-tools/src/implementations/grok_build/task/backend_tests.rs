@@ -123,6 +123,130 @@ async fn spawn_registered_returns_on_admit_before_the_child_finishes() {
         .unwrap();
 }
 
+fn background_request(id: &str, description: &str) -> SubagentRequest {
+    SubagentRequest {
+        id: id.to_string(),
+        prompt: description.to_string(),
+        description: description.to_string(),
+        subagent_type: "general-purpose".to_string(),
+        parent_session_id: "parent".to_string(),
+        parent_prompt_id: None,
+        resume_from: None,
+        cwd: None,
+        runtime_overrides: Default::default(),
+        run_in_background: true,
+        surface_completion: true,
+        await_to_completion: false,
+        fork_context: false,
+        owner: super::super::types::SubagentOwner::Task,
+        implement_loop_effort: None,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+    }
+}
+
+/// Operator: parent serializes on `get_command_or_subagent_output` 10-minute
+/// waits while mill L2 runs 40+ minutes. Only one subagent row.
+///
+/// Fire-and-return: A nested L2 that is a long builder (compile, lake, mill)
+/// must not occupy the parent as a blocking 10-minute wait loop. Parent starts
+/// it, keeps working, completion is a notification. Named test: parent can
+/// spawn a second L2 while the first is still running without waiting for the
+/// first to exit.
+#[tokio::test]
+async fn parent_spawn_subagent_second_l2_while_first_still_running_without_wait() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let backend = ChannelBackend::new(tx);
+
+    let mill = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .spawn_registered(background_request("mill-l2", "mill compile on nixbuilder"))
+                .await
+        }
+    });
+    let mill_req = recv_event!(rx, Spawn);
+    mill_req
+        .admitted_tx
+        .expect("background mill spawn must wait on admit")
+        .send(Ok(()))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), mill)
+        .await
+        .expect("first spawn_registered must return on admit, without waiting for mill to finish")
+        .expect("mill spawn task must not panic")
+        .expect("mill admit Ok is not a tool error");
+
+    let mill_notice = xai_tool_types::format_subagent_started_background(
+        "mill-l2",
+        "general-purpose",
+        "mill compile on nixbuilder",
+        &xai_tool_types::BackgroundNoticeNaming {
+            task_output_tool: "get_command_or_subagent_output",
+            ..xai_tool_types::BackgroundNoticeNaming::CANONICAL
+        },
+        false,
+    );
+    assert!(
+        mill_notice.contains("Keep working")
+            && (mill_notice.contains("notification") || mill_notice.contains("notified")),
+        "spawn notice must tell the parent to keep working; completion is a notification, got {mill_notice}"
+    );
+    assert!(
+        !mill_notice.contains("When you need its result")
+            && !mill_notice.contains("and a positive timeout_ms."),
+        "spawn notice must not teach a blocking positive timeout_ms as the default retrieval, got {mill_notice}"
+    );
+
+    let second = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            backend
+                .spawn_registered(background_request(
+                    "just-module",
+                    "next-row just module while mill runs",
+                ))
+                .await
+        }
+    });
+    let second_req = recv_event!(rx, Spawn);
+    second_req
+        .admitted_tx
+        .expect("second L2 spawn must wait on admit")
+        .send(Ok(()))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), second)
+        .await
+        .expect(
+            "parent must spawn a second L2 while the first is still running, with no blocking wait in between",
+        )
+        .expect("second spawn task must not panic")
+        .expect("second admit Ok is not a tool error");
+
+    assert_eq!(mill_req.request.id, "mill-l2");
+    assert_eq!(second_req.request.id, "just-module");
+    assert!(
+        mill_req
+            .result_tx
+            .send(SubagentResult {
+                success: true,
+                output: Arc::from("mill done"),
+                subagent_id: "mill-l2".to_string(),
+                child_session_id: "mill-l2".to_string(),
+                ..Default::default()
+            })
+            .is_ok(),
+        "first L2 must still be running when the second spawn returns"
+    );
+    let _ = second_req.result_tx.send(SubagentResult {
+        success: true,
+        output: Arc::from("module done"),
+        subagent_id: "just-module".to_string(),
+        child_session_id: "just-module".to_string(),
+        ..Default::default()
+    });
+}
+
 #[tokio::test]
 async fn channel_backend_spawn_closed_channel() {
     let (tx, rx) = mpsc::unbounded_channel::<SubagentEvent>();

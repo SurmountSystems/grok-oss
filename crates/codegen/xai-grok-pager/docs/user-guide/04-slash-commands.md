@@ -22,6 +22,8 @@ Open the session picker to reload a previous session from disk.
 
 Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
 
+After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` with no extra text docks Isolated Preview from this session's current disk `plan.md`. `/plan` with extra Human text submits a plan-update turn. Compact at 100% / over 500k must not swallow `/plan`. Empty Enter never Approves.
+
 `/start` is not `/resume`. `/resume` only opens the session picker.
 
 ### `/unstick`
@@ -35,6 +37,8 @@ If a turn is hung in flight, `/unstick` orphans that hung prompt the way a dropp
 It prefers the last L1 operator text from `prompt_wal.jsonl` when that file exists. Otherwise it uses the last Human send on this session, not a nested overlay. Image tokens stay `[Image #N]`. WAL image file ids resend as resource links (`file://` under the session `images/` directory). It never re-inlines data URLs.
 
 If there is no last parent prompt, it fails with a short toast and does not invent text.
+
+After Plan Exit, `/unstick` leaves parked Isolated Preview when resending a hung parent prompt. Esc:close also leaves that pane. `/start` continues paused or interrupted work. Empty Enter never Approves.
 
 `/unstick` is not `/resume`. `/resume` still opens the session picker. Continue interrupted turn (`canceled_turn_resume.json`) still belongs to last-session on start and `/start`.
 
@@ -50,7 +54,7 @@ List live grok-oss TUI windows on this machine. Alias: `/windows`.
 
 This is **Running grok-oss sessions**. It is not the [Agent Dashboard](23-dashboard.md), not `/sessions`, not `/tasks`, not `/resume`, and not `/start`. `/dashboard` still owns the roster inside this pager process. Do not treat `/running` as a second dashboard.
 
-**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop coordinator. It is not a website on the mail host :443. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that GPUI window will call: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and writes a per-session enqueue drop file. It also has the laptop-side action **set remote host console API key** for a machine xAI console API key on host surmount-1 (console API credits / console team prepaid, not included SuperGrok period limits, not SuperGrok dollar credits). That action writes a staging file the operator copies, or prints `scp` as the existing deploy user. It never prints the key. It does not open git on the guest. Binary `surmount-coordinator-gui` reads `/running --json` from stdin or a file and prints that safe JSON, and the same binary accepts `set-remote-host-console-api-key`. It is not this TUI and not `/dashboard`. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1). The GPUI window itself is leftover when this crate has no `gui` feature.
+**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop coordinator. It is not a website on the mail host :443. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that GPUI window will call: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and writes a per-session enqueue drop file. It also has the laptop-side action **set remote host console API key** for a machine xAI console API key on host surmount-1 (console API credits / console team prepaid, not included SuperGrok period limits, not SuperGrok dollar credits). That action writes a staging file the operator copies, or prints `scp` as the existing deploy user. It never prints the key. It does not open git on the guest. Call L0 **`grok-oss gui`** (not `grok-oss running`). That command lists live windows through the coordinator and prints safe JSON (no prompt). `grok-oss running` stays the TUI window table. Binary `surmount-coordinator-gui` still accepts stdin `/running --json` and `set-remote-host-console-api-key`. It is not this TUI and not `/dashboard`. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1). The GPUI window itself is leftover when this crate has no `gui` feature.
 
 The list comes from `$GROK_HOME/active_sessions.json`. When `GROK_HOME` is unset, that file is `~/.grok/active_sessions.json`. Two grok homes do not see each other. Only live grok-oss processes appear. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
 
@@ -214,7 +218,7 @@ The named tool is `pull_remote_tree`. Direction is `HOST:SRC` (or a local source
 
 ### `/metadata`
 
-Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. Fields that are not known are omitted rather than invented. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
+Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. For the current sampling model it also shows last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` with when those were observed. Those fingerprints are serving-path configuration, not a SHA of the weights, and they are not on the status bar. Fields that are not known are omitted rather than invented. Do not invent dated slugs such as `grok-4.6-20260812` unless `/v1/language-models` lists them. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
 
 ### `/fork`
 
@@ -322,7 +326,7 @@ Always-approve remains the preferred daily autonomy mode. Context-only is an exp
 
 ### `/multiline`
 
-Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables newlines entirely; `/multiline` cannot restore them while that persist flag is off.
+Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` interjects when a running turn can take it, and otherwise inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.
 
 ### `/history`
 
@@ -346,12 +350,16 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/plan`
 
-Enter plan mode. Immediate `/plan` (optionally with a description) still enters plan mode when you want it now.
+Enter plan mode. Immediate `/plan` (optionally with a description) enters plan mode when you want it now. `/plan` with extra Human text (for example `/plan update the plan with what was accomplished and all that remains please`) submits that as a plan-update turn. It does not only dock Isolated Preview of a leftover plan. That submit writes the prompt write-ahead log. Bare `/plan` or `/plan --soft` with no extra text docks Isolated Preview from this session's current disk `plan.md`, not leftover "why the agent stopped" or a TECH.md persist overwrite. Empty Enter never Approves.
 
-To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue. Present is not Approve. Empty Enter never Approves.
+`/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested subagents stay Working. Present is not Approve. Empty Enter never Approves. The Isolated Preview composer is a Human box unless you click Comment. Non-empty Enter sends a Human turn. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Hard `/plan` without `--soft` enters plan mode. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
+
+To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 
 ```
-/plan [description]
+/plan [--soft] [description]
+/plan --soft
+/plan --soft add feature
 /plan queue
 /queue /plan
 ```
@@ -568,16 +576,16 @@ The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint onl
 
 ### `/rebuild`
 
-Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
+Rebuild this session's Grok OSS workspace into a `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
 
-1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
+1. Finds this session's Grok OSS workspace (the session working directory, walking up to `justfile` plus `crates/codegen/xai-grok-pager-bin`). Process current directory is used only when that session path cannot resolve a source tree.
 2. Copies the current installed `grok-oss` binary, when it exists, to a sibling file named `grok-oss.prev` next to it (under `${CARGO_HOME:-$HOME/.cargo}/bin/`).
 3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
-4. Verifies package version plus git SHA.
+4. Verifies the installed binary's `--version` identity git SHA matches `git rev-parse --short=12 HEAD` of that workspace (same width as pager-bin `build.rs`). A leftover cargo-bin identity such as `1.0.3 (157f1746)` is not an acceptable exec target when this workspace SHA differs. Stale cargo-bin contents are a bug.
 5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
+6. Re-execs this TUI onto that just-produced file. Same PID is fine. Unix `exec` keeps the same PID and `ps` start time; that is not proof this process is still the old image. Trust the post-relaunch identity chrome (`grok-oss` version plus git SHA) and the inode of `/proc/<pid>/exe` versus `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`. `ps` fork time is not the signal. Stock Grok Build is a different binary and is not updated by grok-oss `/rebuild`. Mid-turn `/rebuild` does not cancel the parent; the new TUI adopts the live turn the same way a TUI disconnect / network interruption does. Nested ids are not cancelled. `/rebuild` is not a nested-work gate. Idle completed turns do not re-fire the last prompt. Do not re-queue a Human turn that is already in chat history. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. This TUI still exec-replaces while nested work is live. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
 
-Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. This TUI does not wait for that drain before it exec-replaces. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`, `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`.
 
 To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 
@@ -677,20 +685,32 @@ Keeps each meter distinct:
 
 When two SuperGrok principals are stored, `/limits` stacks a section per principal. The live sampling line names which principal (or console key) is active when known. A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
 
-Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
+Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. When personal included SuperGrok period limits have room again, grok-oss uses personal SuperGrok, not leftover business credits, unless the Operator pinned console or pinned business. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
 
-Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME`. There is no extra daemon. Rebuild SIGUSR1 is not this.
+Personal SuperGrok and business SuperGrok are distinct identities. Matching `nextReset` is not a shared pool. grok-oss limits JSON is a client printout, not xAI billing truth.
+
+Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json` plus the snapshot lock). Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. There is no extra daemon. Rebuild SIGUSR1 is not this.
 
 ```
 /limits
+/limits --help
 /limits --json
+/limits stay-supergrok
+/limits --stay-supergrok
+/limits use-console
+/limits --use-console
+/limits use-personal
+/limits use-business
+/limits --use-credits
+/limits meter included
+/limits refresh
 ```
 
 `/limits --json` prints the same machine-readable JSON as `grok-oss limits --json` into the conversation (no secrets). Fields include `schemaVersion`, `liveSampling`, and `activeDriver` (`supergrok_free_period` | `supergrok_extras` | `console_key`). Those `activeDriver` names are wire fields, not human meter names. `supergrok_free_period` is **included SuperGrok period limits**. `supergrok_extras` is **SuperGrok dollar credits** (prepaid SuperGrok top-ups). `console_key` is console team prepaid / console API credits. SuperGrok is paid. Never call SuperGrok free.
 
 A grok-oss limits JSON or compact printout of included 100%, remaining 0, or SuperGrok dollar credits $0 must not mark SuperGrok used up or hop to console so this session cannot self-fix. grok-oss limits is a client printout, not xAI billing truth. Matching `nextReset` is not proof of a shared pool. Operator Usage (grok.com for that workspace) and the console.x.ai Billing page they can see win. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. Never invent remaining. Never call any pool used up.
 
-Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. The compact meter names the driving meter (included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits, or combined when remaining is across distinct SuperGrok identities). `/limits meter` chooses which of those named meters the compact line emphasizes.
+Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). `/limits --help` (also `help` and `-h`) lists those words. Hyphenated aliases match the unhyphenated words (`--stay-supergrok`, `--use-console`, `--use-personal`, `--use-business`, `--refresh`, `--meter`). `/limits --use-credits` pins compact chrome to SuperGrok dollar credits (same as `meter dollar-credits`). `/limits use credits` is that same pin. `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Personal SuperGrok and business SuperGrok are distinct weekly pools; they do not combine. SuperGrok is a paid product. `use-business` is valid even when business has no included period-limits payload. grok-oss fails loud if no stored Team login exists. A second `grok-oss login` stores the Team principal. Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up or hop to console. Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. The compact meter names the driving meter (included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits, or combined when remaining is across distinct SuperGrok identities). `/limits meter` chooses which of those named meters the compact line emphasizes.
 
 See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
 

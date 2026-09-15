@@ -88,6 +88,7 @@ mod tests {
         std::fs::read_to_string(root.join(rel)).unwrap()
     }
 
+    // Grok OSS: /polish /subagent /what /pull-remote-tree are default Grok OSS skills in-tree. This diverges from upstream xAI because FORK.md and the skills catalog pin those four as product defaults.
     #[test]
     fn default_product_skills_include_polish_and_subagent() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");

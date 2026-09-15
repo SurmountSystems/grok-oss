@@ -849,3 +849,46 @@ fn voice_submit_follow_up_keeps_chip_literal() {
     assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "draft dictated");
     assert!(!app.voice_listening());
 }
+
+/// Grok OSS: Recording must be reliable: start capture, keep bytes, transcribe into the composer. Silent 10s teardown without a visible recording state is a miss.
+#[test]
+fn voice_recording_survives_ten_seconds_of_simulated_silence() {
+    // Recording must be reliable: start capture, keep bytes, transcribe into the composer. Silent 10s teardown without a visible recording state is a miss.
+    assert!(
+        !xai_grok_voice::silence_tears_down_recording(),
+        "silent 10s teardown without a visible recording state is a miss"
+    );
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    assert!(app.voice_listening());
+
+    let silence = std::time::Duration::from_secs(10);
+    assert!(
+        !xai_grok_voice::recording_ends_after_silence(silence),
+        "after 10s simulated silence recording must stay Recording until Operator stop"
+    );
+    assert!(
+        app.voice_listening(),
+        "composer must still show recording chrome after 10s of silence"
+    );
+    assert!(
+        matches!(app.voice_state, VoiceState::Recording { .. }),
+        "WAL stays conceptually open: state remains Recording until Esc, Enter, chord release, or /voice toggle"
+    );
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::InterimTranscript {
+            text: "kept after silence".into(),
+        },
+    );
+    assert_eq!(app.voice_interim(), Some("kept after silence"));
+    assert!(app.voice_listening());
+}

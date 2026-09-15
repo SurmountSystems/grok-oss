@@ -8,6 +8,10 @@ enough. Dual-pin: [`AGENTS.md`](../AGENTS.md), [`FORK.md`](../FORK.md),
 [`git-workflow.md`](git-workflow.md), host `~/.grok/AGENTS.md`, and the
 plan skill. Compaction must not drop this.
 
+Collaborative issues distinguish **feature**, **bug**, and
+**upstream-merge** labels so peers can filter work without guessing
+from the title.
+
 ## 1. Plan Approve → GitHub issue
 
 When the operator **Approves** a plan (product plan-panel Approve, not
@@ -17,7 +21,8 @@ empty Enter, not always-approve tool permissions):
    (`SurmountSystems/grok-oss` here).
 2. Title is the plan title.
 3. Body is the **full plan text** from `plan.md` (session plan file).
-4. Label `enhancement` unless the plan is a bug fix (`bug`).
+4. Label `enhancement` for a feature plan, `bug` for a bug-fix plan, or
+   `upstream-merge` for an upstream merge.
 5. Do not wait for a later “should I file this?”
 
 ## 2. Bug report → GitHub issue (with screenshots)

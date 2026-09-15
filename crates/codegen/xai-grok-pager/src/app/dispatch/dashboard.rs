@@ -1507,6 +1507,19 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             }
             vec![]
         }
+        // `/plan --soft` does not enter plan mode and does not spawn the
+        // description as a Prompt. Isolated Preview docks on a session,
+        // not the session-less dashboard.
+        CommandResult::Action(Action::DockIsolatedPreview { .. }) => {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.error_toast = None;
+                d.set_error_toast(
+                    "/plan --soft docks Isolated Preview in a session. It does not enter plan mode.",
+                );
+            }
+            vec![]
+        }
         // `/plan <description>` — stage plan mode AND spawn immediately with
         // the description as the first prompt.
         CommandResult::Action(Action::EnterPlanMode { description }) => {

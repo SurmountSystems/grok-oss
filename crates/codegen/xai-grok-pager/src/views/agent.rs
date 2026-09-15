@@ -1187,13 +1187,11 @@ pub fn build_hints(
             }
             let always_expand_thinking = crate::appearance::cache::load_always_expand_thinking();
             // `-` (ExpandAllThinking) owns "expand" while thoughts are
-            // collapsed. A selected-entry expand next to "collapse thinking"
-            // is dead chrome: the advertised key does not open thoughts.
+            // collapsed. When thoughts are already expanded, Enter still
+            // expands a collapsed selected entry (same as `:expand`).
             let thinking_owns_expand =
                 !always_expand_thinking && thinking_label == "expand thinking";
-            let suppress_dead_expand =
-                !always_expand_thinking && thinking_label == "collapse thinking";
-            let skip_entry_expand = thinking_owns_expand || suppress_dead_expand;
+            let skip_entry_expand = thinking_owns_expand;
             let thinking_expand_key = if thinking_owns_expand {
                 crate::key!('-')
             } else {
@@ -1205,7 +1203,8 @@ pub fn build_hints(
                 let user_collapsed = fold_label == Some("expand");
                 if user_collapsed && !skip_entry_expand {
                     let key = registry
-                        .key_for_mode(ActionId::ToggleFold, vim_mode)
+                        .key_for(ActionId::OpenBlockViewer)
+                        .or_else(|| registry.key_for_mode(ActionId::ToggleFold, vim_mode))
                         .or_else(|| registry.key_for_mode(ActionId::Expand, vim_mode));
                     if let Some(key) = key {
                         hints.push(HintItem::new(key, "expand"));
@@ -1239,9 +1238,16 @@ pub fn build_hints(
                     } else {
                         ActionId::Collapse
                     };
-                    let key = registry
-                        .key_for_mode(ActionId::ToggleFold, vim_mode)
-                        .or_else(|| registry.key_for_mode(directional, vim_mode));
+                    let key = if label == "expand" {
+                        registry
+                            .key_for(ActionId::OpenBlockViewer)
+                            .or_else(|| registry.key_for_mode(ActionId::ToggleFold, vim_mode))
+                            .or_else(|| registry.key_for_mode(directional, vim_mode))
+                    } else {
+                        registry
+                            .key_for_mode(ActionId::ToggleFold, vim_mode)
+                            .or_else(|| registry.key_for_mode(directional, vim_mode))
+                    };
                     if let Some(key) = key {
                         hints.push(HintItem::new(key, label));
                     }
@@ -1691,8 +1697,11 @@ mod tests {
         }
     }
     #[test]
-    fn scrollback_expanded_thinking_does_not_advertise_dead_expand() {
+    fn scrollback_collapsed_user_prompt_advertises_enter_expand_beside_collapse_thinking() {
         let registry = ActionRegistry::defaults();
+        let enter_key = registry
+            .key_for(crate::actions::ActionId::OpenBlockViewer)
+            .expect("OpenBlockViewer has a default key");
         for vim_mode in [true, false] {
             let hints = scrollback_hints_with_thinking_label(
                 &registry,
@@ -1701,10 +1710,19 @@ mod tests {
                 true,
                 vim_mode,
             );
-            assert!(
-                !hints.iter().any(|h| h.label == "expand"),
-                "expanded thinking must not advertise a dead expand next to collapse thinking (vim_mode={vim_mode}); got {:?}",
-                hints.iter().map(|h| h.label.as_ref()).collect::<Vec<_>>()
+            let expand = hints
+                .iter()
+                .find(|h| h.label == "expand")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "collapsed selected prompt must advertise Enter:expand (vim_mode={vim_mode}); got {:?}",
+                        hints.iter().map(|h| h.label.as_ref()).collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                expand.keys,
+                vec![enter_key],
+                "selected collapsed entry expand must be Enter (vim_mode={vim_mode})"
             );
             assert!(
                 hints.iter().any(|h| h.label == "collapse thinking"),
@@ -2396,6 +2414,7 @@ mod tests {
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
     }
+    // Grok OSS: hide_header zeros the in-app agent status bar height. This diverges from upstream xAI because FORK.md and catalog class 2 pin hide_header as a shipped runtime reader, not serde-only.
     #[test]
     fn hide_header_zeroes_status_bar_height() {
         std::thread::spawn(|| {

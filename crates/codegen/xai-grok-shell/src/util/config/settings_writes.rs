@@ -252,6 +252,11 @@ pub async fn set_composer_multiline(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.composer_multiline = Some(value)).await
 }
 
+/// Persist `[ui].allow_session_multiline` via `update_config`.
+pub async fn set_allow_session_multiline(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.allow_session_multiline = Some(value)).await
+}
+
 /// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
 pub async fn set_plan_approval_park(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.plan_approval_park = Some(value)).await

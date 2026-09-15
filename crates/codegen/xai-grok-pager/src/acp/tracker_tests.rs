@@ -4660,3 +4660,60 @@ fn thought_chunk_peels_trailing_user_facing_draft_while_streaming() {
         texts[0]
     );
 }
+
+/// Operator contract: grok-oss stopped responding after a cancelled turn,
+/// Goal Paused, and "Can you please answer?". The TUI painted Thought for
+/// 1.7s, then sat with a blinking cursor and [pause] and no assistant reply.
+/// An empty AgentMessageChunk (content-start with no text) must not finish
+/// thinking and leave the turn with no visible answer.
+#[test]
+fn empty_agent_chunk_after_thinking_does_not_drop_the_reply() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        thought_chunk("The operator cancelled, then asked Can you please answer?"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(thinking_count(&sb), 1, "precondition: thinking is live");
+    tracker.handle_update(agent_chunk(""), &meta(), &mut sb);
+    assert_eq!(
+        thinking_count(&sb),
+        1,
+        "empty agent chunk must not omit the live thought"
+    );
+    let thought_still_running = (0..sb.len()).any(|i| {
+        matches!(
+            sb.get(i).map(|e| (&e.block, e.is_running)),
+            Some((RenderBlock::Thinking(_), true))
+        )
+    });
+    assert!(
+        thought_still_running,
+        "empty agent chunk must not paint Thought for N.s as finished with no reply"
+    );
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        agent_bodies.iter().all(|b| b.trim().is_empty()),
+        "empty chunk must not invent an assistant row, got {agent_bodies:?}"
+    );
+    tracker.handle_update(agent_chunk("Yes. Here is the answer."), &meta(), &mut sb);
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        agent_bodies
+            .iter()
+            .any(|b| b.contains("Here is the answer")),
+        "a later real assistant chunk must still become the reply, got {agent_bodies:?}"
+    );
+}

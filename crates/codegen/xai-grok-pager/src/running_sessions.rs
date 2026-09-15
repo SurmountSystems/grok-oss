@@ -117,6 +117,48 @@ pub fn run_cli(json: bool) -> Result<()> {
     Ok(crate::util::ignore_broken_pipe(written)?)
 }
 
+/// `grok-oss gui`: L0 coordinator over the live window list.
+///
+/// Not `/dashboard` and not `/running`. Feeds `/running --json` into
+/// `surmount-coordinator-gui` and prints safe JSON (no prompt).
+pub fn run_gui_cli(host: Option<&str>, ssh: Option<&str>) -> Result<()> {
+    let json = if let Some(user_at_host) = ssh.map(str::trim).filter(|s| !s.is_empty()) {
+        let argv = surmount_coordinator_gui::fetch_remote_running_ssh_argv(user_at_host)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .map_err(|e| anyhow::anyhow!("could not ssh to {user_at_host}: {e}"))?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "ssh grok-oss running --json failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|e| anyhow::anyhow!("remote running json is not utf-8: {e}"))?
+    } else {
+        let rows = list_running_sessions()?;
+        format_json(&rows)?
+    };
+    let default_host = match host.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(name) if !name.eq_ignore_ascii_case("local") => {
+            surmount_coordinator_gui::SessionHost::Remote(name.to_string())
+        }
+        _ => {
+            if ssh.is_some() {
+                surmount_coordinator_gui::SessionHost::Remote("surmount-1".to_string())
+            } else {
+                surmount_coordinator_gui::SessionHost::Local
+            }
+        }
+    };
+    let rendered = surmount_coordinator_gui::safe_json_from_running(&json, default_host)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let written = writeln!(io::stdout(), "{rendered}");
+    Ok(crate::util::ignore_broken_pipe(written)?)
+}
+
 fn format_row(row: &RunningSessionRow, this_pid: Option<u32>) -> String {
     let mut parts = vec![
         format!("  {}", row.pid),
@@ -229,6 +271,66 @@ mod tests {
         assert!(
             matches!(sessions.command, Some(Command::Sessions(_))),
             "running must not overload sessions"
+        );
+    }
+
+    #[test]
+    fn cli_gui_is_l0_not_running() {
+        let plain = PagerArgs::try_parse_from(["grok-oss", "gui"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Some(Command::Gui {
+                host: None,
+                ssh: None
+            })
+        ));
+        let remote =
+            PagerArgs::try_parse_from(["grok-oss", "gui", "--host", "surmount-1"]).unwrap();
+        assert!(matches!(
+            remote.command,
+            Some(Command::Gui {
+                host: Some(h),
+                ssh: None
+            }) if h == "surmount-1"
+        ));
+        let running = PagerArgs::try_parse_from(["grok-oss", "running"]).unwrap();
+        assert!(
+            matches!(running.command, Some(Command::Running { json: false })),
+            "gui must not overload running"
+        );
+    }
+
+    #[test]
+    fn gui_safe_json_omits_prompt_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let self_pid = std::process::id();
+        let fixture = format!(
+            r#"[
+  {{
+    "session_id": "gui-json-sibling",
+    "pid": {self_pid},
+    "cwd": "/tmp/gui-cli-json-cwd",
+    "opened_at": "2026-08-16T12:00:00Z",
+    "title": "on-disk summary title",
+    "activity": "unknown",
+    "prompt": "SECRET_PLEASE_IMPLEMENT_THE_LOGIN_FLOW"
+  }}
+]"#
+        );
+        std::fs::write(dir.path().join("active_sessions.json"), fixture).unwrap();
+        let rows = list_running_sessions_in(dir.path()).unwrap();
+        let json = format_json(&rows).unwrap();
+        let safe = surmount_coordinator_gui::safe_json_from_running(
+            &json,
+            surmount_coordinator_gui::SessionHost::Local,
+        )
+        .unwrap();
+        assert!(safe.contains("gui-json-sibling"));
+        assert!(safe.contains("/tmp/gui-cli-json-cwd"));
+        let lower = safe.to_ascii_lowercase();
+        assert!(
+            !lower.contains("secret_please_implement_the_login_flow"),
+            "grok-oss gui must omit prompt text; got {safe}"
         );
     }
 }

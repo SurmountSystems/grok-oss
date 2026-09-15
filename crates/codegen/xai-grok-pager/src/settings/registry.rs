@@ -741,6 +741,9 @@ pub fn current_value_for(
         "composer_multiline" => Some(SettingValue::Bool(
             crate::appearance::cache::load_composer_multiline(),
         )),
+        "allow_session_multiline" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_allow_session_multiline(),
+        )),
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
         )),
@@ -1005,6 +1008,7 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 mod tests {
     use super::*;
 
+    // Grok OSS: /settings theme picker includes DOGE and the default is doge, not groknight. This diverges from upstream xAI because FORK.md land class 2 and catalog § 2 pin theme as a shipped surface.
     #[test]
     fn theme_choices_include_doge_and_default_is_doge() {
         let reg = SettingsRegistry::defaults();
@@ -1329,6 +1333,14 @@ mod tests {
                         "composer_multiline default drifts from UiConfig::default()"
                     );
                     assert!(*default, "composer_multiline must default ON");
+                }
+                ("allow_session_multiline", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.allow_session_multiline_enabled(),
+                        "allow_session_multiline default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "allow_session_multiline must default ON");
                 }
                 ("scrub_ascii_punct", SettingKind::Bool { default }) => {
                     assert_eq!(

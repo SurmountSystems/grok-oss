@@ -2709,6 +2709,7 @@ mod tests {
             .to_string()
     }
 
+    // Grok OSS: hide_header zeros the welcome top bar. This diverges from upstream xAI because FORK.md and catalog class 2 pin hide_header as a shipped runtime reader, not serde-only.
     #[test]
     fn hide_header_zeros_welcome_top_bar_height() {
         std::thread::spawn(|| {

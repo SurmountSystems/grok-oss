@@ -365,9 +365,10 @@ mod tests {
         );
     }
 
-    /// Named contract: after included SuperGrok period limits are full, dual-auth
+    /// Grok OSS Named contract: after included SuperGrok period limits are full, dual-auth
     /// hop is shipped (SuperGrok dollar credits, then console failover). The
-    /// embedded user-guide must not say that hop is unshipped.
+    /// embedded user-guide must not say that hop is unshipped. This diverges from
+    /// upstream xAI because FORK.md land class 5 and the catalog user-guide fork pins.
     #[test]
     fn user_guide_does_not_claim_automatic_host_hop_is_unshipped() {
         for doc in USER_GUIDE {
@@ -417,9 +418,10 @@ mod tests {
         }
     }
 
-    /// Named contract: user-guide spend-order sentences match source
+    /// Grok OSS Named contract: user-guide spend-order sentences match source
     /// (personal SuperGrok paying JWT first, Team JWT omitted while personal
-    /// exists, combined remaining, one fetcher).
+    /// exists, combined remaining, one fetcher). This diverges from upstream xAI
+    /// because FORK.md and catalog class 5 name those three meters and that order.
     #[test]
     fn user_guide_names_token_economy_spend_order() {
         let auth = USER_GUIDE
@@ -475,6 +477,16 @@ mod tests {
                 "{name} must say other live TUIs read a snapshot under $GROK_HOME"
             );
             assert!(
+                content.contains("limits_snapshot.json")
+                    && content.contains("HonorTtl")
+                    && content.contains("once an hour"),
+                "{name} must say automatic HonorTtl is at most once an hour on limits_snapshot.json"
+            );
+            assert!(
+                content.contains("not leftover business credits"),
+                "{name} must say grok-oss uses personal SuperGrok, not leftover business credits, when personal included SuperGrok period limits have room again"
+            );
+            assert!(
                 content.contains("There is no extra daemon"),
                 "{name} must say there is no extra daemon"
             );
@@ -497,8 +509,37 @@ mod tests {
         }
     }
 
-    /// Named contract: `/limits` user-guide keeps fail-open plus named
+    /// Grok OSS contract B: user-guide screenshots of the compact bar must not paint
+    /// the long string `included SuperGrok period limits`. Short human chrome
+    /// is `SuperGrok period · N%`. SuperGrok is paid. grok-oss limits is not
+    /// xAI billing truth. This diverges from upstream xAI because FORK.md class 4
+    /// and catalog class 5b pin compact included SuperGrok period limits chrome.
+    #[test]
+    fn user_guide_compact_chip_must_not_paint_included_supergrok_period_limits() {
+        let auth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "02-authentication.md")
+            .expect("02-authentication.md is embedded");
+        assert!(
+            auth.content.contains("`SuperGrok period · N%`"),
+            "02-authentication.md must screenshot SuperGrok period · N% on the compact bar"
+        );
+        assert!(
+            !auth
+                .content
+                .contains("`included SuperGrok period limits · N%`"),
+            "02-authentication.md must not screenshot included SuperGrok period limits as the compact chip"
+        );
+        assert!(
+            !auth.content.contains("free SuperGrok"),
+            "02-authentication.md must not call SuperGrok free"
+        );
+    }
+
+    /// Grok OSS Named contract: `/limits` user-guide keeps fail-open plus named
     /// commands. grok-oss limits is a client printout, not xAI billing truth.
+    /// This diverges from upstream xAI because FORK.md and the catalog fail-open
+    /// extra pin stay-supergrok, use-console, and named meter commands.
     #[test]
     fn user_guide_limits_names_fail_open_and_named_commands() {
         let auth = USER_GUIDE
@@ -522,6 +563,18 @@ mod tests {
                 "{name} must name use-console"
             );
             assert!(
+                content.contains("use-personal"),
+                "{name} must name use-personal"
+            );
+            assert!(
+                content.contains("use-business"),
+                "{name} must name use-business"
+            );
+            assert!(
+                content.contains("supergrok_identity"),
+                "{name} must name the limits_pins.json field supergrok_identity"
+            );
+            assert!(
                 content.contains("limits_pins.json"),
                 "{name} must name the limits_pins.json sidecar"
             );
@@ -541,8 +594,10 @@ mod tests {
         assert!(
             slash.content.contains("meter included")
                 && slash.content.contains("dollar-credits")
-                && slash.content.contains("refresh"),
-            "04-slash-commands.md must name meter included|dollar-credits|console|combined and refresh"
+                && slash.content.contains("refresh")
+                && slash.content.contains("--help")
+                && slash.content.contains("--use-credits"),
+            "04-slash-commands.md must name meter included|dollar-credits|console|combined, refresh, --help, and --use-credits"
         );
         assert!(
             slash.content.contains("preferred_method") && slash.content.contains("api_key"),
@@ -577,8 +632,9 @@ mod tests {
         );
     }
 
-    /// Named contract: product skills are not a Python runtime. Restack must
-    /// not drop this from user-guide `08-skills.md`.
+    /// Grok OSS Named contract: product skills are not a Python runtime. Restack must
+    /// not drop this from user-guide `08-skills.md`. This diverges from upstream xAI
+    /// because FORK.md land class 7 and catalog § 7 require that sentence.
     #[test]
     fn user_guide_skills_are_not_a_python_runtime() {
         let skills = USER_GUIDE
@@ -597,8 +653,18 @@ mod tests {
         assert!(
             skills.content.contains("implement/scripts/memory.py")
                 && skills.content.contains("validate-plan.py")
-                && skills.content.contains("session_reader.py"),
-            "08-skills.md must name the allowlisted intercept CLI forms"
+                && skills.content.contains("session_reader.py")
+                && skills.content.contains("grok-oss-implement-memory")
+                && skills.content.contains("grok-oss-plan-validate")
+                && skills.content.contains("grok-oss-session-reader"),
+            "08-skills.md must name the allowlisted intercept CLI forms and CLI bins"
+        );
+        assert!(
+            skills
+                .content
+                .contains("must not generate arbitrary Python or Bash")
+                || skills.content.contains("must not generate Python or Bash"),
+            "08-skills.md must say skills must not generate Python or Bash and exec it"
         );
         assert!(
             skills.content.contains("docx")
@@ -659,8 +725,9 @@ mod tests {
         );
     }
 
-    /// Contract: `/rebuild` documents the sibling previous-binary rollback and
-    /// staged-only compile in complete sentences.
+    /// Grok OSS: `/rebuild` documents sibling grok-oss.prev rollback and staged-only
+    /// compile in complete sentences. This diverges from upstream xAI because FORK.md
+    /// `/rebuild` extras and the catalog user-guide pin require that copy.
     #[test]
     fn user_guide_rebuild_documents_prev_binary_rollback_and_staged_index() {
         let slash = USER_GUIDE
@@ -688,10 +755,32 @@ mod tests {
                 && slash.content.contains("queued prompts"),
             "04-slash-commands.md must say /rebuild keeps the unsent draft and queued prompts"
         );
+        assert!(
+            slash.content.contains("/proc/<pid>/exe") && slash.content.contains("inode"),
+            "04-slash-commands.md must say Unix exec keeps PID and ps start time, so inode is how you tell the live image restarted"
+        );
+        assert!(
+            slash.content.contains("identity chrome")
+                && slash.content.contains("ps` fork time is not the signal"),
+            "04-slash-commands.md must say the grok-oss version plus git SHA is the relaunch signal, not ps fork time"
+        );
+        assert!(
+            slash
+                .content
+                .contains("Stock Grok Build is a different binary"),
+            "04-slash-commands.md must say stock Grok Build is not updated by grok-oss /rebuild"
+        );
+        assert!(
+            slash
+                .content
+                .contains("This TUI still exec-replaces while nested work is live"),
+            "04-slash-commands.md must say this TUI exec-replaces even while nested work is live"
+        );
     }
 
-    /// Named contract: operator-facing resume / `--version` examples use
-    /// `grok-oss`, never upstream `grok`.
+    /// Grok OSS Named contract: operator-facing resume / `--version` examples use
+    /// `grok-oss`, never upstream `grok`. This diverges from upstream xAI because
+    /// FORK.md and catalog class 1 pin CLI identity in the user-guide.
     #[test]
     fn user_guide_resume_and_version_examples_use_grok_oss() {
         let getting_started = USER_GUIDE
@@ -734,7 +823,43 @@ mod tests {
         }
     }
 
-    /// `/unstick` is documented as a new slash and is not `/resume`.
+    /// Grok OSS Named contract: `/metadata` documents serving-path fingerprints
+    /// (Chat Completions `system_fingerprint` and language-models fields).
+    /// Fingerprint is not a SHA of the weights and is not on the status bar.
+    /// This diverges from upstream xAI because FORK.md and the catalog official
+    /// serving-path fingerprints extra pin Surmount persist and guide copy.
+    #[test]
+    fn user_guide_metadata_documents_serving_fingerprints() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("### `/metadata`"),
+            "04-slash-commands must document /metadata"
+        );
+        assert!(
+            slash.content.contains("system_fingerprint")
+                && slash.content.contains("language-models"),
+            "04-slash-commands /metadata must name system_fingerprint and language-models fields"
+        );
+        assert!(
+            slash.content.contains("not a SHA of the weights"),
+            "04-slash-commands must say fingerprint is not a SHA of the weights"
+        );
+        assert!(
+            slash.content.contains("not on the status bar"),
+            "04-slash-commands must say serving fingerprints are not on the status bar"
+        );
+        assert!(
+            slash.content.contains("grok-4.6-20260812"),
+            "04-slash-commands must warn not to invent dated slugs"
+        );
+    }
+
+    /// Grok OSS: `/unstick` is documented as a new slash and is not `/resume`.
+    /// This diverges from upstream xAI because FORK.md and the catalog Nested overlay
+    /// hang / `/unstick` extra pin that distinct slash.
     #[test]
     fn user_guide_unstick_is_not_resume() {
         let slash = USER_GUIDE
@@ -769,11 +894,35 @@ mod tests {
         );
     }
 
-    /// Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
-    /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
-    /// Notes (`A`) is gone. Empty `a` does not Approve.
+    /// Operator: Ctrl+Enter should only act like Shift+Enter if interjection
+    /// is not appropriate. Guide and FORK must say when it interjects.
     #[test]
-    fn user_guide_plan_mode_ctas_are_approve_clarify_revise_exit() {
+    fn user_guide_ctrl_enter_interjects_when_appropriate() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("interjects when interjection is appropriate")
+                && content.contains("otherwise inserts a newline"),
+            "03-keyboard-shortcuts.md must define when Ctrl+Enter interjects: {content}"
+        );
+        assert!(
+            content.contains("L3 specialist overlay")
+                && content.contains("idle")
+                && content.contains("composer is empty"),
+            "03-keyboard-shortcuts.md must say when interject is not appropriate"
+        );
+    }
+
+    /// Grok OSS Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
+    /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
+    /// Notes (`A`) is gone. Empty `a` does not Approve. This diverges from upstream
+    /// xAI because FORK.md class 4 and the catalog four idle plan CTAs pin Clarify
+    /// only after Comment.
+    #[test]
+    fn user_guide_plan_mode_idle_ctas_are_approve_comment_revise_exit() {
         let plan = USER_GUIDE
             .iter()
             .find(|d| d.filename == "19-plan-mode.md")
@@ -829,9 +978,208 @@ mod tests {
         );
     }
 
-    /// Named contract: implement-loop effort in user-guide `05-configuration`
+    /// Grok OSS Named contract: `/plan --soft` docks Isolated Preview for a new
+    /// feature. It does not enter plan mode. It does not park L1. It does
+    /// not enqueue the description as a Prompt. Present is not Approve.
+    /// Nested work stays Working. `--soft` is not the queue hold token.
+    /// Empty Enter never Approves. This diverges from upstream xAI because
+    /// FORK.md and catalog `/plan --soft` pin Isolated Preview, not plan mode.
+    #[test]
+    fn user_guide_plan_soft_docks_isolated_preview() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash.content.contains("/plan --soft"),
+            "04-slash-commands.md must document /plan --soft"
+        );
+        assert!(
+            slash.content.contains("Isolated Preview"),
+            "04-slash-commands.md must say /plan --soft docks Isolated Preview"
+        );
+        assert!(
+            slash.content.contains("does not enter plan mode"),
+            "04-slash-commands.md must say /plan --soft does not enter plan mode"
+        );
+        assert!(
+            slash.content.contains("not the queue hold token"),
+            "04-slash-commands.md must say --soft is not the queue hold token"
+        );
+        assert!(
+            slash.content.contains("Present is not Approve"),
+            "04-slash-commands.md must keep present is not Approve"
+        );
+        assert!(
+            slash.content.contains("Empty Enter never Approves"),
+            "04-slash-commands.md must keep empty Enter never Approves"
+        );
+        assert!(
+            slash.content.contains("Nested subagents stay Working"),
+            "04-slash-commands.md must say nested subagents stay Working"
+        );
+        assert!(
+            slash.content.contains("/plan --soft add feature"),
+            "04-slash-commands.md must show /plan --soft add feature"
+        );
+        assert!(
+            !slash.content.contains("still enters plan mode"),
+            "04-slash-commands.md must not say /plan --soft still enters plan mode"
+        );
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            plan.content.contains("/plan --soft"),
+            "19-plan-mode.md must document /plan --soft"
+        );
+        assert!(
+            plan.content.contains("/plan --soft add feature"),
+            "19-plan-mode.md must show /plan --soft add feature"
+        );
+        assert!(
+            plan.content.contains("does not enter plan mode"),
+            "19-plan-mode.md must say /plan --soft does not enter plan mode"
+        );
+        assert!(
+            plan.content.contains("not the queue hold token"),
+            "19-plan-mode.md must say --soft is not the queue hold token"
+        );
+        assert!(
+            !plan.content.contains("also enters plan mode"),
+            "19-plan-mode.md must not say /plan --soft add feature also enters plan mode"
+        );
+        assert!(
+            plan.content.contains("re-reads session")
+                && plan.content.contains("plan.md")
+                && plan.content.contains("first-draft snapshot"),
+            "19-plan-mode.md must say Isolated Preview re-reads session plan.md after Revise, \
+             not the first-draft snapshot"
+        );
+        assert!(
+            plan.content.contains("After Plan Exit")
+                && plan.content.contains("Esc:close")
+                && plan.content.contains("`/start`")
+                && plan.content.contains("`/unstick`")
+                && plan.content.contains("leave parked Isolated Preview"),
+            "19-plan-mode.md must say after Plan Exit, Esc:close /start /unstick leave parked Isolated Preview"
+        );
+        assert!(
+            slash.content.contains("After Plan Exit")
+                && slash.content.contains("leaves parked Isolated Preview")
+                && slash.content.contains("`/start` is not `/resume`"),
+            "04-slash-commands.md must say after Plan Exit, /start leaves Isolated Preview and is not /resume"
+        );
+        assert!(
+            plan.content.contains("Empty Enter never Approves")
+                && slash.content.contains("Empty Enter never Approves"),
+            "user-guide must keep empty Enter never Approves after Plan Exit"
+        );
+        assert!(
+            slash.content.contains("plan-update turn")
+                && plan.content.contains("plan-update turn")
+                && slash.content.contains("why the agent stopped"),
+            "user-guide must say `/plan` with extra Human text submits a plan-update turn \
+             and does not only dock leftover Isolated Preview"
+        );
+    }
+
+    /// Operator: "/plan never submits, it just pulls up the stale plan."
+    /// User-guide must say `/plan` with extra Human text submits a plan-update
+    /// turn. Bare `/plan` still docks Isolated Preview from current disk.
+    #[test]
+    fn user_guide_plan_slash_with_body_submits_plan_update() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            slash.content.contains("plan-update turn")
+                && slash.content.contains(
+                    "update the plan with what was accomplished and all that remains please"
+                ),
+            "04-slash-commands.md must say `/plan` with extra Human text submits a plan-update turn"
+        );
+        assert!(
+            plan.content.contains("plan-update turn")
+                && plan.content.contains("does not only pull up a stale plan"),
+            "19-plan-mode.md must say `/plan` with extra Human text submits a plan-update turn"
+        );
+        assert!(
+            slash.content.contains("prompt write-ahead log")
+                && plan.content.contains("prompt write-ahead log"),
+            "user-guide must say the plan-update submit writes the prompt write-ahead log"
+        );
+        assert!(
+            slash.content.contains("Empty Enter never Approves")
+                && plan.content.contains("Empty Enter never Approves"),
+            "user-guide must keep empty Enter never Approves"
+        );
+    }
+
+    /// Operator: after Plan Exit, Isolated Preview must not wedge. `/start`
+    /// continues interrupted work. Esc:close / `/start` / `/unstick` leave
+    /// the pane. Painted body is this session's disk plan.md.
+    #[test]
+    fn user_guide_plan_exit_start_leaves_isolated_preview() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            slash.content.contains("After Plan Exit")
+                && slash.content.contains("leaves parked Isolated Preview")
+                && slash.content.contains("paused or interrupted work"),
+            "04-slash-commands.md must say /start after Plan Exit leaves Isolated Preview and continues interrupted work"
+        );
+        assert!(
+            slash.content.contains("`/start` is not `/resume`"),
+            "04-slash-commands.md must keep /start distinct from /resume"
+        );
+        assert!(
+            plan.content.contains("Esc:close")
+                && plan.content.contains("leave parked Isolated Preview")
+                && plan.content.contains("TECH.md snapshot"),
+            "19-plan-mode.md must say Esc:close leaves Isolated Preview and must not keep a leftover TECH.md snapshot"
+        );
+        assert!(
+            plan.content.contains("Empty Enter never Approves"),
+            "19-plan-mode.md must keep empty Enter never Approves"
+        );
+        assert!(
+            plan.content.contains("chrome must not stay plan")
+                && slash.content.contains("chrome must not stay plan"),
+            "user-guide must say after Plan Exit with Isolated Preview closed, chrome must not stay plan"
+        );
+        assert!(
+            plan.content.contains("`/plan` or `/plan --soft`")
+                && slash.content.contains("`/plan` or `/plan --soft`")
+                && plan.content.contains("must not swallow `/plan`")
+                && slash.content.contains("must not swallow `/plan`"),
+            "user-guide must say /plan after Exit docks Isolated Preview and compact must not swallow /plan"
+        );
+        assert!(
+            plan.content
+                .contains("must not stay parked on leftover present")
+                && plan.content.contains("if mill rewrote it")
+                && plan.content.contains("TECH.md persist overwrite"),
+            "19-plan-mode.md must say Isolated Preview does not stay parked on leftover present after mill work continues"
+        );
+    }
+
+    /// Grok OSS Named contract: implement-loop effort in user-guide `05-configuration`
     /// is thoroughness. It is not reviewer fan-out and not how many Review
-    /// rows to launch.
+    /// rows to launch. This diverges from upstream xAI because FORK.md and AGENTS.md
+    /// one-review-job-per-slice pin effort as thoroughness, not reviewer count.
     #[test]
     fn user_guide_implement_effort_is_thoroughness_not_reviewer_fan_out() {
         let config = USER_GUIDE
@@ -854,10 +1202,11 @@ mod tests {
         );
     }
 
-    /// Named contract: leftover operator-facing CLI examples for this tree
+    /// Grok OSS Named contract: leftover operator-facing CLI examples for this tree
     /// use `grok-oss`, not bare `grok sessions` / `grok login` / `grok mcp add`
     /// and similar operator commands. Official xAI `grok` product mentions and
-    /// `~/.grok` paths are not this contract.
+    /// `~/.grok` paths are not this contract. This diverges from upstream xAI
+    /// because catalog class 1 requires grok-oss in operator CLI examples.
     #[test]
     fn user_guide_operator_cli_examples_use_grok_oss() {
         const FORBIDDEN: &[&str] = &[
@@ -922,10 +1271,12 @@ mod tests {
         );
     }
 
-    /// Named contract: user-guide describes a machine console API key for
+    /// Grok OSS Named contract: user-guide describes a machine console API key for
     /// host surmount-1, install under that host grok home, no guest git,
     /// GPG sign on the laptop, attach SSH + tmux as user grok, and L0 as
-    /// a different product from pager /dashboard.
+    /// a different product from pager /dashboard. This diverges from upstream
+    /// xAI because FORK.md `/running` vs L0 and the catalog L0 machine console
+    /// API key extra pin that host key.
     #[test]
     fn user_guide_machine_console_api_key_for_surmount_1() {
         let auth = USER_GUIDE

@@ -55,7 +55,7 @@ This is **not** last-session-on-start, and it is **not** the `/resume` picker.
 
 When a mid-turn is interrupted in a cancel-resumable way, Grok OSS may write `canceled_turn_resume.json` with the in-flight prompt identity (not secrets). On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`** is on (default **true**, Settings → Session → **Continue interrupted turn on restart**), Grok OSS re-queues that prompt once and clears the marker.
 
-**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, `/rebuild` mid-turn before self re-exec, and fearless global pause when it cancels a running turn (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted).
+**Writes the marker:** explicit cancel (`Esc` / `[stop]`), graceful quit while a turn is running, and fearless global pause when it cancels a running turn (`Ctrl+Shift+Space`, status `[pause]` / `[resume]` when painted). Mid-turn `/rebuild` does not write this marker and does not cancel the parent; the new TUI adopts the live turn like a disconnect.
 
 **Does not write a durable cancel-resume marker:**
 
@@ -74,6 +74,7 @@ Do not confuse these:
 | `/start` | Starts paused or interrupted work in the current session. Not the picker. |
 | `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Human line. |
 | Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
+| L0 GUI | `grok-oss gui`. Laptop coordinator over that window list. Not `/dashboard` and not `/running`. |
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 
@@ -319,6 +320,9 @@ grok-oss running
 
 # Same filtered rows, safe fields only
 grok-oss running --json
+
+# L0 coordinator (safe JSON; not /dashboard and not /running)
+grok-oss gui
 ```
 
 `grok-oss running` is not `grok-oss sessions`. The sessions subcommand is disk history (list and search). `/rebuild` still signals each live grok-oss PID once (dedupe by PID) after two windows can share one conversation.

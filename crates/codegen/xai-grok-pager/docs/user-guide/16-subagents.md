@@ -332,6 +332,7 @@ When you open a subagent (from a scrollback block or the tasks pane), the parent
 - Title bar inside the frame: status icon (spinner / ✓ / ✗), label + bold description + model, optional "resumed"/"forked" badge, live activity · elapsed time, and [✗] close button.
 - The child's own scrollback, thinking, tool calls, and (when this is an L2 coordinator) a composer render inside the frame.
 - Typing in an L2 coordinator overlay is a question or clarify to that L2. It is a mid-turn ask on that L2 session. It does not go to the main thread, and it does not land as a user message on a live L3 specialist.
+- From the main thread (L1), text that uniquely names a live L2 is a soft interject (`x.ai/interject`) into that L2. You do not have to kill the L2, wait for it to exit, or open the nested overlay. The overlay still works when you want it. Do not barge into an L3 unless you explicitly target that specialist. The product still refuses operator chat on L3.
 - L3 specialist overlays stay observational. Specialists are not interrupted by operator chat. Ask the coordinator from the L2 view instead.
 - Nesting stays: the main-thread list shows L2 coordinators only, plus how many live L3 specialists each is using. L2 and L3 are not flattened into one list.
 

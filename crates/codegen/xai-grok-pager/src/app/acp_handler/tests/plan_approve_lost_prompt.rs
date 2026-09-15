@@ -1,6 +1,8 @@
-//! Surmount / grok-oss fork (ours). Named tests in this file are
+//! Grok OSS / Surmount fork (ours). Named tests in this file are
 //! **contracts**, not optional chrome. Do not delete or weaken them on
-//! recon / onto / import.
+//! recon / onto / import. This diverges from upstream xAI because FORK.md
+//! lost-prompt extra and the catalog Clickable Approve table pin that click
+//! Approve must not drop the Human-box prompt.
 //!
 //! Clickable Approve on an isolated present must not lose a Human-box
 //! prompt. Unit tests that only call `AgentView::approve_plan` or
@@ -15,9 +17,8 @@
 //! typed string. Leftover composer text without an implement payload is
 //! also a miss (typed after an empty present, stash does not match).
 //!
-//! Docs leftover (do not edit those files from this slice):
-//! `FORK.md` Land checklist and `doc/dev/upstream-regression-filters.md`
-//! must catalog these function names.
+//! Catalog: `FORK.md` Land checklist and
+//! `doc/dev/upstream-regression-filters.md` name these functions.
 
 use super::*;
 use crate::app::actions::{Action, Effect};
@@ -62,12 +63,18 @@ fn isolated_present(
     tool_call_id: &str,
     plan: &str,
 ) -> tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>> {
-    {
+    let session_id = {
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_pending_tool(agent, tool_call_id, "CreatePlan");
         agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
-    }
-    let (ext, rx) = make_exit_plan_ext_with_tool_call_id(tool_call_id, Some(plan));
+        agent
+            .session
+            .session_id
+            .as_ref()
+            .map(|s| s.0.to_string())
+            .unwrap_or_else(|| "sess-1".into())
+    };
+    let (ext, rx) = make_exit_plan_ext_for_session(&session_id, tool_call_id, Some(plan));
     assert!(
         handle_exit_plan_mode(ext, app),
         "isolated present must park the live waiter and dock the pane"
@@ -275,10 +282,11 @@ fn assert_acp_approved_notes_not_in_feedback(
     );
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Case A: text already in the Human box at isolated present (stash match).
 /// Click Approve via App handle_input, then dispatch. The prompt must not
-/// vanish into an empty composer with no Interject copy.
+/// vanish into an empty composer with no Interject copy. This diverges from
+/// upstream xAI because FORK.md lost-prompt extra and the catalog Clickable Approve table.
 #[test]
 fn isolated_present_preview_click_approve_does_not_drop_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -318,10 +326,12 @@ fn isolated_present_preview_click_approve_does_not_drop_human_box_prompt() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Case B: composer empty at present, then type in isolated Preview, then
 /// click Approve. Stash does not match. The typed string must still go on
-/// the implement turn. Leftover composer without Interject is a miss.
+/// the implement turn. Leftover composer without Interject is a miss. This
+/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
 #[test]
 fn isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -360,9 +370,11 @@ fn isolated_present_preview_typed_after_present_click_approve_sends_human_box_pr
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// Prompt-focused: Comment CTA (same as Tab to Prompt), type the same
-/// Human-box string, click Approve through App handle_input + dispatch.
+/// Human-box string, click Approve through App handle_input + dispatch. This
+/// diverges from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
 #[test]
 fn isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt() {
     let mut app = make_app_with_agent("sess-1");
@@ -410,10 +422,12 @@ fn isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt() 
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Surmount / grok-oss fork (ours). Named tests are contracts.
+/// Grok OSS / Surmount fork (ours). Named tests are contracts.
 /// The live event loop is handle_input then dispatch. Interject must
 /// carry the typed prompt and paint UserPrompt / interjection_prompt
-/// scrollback. ACP stays `"approved"` with no feedback field.
+/// scrollback. ACP stays `"approved"` with no feedback field. This diverges
+/// from upstream xAI because FORK.md lost-prompt extra and the catalog Clickable
+/// Approve table.
 #[test]
 fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     let mut app = make_app_with_agent("sess-1");
@@ -460,3 +474,433 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);
 }
+
+/// Grok OSS: Isolated Preview Human text is a Human turn, not only plan
+/// comment 1. Operator: soft planning is broken; lost that prompt; nothing
+/// happened; cannot submit the prompt now. Empty Enter never Approves.
+/// Click Approve still completes the live waiter. This diverges from
+/// upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
+#[test]
+fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
+    let mut app = make_app_with_agent("sess-1");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let mut rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nEnter then Approve\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+    }
+
+    let empty_enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty_enter);
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .plan_approval_view
+            .is_some(),
+        "empty Enter never Approves"
+    );
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start a Prompt; effects={empty_effects:?}"
+    );
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "empty Enter must leave the live waiter parked"
+    );
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(
+        matches!(
+            enter,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::ActionThenForward(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "Isolated Preview Human Enter must send, not only stash plan comment 1; got {enter:?}"
+    );
+    let enter_effects = dispatch_outcome(&mut app, enter);
+    assert!(
+        enter_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "Isolated Preview Human Enter must dispatch a send; effects={enter_effects:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "Isolated Preview Enter must not Approve"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Human send continues mill: Isolated Preview must not stay parked on leftover present"
+        );
+    }
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "Human send must leave the live waiter parked"
+    );
+
+    let _ = crate::app::dispatch::dispatch(Action::ShowPlan, &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must reopen Isolated Preview so Comment then Approve can run"
+        );
+    }
+
+    let after = click_approve_via_app(&mut app);
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .plan_approval_view
+            .is_none(),
+        "click Approve must decide the parked plan"
+    );
+    let _ = after;
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+fn notes_queued_as_prompt(app: &AppView, after: &AfterClickApprove, needle: &str) -> bool {
+    let queued = app
+        .agents
+        .get(&AgentId(0))
+        .unwrap()
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text.contains(needle) && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD));
+    let send_prompt = after.effects.iter().any(|effect| match effect {
+        Effect::SendPrompt { text, .. } => {
+            text.contains(needle) && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        }
+        Effect::SendPromptNow { .. } => true,
+        _ => false,
+    });
+    queued || send_prompt
+}
+
+/// Grok OSS: Isolated Preview Approve with notes in the plan composer must submit
+/// those notes with Approve, not queue them as a Prompt, and not drop
+/// them. Empty Enter never Approves. This diverges from upstream xAI because
+/// FORK.md lost-prompt extra and the catalog Clickable Approve table.
+#[test]
+fn isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt() {
+    let mut app = make_app_with_agent("sess-1");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nApprove with notes\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview),
+            "Isolated Preview starts Preview"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview pane must be open"
+        );
+    }
+
+    let empty_enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty_enter);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves"
+        );
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "empty Enter must not queue a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start a Prompt; effects={empty_effects:?}"
+    );
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "click Approve must decide the parked plan"
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(HUMAN_BOX_PROMPT)
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with notes must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
+        "Approve with notes must Interject, not SendPrompt or queue a Prompt; effects={:?} pending={:?}",
+        after.effects,
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+/// Operator: Isolated Preview vanished after present, so Comment then
+/// Approve could not run. Present must keep Isolated Preview docked with
+/// idle Approve / Comment / Revise / Exit. Empty Enter never Approves.
+#[test]
+fn isolated_preview_stays_after_present_so_comment_then_approve_can_run() {
+    let mut app = make_app_with_agent("sess-stay-present");
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nPresent must keep Isolated Preview\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "present is not Approve"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay after present so Comment then Approve can run"
+        );
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(
+            viewer.feedback_active() || viewer.plan_ref().is_some_and(|p| p.show_action_buttons),
+            "Isolated Preview idle CTAs must stay armed after present"
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.prompt_intent),
+            Some(PlanPromptIntent::Revise)
+        );
+    }
+    let empty = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+            "empty Enter never Approves and must not vanish Isolated Preview"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    std::mem::drop(rx);
+}
+
+/// Operator: "it still doesn't do approve with comment workflow."
+/// Comment CTA, then composer notes, then click Approve submits as
+/// Approve-with-notes, not only as a Human SendPrompt. Isolated Preview
+/// Human Enter without Comment stays a Human send (lost-prompt).
+#[test]
+fn isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt() {
+    let mut app = make_app_with_agent("sess-comment-approve");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nComment then Approve\n",
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay after present so Comment then Approve can run"
+        );
+    }
+
+    arm_comment_and_approve_hit_rects(&mut app);
+    let comment_outcome = app.handle_input(&mouse_down(32, 20));
+    assert!(
+        !matches!(
+            comment_outcome,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "Comment CTA is the hub; it must not Approve or send, got {comment_outcome:?}"
+    );
+    let _ = dispatch_outcome(&mut app, comment_outcome);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Prompt)
+        );
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.prompt_intent),
+            Some(PlanPromptIntent::Comment)
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Comment CTA must not vanish Isolated Preview"
+        );
+    }
+
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "click Approve must decide the parked plan"
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(HUMAN_BOX_PROMPT)
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with Comment notes must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
+        "Comment then Approve must Interject, not SendPrompt; effects={:?} pending={:?}",
+        after.effects,
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+/// `/view-plan` must re-open Isolated Preview from current disk plan.md
+/// after Isolated Preview was closed. Comment then Approve still works.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_closed() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "view-plan-reopen-iso";
+
+    let mut app = make_app_with_agent(sid);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.to_string().into());
+        agent.session.cwd = cwd;
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nReopen from disk\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.line_viewer.is_some());
+        agent.cancel_line_viewer();
+        assert!(
+            agent.line_viewer.is_none(),
+            "fixture: Isolated Preview closed"
+        );
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "closing Isolated Preview must keep the live waiter"
+        );
+    }
+
+    let _ = crate::app::dispatch::dispatch(Action::ShowPlan, &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must re-open Isolated Preview from current disk plan.md"
+        );
+        let painted = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .unwrap_or_default();
+        assert!(
+            painted.contains("Reopen from disk") || painted.contains("Isolated plan.md"),
+            "/view-plan must paint current disk plan.md; got {painted:?}"
+        );
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.response_tx.is_some()),
+            "/view-plan must keep the live waiter so Comment then Approve can run"
+        );
+    }
+
+    arm_comment_and_approve_hit_rects(&mut app);
+    let _ = app.handle_input(&mouse_down(32, 20));
+    type_into_human_box(&mut app, HUMAN_BOX_PROMPT);
+    let after = click_approve_via_app(&mut app);
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+

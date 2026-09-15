@@ -495,7 +495,7 @@ impl AgentView {
                         .is_some_and(|child| !child.session.state.is_busy());
                     (info.is_running() && idle).then(|| info.subagent_id.to_string())
                 });
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 if let Some(subagent_id) = kill_idle_listed {
                     return InputOutcome::Action(Action::KillSubagent(subagent_id));
                 }
@@ -556,7 +556,7 @@ impl AgentView {
                     .get(child_sid)
                     .is_some_and(|c| c.nested_overlay_esc_dismisses())
             {
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
             if child_in_scrollback
@@ -564,7 +564,7 @@ impl AgentView {
                 && key.kind != KeyEventKind::Release
                 && key!('q').matches(key)
             {
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
@@ -2201,6 +2201,97 @@ mod background_and_tasks_shortcut_tests {
             parent.subagent_views.contains_key("l3-gate"),
             "missing L3 view must be created so the click is not a dead control"
         );
+    }
+
+    fn draw_nested_overlay_hits(parent: &mut super::super::AgentView) {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let registry = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+    }
+
+    /// Named contract: L3 overlay `[x]` pops one overlay to the parent L2
+    /// view. It must not drop to L1. It must not cancel the L2 or L3
+    /// process. Overlay-dismiss is not Stop.
+    #[test]
+    fn l3_overlay_x_returns_to_l2_not_l1() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, l2_sid) = parent_with_overlay_child("l2-coord", 1);
+        let mut l3 = overlay_info("l3-gate", "l2-coord", 2);
+        l3.is_background = true;
+        parent.subagent_sessions.insert("l3-gate".into(), l3);
+        let mut l3_view = make_agent();
+        l3_view.session.session_id = Some(agent_client_protocol::SessionId::new("l3-gate"));
+        l3_view.session.state = crate::app::agent::AgentState::TurnRunning;
+        parent.insert_subagent_view("l3-gate".into(), Box::new(l3_view));
+        parent.open_subagent_fullscreen("l3-gate".into());
+        assert_eq!(
+            parent.active_subagent.as_deref(),
+            Some("l3-gate"),
+            "setup must show the L3 overlay on top of L2"
+        );
+        draw_nested_overlay_hits(&mut parent);
+        let close = parent
+            .hit_subagent_frame_close
+            .rect
+            .expect("open L3 overlay must paint frame [x]");
+        let outcome = parent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: close.x,
+                row: close.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "L3 overlay [x] must dismiss one overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::CancelTurn | Action::KillSubagent(_))
+            ),
+            "L3 overlay [x] must not cancel L2 or L3, got {outcome:?}"
+        );
+        assert_eq!(
+            parent.active_subagent.as_deref(),
+            Some(l2_sid.as_str()),
+            "L3 overlay [x] must return to the L2 overlay, not L1"
+        );
+        let l2 = parent.subagent_views.get(&l2_sid).expect("l2");
+        assert!(
+            l2.session.state.is_turn_running(),
+            "L2 must keep running after L3 overlay [x]"
+        );
+        assert!(!l2.session.state.is_cancelling());
+        let l3 = parent.subagent_views.get("l3-gate").expect("l3");
+        assert!(
+            l3.session.state.is_turn_running(),
+            "L3 must keep running after overlay dismiss"
+        );
+        assert!(!l3.session.state.is_cancelling());
+        assert!(l3.cancel_trigger_hint.is_none());
     }
 
     #[test]

@@ -762,6 +762,7 @@ impl ToolRegistryBuilder {
             >();
         b.register_reminder(crate::reminders::LspDiagnosticsReminder);
         b.register_reminder(crate::reminders::TaskCompletionReminder);
+        b.register_reminder(crate::reminders::WritePathsAssignmentReminder);
         b.register_reminder(SkillDiscoveryReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);

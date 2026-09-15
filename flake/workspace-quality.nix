@@ -33,8 +33,9 @@ let
   # (see https://github.com/NixOS/nix/issues/5646 accessed: 2026-08-23).
   # Override CARGO_BUILD_JOBS=2 from commonArgs (that cap is for the
   # low-memory package sandbox). Advertise 64 Nix cores on the builder
-  # and keep cargo at 32 so one workspace clippy is not 8-wide and is
-  # less likely to OOM than 64 rustc processes at once.
+  # (`--cores 64`). Cargo jobs are 64 from those cores. Every cargo
+  # on this path is `nice -n 19` (lowest priority; 19 is as high as
+  # nice goes).
   # nextest compile links every test binary. 32 parallel mold links
   # were SIGKILL'd (ld returned 137; 128+9) under the builder
   # nix-daemon 32GiB MemoryMax. Host MemAvailable is larger;
@@ -46,41 +47,43 @@ let
   # skip LLVM, so codegen-units does not fan out a Checking rustc;
   # --release still type-checks at opt-level 3 on one thread per
   # crate. Use the same dev profile as local `just test-clippy`.
-  # Pass cargo --jobs on argv from NIX_BUILD_CORES (nix --cores),
-  # n = min(NIX_BUILD_CORES, 32). Do not floor from CARGO_BUILD_JOBS:
-  # crane preBuild can copy NIX_BUILD_CORES=1 into that env and then
-  # a 1-core assignment stays one rustc. If cores is 0 or 1, use 32
-  # so the remote quality gate is not a single clippy-driver. cargo
-  # fmt rejects --jobs; check/build/test get it. cargo nextest
-  # run uses CARGO_LINK_JOBS for --build-jobs (compile and link);
-  # nextest -j is test processes (CARGO_BUILD_JOBS). cargo 1.97.1
-  # has no global `cargo --jobs N` (tip:
-  # `check --jobs`). Put --jobs after the subcommand: `cargo check
-  # --jobs N`. Do not run `cargo clippy`: that is an external
-  # cargo-clippy binary. The outer cargo may start a 1-token GNU
-  # jobserver from available_parallelism() (often 1 in a Nix
-  # sandbox); inner `--jobs N` is then ignored and you get one
-  # clippy-driver. Workspace lint is builtin `cargo check` with
-  # RUSTC_WORKSPACE_WRAPPER=clippy-driver under a GNU make
-  # jobserver with $CARGO_BUILD_JOBS tokens. Drop Nix MAKEFLAGS
-  # first (may be 1 token), then make -j$CARGO_BUILD_JOBS.
-  # Never raise Nix max-jobs for this.
+  # Pass cargo --jobs on argv from NIX_BUILD_CORES (nix --cores).
+  # Do not floor from CARGO_BUILD_JOBS: crane preBuild can copy
+  # NIX_BUILD_CORES=1 into that env and then a 1-core assignment
+  # stays one rustc. Pin cargo jobs to 64 whenever cores is 64 or
+  # less (including 0, 1, and 2 through 63). Cap remains 64 when
+  # cores > 64. `--cores 64` then jobs 64 is the contract. cargo fmt
+  # rejects --jobs; check/build/test get it. cargo nextest run uses
+  # CARGO_LINK_JOBS for --build-jobs (compile and link); nextest -j
+  # is test processes (CARGO_BUILD_JOBS). cargo 1.97.1 has no global
+  # `cargo --jobs N` (tip: `check --jobs`). Put --jobs after the
+  # subcommand: `cargo check --jobs N`. Do not run `cargo clippy`:
+  # that is an external cargo-clippy binary. The outer cargo may
+  # start a 1-token GNU jobserver from available_parallelism()
+  # (often 1 in a Nix sandbox); inner `--jobs N` is then ignored
+  # and you get one clippy-driver. Workspace lint is builtin
+  # `cargo check` with RUSTC_WORKSPACE_WRAPPER=clippy-driver under
+  # GNU make -j$CARGO_BUILD_JOBS. Cargo must own $CARGO_BUILD_JOBS
+  # tokens; inheriting make's jobserver while also passing --jobs
+  # is how you get a few clippy-driver processes and idle cores.
+  # Drop Nix MAKEFLAGS first, then make -j$CARGO_BUILD_JOBS, then
+  # env -u MAKEFLAGS/MFLAGS/CARGO_MAKEFLAGS, then nice -n 19, then
+  # cargo. Never raise Nix max-jobs for this.
   workspaceCargoJobsFromCores = ''
-    cargoJobs="''${NIX_BUILD_CORES:-32}"
+    cargoJobs="''${NIX_BUILD_CORES:-64}"
     case "$cargoJobs" in
-      "" | *[!0-9]*) cargoJobs=32 ;;
+      "" | *[!0-9]*) cargoJobs=64 ;;
     esac
-    if [ "$cargoJobs" -gt 32 ]; then
-      cargoJobs=32
+    if [ "$cargoJobs" -gt 64 ]; then
+      cargoJobs=64
     fi
-    if [ "$cargoJobs" -lt 2 ]; then
-      cargoJobs=32
+    if [ "$cargoJobs" -le 64 ]; then
+      cargoJobs=64
     fi
     export CARGO_BUILD_JOBS="$cargoJobs"
     # Six concurrent mold links of workspace test binaries were
     # SIGKILL'd in one quality run (ld returned 137). Cap compile
-    # and link below clippy's 32 jobs. Host RAM is not the
-    # nix-daemon memory cgroup.
+    # and link at 4. Host RAM is not the nix-daemon memory cgroup.
     linkJobs="$CARGO_BUILD_JOBS"
     if [ "$linkJobs" -gt 4 ]; then
       linkJobs=4
@@ -96,7 +99,11 @@ let
       fi
       mk="''${TMPDIR:-/tmp}/workspace-cargo-jobserver.mk"
       {
-        printf 'all:\n\t+'
+        # Recursive `+` keeps make -j"$CARGO_BUILD_JOBS" in source.
+        # env -u drops the inherited jobserver so cargo is the
+        # $CARGO_BUILD_JOBS-token server, not a confused client.
+        # nice -n 19 is lowest priority (19 is as high as nice goes).
+        printf 'all:\n\t+env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 '
         printf '%q ' "$@"
         printf '\n'
       } > "$mk"
@@ -126,7 +133,7 @@ let
         "fortify3"
       ];
       enableParallelBuilding = true;
-      CARGO_BUILD_JOBS = "32";
+      CARGO_BUILD_JOBS = "64";
       CARGO_PROFILE = "dev";
       buildPhaseCargoCommand = ''
         ${workspaceCargoJobsFromCores}
@@ -152,7 +159,7 @@ let
         "fortify3"
       ];
       enableParallelBuilding = true;
-      CARGO_BUILD_JOBS = "32";
+      CARGO_BUILD_JOBS = "64";
       CARGO_PROFILE = "dev";
       # Same cargo steps as `just test`. nextest is not in commonArgs.
       # ripgrep is required: the receipt greps nextest.log with `rg -a -F
@@ -179,7 +186,7 @@ let
         unset NO_COLOR
         unset CARGO_TERM_COLOR
         unset OPENROUTER_API_KEY
-        cargo fmt --all -- --check
+        nice -n 19 cargo fmt --all -- --check
         clippyDriver="$(command -v clippy-driver)"
         if [ -z "$clippyDriver" ] || [ ! -x "$clippyDriver" ]; then
           echo "workspace-cargo-quality: clippy-driver not on PATH" >&2
@@ -198,7 +205,7 @@ let
         fi
         # nextest writes the final Summary line on stderr. stdout-only tee
         # leaves nextest.log without that line and the receipt exits 2.
-        CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" 2>&1 | tee "$nextest_log"
+        CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" nice -n 19 cargo nextest run --workspace --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" 2>&1 | tee "$nextest_log"
         unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
         workspace_run_make_jobserver cargo test --workspace --doc --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_LINK_JOBS"
         summary="$(rg -a -F -n 'Summary [' "$nextest_log" | tail -n 1 || true)"

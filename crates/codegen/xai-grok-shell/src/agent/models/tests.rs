@@ -2294,6 +2294,7 @@ async fn identity_switch_clears_user_pick_latch() {
 /// the failover list.
 #[test]
 #[serial]
+// Grok OSS: hop proof. ModelsManager::sampling_config omits console while included SuperGrok period limits still have room. Rank helpers are not this proof. SuperGrok is paid.
 fn sampling_config_auto_use_omits_console_while_supergrok_included_headroom() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::AuthMode;
@@ -2376,6 +2377,7 @@ fn sampling_config_auto_use_omits_console_while_supergrok_included_headroom() {
 /// even when auto_use_included_limits is on and a SuperGrok session is live.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Stock preferred_method = api_key still pins console on ModelsManager::sampling_config. SuperGrok is paid.
 fn sampling_config_api_key_pin_keeps_console_primary() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{AuthMode, PreferredAuthMethod};

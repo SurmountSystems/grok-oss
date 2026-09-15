@@ -10,6 +10,7 @@ pub mod billing_credits_card;
 pub mod conversation;
 pub mod doom_loop;
 pub mod error;
+pub mod language_models;
 pub mod messages;
 pub mod provider_error;
 pub mod serde_helpers;
@@ -40,6 +41,10 @@ pub use self::error::{
     is_retryable_api_status, is_server_or_gateway_outage_status, is_transient_api_status,
     message_names_server_or_gateway_outage, outage_exhausted_user_message, parse_error_code,
     status_user_message, strip_api_error_status_prefix, user_facing_api_error_message,
+};
+pub use self::language_models::{
+    LanguageModelServing, LanguageModelsList, language_models_url_from_models_list_url,
+    parse_language_models_json,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

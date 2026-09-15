@@ -6,6 +6,19 @@ or code — not only here. Closed campaign history:
 
 ## Open
 
+- **Isolated Preview Human send, skill CLI bins, and grok-oss ULID store keys are in the tree; this running TUI is not that binary (2026-09-11).** Isolated Preview Human text is a Human turn and prompt WAL, not only plan comment 1. Non-empty Enter still sends while ride-Approve chrome is visible. Empty Enter never Approves. Product skills must not generate Python or Bash and exec it; grok-oss intercepts `memory.py` / `validate-plan.py` / `session_reader.py` and the CLI bins `grok-oss-implement-memory` / `grok-oss-plan-validate` / `grok-oss-session-reader` to Rust. New `session_plans` rows for a UUID wire id store a ULID. UUID leftover rows still load. Named tests: `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment`, `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible`, `isolated_preview_human_text_enter_appends_wal`, `implement_memory_snapshot_intercept_does_not_spawn_shell`, `grok_oss_implement_memory_cli_bin_intercept_does_not_spawn_shell`, `new_session_plan_row_for_uuid_session_stores_ulid_not_uuid`, `format_lists_ulid_before_uuid_when_primary`. This stock Grok Build debugger will not show Isolated Preview send until the Operator installs grok-oss and `/rebuild`s. Named cargo on horizon was not run. `just test-remote` stays operator-owned. Leftover UUID `session_plans` rows are not rewritten in place. Host overlay `~/.agents/skills` can still contain `memory.py`; grok-oss must not run it as Python. Report: `/home/hunter/.agents/reports/impl-soft-plan-skills-ulid-2026-09-11.md`.
+
+
+- **`/rebuild` adopt-like-disconnect is in the tree; this running TUI is not that binary (2026-09-11).** Mid-turn `/rebuild` no longer cancels the parent and no longer writes `canceled_turn_resume.json` for a still-live parent turn. The new TUI `--resume` adopts `runningPromptId` the same way a TUI disconnect does. Nested ids stay uncancelled. Idle completed turns still do not re-fire. A Human turn already in chat history is still not re-queued. Named tests: `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`, `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`. This stock Grok Build debugger will not show that resume until the Operator installs grok-oss and reopens. Named cargo on horizon was not the proof host. Leader `RelaunchForUpdate` drain is unchanged. Auto-resume after an error-terminal turn with no marker is still not shipped. Report: `/home/hunter/.agents/reports/l3-rebuild-resume-implement.md`.
+
+- **Eleven named nextest fails after the reliability slice (source 2026-09-10; leftover is quality proof and live TUI).** `just check-remote` reported 11 failed named tests (quality, not flake 502). Product edits restore those contracts without rewriting asserts: WAL restore occupancy must not drop missing Send/Interject; live `queue/changed` must not treat WAL Send as occupancy; mid-turn `/goal` interjects; `/compact` must clear the composer; HTTP 502 leftover `/implement` continues after compact; Enter expands a collapsed tool; recording height must fit spoken text; `/what` skill keeps Operator/Agent speaker labels. Named cargo on horizon is still forbidden. One `just check-remote` starts after those edits. `just test-remote` stays operator-owned. This Grok Build debugger will not show the pager fixes until the Operator installs grok-oss and reopens. Reports: `/home/hunter/.agents/reports/fix-nextest-11-reliability-regressions-2026-09-10.md`, `/home/hunter/.agents/reports/remaining-2026-09-10-nextest-11.md`.
+
+- **Reliability composer, `/limits` help, Ctrl+Enter, cold-start chrome, queued `/goal` (source 2026-09-10; leftover is live TUI and named cargo).** The tree now has named tests that quote the operator screenshot: composer Enter/send-now still clears while other work is live; `/limits --help` and hyphenated aliases including `--use-credits`; Ctrl+Enter interjects only when interjection is appropriate; header-timeout chrome names a cold-start class and keeps Retrying; queued `/goal` after Send now is GoalSet via send-now. Named tests: `enter_while_other_work_is_live_must_still_clear_composer`, `send_now_while_retrying_must_still_clear_composer`, `queued_prompt_edit_must_not_steal_later_send_clear`, `ctrl_enter_mid_turn_dispatches_send_interject`, `empty_ctrl_enter_mid_turn_does_not_send`, `limits_help_lists_named_words_and_hyphenated_aliases`, `limits_hyphenated_aliases_match_unhyphenated_words`, `header_timeout_is_named_cold_start_class_with_retry_path`, `queued_goal_send_now_is_goal_action_not_stuck_composer_string`, `user_guide_ctrl_enter_interjects_when_appropriate`. This L2 did not run cargo or rustc on this laptop and did not run `just test-remote`. `just install` and `/rebuild` stay operator-owned. This stock Grok Build TUI debugger is not the product under test. Some PTY e2e comments may still inject `CTRL_ENTER` as send-now. Existing prompt WAL, rebuild persist, occupancy-drop, and identity chrome tests were not deleted. Reports: `/home/hunter/.agents/reports/impl-reliability-composer-limits-interject-tests.md`, `/home/hunter/.agents/reports/remaining-2026-09-10-reliability-tests.md`.
+
+- **Leader AutoUpdate drain stays leftover (2026-09-09).** Nested hold before leader relaunch is not this rebuild-identity and stale-queue slice. TUI `/rebuild` still exec-replaces while nested work is live. Named drain tests stay `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect` and `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+
+- **This Grok Build window still needs left grok-oss `/rebuild` to show the identity and stale-queue fix (2026-09-09).** The source tree now shows grok-oss version plus git SHA after exec, occupancy-drops Human-turn queue rows even when memory is already non-empty, and keeps `resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone` on post-rebuild load. This stock Grok Build TUI 1.0.13 debugger is a different binary and does not pick up that chrome. Left grok-oss PID 88691 loads the fix only after that process `/rebuild`s or is restarted onto a newly installed `grok-oss`. Named `just test-remote` stays operator-owned. Report: `/home/hunter/.agents/reports/impl-rebuild-identity-and-stale-queue.md`.
+
 - **Remote operation performance (2026-09-03).** This nested overlay had wait/kill/get_output and no `spawn_subagent`. Load path: `apply_child_tool_policy` strips Task when `nested_spawn_allowed` is false (`child_depth >= max`). Operator `config.toml` has no `max_depth`. A remote `grok_build_settings.subagents_max_depth` of 1 no longer wins over the L1→L2→L3 default. Named tests: `resolve_max_depth_remote_one_does_not_block_l2_spawn`, `l2_grok_build_child_tool_policy_keeps_spawn_subagent`, `max_depth_child_tool_policy_strips_spawn_subagent_and_keeps_bash_lifecycle`. SSH TUI default draw cadence is 33ms when the display-refresh probe is skipped (`ssh_probe_skip_uses_slower_default_cadence`). Leftover: this running grok-oss binary still omits `spawn_subagent` until the Operator installs grok-oss and reopens the session; copying `enqueue.json` onto the remote grok home; the GPUI L0 window; grok-rate-limit HTTP cooldowns were already the shared flock store and were not changed this slice. Compaction `image_url` serialization belongs to the image L2. Report: `/home/hunter/.agents/reports/fix-remote-operation-performance.md`.
 
 - **Waiting for the model is not always a hang (shipped in source 2026-09-01).** Live nested wait, live sampler wait, queued `pending_prompts` (1 queued while nested still running), and false wait after nested ids already completed are distinct. `/unstick` does not auto-fire on a long live wait. Named tests: `waiting_for_the_model_is_not_idle_when_nested_subagent_still_running`, `waiting_for_the_model_is_not_idle_when_prompt_is_queued`, `parent_must_not_wait_for_the_model_after_waited_nested_already_completed`. This running grok-oss TUI will not show that wait-kind chrome until you install grok-oss and reopen the session. Named `just test-remote` stays operator-owned. The wait tool on the shell may still be Pending after chrome drops; this slice does not complete that ACP call.
@@ -73,7 +86,7 @@ or code — not only here. Closed campaign history:
 
 - **Task tracking system (open; Grok OSS product; named 2026-08-22).** Unique to this product, not GitHub. More formal than the session todo board. Less formal than Linear or GitHub issues. Local first always. Do not replace the session todo board (Ctrl+T, status chip `tasks N/M`). Do not shorten the name. The live HITL board is already there. Intended chrome is **not** shipped: tasks on a left sidebar, plan stays a right sidebar, like an AI-assisted Gantt chart in grok-oss. Durable rows already live in `$GROK_HOME/grok_oss.db` (`prompt_tasks`, drafts, templates, `prompt_exec_metrics`). That store already records tokens and honest wall duration on composer submit. It does not yet fill or average the estimate columns, and it has no occupancy column. This is not a second GitHub. Host `AGENTS.md` is not dual-pinned for this product name. Board `feat:task-tracking-system`. Report: `~/.agents/reports/feat-task-tracking-system.md`.
 
-- **2026-08-22 mid-turn Enter interjects (product shipped in source; process leftover).** Composer Enter with explaining-work text while a turn is running is `x.ai/interject` into this turn, not a serial `#1` queue row. Named `/queue /finish` still holds. Empty Enter does not Approve a plan. Ctrl+Enter is still cancel-and-send. **Process leftover:** L1 must treat that interjected user text as additive immediately (board, remaining pointer, spawn). Do not wait for idle. **Docs leftover:** `FORK.md` still says Ctrl+Enter never cancels; user-guide `03-keyboard-shortcuts` matches that stale story. Code and PTY say Ctrl+Enter is cancel-and-send; Enter is now interject. Live TUI needs rebuild/install. Report: `/home/hunter/.agents/reports/fix-prompt-queue-blocks-explain.md`. Law: `AGENTS.md` additive asks, mid-turn Enter is this turn.
+- **2026-08-22 mid-turn Enter interjects (product shipped in source; process leftover).** Composer Enter with explaining-work text while a turn is running is `x.ai/interject` into this turn, not a serial `#1` queue row. Named `/queue /finish` still holds. Empty Enter does not Approve a plan. **Ctrl+Enter interjects when appropriate** and otherwise inserts a newline (2026-09-10). Soft interject remaining chords are Ctrl+I, Apple Terminal Ctrl+O, VS Code family Ctrl+L, queue [Send now] on a plain prompt row, and empty-composer mid-turn Enter on a queued row. **Process leftover:** L1 must treat that interjected user text as additive immediately (board, remaining pointer, spawn). Do not wait for idle. Some PTY e2e comments still inject `CTRL_ENTER` as send-now. Live TUI needs rebuild/install. Report: `/home/hunter/.agents/reports/impl-ctrl-enter-newline-disable-multiline-2026-09-09.md`. Law: `AGENTS.md` additive asks, mid-turn Enter is this turn.
 
 - **2026-08-22 polish, billing honesty, sluggish nested agents, compact occupancy.** Pointer only. The inventory lives on the operator machine reports home at `~/.agents/reports/remaining-2026-08-22-incidents.md`. That report is not in git. `/polish` is a default Grok OSS skill (product tree `crates/codegen/xai-grok-bundle/skills/polish/`). SuperGrok is paid. grok-oss limits is a client printout, not xAI billing truth. Do not call any pool used up. Do not paste that inventory into D1.
 
@@ -111,11 +124,13 @@ or code — not only here. Closed campaign history:
   shows `(deleted)` until that process exits. Checklist:
   [`.agents/reports/d0-dogfood-checklist-2026-08-09.md`](.agents/reports/d0-dogfood-checklist-2026-08-09.md).
   Handoff: [`FORK.md`](FORK.md) § *Dogfood / next session handoff (2026-08-09)*.
-  **Shipped in source:** mid-turn `/rebuild` writes continue-interrupted-turn
-  (`canceled_turn_resume.json`) before re-exec; session load continues that
-  turn. Idle completed turns do not write a marker and do not re-fire the
-  last prompt. A leftover marker after a successful primary-turn finish is
-  dropped on load. Named tests:
+  **Shipped in source:** mid-turn `/rebuild` does not cancel the parent and
+  does not write `canceled_turn_resume.json` for a still-live parent turn;
+  the new TUI adopts the live turn like a disconnect. Idle completed turns
+  do not write a marker and do not re-fire the last prompt. A leftover
+  marker after a successful primary-turn finish is dropped on load. Named
+  tests:
+  `handle_rebuild_done_must_not_cancel_parent_so_session_load_adopts_like_disconnect`,
   `handle_rebuild_done_mid_turn_writes_cancel_resume_and_session_load_continues_the_turn`,
   `handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt`,
   `session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully`.
@@ -149,25 +164,26 @@ or code — not only here. Closed campaign history:
   `.agents/reports/live-tasks-2026-08-15.md`.
 
 - **ACP edit tools take a per-path write lock (shipped 2026-08-15;
-  spawn `write_paths` 2026-08-22).** `search_replace`, `apply_patch`,
-  `write`, OpenCode `edit`, and `hashline_edit` acquire the path
-  automatically as part of the tool call. Happy path is silent (no lock
-  argument). A held path is a tool error that names the holder and the
-  file. The tool does not write, wait, or show a human steal, skip, or
-  wait menu. Agents resolve the conflict by talking to each other. The
-  in-flight lock releases when the call finishes. Spawn may also pass
-  `write_paths` on `task` / `spawn_subagent` to claim files until the
-  child finishes. That claim is optional. Omit it when paths are
-  unknown. File-level infer-from-path verify still runs under the
-  in-flight hold. FORK subsection **ACP per-path write lock**. Named
-  tests: module filter `per_path_write_lock`; spawn
-  `spawn_rejects_when_write_paths_overlap_a_live_claim`; OpenCode edit
-  `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
-  Report: `/home/hunter/.agents/reports/feat-subagent-write-coordination.md`.
-  Spawn claims stay optional. Session board todos do not claim files.
-  Nested agents do not get a sibling-writer list. The table is in this
-  process only. "Preparing write" is a TUI activity label, not a lock
-  wait.
+  spawn `write_paths` soft assignment 2026-09-09).** `search_replace`,
+  `apply_patch`, `write`, OpenCode `edit`, and `hashline_edit` acquire
+  the path automatically as part of the tool call. Happy path is silent
+  (no lock argument). A held path is a tool error that names the holder
+  and the file. The tool does not write, wait, or show a human steal,
+  skip, or wait menu. The hard exclusive lock lasts only for that one
+  edit-tool call, then releases. Spawn `write_paths` on `task` /
+  `spawn_subagent` is a soft assignment: other nested agents get a
+  reminder that an L2 is assigned those paths. Spawn and later sequential
+  edits do not fail for the child's lifetime. Two agents still cannot
+  write the same file at the same instant. File-level infer-from-path
+  verify still runs under the in-flight hold. FORK subsection **ACP
+  per-path write lock**. Named tests: module filter `per_path_write_lock`;
+  spawn `spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error`;
+  reminder `soft_lock_reminder_is_observable_on_a_sibling_tool_call`;
+  OpenCode edit `opencode_edit_cannot_write_a_path_another_agent_already_holds`.
+  Report: `/home/hunter/.agents/reports/l3-impl-tool-call-hard-locks.md`.
+  Spawn assignment stays optional. Session board todos do not claim
+  files. The table is in this process only. "Preparing write" is a TUI
+  activity label, not a lock wait.
 
 - **Tools improve tools (pinned 2026-08-15; process law, not a product
   slice).** Do not write disposable bash, Python, or one-off `curl` as
