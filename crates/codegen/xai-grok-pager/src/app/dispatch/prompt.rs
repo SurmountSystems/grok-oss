@@ -476,6 +476,12 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// not hold: that follow-up starts a real turn. Recognized slash commands
 /// are not comments: `/plan queue` / `/plan later` must still hold on the
 /// prompt queue, and `--soft` is not the queue hold token.
+///
+/// Operator: "/plan never submits, it just pulls up the stale plan." Bare
+/// `/plan` and `/plan --soft` still dock Isolated Preview. `/plan` with extra
+/// Human text is a plan-update turn (Human send / plan rewrite), so leftover
+/// Isolated Preview must close or re-read current disk plan.md the same way
+/// a Human mill-continue send does.
 fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -486,7 +492,7 @@ fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
         return false;
     }
     if token == "/plan" || trimmed.starts_with("/plan ") {
-        return false;
+        return crate::slash::queue_schedule::plan_slash_is_update_turn(trimmed);
     }
     true
 }
@@ -691,9 +697,10 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
     // Isolated Preview stays after present so Comment then Approve can run.
-    // Human send that is not Comment notes, `/implement`, and mill rewrite
-    // must not keep leftover Isolated Preview parked. `/view-plan` and
-    // `/plan` still dock Isolated Preview. Empty Enter never Approves.
+    // Human send that is not Comment notes, `/implement`, mill rewrite, and
+    // `/plan` with extra Human text (plan-update turn) must not keep leftover
+    // Isolated Preview parked. Bare `/plan` and `/plan --soft` still dock
+    // Isolated Preview. Empty Enter never Approves.
     if mill_work_continues_after_isolated_preview(&text) {
         agent.leave_or_reread_isolated_preview_after_mill_continues();
     }

@@ -316,8 +316,11 @@ fn queue_plan_does_not_invoke_immediately() {
     assert_eq!(app.agents[&id].session.queue_len(), 1);
 }
 
+/// Operator: "/plan never submits, it just pulls up the stale plan."
+/// `/plan` with extra Human text already in plan mode is a plan-update
+/// turn, not a `/view-plan` toast.
 #[test]
-fn slash_plan_with_args_already_in_plan_is_noop() {
+fn slash_plan_with_args_already_in_plan_submits_plan_update() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().plan_mode_active = true;
@@ -327,8 +330,23 @@ fn slash_plan_with_args_already_in_plan_is_noop() {
         &mut app,
     );
 
-    assert!(effects.is_empty(), "expected no effects, got: {effects:?}");
-    assert!(read_toast(&app).contains("/view-plan"));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. }
+                | Effect::SetModeThenPrompt { text, .. }
+                if text == "add auth to the app"
+        )) || app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.text == "add auth to the app"),
+        "`/plan <desc>` already in plan mode must submit a plan-update turn, got {effects:?}"
+    );
+    assert!(
+        !read_toast(&app).contains("/view-plan"),
+        "already in plan mode must not swallow `/plan` with extra Human text into a /view-plan toast"
+    );
 }
 
 /// Operator (2026-09-12): "wait, actually, exiting the plan mode does
@@ -394,6 +412,56 @@ fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
             }
         ),
         "docking Isolated Preview must not abort compact"
+    );
+}
+
+/// Operator (2026-09-14): "It's still broken. /plan never submits, it just
+/// pulls up the stale plan." After Plan Exit, `/plan` with extra Human text
+/// submits a plan-update turn. Bare `/plan` still docks Isolated Preview.
+/// Empty Enter never Approves.
+#[test]
+fn after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content =
+            Some("# Plan: why the agent stopped, and what we do instead\n".to_string());
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt(
+            "/plan update the plan with what was accomplished and all that remains please".into(),
+        ),
+        &mut app,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. }
+                | Effect::SetModeThenPrompt { text, .. }
+                if text.contains("update the plan with what was accomplished")
+        )) || app.agents[&id].session.pending_prompts.iter().any(|p| p
+            .text
+            .contains("update the plan with what was accomplished")),
+        "after Plan Exit, `/plan` with extra Human text must submit a plan-update turn, not only dock Isolated Preview; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.plan_decision_resolved,
+        "plan-update submit must not Approve; empty Enter never Approves"
+    );
+    assert!(
+        agent.session.pending_prompts.iter().all(|p| p.text
+            != "/plan update the plan with what was accomplished and all that remains please"
+            || p.text.contains("update the plan")),
+        "plan-update must not vanish; queue={:?}",
+        agent.session.pending_prompts
     );
 }
 

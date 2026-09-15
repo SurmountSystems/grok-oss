@@ -1076,6 +1076,50 @@ mod tests {
                 && slash.content.contains("Empty Enter never Approves"),
             "user-guide must keep empty Enter never Approves after Plan Exit"
         );
+        assert!(
+            slash.content.contains("plan-update turn")
+                && plan.content.contains("plan-update turn")
+                && slash.content.contains("why the agent stopped"),
+            "user-guide must say `/plan` with extra Human text submits a plan-update turn \
+             and does not only dock leftover Isolated Preview"
+        );
+    }
+
+    /// Operator: "/plan never submits, it just pulls up the stale plan."
+    /// User-guide must say `/plan` with extra Human text submits a plan-update
+    /// turn. Bare `/plan` still docks Isolated Preview from current disk.
+    #[test]
+    fn user_guide_plan_slash_with_body_submits_plan_update() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            slash.content.contains("plan-update turn")
+                && slash.content.contains(
+                    "update the plan with what was accomplished and all that remains please"
+                ),
+            "04-slash-commands.md must say `/plan` with extra Human text submits a plan-update turn"
+        );
+        assert!(
+            plan.content.contains("plan-update turn")
+                && plan.content.contains("does not only pull up a stale plan"),
+            "19-plan-mode.md must say `/plan` with extra Human text submits a plan-update turn"
+        );
+        assert!(
+            slash.content.contains("prompt write-ahead log")
+                && plan.content.contains("prompt write-ahead log"),
+            "user-guide must say the plan-update submit writes the prompt write-ahead log"
+        );
+        assert!(
+            slash.content.contains("Empty Enter never Approves")
+                && plan.content.contains("Empty Enter never Approves"),
+            "user-guide must keep empty Enter never Approves"
+        );
     }
 
     /// Operator: after Plan Exit, Isolated Preview must not wedge. `/start`

@@ -69,15 +69,20 @@ pub(super) fn dispatch_dock_isolated_preview(
 /// Enter plan mode via hard `/plan`.
 ///
 /// When not in plan mode: emits `SetSessionMode` (or `SetModeThenPrompt`
-/// if a description is provided). When already in plan mode: no-op with toast.
-/// Use `/view-plan` to open the current saved plan preview.
-/// `/plan --soft` uses [`dispatch_dock_isolated_preview`] and must not
-/// call this function.
+/// if a description is provided). Bare `/plan` already in plan mode, or
+/// after Plan Exit, docks Isolated Preview from current disk plan.md.
+/// `/plan` with extra Human text submits a plan-update turn even when
+/// Isolated Preview leftover is docked or plan mode is already on. That
+/// submit must not wipe the sentence without sending it. WAL records it.
+/// Use `/view-plan` to open the current saved plan preview without a
+/// body. `/plan --soft` uses [`dispatch_dock_isolated_preview`] and must
+/// not call this function.
 ///
 /// When a description is present on hard `/plan`, the mode switch and
 /// prompt send must be ordered: the mode switch ACP call must complete
 /// before the prompt is dispatched. `SetModeThenPrompt` bundles both
-/// into a single spawned task to guarantee this ordering.
+/// into a single spawned task to guarantee this ordering. Already in
+/// plan mode, the description is a Human send (drain SendPrompt).
 pub(super) fn dispatch_enter_plan_mode(
     app: &mut AppView,
     description: Option<String>,
@@ -85,45 +90,45 @@ pub(super) fn dispatch_enter_plan_mode(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let description = description.filter(|s| !s.trim().is_empty());
+    let in_plan = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+        // Operator: "/plan never submits, it just pulls up the stale plan."
+        // Bare `/plan` after Exit docks Isolated Preview from current disk
+        // plan.md. Extra Human text is a plan-update turn, not a feature seed.
+        // Empty Enter never Approves. Compact must not swallow this.
+        if description.is_none()
+            && (agent.plan_decision_resolved || in_plan || agent.is_plan_viewer())
+        {
+            agent.dock_isolated_preview();
+            return vec![];
+        }
+        in_plan
+    };
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-
-    // Operator: after Plan Exit, a new `/plan` prompt must not be ignored.
-    // Dock Isolated Preview from current disk plan.md (or seed from the
-    // description). Empty Enter never Approves. Compact must not swallow
-    // this into the compact turn.
-    if agent.plan_decision_resolved {
-        agent.dock_isolated_preview_with_feature(description);
-        return vec![];
-    }
-
-    let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-    if in_plan {
-        app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
-        return vec![];
-    }
-
-    let agent = app.agents.get_mut(&id).unwrap();
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast("No active session");
         return vec![];
     };
 
-    // Set optimistic pending state (same pattern as dispatch_cycle_mode).
-    agent.plan_mode_pending = Some(true);
-    tracing::info!("Plan mode entered via /plan slash command");
-
     let mode_id = acp::SessionModeId::new("plan");
 
     if let Some(desc) = description {
-        // Enqueue and drain: maybe_drain_queue does all synchronous turn
-        // setup (scrollback, start_turn, prompt_id) and returns a SendPrompt.
-        // We combine it with the mode switch into a single sequential effect
-        // so the mode switch completes before the prompt is sent.
-        // The description is a plain prompt: capture composer-recognized
-        // tokens like the normal submit path (offsets recomputed against
-        // `desc` since the leading `/plan ` was stripped).
+        // Plan-update turn: Isolated Preview leftover / already in plan /
+        // after Plan Exit must still send. WAL records the sentence so a
+        // consume_input wipe is not a lost prompt.
+        let wal_kind = if agent.session.state.is_idle() {
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+        } else {
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Queue
+        };
+        agent.append_prompt_wal(wal_kind, &desc, &agent.prompt.images);
+        agent.start_pending_live_prompt_task(&desc);
         let skill_token_ranges = agent
             .prompt
             .slash_controller
@@ -131,6 +136,10 @@ pub(super) fn dispatch_enter_plan_mode(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
+        if !in_plan {
+            agent.plan_mode_pending = Some(true);
+            tracing::info!("Plan mode entered via /plan slash command");
+        }
         let drain = maybe_drain_queue(agent);
         note_peek_page_flip(app, id, drain.page_flip_entry);
         let mut effects = Vec::with_capacity(1);
@@ -142,7 +151,7 @@ pub(super) fn dispatch_enter_plan_mode(
                     prompt_id,
                     skill_token_ranges,
                     ..
-                } => {
+                } if !in_plan => {
                     effects.push(Effect::SetModeThenPrompt {
                         session_id: session_id.clone(),
                         mode_id: mode_id.clone(),
@@ -155,9 +164,7 @@ pub(super) fn dispatch_enter_plan_mode(
                 other => effects.push(other),
             }
         }
-        // If drain was empty (not idle), just emit the mode switch — the
-        // prompt stays queued and will drain naturally when the agent idles.
-        if effects.is_empty() {
+        if effects.is_empty() && !in_plan {
             effects.push(Effect::SetSessionMode {
                 session_id,
                 mode_id,
@@ -165,6 +172,8 @@ pub(super) fn dispatch_enter_plan_mode(
         }
         effects
     } else {
+        agent.plan_mode_pending = Some(true);
+        tracing::info!("Plan mode entered via /plan slash command");
         vec![Effect::SetSessionMode {
             session_id,
             mode_id,
@@ -207,10 +216,14 @@ pub(super) fn set_plan_mode(
 
     // Operator: after Plan Exit, `/plan` must not be ignored. Shell plan
     // mode can still be on. Dock Isolated Preview from current disk
-    // plan.md. Empty Enter never Approves. Compact must not swallow this.
-    if new && agent.plan_decision_resolved {
+    // plan.md, not leftover "why the agent stopped" / TECH.md. Empty Enter
+    // never Approves. Compact must not swallow this. Leftover Isolated
+    // Preview already docked still rereads current disk.
+    if new && (agent.plan_decision_resolved || agent.is_plan_viewer()) {
         agent.dock_isolated_preview();
-        return vec![];
+        if prev == new {
+            return vec![];
+        }
     }
 
     // Idempotent: toast but skip the ACP round-trip.

@@ -1246,6 +1246,11 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `/plan` or `/plan --soft` after Exit docks Isolated Preview. Compact
   at 100% / over 500k must not swallow `/plan`. Typing a Human sentence
   after Exit still sends. Empty Enter never Approves.
+  `/plan` with extra Human text submits a plan-update turn (Human send /
+  plan rewrite) and writes the prompt write-ahead log. It must not only
+  dock leftover Isolated Preview ("why the agent stopped" / TECH.md).
+  Bare `/plan` or `/plan --soft` with no extra text still docks Isolated
+  Preview from current disk `plan.md`.
   GitHub issue 96 and issue 98. Tests:
   `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot`,
   `isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot`,
@@ -1264,6 +1269,12 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan`,
   `after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome`,
   `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored`,
+  `after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview`,
+  `slash_plan_with_args_already_in_plan_submits_plan_update`,
+  `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview`,
+  `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped`,
+  `plan_slash_with_body_is_update_turn_bare_and_soft_are_not`,
+  `user_guide_plan_slash_with_body_submits_plan_update`,
   `after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview`,
   `after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill`,
   `dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md`,

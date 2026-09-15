@@ -81,10 +81,11 @@ impl AgentView {
 
     /// Isolated Preview stays after present so Comment then Approve can run.
     /// After mill work continues (Human send that is not Comment notes,
-    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md),
-    /// Isolated Preview must not stay parked on leftover present.
-    /// Re-read current session plan.md if mill rewrote it. Else close Isolated
-    /// Preview. Empty Enter never Approves. Does not Approve the parked plan.
+    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md,
+    /// `/plan` with extra Human text), Isolated Preview must not stay parked
+    /// on leftover present. Re-read current session plan.md if mill rewrote
+    /// it. Else close Isolated Preview. Empty Enter never Approves. Does not
+    /// Approve the parked plan.
     pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
         if !self.is_plan_viewer() {
             return;
@@ -107,6 +108,33 @@ impl AgentView {
             }
         }
         self.leave_parked_isolated_preview();
+    }
+
+    /// Bare `/plan` / `/plan --soft` docks Isolated Preview from current
+    /// disk plan.md, not leftover "why the agent stopped" / TECH.md persist
+    /// overwrite. Does not Approve. Empty Enter never Approves.
+    pub(crate) fn reread_isolated_preview_from_current_disk_plan_md(&mut self) {
+        let leftover = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback());
+        let Some(disk) = self
+            .plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        if disk.contains("TECH.md") || disk.contains("why the agent stopped") {
+            return;
+        }
+        let leftover_stale = leftover
+            .as_ref()
+            .is_some_and(|body| body.contains("why the agent stopped") || body.contains("TECH.md"));
+        let mill_rewrote = leftover.as_deref() != Some(disk.as_str());
+        if mill_rewrote || leftover_stale {
+            self.paint_isolated_preview_from_mill_plan_md(disk);
+        }
     }
 
     /// Mill rewrote session plan.md. Isolated Preview must paint that file,

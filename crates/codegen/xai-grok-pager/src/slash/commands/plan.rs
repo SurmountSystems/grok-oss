@@ -150,7 +150,8 @@ impl AgentView {
     /// description seeds Isolated Preview. It does not enter plan mode and
     /// does not enqueue that text as a Prompt.
     pub(crate) fn dock_isolated_preview_with_feature(&mut self, feature: Option<String>) {
-        if let Some(text) = feature.filter(|s| !s.trim().is_empty()) {
+        let feature = feature.filter(|s| !s.trim().is_empty());
+        if let Some(text) = feature.clone() {
             self.latest_inline_plan_content = Some(text.clone());
             if let Some(pav) = self.plan_approval_view.as_mut()
                 && pav
@@ -161,6 +162,10 @@ impl AgentView {
                 pav.plan_content = Some(text);
                 pav.has_plan = true;
             }
+        } else {
+            // Bare `/plan` / `/plan --soft`: current disk plan.md, not leftover
+            // Isolated Preview present ("why the agent stopped" / TECH.md).
+            self.reread_isolated_preview_from_current_disk_plan_md();
         }
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();

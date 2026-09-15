@@ -22,7 +22,7 @@ Open the session picker to reload a previous session from disk.
 
 Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
 
-After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` docks Isolated Preview from this session's current disk `plan.md`. Compact at 100% / over 500k must not swallow `/plan`. Empty Enter never Approves.
+After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` with no extra text docks Isolated Preview from this session's current disk `plan.md`. `/plan` with extra Human text submits a plan-update turn. Compact at 100% / over 500k must not swallow `/plan`. Empty Enter never Approves.
 
 `/start` is not `/resume`. `/resume` only opens the session picker.
 
@@ -350,7 +350,7 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/plan`
 
-Enter plan mode. Immediate `/plan` (optionally with a description) enters plan mode when you want it now.
+Enter plan mode. Immediate `/plan` (optionally with a description) enters plan mode when you want it now. `/plan` with extra Human text (for example `/plan update the plan with what was accomplished and all that remains please`) submits that as a plan-update turn. It does not only dock Isolated Preview of a leftover plan. That submit writes the prompt write-ahead log. Bare `/plan` or `/plan --soft` with no extra text docks Isolated Preview from this session's current disk `plan.md`, not leftover "why the agent stopped" or a TECH.md persist overwrite. Empty Enter never Approves.
 
 `/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested subagents stay Working. Present is not Approve. Empty Enter never Approves. The Isolated Preview composer is a Human box unless you click Comment. Non-empty Enter sends a Human turn. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Hard `/plan` without `--soft` enters plan mode. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
 

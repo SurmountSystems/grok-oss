@@ -537,6 +537,12 @@ Present is not Approve. Empty Enter never Approves.
 | `after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan` | After Plan Exit with Isolated Preview closed, composer chrome must not stay plan. Typing a Human sentence after Exit still sends. |
 | `after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome` | After Plan Exit with Isolated Preview closed, the draw must not keep composer plan chrome. |
 | `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored` | After Plan Exit, `/plan` docks Isolated Preview. Compact must not swallow `/plan`. Empty Enter never Approves. |
+| `after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview` | After Plan Exit, `/plan` with extra Human text submits a plan-update turn. It does not only dock leftover Isolated Preview. Empty Enter never Approves. |
+| `slash_plan_with_args_already_in_plan_submits_plan_update` | `/plan <desc>` already in plan mode submits a plan-update turn, not a `/view-plan` toast |
+| `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview` | Isolated Preview leftover: `/plan update the plan...` submits a plan-update turn and WAL. Empty Enter never Approves. |
+| `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped` | Bare `/plan` docks current disk plan.md, not leftover why-the-agent-stopped / TECH.md |
+| `plan_slash_with_body_is_update_turn_bare_and_soft_are_not` | `/plan` with extra Human text is a plan-update turn. Bare `/plan` and `/plan --soft` are not |
+| `user_guide_plan_slash_with_body_submits_plan_update` | 04-slash-commands and 19-plan-mode say `/plan` with extra Human text submits a plan-update turn |
 | `after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview` | After Plan Exit, `/plan --soft` during auto-compact docks Isolated Preview. Compact must not swallow `/plan`. |
 | `after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill` | After Plan Exit, Isolated Preview paints current disk mill plan.md, not leftover TECH.md. |
 | `dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md` | Isolated Preview dock_open must not bump SQL updated_at so leftover TECH.md SQL cannot beat current disk plan.md. |
@@ -569,6 +575,12 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan \
   after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome \
   after_plan_exit_slash_plan_docks_isolated_preview_not_ignored \
+  after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview \
+  slash_plan_with_args_already_in_plan_submits_plan_update \
+  isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
+  leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
+  plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
+  user_guide_plan_slash_with_body_submits_plan_update \
   after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \
   after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill \
   dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md \
@@ -2253,6 +2265,12 @@ cargo test -p xai-grok-pager --lib -- \
   after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan \
   after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome \
   after_plan_exit_slash_plan_docks_isolated_preview_not_ignored \
+  after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview \
+  slash_plan_with_args_already_in_plan_submits_plan_update \
+  isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
+  leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
+  plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
+  user_guide_plan_slash_with_body_submits_plan_update \
   after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \
   after_plan_exit_without_current_disk_closes_leftover_tech_md_when_disk_is_mill \
   dock_open_must_not_bump_updated_at_over_rewritten_disk_plan_md \

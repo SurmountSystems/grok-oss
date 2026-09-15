@@ -41,7 +41,7 @@ The agent enters plan mode when it determines a task has genuine ambiguity. It c
 
 You can enter plan mode yourself in two ways:
 
-- **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step.
+- **`/plan`** -- Enter plan mode. Plan mode activates when you send your next prompt. Run `/plan <description>` to enter plan mode and start a turn with that description in one step. `/plan` with extra Human text submits a plan-update turn even when Isolated Preview leftover is docked. It does not only pull up a stale plan. That submit writes the prompt write-ahead log. Bare `/plan` docks Isolated Preview from current disk `plan.md`. Empty Enter never Approves.
 - **Shift+Tab** -- Cycle the session mode: Normal, then Plan, then Always-approve, then back to Normal. From Normal, a single press lands on Plan.
 
 After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen the pane. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy lives on `y` and a title-bar control, not as a fifth idle CTA on the Approve row. On this Surmount fork, **Approve** also files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)). A clickable **copy** control (`y`) copies the plan, including while a line-comment overlay is open. A dot marks the **selected** CTA (the one Enter will submit). That mark is live selection, not a leftover grok-oss.db recorded row. Present, empty Enter, and always-approve tool permissions do not Approve. Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
@@ -58,7 +58,7 @@ If Approve still needs a live waiter, that waiter must not send cancel to nested
 
 **`/rebuild`** with Isolated Preview open restores that pane after relaunch. Resume does not auto-dock leftover `plan.md` when the pane was not open at persist.
 
-After Plan Exit, Isolated Preview must not trap the session on a leftover plan. Esc:close, `/start`, or `/unstick` (when the last parent prompt is hung) leave parked Isolated Preview. `/start` continues paused or interrupted work in this process. It is not `/resume`. The painted body is this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` docks Isolated Preview from this session's current disk `plan.md`. Compact at 100% / over 500k must not swallow `/plan`. Typing a Human sentence after Exit still sends. Empty Enter never Approves.
+After Plan Exit, Isolated Preview must not trap the session on a leftover plan. Esc:close, `/start`, or `/unstick` (when the last parent prompt is hung) leave parked Isolated Preview. `/start` continues paused or interrupted work in this process. It is not `/resume`. The painted body is this session's current disk `plan.md`, not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. `/plan` or `/plan --soft` with no extra text docks Isolated Preview from this session's current disk `plan.md`, not leftover "why the agent stopped" or a TECH.md persist overwrite. `/plan` with extra Human text submits a plan-update turn. Compact at 100% / over 500k must not swallow `/plan`. Typing a Human sentence after Exit still sends. Empty Enter never Approves.
 
 ---
 
