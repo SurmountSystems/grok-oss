@@ -114,7 +114,12 @@ mod tests {
         static N: Mutex<u32> = Mutex::new(0);
         let mut n = N.lock().expect("wal test counter");
         *n += 1;
-        std::env::temp_dir().join(format!("grok-oss-audio-wal-test-{n}.pcm"))
+        // nextest runs each test in its own process, so `n` always starts at 1.
+        // Include pid so parallel tests do not share one /tmp WAL inode.
+        std::env::temp_dir().join(format!(
+            "grok-oss-audio-wal-test-{}-{n}.pcm",
+            std::process::id()
+        ))
     }
 
     #[test]
