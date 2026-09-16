@@ -2941,3 +2941,65 @@ fn session_loaded_same_model_catalog_high_does_not_clobber_medium() {
         "SessionLoaded catalog high must not paint the composer high after medium"
     );
 }
+
+/// Named contract: after `grok-oss` in a cwd that last used a `/fork` child,
+/// the Operator sees that child's transcript, not the empty fork parent
+/// ("Systems Lean - main thread", Grok 4.5, 119K/500K, black scrollback).
+#[serial_test::serial(GROK_HOME)]
+#[test]
+fn last_session_fork_child_stays_focused_not_empty_parent() {
+    use crate::app::app_view::ActiveView;
+    use crate::test_util::GrokHomeFixture;
+    let mut fx = GrokHomeFixture::new();
+    let cwd = fx.cwd_str();
+    let parent = "aaaaaaaa-1111-2222-3333-444444444444";
+    let child = "bbbbbbbb-1111-2222-3333-555555555555";
+    fx.write_summary(
+        &cwd,
+        parent,
+        serde_json::json!({
+            "generated_title": "Systems Lean - main thread",
+            "current_model_id": "grok-4.5",
+            "reasoning_effort": "high",
+            "session_kind": "fork",
+            "parent_session_id": "cccccccc-1111-2222-3333-666666666666",
+            "forked_at": "2026-07-21T17:55:58.152730160Z",
+        }),
+    );
+    fx.write_summary(
+        &cwd,
+        child,
+        serde_json::json!({
+            "generated_title": "Systems Lean - Slake",
+            "current_model_id": "grok-4.6",
+            "session_kind": "fork",
+            "parent_session_id": parent,
+            "forked_at": "2026-07-21T18:35:34.177073852Z",
+        }),
+    );
+    let mut app = test_app();
+    app.cwd = std::path::PathBuf::from(&cwd);
+    dispatch(
+        Action::LoadSession(child.into(), Some(std::path::PathBuf::from(&cwd)), false),
+        &mut app,
+    );
+    let ActiveView::Agent(active) = app.active_view else {
+        panic!("last-session must open an agent, got {:?}", app.active_view);
+    };
+    let sid = app.agents[&active]
+        .session
+        .session_id
+        .as_ref()
+        .expect("loaded agent has a session id")
+        .0
+        .to_string();
+    assert_eq!(
+        sid, child,
+        "last-session of a fork child must stay on the child, not the empty parent"
+    );
+    assert!(
+        app.agents.len() >= 2,
+        "fork parent still loads for the family switcher, but must not steal focus; agents={}",
+        app.agents.len()
+    );
+}

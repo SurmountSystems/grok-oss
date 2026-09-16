@@ -306,6 +306,112 @@ fn check_remote_prints_quality_receipt_on_cache_hit() {
 }
 
 #[test]
+fn install_recipe_cargo_builds_rg_from_the_ripgrep_crate_github_musl_tarball_is_not_the_install_path()
+ {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    let install = recipe_body(&just, "install");
+    assert!(
+        install.contains("cargo install")
+            && install.contains("--version 15.0.0")
+            && install.contains("ripgrep")
+            && install.contains("--bin rg"),
+        "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path:\n{install}"
+    );
+    assert!(
+        install.contains("GROK_TOOLS_BUNDLE_RG_PATH"),
+        "just install must set GROK_TOOLS_BUNDLE_RG_PATH so xai-grok-tools build.rs copies the cargo-built rg:\n{install}"
+    );
+    assert!(
+        install.contains("GROK_SHELL_BUNDLE_RG_PATH"),
+        "just install must set GROK_SHELL_BUNDLE_RG_PATH so xai-grok-shell build.rs copies the same cargo-built rg:\n{install}"
+    );
+    assert!(
+        !install.contains("x86_64-unknown-linux-musl"),
+        "just install must not default GROK_TOOLS_RG_TARGET or vendor path to musl:\n{install}"
+    );
+    assert!(
+        !install.contains("github.com/BurntSushi"),
+        "just install must not curl GitHub for ripgrep:\n{install}"
+    );
+}
+
+#[test]
+fn tools_and_shell_build_rs_cargo_build_rg_from_crate_not_github_musl_tarball() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let tools = read(&root, "crates/codegen/xai-grok-tools/build.rs");
+    let shell = read(&root, "crates/codegen/xai-grok-shell/build.rs");
+    for (name, src) in [
+        ("xai-grok-tools/build.rs", tools.as_str()),
+        ("xai-grok-shell/build.rs", shell.as_str()),
+    ] {
+        assert!(
+            src.contains("cargo")
+                && src.contains("install")
+                && src.contains("ripgrep")
+                && src.contains("--bin")
+                && src.contains("rg"),
+            "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path ({name})"
+        );
+        assert!(
+            !src.contains("github.com/BurntSushi/ripgrep/releases")
+                && !src.contains("ripgrep/releases/download"),
+            "{name} must not download a GitHub musl ripgrep tarball"
+        );
+        assert!(
+            !src.contains("GROK_TOOLS_RG_TARGET=x86_64-unknown-linux-musl")
+                && !src.contains("GROK_SHELL_RG_TARGET=x86_64-unknown-linux-musl"),
+            "{name} must not default GROK_TOOLS_RG_TARGET to musl"
+        );
+    }
+}
+
+#[test]
+fn install_recipe_does_not_download_github_musl_fd_tarball() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    let install = recipe_body(&just, "install");
+    assert!(
+        !install.contains("github.com/sharkdp")
+            && !install.contains("fd/releases/download")
+            && !install.contains("fd-v"),
+        "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path:\n{install}"
+    );
+}
+
+#[test]
+fn tools_build_rs_cargo_build_fd_from_crate_not_github_musl_tarball() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let tools = read(&root, "crates/codegen/xai-grok-tools/build.rs");
+    assert!(
+        tools.contains("cargo")
+            && tools.contains("install")
+            && tools.contains("fd-find")
+            && tools.contains("--bin")
+            && tools.contains("fd"),
+        "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path"
+    );
+    assert!(
+        !tools.contains("github.com/sharkdp/fd/releases")
+            && !tools.contains("fd/releases/download"),
+        "xai-grok-tools/build.rs must not download a GitHub musl fd tarball"
+    );
+    assert!(
+        !tools.contains("GROK_TOOLS_FD_TARGET=x86_64-unknown-linux-musl")
+            && !tools.contains("x86_64-unknown-linux-musl"),
+        "xai-grok-tools/build.rs must not default GROK_TOOLS_FD_TARGET to musl"
+    );
+}
+
+#[test]
 fn nix_retry_flake_meta_and_check_remote_do_not_require_helper_binary() {
     let Some(root) = skip_or_root() else {
         return;

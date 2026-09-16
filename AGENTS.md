@@ -169,6 +169,14 @@ less than product code and tests. Do not invent long essays or git nags.
    bash wait policy: auto-background at the wait cap and a ten-hour
    foreground ceiling, so a still-running compile stays running and
    returns a task id. Dual-pin: [`FORK.md`](FORK.md) CI table.
+3b-after-change-install. **After a product change, run just install and
+   just check-remote (pinned 2026-09-16).** After a product change in
+   this tree, the same wave runs `just install` and `just check-remote`.
+   Not later. Not only when the Operator nags. One live
+   `just check-remote` at a time. Do not restart a live remote compile
+   at five minutes. `just test-remote` stays operator-owned unless they
+   also whitelist it. Never git commit. Dual-pin: [`FORK.md`](FORK.md)
+   Process same heading; host `~/.grok/AGENTS.md` same heading.
 3b-remote-clippy. **Remote quality clippy must use many workers (pinned
    2026-08-23).** Do not invoke `cargo clippy` on `workspace-cargo-quality`.
    That external binary lets the outer cargo start a 1-token jobserver;
@@ -996,6 +1004,16 @@ Start a long nested job (compile, mill, Lake). The parent keeps working. It does
 This name is more accurate than fire-and-forget, because forget means never look at the result. Return means the parent still owns the outcome. It is more precise than "background the job" or "don't wait", because those omit the notification and the next step.
 
 A blocking `get_command_or_subagent_output` ten-minute loop serializes L1 so FORK and AGENTS pins never run after compact. That is not fire-and-return.
+
+### After a product change, run just install and just check-remote (pinned 2026-09-16)
+
+After a product change in this tree, the same wave runs `just install`
+and `just check-remote`. Not later. Not only when the Operator nags.
+One live `just check-remote` at a time. Do not restart a live remote
+compile at five minutes. `just test-remote` stays operator-owned unless
+they also whitelist it. Never git commit. Dual-pin: this file hard
+constraint 3b-after-change-install; [`FORK.md`](FORK.md) Process same
+heading; host `~/.grok/AGENTS.md` same heading.
 
 Host mill and Lake instance: `~/.grok/AGENTS.md` § *Session parallelism* and § *Do not wait on the isolated bottleneck*. Divergence home: [`FORK.md`](FORK.md) Process.
 

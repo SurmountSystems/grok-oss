@@ -51,7 +51,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session(
             });
         return vec![];
     }
-    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true)
+    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true, true)
 }
 /// Clear `session_id` from any existing agent that already owns the given
 /// session, then return a freshly constructed [`acp::SessionId`].
@@ -143,6 +143,7 @@ fn dispatch_load_session_ungated(
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
     restore_fork_parent: bool,
+    focus: bool,
 ) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
     let bypass_chat_refusal = app.welcome_history_load_as_build;
@@ -297,7 +298,9 @@ fn dispatch_load_session_ungated(
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
     wire_forked_from_from_disk(app, agent_id);
-    switch_to_agent(app, agent_id, SwitchCause::Load);
+    if focus {
+        switch_to_agent(app, agent_id, SwitchCause::Load);
+    }
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
@@ -337,7 +340,7 @@ fn ensure_fork_parent_loaded(
     let Some(parent_cwd) = parent_cwd else {
         return vec![];
     };
-    dispatch_load_session_ungated(app, parent_sid, Some(parent_cwd), chat_kind, false)
+    dispatch_load_session_ungated(app, parent_sid, Some(parent_cwd), chat_kind, false, false)
 }
 
 /// Stamp `forked_from` from `summary.json` once the parent is a live agent.

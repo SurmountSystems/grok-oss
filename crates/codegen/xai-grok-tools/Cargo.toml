@@ -124,12 +124,6 @@ wiremock = { workspace = true }
 xai-grok-test-support = { workspace = true }
 xai-test-utils = { workspace = true }
 
-[build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
-flate2 = { workspace = true }
-sha2 = { workspace = true }
-tar = { workspace = true }
-
 [[bin]]
 name = "grok-oss-implement-memory"
 path = "src/bin/grok_oss_skill_cli.rs"

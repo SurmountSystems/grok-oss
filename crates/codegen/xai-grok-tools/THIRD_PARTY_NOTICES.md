@@ -65,13 +65,14 @@ SOFTWARE.
 
 ## Bundled tool binaries
 
-Release builds of this crate embed unmodified, prebuilt binaries of the
-tools below (see `build.rs`); they are self-extracted to `~/.grok/vendor/`
-at runtime. Which tools are embedded in a given build depends on what the
-release pipeline supplies at build time:
+Release builds of this crate embed binaries of the tools below (see
+`build.rs`); they are self-extracted to `~/.grok/vendor/` at runtime.
+Which tools are embedded in a given build depends on what the release
+pipeline supplies at build time:
 
-- **ripgrep** is embedded in every release build (downloaded from the
-  official GitHub release, or supplied via `GROK_TOOLS_BUNDLE_RG_PATH`).
+- **ripgrep** is cargo-built from the `ripgrep` crate (or supplied via
+  `GROK_TOOLS_BUNDLE_RG_PATH`). GitHub musl tarball is not the install
+  path.
 - **ugrep** and **bfs** are embedded only when the release pipeline supplies
   static binaries via `GROK_TOOLS_BUNDLE_UGREP_PATH` /
   `GROK_TOOLS_BUNDLE_BFS_PATH`. When those are unset the tools are not
@@ -82,15 +83,9 @@ release pipeline supplies at build time:
 ### ripgrep
 
 [ripgrep](https://github.com/BurntSushi/ripgrep) is dual-licensed under the
-MIT License or the Unlicense, at the user's option. We redistribute the
-official ripgrep release binaries and reproduce the MIT license below.
-
-The official ripgrep release binaries statically link
-[PCRE2](https://github.com/PCRE2Project/pcre2) (BSD-3-Clause with the PCRE2
-exemption for binary library-like packages). Under that exemption, packages
-that include ripgrep — and do not use PCRE2 independently — are not subject
-to PCRE2's binary-redistribution notice condition, so no separate PCRE2
-notice is reproduced here.
+MIT License or the Unlicense, at the user's option. We cargo-build `rg`
+from that crate (default features, not a GitHub musl tarball) and
+reproduce the MIT license below. Default features do not enable PCRE2.
 
 The MIT License (MIT)
 

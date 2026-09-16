@@ -79,3 +79,53 @@ pub fn rg_path() -> PathBuf {
         })
         .clone()
 }
+
+#[cfg(test)]
+mod bundle_source_contract {
+    #[test]
+    fn bundled_rg_is_cargo_built_from_the_ripgrep_crate_github_musl_tarball_is_not_the_install_path()
+     {
+        let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
+        assert!(
+            src.contains("cargo")
+                && src.contains("install")
+                && src.contains("ripgrep")
+                && src.contains("--bin")
+                && src.contains("rg"),
+            "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path"
+        );
+        assert!(
+            !src.contains("github.com/BurntSushi/ripgrep/releases")
+                && !src.contains("ripgrep/releases/download"),
+            "xai-grok-tools build.rs must not download a GitHub musl ripgrep tarball"
+        );
+        assert!(
+            !src.contains("GROK_TOOLS_RG_TARGET=x86_64-unknown-linux-musl"),
+            "xai-grok-tools build.rs must not default GROK_TOOLS_RG_TARGET to musl"
+        );
+    }
+
+    #[test]
+    fn bundled_fd_is_cargo_built_from_the_fd_find_crate_github_musl_tarball_is_not_the_install_path()
+     {
+        let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
+        assert!(
+            src.contains("cargo")
+                && src.contains("install")
+                && src.contains("fd-find")
+                && src.contains("--bin")
+                && src.contains("fd"),
+            "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path"
+        );
+        assert!(
+            !src.contains("github.com/sharkdp/fd/releases")
+                && !src.contains("fd/releases/download"),
+            "xai-grok-tools build.rs must not download a GitHub musl fd tarball"
+        );
+        assert!(
+            !src.contains("GROK_TOOLS_FD_TARGET=x86_64-unknown-linux-musl")
+                && !src.contains("x86_64-unknown-linux-musl"),
+            "xai-grok-tools build.rs must not default GROK_TOOLS_FD_TARGET to musl"
+        );
+    }
+}

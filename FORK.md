@@ -1852,6 +1852,15 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   is additive: horizon is not the cargo-test host. Dual-pin:
   [`AGENTS.md`](AGENTS.md) hard constraint 3b-horizon-cargo and the
   same heading; host `~/.grok/AGENTS.md` same heading.
+- [x] **After a product change, run just install and just check-remote
+  (pinned 2026-09-16).** After a product change in this tree, the same
+  wave runs `just install` and `just check-remote`. Not later. Not only
+  when the Operator nags. One live `just check-remote` at a time. Do
+  not restart a live remote compile at five minutes. `just test-remote`
+  stays operator-owned unless they also whitelist it. Never git
+  commit. Dual-pin: [`AGENTS.md`](AGENTS.md) hard constraint
+  3b-after-change-install and the same heading; host
+  `~/.grok/AGENTS.md` same heading.
 - [x] **Subagent worktree policy**: prefer isolation none; product default
   `[subagents] allow_worktree = false`. Class 2 copies the flag:
   `resolve_subagents_copies_allow_worktree`. User-guide `05-configuration` +

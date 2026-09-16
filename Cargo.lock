@@ -14441,7 +14441,6 @@ dependencies = [
  "dunce",
  "educe",
  "encoding_rs",
- "flate2",
  "fs2",
  "futures",
  "futures-util",
