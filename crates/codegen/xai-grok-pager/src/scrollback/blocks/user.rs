@@ -1426,6 +1426,29 @@ mod tests {
         assert_eq!(Some(rail), expected, "rail matches pointer Human colour");
     }
 
+    /// Operator: stop calling that Human. Scrollback operator prompt prefix
+    /// is the prompt arrow, not the word Human, User, or Grok.
+    #[test]
+    fn user_prompt_prefix_is_not_the_word_human() {
+        let block = UserPromptBlock::new("hello from the operator");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        let prefix = lines[0].content.spans[0].content.as_ref();
+        assert!(
+            !prefix.contains("Human") && !prefix.contains("User") && !prefix.contains("Grok"),
+            "operator prompt prefix must not paint Human/User/Grok as a speaker, got {prefix:?}"
+        );
+        assert_eq!(
+            prefix,
+            crate::glyphs::prompt_arrow(),
+            "operator prompt prefix stays the prompt arrow"
+        );
+        let body = line_text(&lines[0].content);
+        assert!(
+            body.contains("hello from the operator"),
+            "prompt body must stay, got {body}"
+        );
+    }
+
     /// Fullscreen paint: Human prompt left cell is `┃` in `accent_user`.
     /// `accent()` returning green is not enough if EntryRenderer never paints it.
     #[test]

@@ -335,13 +335,10 @@ fn slash_plan_with_args_already_in_plan_submits_plan_update() {
             e,
             Effect::SendPrompt { text, .. }
                 | Effect::SetModeThenPrompt { text, .. }
+                | Effect::SendInterject { text, .. }
                 if text == "add auth to the app"
-        )) || app.agents[&id]
-            .session
-            .pending_prompts
-            .iter()
-            .any(|p| p.text == "add auth to the app"),
-        "`/plan <desc>` already in plan mode must submit a plan-update turn, got {effects:?}"
+        )),
+        "`/plan <desc>` already in plan mode must SendPrompt, not vanish onto the queue only; got {effects:?}"
     );
     // No toast is success. `read_toast` panics when none is set, which
     // would fail a correct submit that does not toast `/view-plan`.
@@ -452,11 +449,10 @@ fn after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_previ
             e,
             Effect::SendPrompt { text, .. }
                 | Effect::SetModeThenPrompt { text, .. }
+                | Effect::SendInterject { text, .. }
                 if text.contains("update the plan with what was accomplished")
-        )) || app.agents[&id].session.pending_prompts.iter().any(|p| p
-            .text
-            .contains("update the plan with what was accomplished")),
-        "after Plan Exit, `/plan` with extra Human text must submit a plan-update turn, not only dock Isolated Preview; got {effects:?}"
+        )),
+        "after Plan Exit, `/plan` with extra Operator text must SendPrompt/SetModeThenPrompt, not vanish; got {effects:?}"
     );
     let agent = &app.agents[&id];
     assert!(

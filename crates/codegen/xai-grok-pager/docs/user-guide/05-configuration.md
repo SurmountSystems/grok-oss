@@ -45,7 +45,7 @@ theme = "doge"                         # default when unset is also DOGE; "grokn
                                        # previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
-composer_multiline = true              # Human box may insert newlines (default on). Set false
+composer_multiline = true              # Operator box may insert newlines (default on). Set false
                                        # so Enter and Shift+Enter send (or interject) and never
                                        # open a second line. Session Multiline cannot restore
                                        # newlines while this is false. Ctrl+Enter still inserts
@@ -133,7 +133,7 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
-| `[ui] composer_multiline` | true | Settings → Editor | When false, the Human box stays single-line for Enter and Shift+Enter (they send or interject and never insert a newline). Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. `Ctrl+Enter` still inserts a newline when interject is not appropriate. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
+| `[ui] composer_multiline` | true | Settings → Editor | When false, the Operator box stays single-line for Enter and Shift+Enter (they send or interject and never insert a newline). Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. `Ctrl+Enter` still inserts a newline when interject is not appropriate. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
 | `[ui] allow_session_multiline` | true | Settings → Editor | When false, `Ctrl+M`, `/multiline`, and the session Multiline settings row cannot turn session Multiline on. Distinct from `composer_multiline`. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. Default on. |
 | `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
 | `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
@@ -188,7 +188,7 @@ You can also flip it from the settings pane (`/settings` → **Disable vim input
 
 #### Composer multiline
 
-`[ui] composer_multiline` is whether the Human box may insert newlines from Enter / Shift+Enter. Default is on, so Shift+Enter still inserts a newline when session Multiline is off. Session Multiline (`Ctrl+M` / `/multiline`) still makes mid-line Enter insert a newline, and Shift+Enter still sends. Enter at the end of the last line still sends or interjects. It does not insert a silent extra newline. `Ctrl+Enter` inserts a newline when interjection is not appropriate, and interjects when a running turn can take it. That is not gated by this flag.
+`[ui] composer_multiline` is whether the Operator box may insert newlines from Enter / Shift+Enter. Default is on, so Shift+Enter still inserts a newline when session Multiline is off. Session Multiline (`Ctrl+M` / `/multiline`) still makes mid-line Enter insert a newline, and Shift+Enter still sends. Enter at the end of the last line still sends or interjects. It does not insert a silent extra newline. `Ctrl+Enter` inserts a newline when interjection is not appropriate, and interjects when a running turn can take it. That is not gated by this flag.
 
 Set it false when you want Enter / Shift+Enter to stay single-line:
 

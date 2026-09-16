@@ -81,10 +81,11 @@ impl AgentView {
 
     /// Isolated Preview stays after present so Comment then Approve can run.
     /// After mill work continues (Human send that is not Comment notes,
-    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md,
-    /// `/plan` with extra Human text), Isolated Preview must not stay parked
-    /// on leftover present. Re-read current session plan.md if mill rewrote
-    /// it. Else close Isolated Preview. Empty Enter never Approves. Does not
+    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md),
+    /// Isolated Preview must not stay parked on leftover present. Re-read
+    /// current session plan.md if mill rewrote it. Else close Isolated
+    /// Preview. `/plan` extra text is a plan-update turn and must not take
+    /// this mill-continue close. Empty Enter never Approves. Does not
     /// Approve the parked plan.
     pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
         if !self.is_plan_viewer() {

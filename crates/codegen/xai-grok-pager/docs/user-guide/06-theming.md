@@ -29,12 +29,12 @@ On DOGE, Grok OSS uses these roles:
 
 | Colour | Role |
 |--------|------|
-| **Green** | Human: composer caret, user rails, success |
+| **Green** | Operator: composer caret, operator rails, success |
 | **Magenta** | Agent: running activity, tool spinner, model accent |
 | **Yellow** | Dates, timers, secondary context |
 | **Cyan** | System tags, included SuperGrok period limits, credits, paths |
 
-Do not confuse the composer caret (human green) with the lower-left activity throbber (agent magenta). Mid-draft letters under the caret use ordinary text colour on the empty blink half, not neon green ink on the letter.
+Do not confuse the composer caret (Operator green) with the lower-left activity throbber (agent magenta). Mid-draft letters under the caret use ordinary text colour on the empty blink half, not neon green ink on the letter.
 
 To switch back to the previous neutral dark default:
 

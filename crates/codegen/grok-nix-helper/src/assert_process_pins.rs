@@ -213,6 +213,16 @@ pub fn check_worktree(root: &Path, strict: bool) -> PinReport {
                 "AGENTS.md (must name stay-supergrok fail-open / named /limits commands)".into(),
             );
         }
+        if !body.contains("Prefer **Operator** and **Agent** as speaker labels") {
+            report
+                .missing
+                .push("AGENTS.md (must pin Operator and Agent speaker labels)".into());
+        }
+        if body.contains("Do not rename the product composer Human box") {
+            report
+                .missing
+                .push("AGENTS.md (must not keep the old Human box rename ban; painted chrome says Operator box)".into());
+        }
     }
 
     let fork = root.join("FORK.md");
@@ -228,9 +238,9 @@ pub fn check_worktree(root: &Path, strict: bool) -> PinReport {
             );
         }
         if !body.contains("non-excepted Python") {
-            report.missing.push(
-                "FORK.md land class 7 (must say a restack that installs non-excepted Python is a failed land)".into(),
-            );
+            report
+                .missing
+                .push("FORK.md land class 7 (must say a restack that installs non-excepted Python is a failed land)".into());
         }
         if !body.contains("stay-supergrok") {
             report
@@ -241,6 +251,21 @@ pub fn check_worktree(root: &Path, strict: bool) -> PinReport {
             report
                 .missing
                 .push("FORK.md (must name limits_pins.json sidecar)".into());
+        }
+        if !body.contains("Operator and Agent as speaker labels") {
+            report
+                .missing
+                .push("FORK.md (must pin Operator and Agent speaker labels)".into());
+        }
+        if !body.contains("call the composer the Operator box") {
+            report.missing.push(
+                "FORK.md (must say painted chrome calls the composer the Operator box)".into(),
+            );
+        }
+        if body.contains("Do not rename the product composer Human box") {
+            report
+                .missing
+                .push("FORK.md (must not keep the old Human box rename ban)".into());
         }
     }
 
@@ -310,6 +335,39 @@ fn check_tree(tree_ish: &str) -> Result<PinReport, String> {
         && let Some(body) = git_show(tree_ish, "doc/dev/upstream-regression-filters.md")
     {
         catalog_markers(&body, &mut report.missing);
+    }
+    if path_in_tree(tree_ish, "AGENTS.md")
+        && let Some(body) = git_show(tree_ish, "AGENTS.md")
+    {
+        if !body.contains("Prefer **Operator** and **Agent** as speaker labels") {
+            report
+                .missing
+                .push("AGENTS.md (must pin Operator and Agent speaker labels)".into());
+        }
+        if body.contains("Do not rename the product composer Human box") {
+            report
+                .missing
+                .push("AGENTS.md (must not keep the old Human box rename ban; painted chrome says Operator box)".into());
+        }
+    }
+    if path_in_tree(tree_ish, "FORK.md")
+        && let Some(body) = git_show(tree_ish, "FORK.md")
+    {
+        if !body.contains("Operator and Agent as speaker labels") {
+            report
+                .missing
+                .push("FORK.md (must pin Operator and Agent speaker labels)".into());
+        }
+        if !body.contains("call the composer the Operator box") {
+            report.missing.push(
+                "FORK.md (must say painted chrome calls the composer the Operator box)".into(),
+            );
+        }
+        if body.contains("Do not rename the product composer Human box") {
+            report
+                .missing
+                .push("FORK.md (must not keep the old Human box rename ban)".into());
+        }
     }
     Ok(report)
 }
@@ -484,5 +542,38 @@ mod tests {
         assert_eq!(LAND_CLASS_MARKERS.len(), 7);
         assert!(LAND_CLASS_MARKERS[0].contains("CLI identity"));
         assert!(LAND_CLASS_MARKERS[6].contains("not a Python runtime"));
+    }
+
+    #[test]
+    fn agents_without_operator_agent_speaker_pin_fails_loud() {
+        let tmp = env::temp_dir().join(format!(
+            "grok-nix-helper-assert-speaker-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("AGENTS.md"),
+            "parent is coordinator\nstay-supergrok\nDo not rename the product composer Human box\n",
+        )
+        .unwrap();
+        let report = check_worktree(&tmp, false);
+        assert!(
+            report
+                .missing
+                .iter()
+                .any(|m| m.contains("Operator and Agent speaker labels")),
+            "must require Operator and Agent speaker labels, got {:?}",
+            report.missing
+        );
+        assert!(
+            report
+                .missing
+                .iter()
+                .any(|m| m.contains("old Human box rename ban")),
+            "must reject the old Human box rename ban, got {:?}",
+            report.missing
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

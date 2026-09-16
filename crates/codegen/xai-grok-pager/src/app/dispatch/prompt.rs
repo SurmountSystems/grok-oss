@@ -193,12 +193,23 @@ fn enqueue_if_interject_dropped(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
-    let effects = interject::dispatch_interject(app, text.clone(), images.clone());
+    // `/plan` extra text is a plan-update turn. Interject the description,
+    // not mill-continue close of Isolated Preview. Isolated Preview stays
+    // or re-reads current disk plan.md. Comment-then-Approve still works.
+    let send_text = if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
+        crate::slash::queue_schedule::plan_description_from_command(&text)
+            .unwrap_or_else(|| text.clone())
+    } else {
+        text.clone()
+    };
+    let effects = interject::dispatch_interject(app, send_text.clone(), images.clone());
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
     };
     if mill_work_continues_after_isolated_preview(&text) {
         agent.leave_or_reread_isolated_preview_after_mill_continues();
+    } else if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
+        agent.reread_isolated_preview_from_current_disk_plan_md();
     }
     let sent = effects
         .iter()
@@ -207,10 +218,10 @@ fn enqueue_if_interject_dropped(
     if !sent {
         agent.append_prompt_wal(
             xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
-            &text,
+            &send_text,
             &images,
         );
-        agent.start_pending_live_prompt_task(&text);
+        agent.start_pending_live_prompt_task(&send_text);
         let qid = agent.session.next_queue_id;
         agent.session.next_queue_id += 1;
         agent
@@ -220,17 +231,23 @@ fn enqueue_if_interject_dropped(
                 images,
                 ..crate::app::agent::QueuedPrompt::plain(
                     qid,
-                    text.clone(),
+                    send_text.clone(),
                     crate::app::agent::QueueEntryKind::Prompt,
                 )
             });
         agent.persist_pending_prompts();
-        enqueued = agent.session.pending_prompts.iter().any(|p| p.text == text);
+        enqueued = agent
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.text == send_text);
     }
     if sent || enqueued {
         agent.prompt.set_text("");
-        agent.clear_sent_human_from_plan_feedback_draft(&text);
-    } else if agent.prompt.text().trim() != text.trim() {
+        agent.clear_sent_human_from_plan_feedback_draft(&send_text);
+    } else if agent.prompt.text().trim() != text.trim()
+        && agent.prompt.text().trim() != send_text.trim()
+    {
         // Interject and enqueue both dropped: put the paste back.
         agent.prompt.set_text(&text);
         agent.persist_unsent_composer_draft_now();
@@ -478,10 +495,11 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// prompt queue, and `--soft` is not the queue hold token.
 ///
 /// Operator: "/plan never submits, it just pulls up the stale plan." Bare
-/// `/plan` and `/plan --soft` still dock Isolated Preview. `/plan` with extra
-/// Human text is a plan-update turn (Human send / plan rewrite), so leftover
-/// Isolated Preview must close or re-read current disk plan.md the same way
-/// a Human mill-continue send does.
+/// `/plan` and `/plan --soft` still dock Isolated Preview. Isolated Preview
+/// stay-after-present exists for Comment-then-Approve. Mill-continue close
+/// is a Human mill sentence / `/implement`, not `/plan` extra text. `/plan`
+/// with extra Operator text is a plan-update turn: Isolated Preview stays
+/// or re-reads current disk plan.md. Empty Enter never Approves.
 fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -492,7 +510,7 @@ fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
         return false;
     }
     if token == "/plan" || trimmed.starts_with("/plan ") {
-        return crate::slash::queue_schedule::plan_slash_is_update_turn(trimmed);
+        return false;
     }
     true
 }
@@ -596,7 +614,7 @@ pub(super) fn dispatch_send_prompt_inner(
         &text,
         crate::appearance::cache::load_economic_mode(),
     );
-    let text = implement_rewrite.command;
+    let mut text = implement_rewrite.command;
 
     let ActiveView::Agent(id) = app.active_view else {
         // `/view-plan` after `--continue` can land while welcome still owns
@@ -697,12 +715,41 @@ pub(super) fn dispatch_send_prompt_inner(
         return vec![];
     }
     // Isolated Preview stays after present so Comment then Approve can run.
-    // Human send that is not Comment notes, `/implement`, mill rewrite, and
-    // `/plan` with extra Human text (plan-update turn) must not keep leftover
-    // Isolated Preview parked. Bare `/plan` and `/plan --soft` still dock
-    // Isolated Preview. Empty Enter never Approves.
+    // Human mill-continue / `/implement` must not keep leftover Isolated
+    // Preview parked. `/plan` extra text is not mill-continue close: that
+    // close-then-hope-drain wiped the Operator box with Isolated Preview
+    // gone and no send. Bare `/plan` and `/plan --soft` still dock Isolated
+    // Preview. Empty Enter never Approves.
     if mill_work_continues_after_isolated_preview(&text) {
         agent.leave_or_reread_isolated_preview_after_mill_continues();
+    }
+
+    // `/plan` with extra Operator text is a plan-update turn. Isolated
+    // Preview leftover stays or re-reads current disk plan.md. PlanCommand
+    // (EnterPlanMode) used to consume_input then return no SendPrompt when
+    // leftover Isolated Preview still had a running turn. Composer empty,
+    // Isolated Preview closed, nothing on the transcript. Bare `/plan` and
+    // `/plan --soft` still run as commands. Empty Enter never Approves.
+    if !literal
+        && crate::slash::queue_schedule::plan_slash_is_update_turn(text.trim())
+        && let Some(desc) = crate::slash::queue_schedule::plan_description_from_command(text.trim())
+    {
+        agent.reread_isolated_preview_from_current_disk_plan_md();
+        let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+        let enter_new_plan =
+            !in_plan && agent.session.state.is_idle() && agent.session.session_id.is_some();
+        if enter_new_plan {
+            let effects = super::modes::dispatch_enter_plan_mode(app, Some(desc.clone()));
+            if consume_input {
+                consume_plan_update_composer(app, id, &desc, &effects);
+            }
+            return effects;
+        }
+        if consume_input && agent.session.state.is_turn_running() {
+            let images = agent.prompt.drain_images();
+            return enqueue_if_interject_dropped(app, id, text, images);
+        }
+        text = desc;
     }
 
     let trimmed = text.trim();
@@ -907,13 +954,25 @@ pub(super) fn dispatch_send_prompt_inner(
                 return dispatch(Action::EditPromptExternal, app);
             }
             CommandResult::Action(action) => {
-                if consume_input {
+                let plan_update = match &action {
+                    Action::EnterPlanMode {
+                        description: Some(d),
+                    } if !d.trim().is_empty() => Some(d.clone()),
+                    _ => None,
+                };
+                // Plan-update must not wipe the Operator box before a send
+                // lands. Other slash actions still consume on dispatch.
+                if consume_input && plan_update.is_none() {
                     agent.prompt.set_text("");
                 }
                 // Local slash actions (including `/view-plan`) must run even
                 // while a leader reconnect is in progress. The reconnect
                 // guard below only blocks model prompts and PassThrough.
-                return dispatch(action, app);
+                let effects = dispatch(action, app);
+                if consume_input && let Some(desc) = plan_update {
+                    consume_plan_update_composer(app, id, &desc, &effects);
+                }
+                return effects;
             }
             CommandResult::QueueCommand(cmd_text) => {
                 agent.session.enqueue_command(cmd_text);
@@ -1355,16 +1414,7 @@ pub(super) fn dispatch_send_prompt_inner(
     // Isolated Preview Human SendPrompt must also drop a leftover
     // `feedback_draft` of that sent turn so unsent persist is not stale.
     if consume_input {
-        let sent = effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::SendPrompt { text: t, .. } if t == &text
-            ) || matches!(
-                e,
-                Effect::SendInterject { text: t, .. } if t == &text
-            ) || matches!(e, Effect::Compact { .. })
-                || matches!(e, Effect::SendBashCommand { .. })
-        });
+        let sent = consume_input_model_ask_landed(&effects, &text);
         if let Some(agent) = app.agents.get_mut(&id) {
             let enqueued = agent.session.pending_prompts.iter().any(|p| p.text == text);
             if sent || enqueued {
@@ -1376,6 +1426,51 @@ pub(super) fn dispatch_send_prompt_inner(
         }
     }
     effects
+}
+
+/// Whether consume-input dispatch already asked the model (or compact/bash).
+///
+/// Image-bearing idle sends drain as [`Effect::SendPromptBlocks`], not
+/// [`Effect::SendPrompt`]. Matching only `SendPrompt` treated a real Human
+/// turn as a failed wipe and restored the composer (text plus image chips)
+/// while chrome already showed Waiting for the model.
+fn consume_input_model_ask_landed(effects: &[Effect], text: &str) -> bool {
+    effects.iter().any(|effect| match effect {
+        Effect::SendPrompt { text: sent, .. }
+        | Effect::SendInterject { text: sent, .. }
+        | Effect::SetModeThenPrompt { text: sent, .. } => sent == text || text.contains(sent),
+        Effect::SendPromptBlocks { .. }
+        | Effect::SendPromptNow { .. }
+        | Effect::Compact { .. }
+        | Effect::SendBashCommand { .. } => true,
+        _ => false,
+    })
+}
+
+/// Wipe the Operator box only after a `/plan` extra-text send or enqueue
+/// landed. Isolated Preview leftover must not consume_input with empty effects.
+fn consume_plan_update_composer(
+    app: &mut AppView,
+    id: crate::app::agent::AgentId,
+    desc: &str,
+    effects: &[Effect],
+) {
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    let landed = consume_input_model_ask_landed(effects, desc);
+    let enqueued = agent
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text == desc || p.text.contains(desc));
+    if landed || enqueued {
+        if enqueued {
+            super::queue::drain_prompt_state_to_last_queued(agent);
+        }
+        agent.prompt.set_text("");
+        agent.clear_sent_human_from_plan_feedback_draft(desc);
+    }
 }
 
 /// Enqueue a bash command and try to drain immediately.
@@ -2196,6 +2291,107 @@ mod tests {
                     && r.session_id == sid
             }),
             "prompt_wal.jsonl must contain the Enter send before model wait, got {rows:?}"
+        );
+    }
+
+    /// Operator: "you're still not clearing the prompt input in the latest
+    /// build." Screenshot 2026-09-15: Human line already in the transcript
+    /// (`why is my system being rly gay rn? [Image #1]`), Waiting for the
+    /// model, composer still holding that same text and image chip,
+    /// Enter:interject. After a successful send that starts Waiting for the
+    /// model, composer text and image chips must be empty. WAL still records
+    /// the sent body. Isolated Preview persist-clear and compact clear stay
+    /// on their own tests.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn successful_send_with_image_chip_must_clear_composer_while_waiting_for_the_model() {
+        use crate::views::prompt_widget::KIND_IMAGE;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "clear-composer-after-image-send";
+        let typed = "why is my system being rly gay rn?";
+
+        let mut app = test_app_with_agent();
+        let agent_id = AgentId(0);
+        let body = {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text(typed);
+            let img = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+                data: vec![1, 2, 3],
+                mime_type: "image/png".into(),
+            });
+            agent.prompt.insert_image(img).expect("image chip attached");
+            assert!(
+                agent
+                    .prompt
+                    .textarea
+                    .elements()
+                    .iter()
+                    .any(|e| e.kind == KIND_IMAGE),
+                "fixture must include an image chip, not only plain text"
+            );
+            assert!(
+                !agent.prompt.images.is_empty(),
+                "fixture must keep the pasted image on the composer"
+            );
+            agent.prompt.text().to_string()
+        };
+        assert!(
+            body.contains(typed) && body.contains("[Image #1]"),
+            "send payload must be the Human line plus image chip, got {body:?}"
+        );
+
+        let effects = dispatch(Action::SendPrompt(body.clone()), &mut app);
+        let sent_blocks = effects.iter().any(|e| {
+            matches!(e, Effect::SendPromptBlocks { .. })
+                || matches!(e, Effect::SendPrompt { text, .. } if text == &body)
+        });
+        assert!(
+            sent_blocks,
+            "idle image send must start Waiting for the model (SendPromptBlocks or SendPrompt), got {effects:?}"
+        );
+
+        let agent = app.agents.get(&agent_id).unwrap();
+        assert!(
+            agent.session.state.is_turn_running(),
+            "successful send must start the model wait, state={:?}",
+            agent.session.state
+        );
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "you're still not clearing the prompt input in the latest build: leftover composer text={:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.images.is_empty()
+                && !agent
+                    .prompt
+                    .textarea
+                    .elements()
+                    .iter()
+                    .any(|e| e.kind == KIND_IMAGE),
+            "image chip must leave the composer after the send starts Waiting for the model"
+        );
+        assert!(
+            !agent.unsent_composer_draft_to_persist().contains(typed),
+            "unsent persist must not keep the sent Human body; persist={:?}",
+            agent.unsent_composer_draft_to_persist()
+        );
+        let rows =
+            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+        assert!(
+            rows.iter().any(|r| {
+                r.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+                    && r.text == body
+                    && r.session_id == sid
+            }),
+            "cleared composer is not a lost prompt: WAL must still hold the sent body, got {rows:?}"
         );
     }
 

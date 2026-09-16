@@ -33,7 +33,7 @@ fluffier. One idea per sentence when that stays clear. Labels are
 Address the person as Operator, not Human. Do not say You or Human for the operator.
 Do not say Me or Grok as the speaker label for the machine
 (Grok OSS and grok-oss stay product names).
-Do not rename the product composer Human box.
+Painted chrome and user-guide call the composer the Operator box.
 
 1. **Job:** one sentence. The real product outcome this session is
    trying to finish right now.

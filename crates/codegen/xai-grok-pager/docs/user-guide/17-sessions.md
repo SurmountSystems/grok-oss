@@ -41,7 +41,7 @@ Grok stores each session in its own directory, grouped by working directory. It 
   prompt_wal.jsonl           # append-only operator prompt write-ahead log
 ```
 
-`prompt_wal.jsonl` sits next to `unsent_prompt_draft` in that session directory. It is not git, not conversation, and not model tokens. Compact does not rewrite it. Each line is one operator event (Enter send, mid-turn interject, queue enqueue, plan Human-box notes that ride Approve, or a `/rebuild` persist flush) with a ULID, wall time, session id, kind, full operator text, and `[Image #N]` file ids under `images/` (never inline data URLs). If a crash or rebuild drops a send that is missing from chat history, prompt history, and the queue, session load restores that WAL send as a pending Human turn.
+`prompt_wal.jsonl` sits next to `unsent_prompt_draft` in that session directory. It is not git, not conversation, and not model tokens. Compact does not rewrite it. Each line is one operator event (Enter send, mid-turn interject, queue enqueue, plan Operator-box notes that ride Approve, or a `/rebuild` persist flush) with a ULID, wall time, session id, kind, full operator text, and `[Image #N]` file ids under `images/` (never inline data URLs). If a crash or rebuild drops a send that is missing from chat history, prompt history, and the queue, session load restores that WAL send as a pending Operator turn.
 
 See [`/rebuild`](04-slash-commands.md#rebuild) for how that persist path writes the WAL. Nested work on the leader survives `/rebuild` the same way a TUI disconnect does (the leader process stays up while nested ids are live).
 
@@ -72,7 +72,7 @@ Do not confuse these:
 | Continue interrupted turn | `canceled_turn_resume.json` plus the restart setting. |
 | `/resume` or `--resume` | You pick a session (or continue the most recent globally, per CLI). |
 | `/start` | Starts paused or interrupted work in the current session. Not the picker. |
-| `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Human line. |
+| `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Operator line. |
 | Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
 | L0 GUI | `grok-oss gui`. Laptop coordinator over that window list. Not `/dashboard` and not `/running`. |
 

@@ -540,6 +540,7 @@ Present is not Approve. Empty Enter never Approves.
 | `after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview` | After Plan Exit, `/plan` with extra Human text submits a plan-update turn. It does not only dock leftover Isolated Preview. Empty Enter never Approves. |
 | `slash_plan_with_args_already_in_plan_submits_plan_update` | `/plan <desc>` already in plan mode submits a plan-update turn, not a `/view-plan` toast |
 | `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview` | Isolated Preview leftover: `/plan update the plan...` submits a plan-update turn and WAL. Empty Enter never Approves. |
+| `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish` | Isolated Preview leftover plus a running turn: `/plan update the plan...` Enter:send produces SendPrompt/SendInterject, not consume_input with empty effects. |
 | `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped` | Bare `/plan` docks current disk plan.md, not leftover why-the-agent-stopped / TECH.md |
 | `plan_slash_with_body_is_update_turn_bare_and_soft_are_not` | `/plan` with extra Human text is a plan-update turn. Bare `/plan` and `/plan --soft` are not |
 | `user_guide_plan_slash_with_body_submits_plan_update` | 04-slash-commands and 19-plan-mode say `/plan` with extra Human text submits a plan-update turn |
@@ -578,6 +579,7 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview \
   slash_plan_with_args_already_in_plan_submits_plan_update \
   isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
+  isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
   leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \
@@ -1527,17 +1529,30 @@ Speaker labels are Operator and Agent. Operator is any sapient that is
 operating a machine agent. Agent is vendor-neutral. Do not say You or
 Human for the operator. Do not say Me or Grok as the speaker label for
 the machine. This diverges from upstream xAI You/Human / Me/Grok copy
-because the Operator said so. Do not weaken Job / State / Operator /
-Next. Do not delete or weaken this named test in recon, onto, import,
-or join.
+because the Operator said so. Painted chrome and user-guide call the
+composer the Operator box and DOGE caret/rails Operator green
+(`accent_user`). Identifiers such as `accent_user` and `UserPrompt` may
+stay. Do not weaken Job / State / Operator / Next. Do not delete or
+weaken these named tests in recon, onto, import, or join. Surmount
+contracts: quote the Operator. Catalog rows below are labeled Surmount
+with FORK pointers.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | `/what` instruction and the in-tree what skill prefer Operator and Agent and forbid You or Human / Me or Grok as speaker labels |
+| `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | Surmount. `/what` instruction and the in-tree what skill prefer Operator and Agent, name the Operator box, and forbid You or Human / Me or Grok as speaker labels. FORK `/what` restatement. |
+| `xai-grok-pager` `user_guide_operator_agent_speaker_labels_not_human_user_grok` | Surmount. User-guide theming and composer copy paint Operator, not Human/User/Grok as speaker. Keep Isolated Preview leftover-present, Comment then Approve, `/plan` extra text, empty Enter never Approves. FORK user-guide table `06-theming`. |
+| `xai-grok-pager` `waiting_chrome_does_not_paint_human_user_or_grok_as_speaker` | Surmount. Waiting chrome names the model request and does not paint Human, User, or Grok as a speaker. FORK `/what` restatement. |
+| `xai-grok-pager` `user_prompt_prefix_is_not_the_word_human` | Surmount. Operator prompt prefix is the prompt arrow, not the word Human, User, or Grok. FORK land class 4 rails. |
+| `grok-nix-helper` `agents_without_operator_agent_speaker_pin_fails_loud` | Surmount. `assert-process-pins` requires Operator and Agent speaker labels and rejects the old Human box rename ban. FORK process pins. |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
-  what_instruction_prefers_operator_and_agent_speaker_labels
+  what_instruction_prefers_operator_and_agent_speaker_labels \
+  user_guide_operator_agent_speaker_labels_not_human_user_grok \
+  waiting_chrome_does_not_paint_human_user_or_grok_as_speaker \
+  user_prompt_prefix_is_not_the_word_human
+cargo test -p grok-nix-helper --lib -- \
+  agents_without_operator_agent_speaker_pin_fails_loud
 ```
 
 #### Compact must not re-enqueue occupancy
@@ -2268,6 +2283,7 @@ cargo test -p xai-grok-pager --lib -- \
   after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview \
   slash_plan_with_args_already_in_plan_submits_plan_update \
   isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
+  isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
   leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \

@@ -200,7 +200,7 @@ WezTerm ships with the Kitty keyboard protocol disabled. Run `/doctor` in Grok.
 The `terminal.wezterm-kitty` finding shows the setting and restart step. Over
 SSH, Doctor shows only the workaround that can work in the current session.
 `Ctrl+Enter` interjects when a running turn can take it, and otherwise inserts
-a newline in the Human box (same family as `Shift+Enter`). Soft interject also
+a newline in the Operator box (same family as `Shift+Enter`). Soft interject also
 uses `Ctrl+I` (Apple Terminal `Ctrl+O`, VS Code family `Ctrl+L`, plus queue
 **[Send now]**). Apple Terminal uses `Ctrl+O` because it cannot distinguish a
 modified Enter chord.

@@ -1584,6 +1584,52 @@ mod tests {
         );
     }
 
+    /// Operator: Waiting chrome names the model request. It must not paint
+    /// Human, User, or Grok as a speaker label for the operator or the machine.
+    #[test]
+    fn waiting_chrome_does_not_paint_human_user_or_grok_as_speaker() {
+        use crate::acp::tracker::WaitingReason;
+        let theme = Theme::current();
+        let label = WaitingReason::Model.label();
+        assert!(
+            label.contains("Waiting for the model"),
+            "pre-first-token wait must name the model request, got {label}"
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !label.contains(banned),
+                "Waiting chrome must not paint {banned} as a speaker, got {label}"
+            );
+        }
+        let (_, activity, _) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Waiting(WaitingReason::Model)),
+            false,
+            false,
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !activity.contains(banned),
+                "busy-row wait must not paint {banned} as a speaker, got {activity}"
+            );
+        }
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buf = Buffer::empty(area);
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let painted = leftover_area_text(&buf, area);
+        assert!(
+            painted.contains("Waiting for the model"),
+            "leftover wait must still paint the model request, got:\n{painted}"
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !painted.contains(banned),
+                "leftover wait must not paint {banned} as a speaker, got:\n{painted}"
+            );
+        }
+    }
+
     #[test]
     fn waiting_reason_renders_specific_label() {
         use crate::acp::tracker::WaitingReason;

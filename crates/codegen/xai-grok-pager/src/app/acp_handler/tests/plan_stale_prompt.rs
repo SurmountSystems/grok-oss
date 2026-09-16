@@ -199,7 +199,10 @@ fn load_wal(cwd: &str, sid: &str) -> Vec<xai_grok_shell::session::prompt_wal::Pr
 
 fn wal_has_human_send(cwd: &str, sid: &str, needle: &str) -> bool {
     load_wal(cwd, sid).iter().any(|r| {
-        matches!(r.kind, PromptWalKind::Send | PromptWalKind::Queue) && r.text.contains(needle)
+        matches!(
+            r.kind,
+            PromptWalKind::Send | PromptWalKind::Queue | PromptWalKind::Interject
+        ) && r.text.contains(needle)
     })
 }
 
@@ -802,7 +805,8 @@ const LEFTOVER_PRESENT: &str = concat!(
     "# Plan: why the agent stopped, and what we do instead\n\n",
     "Leftover Isolated Preview present. TECH.md persist overwrite.\n",
 );
-const MILL_PLAN_MD: &str = "# Mill 69 of 69 GREEN\n\nCurrent mill plan.md after mill work continued.\n";
+const MILL_PLAN_MD: &str =
+    "# Mill 69 of 69 GREEN\n\nCurrent mill plan.md after mill work continued.\n";
 const MILL_CONTINUE_HUMAN: &str = "continue mill 69 of 69";
 
 fn leftover_isolated_preview_body(app: &AppView) -> Option<String> {
@@ -899,10 +903,7 @@ fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
 fn isolated_preview_implement_closes_leftover_present_after_mill_continues() {
     let mut app = make_app_with_agent("sess-mill-implement");
     let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
-    let effects = crate::app::dispatch::dispatch(
-        Action::SendPrompt("/implement".into()),
-        &mut app,
-    );
+    let effects = crate::app::dispatch::dispatch(Action::SendPrompt("/implement".into()), &mut app);
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -939,13 +940,15 @@ fn isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it() {
     type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
     let outcome = app.handle_input(&enter_key());
     let _ = dispatch_outcome(&mut app, outcome);
-    let painted = leftover_isolated_preview_body(&app).expect("Isolated Preview after mill rewrite");
+    let painted =
+        leftover_isolated_preview_body(&app).expect("Isolated Preview after mill rewrite");
     assert!(
         painted.contains("Mill 69 of 69 GREEN") && painted.contains("Current mill plan.md"),
         "Isolated Preview must re-read current session plan.md if mill rewrote it; got {painted:?}"
     );
     assert!(
-        !painted.contains("why the agent stopped") && !painted.contains("TECH.md persist overwrite"),
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite"),
         "Isolated Preview must not keep leftover present after mill rewrite; got {painted:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -1011,12 +1014,15 @@ fn isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tec
     );
 }
 
-/// Operator (2026-09-14): "It's still broken. /plan never submits, it just
-/// pulls up the stale plan." Composer `/plan update the plan with what was
-/// accomplished and all that remains please` Enter:send. Isolated Preview
-/// leftover "Plan: why the agent stopped" must not be the only outcome.
-/// Extra Human text after `/plan` is a plan-update turn (Human send / plan
-/// rewrite) and WAL. Empty Enter never Approves.
+/// Operator (2026-09-15): "also now this is a regression... see? then I hit
+/// enter and it just disappears and nothing fucking happens. you didn't
+/// fix stale plans. you broke them." Isolated Preview leftover mill 69 /
+/// TECH.md-era plan, idle Enter:send, composer
+/// `/plan update the plan with what was accomplished and all that remains
+/// please`. Isolated Preview must not vanish onto a blank mill with no
+/// send. Submit a plan-update turn (SendPrompt / SetModeThenPrompt /
+/// SendInterject). Isolated Preview stays or re-reads current disk
+/// plan.md. Queue-only is a false green. Empty Enter never Approves.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview() {
@@ -1030,31 +1036,45 @@ fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_prev
         "update the plan with what was accomplished and all that remains please";
     const PLAN_SLASH: &str =
         "/plan update the plan with what was accomplished and all that remains please";
+    const MILL_TECH_LEFTOVER: &str = concat!(
+        "# Mill 69 of 69 GREEN\n\n",
+        "TECH.md persist overwrite leftover Isolated Preview.\n",
+    );
 
     let mut app = make_app_with_agent(sid);
     bind_session_home(&mut app, cwd.clone(), sid);
-    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    let _rx = isolated_present(&mut app, "create-plan-call", MILL_TECH_LEFTOVER);
     write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.plan_mode_active = false;
+        agent.plan_mode_pending = None;
+        agent.prompt.set_text("");
+    }
     {
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             leftover_isolated_preview_body(&app)
-                .is_some_and(|b| b.contains("why the agent stopped")),
-            "fixture: leftover Isolated Preview must paint why the agent stopped"
+                .is_some_and(|b| b.contains("Mill 69 of 69 GREEN")
+                    && b.contains("TECH.md persist overwrite")),
+            "fixture: leftover Isolated Preview must paint mill 69 / TECH.md-era plan"
         );
-        assert!(agent.prompt.text().trim().is_empty());
+        assert!(agent.session.state.is_idle(), "fixture: idle Enter:send");
     }
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.prompt.set_text("");
-    }
+    assert!(
+        !app.global_work_pause.is_active(),
+        "status [pause] button chrome is not engaged pause"
+    );
     let empty = app.handle_input(&enter_key());
     let empty_effects = dispatch_outcome(&mut app, empty);
     {
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-            "empty Enter never Approves"
+            agent.plan_approval_view.is_some()
+                && !agent.plan_decision_resolved
+                && agent.line_viewer.is_some(),
+            "empty Enter never Approves and must not vanish Isolated Preview"
         );
         assert!(
             !empty_effects.iter().any(|effect| matches!(
@@ -1079,14 +1099,19 @@ fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_prev
             );
         }
         other => panic!(
-            "`/plan` with extra Human text must SendPrompt, not only dock Isolated Preview; got {other:?}"
+            "`/plan` with extra Operator text must SendPrompt, not only dock Isolated Preview; got {other:?}"
         ),
     }
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, PLAN_UPDATE)
-            || queued_texts(&app).iter().any(|t| t.contains(PLAN_UPDATE)),
-        "`/plan` with extra Human text must submit a plan-update turn; effects={effects:?} queue={:?}",
+        effects_send_human(&effects, PLAN_UPDATE),
+        "`/plan` with extra Operator text must SendPrompt/SetModeThenPrompt/SendInterject, not mill-continue close then empty drain; effects={effects:?} queue={:?}",
+        queued_texts(&app)
+    );
+    assert!(
+        !queued_texts(&app).iter().any(|t| t.contains(PLAN_UPDATE))
+            || effects_send_human(&effects, PLAN_UPDATE),
+        "queue-only is a false green for this vanish; effects={effects:?} queue={:?}",
         queued_texts(&app)
     );
     assert!(
@@ -1098,11 +1123,105 @@ fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_prev
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
             agent.prompt.text().trim().is_empty(),
-            "composer may clear after submit, not as a lost prompt"
+            "composer may clear after a landed send, not as a lost prompt"
         );
         assert!(
             agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
             "`/plan` with body must not Approve"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay or re-read current disk plan.md, not vanish onto a blank mill"
+        );
+    }
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("Isolated Preview must stay or re-read current disk plan.md");
+    assert!(
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite"),
+        "Isolated Preview must not stay leftover TECH.md-era present after `/plan` with body; got {painted:?}"
+    );
+    assert!(
+        painted.contains("Mill 69 of 69 GREEN") && painted.contains("Current mill plan.md"),
+        "Isolated Preview must paint current disk plan.md, not leftover present; got {painted:?}"
+    );
+}
+
+/// Operator (2026-09-15): leftover Isolated Preview plus a running turn
+/// (plan waiter). `/plan update the plan with what was accomplished and
+/// all that remains please` Enter:send must not wipe the Operator box
+/// with empty effects. Isolated Preview leftover why-the-agent-stopped
+/// must not be the only outcome.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let sid = "plan-slash-body-running";
+    const PLAN_UPDATE: &str =
+        "update the plan with what was accomplished and all that remains please";
+    const PLAN_SLASH: &str =
+        "/plan update the plan with what was accomplished and all that remains please";
+
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.plan_mode_active = true;
+        assert!(
+            leftover_isolated_preview_body(&app)
+                .is_some_and(|b| b.contains("why the agent stopped")),
+            "fixture: leftover Isolated Preview must paint why the agent stopped"
+        );
+    }
+
+    type_into_human_box(&mut app, PLAN_SLASH);
+    let outcome = app.handle_input(&enter_key());
+    match &outcome {
+        InputOutcome::Action(Action::SendPrompt(text))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
+            assert!(
+                text.contains(PLAN_UPDATE),
+                "Enter must submit the `/plan` body, got {text:?}"
+            );
+        }
+        other => panic!(
+            "`/plan` with extra Operator text must SendPrompt, not only dock Isolated Preview; got {other:?}"
+        ),
+    }
+    let effects = dispatch_outcome(&mut app, outcome);
+    assert!(
+        effects_send_human(&effects, PLAN_UPDATE),
+        "running-turn `/plan` extra text must SendPrompt or SendInterject, not vanish; effects={effects:?} queue={:?}",
+        queued_texts(&app)
+    );
+    assert!(
+        wal_has_human_send(&cwd_str, sid, PLAN_UPDATE),
+        "plan-update sentence must be on WAL, not wiped without sending; got {:?}",
+        load_wal(&cwd_str, sid)
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "composer may clear after a landed send, not as a lost prompt"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "`/plan` with body must not Approve"
+        );
+    }
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "running-turn `/plan` extra text must not mill-continue-close Isolated Preview before a send"
         );
     }
     if let Some(painted) = leftover_isolated_preview_body(&app) {
@@ -1110,10 +1229,6 @@ fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_prev
             !painted.contains("why the agent stopped")
                 && !painted.contains("TECH.md persist overwrite"),
             "Isolated Preview must not stay leftover present after `/plan` with body; got {painted:?}"
-        );
-        assert!(
-            painted.contains("Mill 69 of 69 GREEN") || painted.contains("Current mill plan.md"),
-            "Isolated Preview must paint current disk plan.md, not leftover present; got {painted:?}"
         );
     }
 }
@@ -1149,7 +1264,8 @@ fn leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stop
         "bare `/plan` must dock current disk plan.md; got {painted:?}"
     );
     assert!(
-        !painted.contains("why the agent stopped") && !painted.contains("TECH.md persist overwrite"),
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite"),
         "bare `/plan` must not keep leftover Isolated Preview present; got {painted:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();

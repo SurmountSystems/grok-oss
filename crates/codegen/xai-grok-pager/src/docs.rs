@@ -857,9 +857,10 @@ mod tests {
         );
     }
 
-    /// Grok OSS: `/unstick` is documented as a new slash and is not `/resume`.
-    /// This diverges from upstream xAI because FORK.md and the catalog Nested overlay
-    /// hang / `/unstick` extra pin that distinct slash.
+    /// Owed outcome: the product and user-guide must not teach `/unstick` as
+    /// `/resume`. `/unstick` resends the last parent prompt; `/resume` opens
+    /// the session picker; `/start` continues mill / interrupted work.
+    /// Speaker labels are Operator / Agent. Keep the stronger assert.
     #[test]
     fn user_guide_unstick_is_not_resume() {
         let slash = USER_GUIDE
@@ -875,8 +876,13 @@ mod tests {
             "04-slash-commands must keep /unstick distinct from /resume"
         );
         assert!(
-            slash.content.contains("second Human line"),
-            "04-slash-commands must say /unstick does not paint a second Human line"
+            !slash.content.contains("`/unstick` is `/resume`")
+                && !slash.content.contains("`/unstick` as `/resume`"),
+            "04-slash-commands must not teach /unstick as /resume"
+        );
+        assert!(
+            slash.content.contains("second Operator line"),
+            "04-slash-commands must say /unstick does not paint a second Operator line"
         );
         assert!(
             slash.content.contains("orphans that hung prompt"),
@@ -974,7 +980,87 @@ mod tests {
         );
         assert!(
             content.contains("Ctrl+Z") || content.contains("ctrl+z"),
-            "19-plan-mode.md must say Ctrl+Z restores the Human box"
+            "19-plan-mode.md must say Ctrl+Z restores the Operator box"
+        );
+        assert!(
+            content.contains("Operator box") || content.contains("Operator-box"),
+            "19-plan-mode.md must call the composer the Operator box"
+        );
+        assert!(
+            !content.contains("Human box") && !content.contains("Human-box"),
+            "19-plan-mode.md must not teach Human box as the composer name"
+        );
+    }
+
+    /// Operator: stop calling the composer Human. Speaker labels are Operator
+    /// and Agent. Painted user-guide chrome must not teach Human, User, or Grok
+    /// as the speaker for the operator or the machine. Identifiers may stay.
+    /// Keep Isolated Preview leftover-present, Comment then Approve, `/plan`
+    /// extra text, and empty Enter never Approves.
+    #[test]
+    fn user_guide_operator_agent_speaker_labels_not_human_user_grok() {
+        let theme = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "06-theming.md")
+            .expect("06-theming.md is embedded");
+        assert!(
+            theme.content.contains("Operator: composer caret")
+                && theme.content.contains("Operator green"),
+            "06-theming.md must paint Operator green for the composer caret, not Human"
+        );
+        assert!(
+            !theme.content.contains("Human: composer caret")
+                && !theme.content.contains("(human green)"),
+            "06-theming.md must not teach Human as the composer speaker"
+        );
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        assert!(
+            keys.content.contains("Operator box"),
+            "03-keyboard-shortcuts.md must name the Operator box"
+        );
+        assert!(
+            !keys.content.contains("Human box"),
+            "03-keyboard-shortcuts.md must not name a Human box"
+        );
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            slash.content.contains("Operator box")
+                && plan.content.contains("Operator box")
+                && slash.content.contains("extra Operator text")
+                && plan.content.contains("extra Operator text")
+                && slash.content.contains("plan-update turn")
+                && plan.content.contains("Comment then Approve")
+                && plan
+                    .content
+                    .contains("must not stay parked on leftover present")
+                && slash.content.contains("Empty Enter never Approves")
+                && plan.content.contains("Empty Enter never Approves"),
+            "user-guide must keep Isolated Preview leftover-present, Comment then Approve, \
+             `/plan` extra Operator text, and empty Enter never Approves"
+        );
+        assert!(
+            !slash.content.contains("Human box")
+                && !plan.content.contains("Human box")
+                && !slash.content.contains("Human turn")
+                && !plan.content.contains("Human turn"),
+            "slash and plan guides must not teach Human as the composer speaker"
+        );
+        assert!(
+            slash
+                .content
+                .contains("Speaker labels are Operator not You or Human")
+                && slash.content.contains("Agent not Me or Grok"),
+            "04-slash-commands.md /what must keep Operator and Agent speaker labels"
         );
     }
 
@@ -1080,13 +1166,13 @@ mod tests {
             slash.content.contains("plan-update turn")
                 && plan.content.contains("plan-update turn")
                 && slash.content.contains("why the agent stopped"),
-            "user-guide must say `/plan` with extra Human text submits a plan-update turn \
+            "user-guide must say `/plan` with extra Operator text submits a plan-update turn \
              and does not only dock leftover Isolated Preview"
         );
     }
 
     /// Operator: "/plan never submits, it just pulls up the stale plan."
-    /// User-guide must say `/plan` with extra Human text submits a plan-update
+    /// User-guide must say `/plan` with extra Operator text submits a plan-update
     /// turn. Bare `/plan` still docks Isolated Preview from current disk.
     #[test]
     fn user_guide_plan_slash_with_body_submits_plan_update() {
@@ -1103,12 +1189,12 @@ mod tests {
                 && slash.content.contains(
                     "update the plan with what was accomplished and all that remains please"
                 ),
-            "04-slash-commands.md must say `/plan` with extra Human text submits a plan-update turn"
+            "04-slash-commands.md must say `/plan` with extra Operator text submits a plan-update turn"
         );
         assert!(
             plan.content.contains("plan-update turn")
                 && plan.content.contains("does not only pull up a stale plan"),
-            "19-plan-mode.md must say `/plan` with extra Human text submits a plan-update turn"
+            "19-plan-mode.md must say `/plan` with extra Operator text submits a plan-update turn"
         );
         assert!(
             slash.content.contains("prompt write-ahead log")

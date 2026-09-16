@@ -1,6 +1,6 @@
 //! Plan, yolo, auto, and permission mode transitions and toasts.
 
-use super::queue::{maybe_drain_queue, note_peek_page_flip};
+use super::queue::{maybe_drain_queue_protecting, note_peek_page_flip};
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
@@ -118,10 +118,11 @@ pub(super) fn dispatch_enter_plan_mode(
 
     let mode_id = acp::SessionModeId::new("plan");
 
-    if let Some(desc) = description {
+    let (effects, page_flip_entry) = if let Some(desc) = description {
         // Plan-update turn: Isolated Preview leftover / already in plan /
         // after Plan Exit must still send. WAL records the sentence so a
-        // consume_input wipe is not a lost prompt.
+        // consume_input wipe is not a lost prompt. Protect this enqueue so
+        // occupancy does not drop it before SendPrompt.
         let wal_kind = if agent.session.state.is_idle() {
             xai_grok_shell::session::prompt_wal::PromptWalKind::Send
         } else {
@@ -133,15 +134,15 @@ pub(super) fn dispatch_enter_plan_mode(
             .prompt
             .slash_controller
             .recognized_token_ranges(&desc, &agent.session.models);
-        agent
+        let qid = agent
             .session
-            .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
+            .enqueue_prompt_with_skill_tokens(desc.clone(), skill_token_ranges);
         if !in_plan {
             agent.plan_mode_pending = Some(true);
             tracing::info!("Plan mode entered via /plan slash command");
         }
-        let drain = maybe_drain_queue(agent);
-        note_peek_page_flip(app, id, drain.page_flip_entry);
+        let drain = maybe_drain_queue_protecting(agent, Some(qid));
+        let page_flip_entry = drain.page_flip_entry;
         let mut effects = Vec::with_capacity(1);
         for eff in drain.effects {
             match eff {
@@ -164,21 +165,50 @@ pub(super) fn dispatch_enter_plan_mode(
                 other => effects.push(other),
             }
         }
-        if effects.is_empty() && !in_plan {
-            effects.push(Effect::SetSessionMode {
-                session_id,
-                mode_id,
-            });
+        // Do not emit mode-only with no prompt. That wipes `/plan <body>`
+        // and leaves Isolated Preview closed with nothing on the transcript.
+        if effects.is_empty() {
+            agent.session.pending_prompts.retain(|p| p.id != qid);
+            let prompt_id = uuid::Uuid::new_v4().to_string();
+            agent.note_self_originated_prompt(&prompt_id);
+            if agent.session.state.is_idle() {
+                agent.start_turn_boundary(Some(&prompt_id));
+                agent.session.current_prompt_id = Some(prompt_id.clone());
+            }
+            let agent_id = agent.session.id;
+            if !in_plan {
+                effects.push(Effect::SetModeThenPrompt {
+                    session_id,
+                    mode_id,
+                    agent_id,
+                    text: desc,
+                    prompt_id,
+                    skill_token_ranges: Vec::new(),
+                });
+            } else {
+                effects.push(Effect::SendPrompt {
+                    agent_id,
+                    session_id,
+                    text: desc,
+                    prompt_id,
+                    skill_token_ranges: Vec::new(),
+                });
+            }
         }
-        effects
+        (effects, page_flip_entry)
     } else {
         agent.plan_mode_pending = Some(true);
         tracing::info!("Plan mode entered via /plan slash command");
-        vec![Effect::SetSessionMode {
-            session_id,
-            mode_id,
-        }]
-    }
+        (
+            vec![Effect::SetSessionMode {
+                session_id,
+                mode_id,
+            }],
+            None,
+        )
+    };
+    note_peek_page_flip(app, id, page_flip_entry);
+    effects
 }
 
 /// Set plan mode (on / off). PAGER-owned + ACP-mediated, per-session.

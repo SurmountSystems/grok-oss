@@ -25,6 +25,7 @@ State: running, waiting, blocked, or done. Name the real file, command, crate, o
 Operator: the operator action, or the word nothing if they do not need to act. Then say why. Name the evidence. Do not leave a bare nothing. \
 Next: the next concrete agent step. \
 Prefer Operator and Agent as speaker labels. Do not say You or Human for the operator. Do not say Me or Grok as the speaker label for the machine. \
+Painted chrome and user-guide call the composer the Operator box. \
 Complete American English thoughts. Short sentences. \
 No leftover board ids or hex run ids in the body. \
 No say the word if you want me to continue when the next step is already clear. \
@@ -173,6 +174,14 @@ mod tests {
             text.contains("Do not say Me or Grok as the speaker label for the machine"),
             "forbid Me or Grok as the speaker label; got {text}"
         );
+        assert!(
+            text.contains("call the composer the Operator box"),
+            "painted chrome names the Operator box; got {text}"
+        );
+        assert!(
+            !text.contains("Do not rename the product composer Human box"),
+            "old Human box rename ban is superseded; got {text}"
+        );
         assert!(text.contains("Job: one sentence"), "{text}");
         assert!(
             text.contains("State: running, waiting, blocked, or done"),
@@ -222,6 +231,14 @@ mod tests {
         assert!(
             skill_body.contains("Job / State / Operator / Next"),
             "what skill must keep Job / State / Operator / Next; got {skill}"
+        );
+        assert!(
+            skill_body.contains("call the composer the Operator box"),
+            "what skill must name the Operator box; got {skill}"
+        );
+        assert!(
+            !skill_body.contains("Do not rename the product composer Human box"),
+            "what skill must not keep the old Human box rename ban; got {skill}"
         );
     }
 

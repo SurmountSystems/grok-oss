@@ -379,19 +379,22 @@ less than product code and tests. Do not invent long essays or git nags.
    this restatement, speaker labels are **Operator** (not You, not Human)
    and **Agent** (not Me, not Grok when Grok means the assistant). See
    § *Operator and Agent*. Do not
-   rename grok-oss, Grok OSS, or a Grok model id. Do not rename the
-   product composer Human box (`accent_user`). Host dual-pin:
+   rename grok-oss, Grok OSS, or a Grok model id. Painted chrome and
+   user-guide call the composer the **Operator box** (`accent_user`).
+   Identifiers such as `accent_user` and `UserPrompt` may stay. Host dual-pin:
    `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
-   **Address the Operator as Operator (pinned 2026-09-01):** The
+   **Address the Operator as Operator (pinned 2026-09-01; Operator box
+   2026-09-15):** The
    operator prefers being called Operator instead of Human. In chat,
    reports, board titles, spawn descriptions, residual, plans, and
    status, say **Operator** when naming the person. The four-line
    restatement stays Job / State / **Operator** / Next. Report speaker
-   labels stay Operator / Agent. Do not rename the product composer
-   Human box (`accent_user`) or DOGE Human green. That chrome was
-   left alone in the 2026-09-01 report-label pin. This pin is how we
-   address the Operator. Do not globally replace the word Human in
-   user-guide theming (Human green caret). Product names grok-oss
+   labels stay Operator / Agent. Painted chrome, user-guide, and process
+   prose call the composer the **Operator box** and DOGE caret/rails
+   **Operator green** (`accent_user`). Do not teach Human, User, or Grok
+   as the speaker label for the operator or the machine. Do not globally
+   rename Rust identifiers such as `accent_user` or `UserPrompt` unless a
+   user-visible string is attached. Product names grok-oss
    and Grok 4.6 stay. Host dual-pin: `~/.grok/AGENTS.md` § Prose +
    tone.
    **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
@@ -813,11 +816,16 @@ the Operator's favorite, not the only one.
 
 Do not say You or Human for the operator. Do not say Me or Grok as the
 speaker label for the machine. Do not rename grok-oss, Grok OSS, or a
-Grok model id. Do not rename the product composer Human box.
+Grok model id. Painted chrome and user-guide call the composer the
+**Operator box**. DOGE caret and operator rails are Operator green
+(`accent_user`). Identifiers such as `accent_user` and `UserPrompt`
+may stay unless a user-visible string is attached. Do not teach User
+as the speaker label for the operator.
 
 This is what speaker-label sentences mean. Dual-pin: this file (hard
 constraint 4) and host `~/.grok/AGENTS.md` same heading. This pin does
-not weaken Job / State / Operator / Next.
+not weaken Job / State / Operator / Next. It supersedes the 2026-09-01
+line that left the composer named Human box.
 
 ## Never name that Anthropic assistant (pinned 2026-09-09)
 
