@@ -1,16 +1,12 @@
-//! Bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is
-//! not the install path.
+//! grok-oss grep is embedded Rust, not a sidecar `rg`.
+//! `just install` does not cargo-install ripgrep.
 
 #[test]
-fn bundled_rg_is_cargo_built_from_the_ripgrep_crate_github_musl_tarball_is_not_the_install_path() {
+fn grok_oss_grep_is_embedded_rust_not_a_sidecar_rg() {
     let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
     assert!(
-        src.contains("cargo")
-            && src.contains("install")
-            && src.contains("ripgrep")
-            && src.contains("--bin")
-            && src.contains("rg"),
-        "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path"
+        !src.contains("cargo install") && !src.contains("arg(\"ripgrep\")"),
+        "grok-oss grep is embedded Rust, not a sidecar rg: xai-grok-shell build.rs must not cargo-install ripgrep"
     );
     assert!(
         !src.contains("github.com/BurntSushi/ripgrep/releases")
@@ -18,7 +14,7 @@ fn bundled_rg_is_cargo_built_from_the_ripgrep_crate_github_musl_tarball_is_not_t
         "xai-grok-shell build.rs must not download a GitHub musl ripgrep tarball"
     );
     assert!(
-        !src.contains("GROK_SHELL_RG_TARGET=x86_64-unknown-linux-musl"),
-        "xai-grok-shell build.rs must not default GROK_SHELL_RG_TARGET to musl"
+        src.contains("embedded") || src.contains("does not cargo-install ripgrep"),
+        "xai-grok-shell build.rs must say grok-oss grep is embedded, not a sidecar rg"
     );
 }

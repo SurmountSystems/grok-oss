@@ -1,16 +1,12 @@
 //! `glob` tool — OpenCode architecture (`Tool` trait).
 //!
-//! File pattern matching using ripgrep's `--files` mode with glob filters.
-//! Returns matching file paths sorted by modification time (most recent first),
-//! capped at 100 results.
+//! File pattern matching using the `ignore` walker (the same walk ripgrep
+//! `--files` uses) with glob filters. Returns matching file paths sorted by
+//! modification time (most recent first), capped at 100 results.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-
-use crate::implementations::grok_build::grep::ripgrep::rg_path;
+use crate::implementations::grok_build::grep::embedded;
 use crate::types::output::ToolOutput;
 #[allow(unused_imports)]
 use crate::types::resources::{
@@ -22,9 +18,6 @@ use crate::types::tool_io::ToolInput;
 // ─── Constants ──────────────────────────────────────────────────────
 
 const RESULT_LIMIT: usize = 100;
-
-/// Hard cap on bytes read from ripgrep's stdout (5 MB).
-const MAX_STDOUT_BYTES: usize = 5_000_000;
 
 // ─── Description ────────────────────────────────────────────────────
 
@@ -169,24 +162,27 @@ impl xai_tool_runtime::Tool for GlobTool {
             &input.path.clone().unwrap_or_default(),
         );
 
-        // ── Build ripgrep command ───────────────────────────────
-        //   rg --files --glob='!.git/*' --hidden --glob=<pattern> <search_dir>
-        let rg_exec = rg_path();
-        let mut cmd = Command::new(rg_exec);
-        cmd.arg("--files")
-            .arg("--glob=!.git/*")
-            .arg("--hidden")
-            .arg("--glob")
-            .arg(&input.pattern)
-            .arg(&search_dir)
-            .stdout(Stdio::piped())
-            // stderr is never read; a pipe would block rg once warnings fill it.
-            .stderr(Stdio::null());
-        crate::util::detach_search_command(&mut cmd);
-
-        #[allow(clippy::disallowed_methods)] // search helper, waited on below
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        // Walk files the way `rg --files --glob='!.git/*' --hidden --glob=<pattern>` did.
+        let pattern = input.pattern.clone();
+        let search_dir_for_walk = search_dir.clone();
+        let listed = match tokio::task::spawn_blocking(move || {
+            embedded::list_files(&search_dir_for_walk, &pattern, &["!.git/*"])
+        })
+        .await
+        {
+            Ok(Ok(paths)) => paths,
+            Ok(Err(e)) => {
+                return Ok(GlobOutput {
+                    tool_output_for_prompt: format!("Error running glob: {e}"),
+                    count: 0,
+                    total_count: 0,
+                    truncated: false,
+                    entries: Vec::new(),
+                    cwd_for_display: display_cwd_or_cwd(&cwd, display_cwd.as_deref())
+                        .display()
+                        .to_string(),
+                });
+            }
             Err(e) => {
                 return Ok(GlobOutput {
                     tool_output_for_prompt: format!("Error running glob: {e}"),
@@ -201,42 +197,7 @@ impl xai_tool_runtime::Tool for GlobTool {
             }
         };
 
-        // ── Read stdout with byte cap ───────────────────────────
-        let mut stdout_buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
-        let mut truncated_by_bytes = false;
-        if let Some(mut stdout_pipe) = child.stdout.take() {
-            let mut tmp = [0u8; 8192];
-            loop {
-                match stdout_pipe.read(&mut tmp).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdout_buf.len() + n <= MAX_STDOUT_BYTES {
-                            stdout_buf.extend_from_slice(&tmp[..n]);
-                        } else {
-                            let remaining = MAX_STDOUT_BYTES.saturating_sub(stdout_buf.len());
-                            if remaining > 0 {
-                                stdout_buf.extend_from_slice(&tmp[..remaining]);
-                            }
-                            truncated_by_bytes = true;
-                            let _ = child.start_kill();
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-
-        if truncated_by_bytes {
-            // Bounded reap: a D-state rg must not stall this future forever.
-            crate::util::reap_killed_search_child(&mut child).await;
-        } else {
-            let _ = child.wait().await;
-        }
-
-        // ── Parse file paths from stdout ────────────────────────
-        let stdout = String::from_utf8_lossy(&stdout_buf);
-        let mut truncated = truncated_by_bytes;
+        let mut truncated = false;
 
         struct FileEntry {
             path: PathBuf,
@@ -249,11 +210,7 @@ impl xai_tool_runtime::Tool for GlobTool {
         // the truncation marker can report the real overflow.
         let mut entries: Vec<FileEntry> = Vec::new();
         let mut total_count: usize = 0;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
+        for full_path in listed {
             total_count += 1;
 
             if entries.len() >= RESULT_LIMIT {
@@ -261,7 +218,6 @@ impl xai_tool_runtime::Tool for GlobTool {
                 continue;
             }
 
-            let full_path = search_dir.join(line);
             let mtime_ms = std::fs::metadata(&full_path)
                 .ok()
                 .and_then(|m| m.modified().ok())

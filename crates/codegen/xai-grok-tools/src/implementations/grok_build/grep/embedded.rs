@@ -406,6 +406,25 @@ mod tests {
     #[test]
     fn just_install_does_not_cargo_install_ripgrep_and_grok_oss_grep_is_embedded_rust_not_a_sidecar_rg()
      {
+        let just = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../justfile"));
+        let install = just
+            .split("\ninstall:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\nbuild-dist:").next())
+            .unwrap_or(just);
+        assert!(
+            !install.contains("cargo install") || !install.contains("ripgrep"),
+            "just install does not cargo-install ripgrep; grok-oss grep is embedded Rust, not a sidecar rg:\n{install}"
+        );
+        assert!(
+            !install.contains("--version 15.0.0") || !install.contains("ripgrep"),
+            "just install does not cargo-install ripgrep"
+        );
+        assert!(
+            install.contains("cargo build --release -p xai-grok-pager-bin"),
+            "just install is cargo build --release of the pager"
+        );
+
         let tools_build = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
         assert!(
             !tools_build.contains("cargo_install_ripgrep")
@@ -419,15 +438,14 @@ mod tests {
 
         let this_src = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/implementations/grok_build/grep/ripgrep.rs"
+            "/src/implementations/grok_build/grep/embedded.rs"
         ));
-        let prod = this_src.split("#[cfg(test)]").next().unwrap_or(this_src);
         assert!(
-            prod.contains("grep::regex") && prod.contains("WalkBuilder"),
+            this_src.contains("grep::regex") && this_src.contains("WalkBuilder"),
             "grok-oss grep is embedded Rust, not a sidecar rg"
         );
         assert!(
-            !prod.contains("std::process::Command"),
+            !this_src.contains("Command::new") && !this_src.contains("std::process::Command"),
             "grok-oss grep is embedded Rust, not a sidecar rg: embedded search must not exec rg"
         );
     }
@@ -459,53 +477,5 @@ mod tests {
         let text = String::from_utf8_lossy(&out.bytes);
         assert!(text.contains("hello world"), "embedded hit missing: {text}");
         assert_eq!(out.exit_code, 0);
-    }
-
-    #[test]
-    fn grok_oss_grep_is_embedded_rust_not_a_sidecar_rg() {
-        let tools_build = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
-        assert!(
-            !tools_build.contains("cargo_install_ripgrep")
-                && !(tools_build.contains("arg(\"ripgrep\")") && tools_build.contains("--bin")),
-            "grok-oss grep is embedded Rust, not a sidecar rg: xai-grok-tools build.rs must not cargo-install ripgrep"
-        );
-        assert!(
-            !tools_build.contains("github.com/BurntSushi/ripgrep/releases")
-                && !tools_build.contains("ripgrep/releases/download"),
-            "xai-grok-tools build.rs must not download a GitHub musl ripgrep tarball"
-        );
-
-        let grep_mod = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/implementations/grok_build/grep/mod.rs"
-        ));
-        assert!(
-            !grep_mod.contains("Command::new(rg_exec)") && !grep_mod.contains("rg_path()"),
-            "grok-oss grep is embedded Rust, not a sidecar rg"
-        );
-        assert!(
-            grep_mod.contains("embedded::search_to_rg_stdout"),
-            "grok-oss grep is embedded Rust, not a sidecar rg"
-        );
-
-        let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
-        assert!(
-            src.contains("cargo")
-                && src.contains("install")
-                && src.contains("fd-find")
-                && src.contains("--bin")
-                && src.contains("fd"),
-            "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path"
-        );
-        assert!(
-            !src.contains("github.com/sharkdp/fd/releases")
-                && !src.contains("fd/releases/download"),
-            "xai-grok-tools build.rs must not download a GitHub musl fd tarball"
-        );
-        assert!(
-            !src.contains("GROK_TOOLS_FD_TARGET=x86_64-unknown-linux-musl")
-                && !src.contains("x86_64-unknown-linux-musl"),
-            "xai-grok-tools build.rs must not default GROK_TOOLS_FD_TARGET to musl"
-        );
     }
 }

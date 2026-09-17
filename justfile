@@ -2784,39 +2784,16 @@ test-nix-retry-force-remote-ssh-ng-max-connections:
 # Overrides host -fuse-ld=wild (breaks this link). See comments in recipe body.
 # Strips the installed artifact only: [profile.release] stays unstripped for
 # local debugging; release-dist keeps strip=false for sidecar extract.
-# Bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is
-# not the install path. Nix crane still sets GROK_TOOLS_BUNDLE_RG_PATH to
-# pkgs.ripgrep. Host install cargo-installs host GNU rg 15.0.0 unless that
-# env already points at a cargo-built or Nix rg. Do not default to musl.
+# grok-oss grep is embedded Rust (grep crate + ignore), not a sidecar rg.
+# just install does not cargo-install ripgrep.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
     # Host ~/.cargo/config and RUSTFLAGS often set -fuse-ld=wild; wild fails
     # this workspace. Unset encoded rustflags and pin mold only.
     mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
-    tools_rg="${GROK_TOOLS_BUNDLE_RG_PATH:-}"
-    if [[ -z "${tools_rg}" ]]; then
-      bundle_root="${PWD}/target/bundle-rg"
-      echo "==> cargo install --version 15.0.0 ripgrep (host GNU crate build)"
-      env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-        CARGO_TARGET_DIR="${PWD}/target/bundle-rg-cargo" \
-        cargo install --version 15.0.0 --locked --no-track --force \
-          --root "${bundle_root}" --bin rg ripgrep \
-        --config 'build.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]' \
-        --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]' \
-        --config 'target.aarch64-unknown-linux-gnu.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]'
-      tools_rg="${bundle_root}/bin/rg"
-      if [[ ! -x "${tools_rg}" ]]; then
-        echo "install: cargo-built rg missing at ${tools_rg}" >&2
-        exit 1
-      fi
-    fi
-    shell_rg="${GROK_SHELL_BUNDLE_RG_PATH:-${tools_rg}}"
-    echo "==> bundle rg from ${tools_rg} (cargo-built from the ripgrep crate)"
     echo "==> cargo build --release -p xai-grok-pager-bin (no wild linker)"
     env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-      GROK_TOOLS_BUNDLE_RG_PATH="${tools_rg}" \
-      GROK_SHELL_BUNDLE_RG_PATH="${shell_rg}" \
       RULES_RUST_RUNFILES_WORKSPACE_NAME="${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}" \
       cargo build --release -p xai-grok-pager-bin --locked \
       --config 'build.rustflags=["-C","link-arg=-fuse-ld=mold","-C","force-unwind-tables=yes"]' \

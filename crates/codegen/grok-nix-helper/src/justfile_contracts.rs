@@ -306,31 +306,25 @@ fn check_remote_prints_quality_receipt_on_cache_hit() {
 }
 
 #[test]
-fn install_recipe_cargo_builds_rg_from_the_ripgrep_crate_github_musl_tarball_is_not_the_install_path()
- {
+fn just_install_does_not_cargo_install_ripgrep() {
     let Some(root) = skip_or_root() else {
         return;
     };
     let just = read(&root, "justfile");
     let install = recipe_body(&just, "install");
     assert!(
-        install.contains("cargo install")
-            && install.contains("--version 15.0.0")
-            && install.contains("ripgrep")
-            && install.contains("--bin rg"),
-        "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path:\n{install}"
+        !(install.contains("cargo install") && install.contains("ripgrep")),
+        "just install does not cargo-install ripgrep:\n{install}"
     );
     assert!(
-        install.contains("GROK_TOOLS_BUNDLE_RG_PATH"),
-        "just install must set GROK_TOOLS_BUNDLE_RG_PATH so xai-grok-tools build.rs copies the cargo-built rg:\n{install}"
+        !install.contains("GROK_TOOLS_BUNDLE_RG_PATH")
+            && !install.contains("GROK_SHELL_BUNDLE_RG_PATH")
+            && !install.contains("target/bundle-rg"),
+        "just install must not point GROK_TOOLS_BUNDLE_RG_PATH at a sidecar rg:\n{install}"
     );
     assert!(
-        install.contains("GROK_SHELL_BUNDLE_RG_PATH"),
-        "just install must set GROK_SHELL_BUNDLE_RG_PATH so xai-grok-shell build.rs copies the same cargo-built rg:\n{install}"
-    );
-    assert!(
-        !install.contains("x86_64-unknown-linux-musl"),
-        "just install must not default GROK_TOOLS_RG_TARGET or vendor path to musl:\n{install}"
+        install.contains("cargo build --release -p xai-grok-pager-bin"),
+        "just install is cargo build --release of the pager:\n{install}"
     );
     assert!(
         !install.contains("github.com/BurntSushi"),
@@ -339,35 +333,36 @@ fn install_recipe_cargo_builds_rg_from_the_ripgrep_crate_github_musl_tarball_is_
 }
 
 #[test]
-fn tools_and_shell_build_rs_cargo_build_rg_from_crate_not_github_musl_tarball() {
+fn grok_oss_grep_is_embedded_rust_not_a_sidecar_rg() {
     let Some(root) = skip_or_root() else {
         return;
     };
     let tools = read(&root, "crates/codegen/xai-grok-tools/build.rs");
     let shell = read(&root, "crates/codegen/xai-grok-shell/build.rs");
+    let grep_mod = read(
+        &root,
+        "crates/codegen/xai-grok-tools/src/implementations/grok_build/grep/mod.rs",
+    );
     for (name, src) in [
         ("xai-grok-tools/build.rs", tools.as_str()),
         ("xai-grok-shell/build.rs", shell.as_str()),
     ] {
         assert!(
-            src.contains("cargo")
-                && src.contains("install")
-                && src.contains("ripgrep")
-                && src.contains("--bin")
-                && src.contains("rg"),
-            "bundled rg is cargo-built from the ripgrep crate; GitHub musl tarball is not the install path ({name})"
+            !src.contains("cargo_install_ripgrep")
+                && !(src.contains("arg(\"ripgrep\")") && src.contains("--bin")),
+            "grok-oss grep is embedded Rust, not a sidecar rg ({name})"
         );
         assert!(
             !src.contains("github.com/BurntSushi/ripgrep/releases")
                 && !src.contains("ripgrep/releases/download"),
             "{name} must not download a GitHub musl ripgrep tarball"
         );
-        assert!(
-            !src.contains("GROK_TOOLS_RG_TARGET=x86_64-unknown-linux-musl")
-                && !src.contains("GROK_SHELL_RG_TARGET=x86_64-unknown-linux-musl"),
-            "{name} must not default GROK_TOOLS_RG_TARGET to musl"
-        );
     }
+    assert!(
+        grep_mod.contains("embedded::search_to_rg_stdout")
+            && !grep_mod.contains("Command::new(rg_exec)"),
+        "grok-oss grep is embedded Rust, not a sidecar rg"
+    );
 }
 
 #[test]

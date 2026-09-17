@@ -65,14 +65,14 @@ SOFTWARE.
 
 ## Bundled tool binaries
 
-Release builds of this crate embed binaries of the tools below (see
+Release builds of this crate may embed binaries of the tools below (see
 `build.rs`); they are self-extracted to `~/.grok/vendor/` at runtime.
 Which tools are embedded in a given build depends on what the release
 pipeline supplies at build time:
 
-- **ripgrep** is cargo-built from the `ripgrep` crate (or supplied via
-  `GROK_TOOLS_BUNDLE_RG_PATH`). GitHub musl tarball is not the install
-  path.
+- **ripgrep** is not bundled as a sidecar `rg`. grok-oss grep is embedded
+  Rust: it links the `grep` crate plus `ignore` and calls those functions.
+  `just install` does not cargo-install ripgrep.
 - **ugrep** and **bfs** are embedded only when the release pipeline supplies
   static binaries via `GROK_TOOLS_BUNDLE_UGREP_PATH` /
   `GROK_TOOLS_BUNDLE_BFS_PATH`. When those are unset the tools are not
@@ -80,12 +80,12 @@ pipeline supplies at build time:
   `$PATH` if the user has installed them. Their license terms are included
   below so that any build that does bundle them is covered.
 
-### ripgrep
+### ripgrep / grep crate
 
-[ripgrep](https://github.com/BurntSushi/ripgrep) is dual-licensed under the
-MIT License or the Unlicense, at the user's option. We cargo-build `rg`
-from that crate (default features, not a GitHub musl tarball) and
-reproduce the MIT license below. Default features do not enable PCRE2.
+[ripgrep](https://github.com/BurntSushi/ripgrep) and the `grep` crate are
+dual-licensed under the MIT License or the Unlicense, at the user's option.
+We link the `grep` library (default features, not a GitHub musl tarball)
+and reproduce the MIT license below. Default features do not enable PCRE2.
 
 The MIT License (MIT)
 
