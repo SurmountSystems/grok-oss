@@ -519,8 +519,9 @@ Present is not Approve. Empty Enter never Approves.
 | `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt` | `/plan --soft add feature` seeds Isolated Preview and does not grow pending_prompts |
 | `plan_soft_is_not_the_queue_hold_token` | `--soft` is not `queue` / `later` |
 | `user_guide_plan_soft_docks_isolated_preview` | 04-slash-commands and 19-plan-mode say `--soft` does not enter plan mode |
-| `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview Human Enter is a Human turn, not only plan comment 1. Empty Enter never Approves. |
-| `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Non-empty Enter still sends while ride-Approve chrome is visible. Empty Enter never Approves. |
+| `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit` | Isolated Preview idle plus a non-empty Operator paste plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. Empty Enter never Approves. |
+| `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
+| `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Comment CTA then notes then Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_send_prompt_is_human_turn_not_only_plan_comment` | Isolated Preview SendPrompt is a Human turn. Empty Enter never Approves. |
 | `isolated_preview_human_text_enter_appends_wal` | Isolated Preview Human send appends prompt WAL. |
 | `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot` | After Revise rewrites session plan.md, Isolated Preview paints the current file, not the first-draft snapshot. Opening the panel re-reads the file. |
@@ -539,8 +540,10 @@ Present is not Approve. Empty Enter never Approves.
 | `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored` | After Plan Exit, `/plan` docks Isolated Preview. Compact must not swallow `/plan`. Empty Enter never Approves. |
 | `after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview` | After Plan Exit, `/plan` with extra Human text submits a plan-update turn. It does not only dock leftover Isolated Preview. Empty Enter never Approves. |
 | `slash_plan_with_args_already_in_plan_submits_plan_update` | `/plan <desc>` already in plan mode submits a plan-update turn, not a `/view-plan` toast |
-| `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview` | Isolated Preview leftover: `/plan update the plan...` submits a plan-update turn and WAL. Empty Enter never Approves. |
-| `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish` | Isolated Preview leftover plus a running turn: `/plan update the plan...` Enter:send produces SendPrompt/SendInterject, not consume_input with empty effects. |
+| `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview` | Isolated Preview leftover: `/plan update the plan...` submits a plan-update turn and WAL. Isolated Preview stays docked as rewriting-wait. Empty Enter never Approves. |
+| `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish` | Isolated Preview leftover plus a running turn: `/plan update the plan...` Enter:send produces SendPrompt/SendInterject, not consume_input with empty effects. Isolated Preview stays rewriting-wait. |
+| `isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present` | A second plan prompt must not pop leftover mill-69 / first-draft plan.md with idle Approve. Isolated Preview stays rewriting-wait until exit_plan_mode writes current disk. Empty Enter never Approves. Paste-then-Enter Approve works after the new present. |
+| `user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt` | 19-plan-mode documents Isolated Preview rewriting-wait on a second plan prompt. `/unstick` is not `/resume`. |
 | `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped` | Bare `/plan` docks current disk plan.md, not leftover why-the-agent-stopped / TECH.md |
 | `plan_slash_with_body_is_update_turn_bare_and_soft_are_not` | `/plan` with extra Human text is a plan-update turn. Bare `/plan` and `/plan --soft` are not |
 | `user_guide_plan_slash_with_body_submits_plan_update` | 04-slash-commands and 19-plan-mode say `/plan` with extra Human text submits a plan-update turn |
@@ -558,6 +561,7 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt \
   plan_soft_is_not_the_queue_hold_token \
   user_guide_plan_soft_docks_isolated_preview \
+  isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
   isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment \
   isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible \
   isolated_preview_send_prompt_is_human_turn_not_only_plan_comment \
@@ -580,6 +584,8 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   slash_plan_with_args_already_in_plan_submits_plan_update \
   isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
   isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
+  isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present \
+  user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt \
   leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \
@@ -608,7 +614,8 @@ have a piece; never fit the contract to a wipe.
 | `isolated_present_preview_typed_after_present_click_approve_sends_human_box_prompt` | Empty at present, type in Preview, click Approve still sends the typed string |
 | `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt` | Comment then Prompt focus, type, click Approve does not drop the Human-box prompt |
 | `isolated_present_click_approve_dispatches_interject_with_prompt_text` | Click Approve dispatches Interject that carries the prompt text |
-| `isolated_present_preview_enter_is_human_turn_then_click_approve` | Isolated Preview Human Enter is a Human turn, not only plan comment 1; empty Enter never Approves; click Approve still decides the parked plan |
+| `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit` | Isolated Preview idle plus a non-empty Operator paste plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. Empty Enter never Approves. |
+| `isolated_present_preview_enter_is_human_turn_then_click_approve` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt` | Isolated Preview Approve with notes in the plan composer submits those notes with Approve, not as a queued Prompt, and does not drop them. Empty Enter never Approves. |
 | `isolated_preview_stays_after_present_so_comment_then_approve_can_run` | Isolated Preview stays after present so Comment then Approve can run. Empty Enter never Approves. |
 | `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt` | Comment CTA then composer notes then Approve submits as Approve-with-notes, not only as a Human SendPrompt. |
@@ -625,6 +632,7 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   isolated_present_preview_enter_is_human_turn_then_click_approve \
+  isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   isolated_preview_stays_after_present_so_comment_then_approve_can_run \
   isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt \
@@ -2265,6 +2273,7 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   isolated_present_preview_enter_is_human_turn_then_click_approve \
+  isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
   after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
@@ -2284,6 +2293,8 @@ cargo test -p xai-grok-pager --lib -- \
   slash_plan_with_args_already_in_plan_submits_plan_update \
   isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview \
   isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
+  isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present \
+  user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt \
   leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \

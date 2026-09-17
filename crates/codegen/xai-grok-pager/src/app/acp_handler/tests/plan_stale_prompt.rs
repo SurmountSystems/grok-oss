@@ -17,7 +17,10 @@ use crate::app::actions::{Action, Effect};
 use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::block::RenderBlock;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+use crate::views::plan_approval_view::{
+    PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PLAN_REWRITE_WAIT_HEADING, PlanApprovalFocus,
+    PlanFeedbackInFlight, PlanPromptIntent,
+};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -147,13 +150,39 @@ fn effects_send_human(effects: &[Effect], needle: &str) -> bool {
         Effect::SendPrompt { text, .. }
         | Effect::SendInterject { text, .. }
         | Effect::SetModeThenPrompt { text, .. } => {
-            text.contains(needle)
-                && !text
-                    .contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+            text.contains(needle) && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
         }
         Effect::SendPromptNow { .. } => true,
         _ => false,
     })
+}
+
+fn effects_approve_with_notes(effects: &[Effect], needle: &str) -> bool {
+    effects.iter().any(|effect| match effect {
+        Effect::SendInterject { text, .. } => {
+            text.contains(needle) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        }
+        _ => false,
+    })
+}
+
+fn assert_enter_approves_with_notes(outcome: &InputOutcome, needle: &str) {
+    match outcome {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(needle),
+                "Enter must Approve with the Operator notes, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve with comment must wrap the notes, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
+        ),
+    }
 }
 
 fn plan_comment_texts(app: &AppView) -> Vec<String> {
@@ -201,7 +230,10 @@ fn wal_has_human_send(cwd: &str, sid: &str, needle: &str) -> bool {
     load_wal(cwd, sid).iter().any(|r| {
         matches!(
             r.kind,
-            PromptWalKind::Send | PromptWalKind::Queue | PromptWalKind::Interject
+            PromptWalKind::Send
+                | PromptWalKind::Queue
+                | PromptWalKind::Interject
+                | PromptWalKind::PlanNotes
         ) && r.text.contains(needle)
     })
 }
@@ -287,38 +319,22 @@ fn isolated_preview_human_sentence_is_human_turn_and_wal_not_only_plan_comment_1
 
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    match &outcome {
-        InputOutcome::Action(Action::SendPrompt(text))
-        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
-            assert!(
-                text.contains(HUMAN_TURN),
-                "Isolated Preview Human Enter must SendPrompt, got {text:?}"
-            );
-            assert!(
-                !text
-                    .contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
-                "Human send must not wrap ride-Approve review comments, got {text:?}"
-            );
-        }
-        other => panic!(
-            "Isolated Preview Human sentence must be a Human turn, not only plan comment 1; got {other:?}"
-        ),
-    }
+    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, HUMAN_TURN),
-        "dispatch must start a Human Prompt; effects={effects:?}"
+        effects_approve_with_notes(&effects, HUMAN_TURN),
+        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
     );
     assert!(
         wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
-        "lost Isolated Preview Human sentence must be on WAL, got {:?}",
+        "Approve with notes must be on WAL, got {:?}",
         load_wal(&cwd_str, sid)
     );
     assert_not_only_plan_comment_1(&app, HUMAN_TURN);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "Isolated Preview Human Enter must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Isolated Preview idle Enter with notes must Approve"
     );
     assert!(
         !agent
@@ -355,64 +371,22 @@ fn after_comment_cta_later_product_report_sends_as_human_not_ride_approve_only()
     );
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
-    let stash = app.handle_input(&enter_key());
-    let stash_effects = dispatch_outcome(&mut app, stash);
-    assert!(
-        !effects_send_human(&stash_effects, COMMENT_STASH),
-        "first Comment Enter may stash; must not send the comment as the only Prompt; effects={stash_effects:?}"
-    );
-    {
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-            "Comment stash must not Approve"
-        );
-        assert_eq!(
-            agent
-                .plan_approval_view
-                .as_ref()
-                .and_then(|p| p.feedback_draft.as_deref()),
-            Some(COMMENT_STASH)
-        );
-    }
-
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.prompt.set_text("");
-    }
-    type_into_human_box(&mut app, PRODUCT_REPORT);
     let outcome = app.handle_input(&enter_key());
-    match &outcome {
-        InputOutcome::Action(Action::SendPrompt(text))
-        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
-            assert!(
-                text.contains(PRODUCT_REPORT),
-                "later product report must SendPrompt as Human, got {text:?}"
-            );
-            assert!(
-                !text
-                    .contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
-                "later product report must not ride-Approve-only, got {text:?}"
-            );
-        }
-        other => panic!(
-            "after Comment CTA, a later product report must still send as Human, not ride-Approve-only; got {other:?}"
-        ),
-    }
+    assert_enter_approves_with_notes(&outcome, COMMENT_STASH);
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, PRODUCT_REPORT),
-        "later product report must dispatch as Human; effects={effects:?}"
+        effects_approve_with_notes(&effects, COMMENT_STASH),
+        "Comment CTA then notes then Enter must Approve with those notes; effects={effects:?}"
     );
     assert!(
-        wal_has_human_send(&cwd_str, sid, PRODUCT_REPORT),
-        "later product report must be on WAL, got {:?}",
+        wal_has_human_send(&cwd_str, sid, COMMENT_STASH),
+        "Approve with Comment notes must be on WAL, got {:?}",
         load_wal(&cwd_str, sid)
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "later product report Enter must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Comment notes plus Enter must Approve"
     );
 }
 
@@ -476,30 +450,22 @@ fn isolated_preview_human_send_clears_composer_no_stale_draft() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert!(
-        matches!(
-            &outcome,
-            InputOutcome::Action(Action::SendPrompt(text))
-                | InputOutcome::ActionThenForward(Action::SendPrompt(text))
-            if text.contains(HUMAN_TURN)
-        ),
-        "successful Isolated Preview Human send must SendPrompt; got {outcome:?}"
-    );
+    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, HUMAN_TURN),
-        "successful Human send must dispatch; effects={effects:?}"
+        effects_approve_with_notes(&effects, HUMAN_TURN),
+        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
         agent.prompt.text().trim().is_empty(),
-        "composer must clear after a successful Human send during Isolated Preview, leftover={:?}",
+        "composer clears only after Approve lands, leftover={:?}",
         agent.prompt.text()
     );
     let persist = agent.unsent_composer_draft_to_persist();
     assert!(
         !persist.contains(HUMAN_TURN),
-        "unsent persist must not keep a leftover stale draft of a sent Human turn; persist={persist:?}"
+        "unsent persist must not keep leftover notes after Approve; persist={persist:?}"
     );
     assert!(
         wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
@@ -595,53 +561,33 @@ fn plan_comment_body_already_human_turn_does_not_restore_as_queue_after_present_
     );
 }
 
-/// Ride-Approve chrome visible + non-empty composer Enter still sends.
+/// Comment CTA then notes then Enter Approves with those notes.
 #[test]
 fn ride_approve_chrome_visible_non_empty_composer_enter_still_sends() {
     let mut app = make_app_with_agent("sess-ride-approve");
     let _rx = isolated_present(
         &mut app,
         "create-plan-call",
-        "# Isolated plan.md\n\nRide-Approve chrome must not block send\n",
+        "# Isolated plan.md\n\nRide-Approve chrome must not Plan-Exit\n",
     );
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
     let first = app.handle_input(&enter_key());
-    let _ = dispatch_outcome(&mut app, first);
-    {
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent
-                .plan_approval_view
-                .as_ref()
-                .and_then(|p| p.feedback_draft.as_deref()),
-            Some(COMMENT_STASH),
-            "ride-Approve chrome is the stashed comment"
-        );
-        agent.prompt.set_text(COMMENT_STASH);
-    }
-    let second = app.handle_input(&enter_key());
-    match &second {
-        InputOutcome::Action(Action::SendPrompt(text))
-        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
-            assert!(
-                text.contains(COMMENT_STASH),
-                "non-empty Enter while ride-Approve chrome is visible must still send, got {text:?}"
-            );
-        }
-        other => panic!(
-            "ride-Approve chrome visible + non-empty composer Enter still sends; got {other:?}"
-        ),
-    }
-    let effects = dispatch_outcome(&mut app, second);
+    assert_enter_approves_with_notes(&first, COMMENT_STASH);
+    let effects = dispatch_outcome(&mut app, first);
     assert!(
-        effects_send_human(&effects, COMMENT_STASH),
-        "second Enter must dispatch as Human; effects={effects:?}"
+        effects_approve_with_notes(&effects, COMMENT_STASH),
+        "Comment notes plus Enter must Approve with those notes; effects={effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "non-empty Enter while ride-Approve chrome is visible must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Comment notes plus Enter must Approve, not Plan-Exit"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve lands, got {:?}",
+        agent.prompt.text()
     );
 }
 
@@ -665,10 +611,11 @@ fn revise_re_present_does_not_resurrect_prompt_already_in_chat_history() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
+    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, HUMAN_TURN),
-        "first Isolated Preview Human send must dispatch; effects={effects:?}"
+        effects_approve_with_notes(&effects, HUMAN_TURN),
+        "first Isolated Preview idle Enter must Approve with those notes; effects={effects:?}"
     );
     let already_painted = user_prompt_texts(&app)
         .iter()
@@ -781,23 +728,17 @@ fn operator_stale_prompt_quote_is_a_human_turn_not_plan_comment_1() {
     );
     type_into_human_box(&mut app, OPERATOR_STALE_PROMPT);
     let outcome = app.handle_input(&enter_key());
-    match &outcome {
-        InputOutcome::Action(Action::SendPrompt(text))
-        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
-            assert!(
-                text.contains(OPERATOR_STALE_PROMPT),
-                "Operator stale-prompt sentence must SendPrompt, got {text:?}"
-            );
-        }
-        other => {
-            panic!("Operator quote must be a Human turn, not only plan comment 1; got {other:?}")
-        }
-    }
+    assert_enter_approves_with_notes(&outcome, OPERATOR_STALE_PROMPT);
+    let effects = dispatch_outcome(&mut app, outcome);
+    assert!(
+        effects_approve_with_notes(&effects, OPERATOR_STALE_PROMPT),
+        "Operator quote plus Enter must Approve with those notes; effects={effects:?}"
+    );
     assert_not_only_plan_comment_1(&app, OPERATOR_STALE_PROMPT);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "Operator quote Enter must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Operator quote plus Enter must Approve"
     );
 }
 
@@ -882,19 +823,21 @@ fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
     }
     type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
     let outcome = app.handle_input(&enter_key());
+    assert_enter_approves_with_notes(&outcome, MILL_CONTINUE_HUMAN);
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_send_human(&effects, MILL_CONTINUE_HUMAN),
-        "Isolated Preview Human send must continue mill; effects={effects:?}"
+        effects_approve_with_notes(&effects, MILL_CONTINUE_HUMAN),
+        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "Human send must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Isolated Preview idle Enter with notes must Approve, not Plan-Exit and leave the paste"
     );
     assert!(
-        agent.line_viewer.is_none(),
-        "Isolated Preview must not stay parked on leftover present after mill work continues via Human send"
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve lands, got {:?}",
+        agent.prompt.text()
     );
 }
 
@@ -937,9 +880,8 @@ fn isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it() {
     bind_session_home(&mut app, cwd.clone(), sid);
     let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
     write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
-    type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
-    let outcome = app.handle_input(&enter_key());
-    let _ = dispatch_outcome(&mut app, outcome);
+    let _ =
+        crate::app::dispatch::dispatch(Action::SendPrompt(MILL_CONTINUE_HUMAN.into()), &mut app);
     let painted =
         leftover_isolated_preview_body(&app).expect("Isolated Preview after mill rewrite");
     assert!(
@@ -1131,19 +1073,31 @@ fn isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_prev
         );
         assert!(
             agent.line_viewer.is_some(),
-            "Isolated Preview must stay or re-read current disk plan.md, not vanish onto a blank mill"
+            "Isolated Preview must stay docked as rewriting-wait, not vanish onto a blank mill"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating),
+            "plan-update send must mark Isolated Preview rewriting-wait"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v
+                .plan_ref()
+                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
+            "idle Approve / Comment / Revise / Exit must not arm on leftover body during rewrite-wait"
         );
     }
     let painted = leftover_isolated_preview_body(&app)
-        .expect("Isolated Preview must stay or re-read current disk plan.md");
+        .expect("Isolated Preview must stay docked as rewriting-wait");
     assert!(
-        !painted.contains("why the agent stopped")
-            && !painted.contains("TECH.md persist overwrite"),
-        "Isolated Preview must not stay leftover TECH.md-era present after `/plan` with body; got {painted:?}"
+        painted.contains(PLAN_REWRITE_WAIT_HEADING) && painted.contains(PLAN_UPDATE),
+        "Isolated Preview must quote the Operator's second prompt as rewriting-wait, not leftover mill plan.md; got {painted:?}"
     );
     assert!(
-        painted.contains("Mill 69 of 69 GREEN") && painted.contains("Current mill plan.md"),
-        "Isolated Preview must paint current disk plan.md, not leftover present; got {painted:?}"
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite")
+            && !painted.contains("Current mill plan.md"),
+        "Isolated Preview must not paint leftover mill plan.md as a live present while the plan-update turn is running; got {painted:?}"
     );
 }
 
@@ -1223,14 +1177,221 @@ fn isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish() {
             agent.line_viewer.is_some(),
             "running-turn `/plan` extra text must not mill-continue-close Isolated Preview before a send"
         );
-    }
-    if let Some(painted) = leftover_isolated_preview_body(&app) {
-        assert!(
-            !painted.contains("why the agent stopped")
-                && !painted.contains("TECH.md persist overwrite"),
-            "Isolated Preview must not stay leftover present after `/plan` with body; got {painted:?}"
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating),
+            "running-turn plan-update must mark Isolated Preview rewriting-wait"
         );
     }
+    let painted = leftover_isolated_preview_body(&app).expect(
+        "running-turn `/plan` extra text must keep Isolated Preview docked as rewriting-wait",
+    );
+    assert!(
+        painted.contains(PLAN_REWRITE_WAIT_HEADING) && painted.contains(PLAN_UPDATE),
+        "Isolated Preview must quote the Operator's second prompt as rewriting-wait; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite"),
+        "Isolated Preview must not stay leftover present after `/plan` with body; got {painted:?}"
+    );
+}
+
+/// Operator: a second plan prompt must not pop the stale plan. Isolated
+/// Preview leftover after the first present stays only so Comment then
+/// Approve can run. Empty Enter never Approves. A second `/plan` extra-text
+/// send is a plan-update turn: Isolated Preview stays docked as
+/// rewriting-wait, quotes that prompt, and does not arm idle Approve on
+/// leftover mill-69 / first-draft `plan.md`. When `exit_plan_mode` writes
+/// current disk `plan.md`, Isolated Preview presents that file and idle
+/// CTAs arm. Paste-then-Enter Approve still works after the new present.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let sid = "plan-second-prompt-rewrite-wait";
+    const PLAN_UPDATE: &str =
+        "update the plan with what was accomplished and all that remains please";
+    const PLAN_SLASH: &str =
+        "/plan update the plan with what was accomplished and all that remains please";
+    const STALE_FIRST_DRAFT: &str = concat!(
+        "# Plan: mill 69 of 69 first draft\n\n",
+        "Leftover Isolated Preview present. TECH.md persist overwrite.\n",
+    );
+    const REWRITTEN_PLAN: &str =
+        "# Plan: second present after rewrite\n\nCurrent disk plan.md after exit_plan_mode.\n";
+    const FOLLOW_UP: &str = "please add more detail while rewrite-wait is up";
+    const APPROVE_NOTES: &str = "ship the rewritten plan";
+
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", STALE_FIRST_DRAFT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.prompt.set_text("");
+    }
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            leftover_isolated_preview_body(&app)
+                .is_some_and(|b| b.contains("mill 69 of 69 first draft")
+                    && b.contains("TECH.md persist overwrite")),
+            "fixture: leftover Isolated Preview must paint the stale first draft"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v
+                .plan_ref()
+                .is_some_and(|p| p.show_action_buttons || p.feedback_active)),
+            "fixture: leftover present may arm idle CTAs so Comment then Approve can run"
+        );
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some()
+                && !agent.plan_decision_resolved
+                && agent.line_viewer.is_some(),
+            "empty Enter never Approves and must not vanish Isolated Preview"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+                    | Effect::SetModeThenPrompt { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+
+    type_into_human_box(&mut app, PLAN_SLASH);
+    let outcome = app.handle_input(&enter_key());
+    let effects = dispatch_outcome(&mut app, outcome);
+    assert!(
+        effects_send_human(&effects, PLAN_UPDATE),
+        "second plan prompt must send a plan-update turn; effects={effects:?}"
+    );
+    assert!(
+        wal_has_human_send(&cwd_str, sid, PLAN_UPDATE),
+        "plan-update sentence must be on WAL; got {:?}",
+        load_wal(&cwd_str, sid)
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "second plan prompt must not Approve leftover body"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "Isolated Preview must stay docked as rewriting-wait, not close-then-hope"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v
+                .plan_ref()
+                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
+            "idle Approve / Comment / Revise / Exit must not arm during rewriting-wait"
+        );
+    }
+    let painted =
+        leftover_isolated_preview_body(&app).expect("Isolated Preview rewriting-wait body");
+    assert!(
+        painted.contains(PLAN_REWRITE_WAIT_HEADING) && painted.contains(PLAN_UPDATE),
+        "rewriting-wait must quote the Operator's second prompt; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("mill 69 of 69 first draft")
+            && !painted.contains("TECH.md persist overwrite")
+            && !painted.contains("Current mill plan.md"),
+        "second plan prompt must not pop the stale plan; got {painted:?}"
+    );
+
+    type_into_human_box(&mut app, FOLLOW_UP);
+    let follow_outcome = app.handle_input(&enter_key());
+    match &follow_outcome {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. })
+            if text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD) =>
+        {
+            panic!(
+                "rewrite-wait plus notes plus Enter must not Approve leftover body; got {text:?}"
+            );
+        }
+        InputOutcome::Action(Action::SendPrompt(_))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(_))
+        | InputOutcome::Action(Action::Interject { .. })
+        | InputOutcome::ActionThenForward(Action::Interject { .. })
+        | InputOutcome::Action(Action::SendPromptNow { .. })
+        | InputOutcome::ActionThenForward(Action::SendPromptNow { .. }) => {}
+        other => {
+            panic!("rewrite-wait notes plus Enter must send, not Approve leftover; got {other:?}")
+        }
+    }
+    let follow_effects = dispatch_outcome(&mut app, follow_outcome);
+    assert!(
+        !effects_approve_with_notes(&follow_effects, FOLLOW_UP),
+        "rewrite-wait must not Approve leftover body; effects={follow_effects:?}"
+    );
+
+    write_mill_session_plan_md(&cwd, sid, REWRITTEN_PLAN);
+    let _rx2 = isolated_present(&mut app, "create-plan-call-2", REWRITTEN_PLAN);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "new exit_plan_mode present must clear rewriting-wait"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v
+                .plan_ref()
+                .is_some_and(|p| p.show_action_buttons && p.feedback_active)),
+            "new present must arm idle CTAs on current disk plan.md"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "new present is review, not Approve"
+        );
+    }
+    let presented = leftover_isolated_preview_body(&app)
+        .expect("Isolated Preview after exit_plan_mode must paint current disk plan.md");
+    assert!(
+        presented.contains("second present after rewrite")
+            && presented.contains("Current disk plan.md after exit_plan_mode"),
+        "Isolated Preview must re-read current disk plan.md after exit_plan_mode; got {presented:?}"
+    );
+    assert!(
+        !presented.contains(PLAN_REWRITE_WAIT_HEADING)
+            && !presented.contains("mill 69 of 69 first draft"),
+        "new present must not keep rewriting-wait or the stale first draft; got {presented:?}"
+    );
+
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    type_into_human_box(&mut app, APPROVE_NOTES);
+    let approve_outcome = app.handle_input(&enter_key());
+    assert_enter_approves_with_notes(&approve_outcome, APPROVE_NOTES);
+    let approve_effects = dispatch_outcome(&mut app, approve_outcome);
+    assert!(
+        effects_approve_with_notes(&approve_effects, APPROVE_NOTES),
+        "paste-then-Enter Approve must work after the new present; effects={approve_effects:?}"
+    );
 }
 
 /// Operator: bare `/plan` still docks Isolated Preview from current disk

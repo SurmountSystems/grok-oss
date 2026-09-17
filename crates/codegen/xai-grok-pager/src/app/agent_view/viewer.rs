@@ -142,11 +142,66 @@ impl AgentView {
     }
 
     fn plan_cta_has_comment_payload(&self) -> bool {
-        !self.prompt.text().trim().is_empty()
+        self.composer_has_operator_notes()
             || self
                 .plan_approval_view
                 .as_ref()
                 .is_some_and(|pav| !pav.comments.is_empty())
+    }
+
+    fn composer_has_operator_notes(&self) -> bool {
+        !self.prompt.text().trim().is_empty()
+            || !self.prompt.images.is_empty()
+            || self
+                .prompt
+                .textarea
+                .elements()
+                .iter()
+                .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
+    }
+
+    /// Isolated Preview idle after present: a non-empty Operator box
+    /// (typed notes or a paste chip) plus Enter Approves with those notes.
+    /// Empty Enter never Approves. Keep-draft from before present still
+    /// SendPrompt. Slash commands still send. Line-comment overlay still
+    /// saves. Prompt-focused Revise / Questions keep those intents.
+    pub(super) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
+        if self.plan_decision_resolved {
+            return false;
+        }
+        if self.plan_feedback_in_flight.is_some() {
+            return false;
+        }
+        if !self.is_plan_viewer() {
+            return false;
+        }
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        if pav.focus == PlanApprovalFocus::Commenting {
+            return false;
+        }
+        if !self.composer_has_operator_notes() {
+            return false;
+        }
+        if self.composer_is_keep_draft_from_before_present() {
+            return false;
+        }
+        let trimmed = self.prompt.text().trim();
+        if let Some(invocation) = crate::slash::parse_invocation(trimmed) {
+            let reg = self.prompt.slash_controller.registry();
+            if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
+            {
+                return false;
+            }
+        }
+        if pav.focus == PlanApprovalFocus::Prompt {
+            return matches!(
+                pav.prompt_intent,
+                PlanPromptIntent::Comment | PlanPromptIntent::ApproveNotes
+            );
+        }
+        true
     }
 
     /// Click marks the CTA and runs it. Enter also submits the marked CTA.
@@ -159,6 +214,9 @@ impl AgentView {
 
     /// Enter (and a second click) run the marked idle CTA.
     fn activate_selected_plan_cta(&mut self, choice: SelectedPlanCta) -> InputOutcome {
+        if self.plan_feedback_in_flight.is_some() {
+            return InputOutcome::Changed;
+        }
         self.mark_selected_plan_cta(choice);
         match choice {
             SelectedPlanCta::Approve => self.approve_plan(),
@@ -355,13 +413,17 @@ impl AgentView {
             if focus == Some(PlanApprovalFocus::Commenting) {
                 return self.handle_plan_feedback_key(key);
             }
+            if self.isolated_preview_idle_enter_approves_with_notes() {
+                self.snapshot_or_clear_plan_feedback_draft();
+                return self.approve_plan();
+            }
             if self.hold_parked_plan_review_comments_from_enter() {
                 return InputOutcome::Changed;
             }
             if focus == Some(PlanApprovalFocus::Prompt) {
                 return self.handle_plan_feedback_key(key);
             }
-            if !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty() {
+            if self.composer_has_operator_notes() {
                 return self.handle_plan_feedback_key(key);
             }
             if self.selected_plan_cta().is_some() {

@@ -10,7 +10,8 @@ use crate::app::app_view::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::{
-    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanPromptIntent, PlanReviewSource,
+    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanFeedbackInFlight, PlanPromptIntent,
+    PlanReviewSource,
 };
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -88,6 +89,12 @@ impl AgentView {
     /// this mill-continue close. Empty Enter never Approves. Does not
     /// Approve the parked plan.
     pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        ) {
+            return;
+        }
         if !self.is_plan_viewer() {
             return;
         }
@@ -115,6 +122,12 @@ impl AgentView {
     /// disk plan.md, not leftover "why the agent stopped" / TECH.md persist
     /// overwrite. Does not Approve. Empty Enter never Approves.
     pub(crate) fn reread_isolated_preview_from_current_disk_plan_md(&mut self) {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        ) {
+            return;
+        }
         let leftover = self
             .line_viewer
             .as_ref()
@@ -136,6 +149,39 @@ impl AgentView {
         if mill_rewrote || leftover_stale {
             self.paint_isolated_preview_from_mill_plan_md(disk);
         }
+    }
+
+    /// Plan-update send: Isolated Preview stays docked as rewriting-wait.
+    /// Quotes the Operator's second prompt. Does not paint leftover
+    /// `plan.md` as a live present. Idle Approve / Comment / Revise / Exit
+    /// do not arm. Empty Enter never Approves. Does not persist this chrome
+    /// as session `plan.md`. A later `exit_plan_mode` present re-reads
+    /// current disk and arms idle CTAs. Do not close Isolated Preview here:
+    /// mill-continue close already vanished `/plan` extra text once.
+    pub(crate) fn enter_isolated_preview_rewrite_wait(&mut self, operator_prompt: &str) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Updating);
+        self.isolated_preview_rewrite_wait_prompt = Some(operator_prompt.trim().to_string());
+        let body = crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(
+            operator_prompt,
+        );
+        let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", body, None) else {
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override =
+            Some(crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string());
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = false;
+            plan.feedback_active = false;
+            plan.selected_cta = None;
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
     }
 
     /// Mill rewrote session plan.md. Isolated Preview must paint that file,
@@ -283,6 +329,7 @@ impl AgentView {
     pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
         self.plan_decision_resolved = false;
         self.plan_feedback_in_flight = None;
+        self.isolated_preview_rewrite_wait_prompt = None;
         self.persist_plan_decision_resolved_flag(false);
     }
 
@@ -407,17 +454,17 @@ impl AgentView {
     /// panel is shut or feedback is in flight.
     pub(crate) fn plan_loop_status_label(&self) -> Option<&'static str> {
         use crate::views::plan_approval_view::plan_approval_status_label;
-        if let Some(ref pav) = self.plan_approval_view {
-            if self.line_viewer.is_some() {
-                return Some(plan_approval_status_label(pav.has_plan));
-            }
-            return None;
-        }
         if let Some(in_flight) = self.plan_feedback_in_flight {
             if self.session.state.is_turn_running() {
                 return None;
             }
             return Some(in_flight.status_label());
+        }
+        if let Some(ref pav) = self.plan_approval_view {
+            if self.line_viewer.is_some() {
+                return Some(plan_approval_status_label(pav.has_plan));
+            }
+            return None;
         }
         None
     }
@@ -440,6 +487,18 @@ impl AgentView {
     /// leftover SQL or disk must not fill the body. Isolated Preview with no
     /// park still uses SQL-then-disk.
     pub(crate) fn plan_body_for_preview(&self) -> Option<String> {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        ) {
+            return Some(
+                crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(
+                    self.isolated_preview_rewrite_wait_prompt
+                        .as_deref()
+                        .unwrap_or(""),
+                ),
+            );
+        }
         if self
             .plan_approval_view
             .as_ref()
@@ -686,7 +745,13 @@ impl AgentView {
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-        viewer.title_override = Some(if approval_empty {
+        let rewrite_wait = matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        );
+        viewer.title_override = Some(if rewrite_wait {
+            crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string()
+        } else if approval_empty {
             "plan.md (empty)".to_string()
         } else {
             "plan.md".to_string()
@@ -695,15 +760,23 @@ impl AgentView {
         {
             let recorded = self.recorded_plan_choice_for_paint();
             let plan = viewer.plan_mut();
-            plan.show_action_buttons = true;
             plan.recorded_choice = recorded;
-            // Live park still owns ACP Approve. After Approve/Quit, the four
-            // idle CTAs still paint; feedback_active stays false so we do
-            // not re-arm Plan ready.
-            if self.plan_approval_view.is_none() && !self.should_arm_plan_decision_chrome() {
+            // Plan-update rewriting-wait: Isolated Preview stays docked
+            // without idle Approve on leftover body.
+            if rewrite_wait {
+                plan.show_action_buttons = false;
                 plan.feedback_active = false;
+                plan.selected_cta = None;
             } else {
-                plan.feedback_active = self.plan_approval_view.is_some();
+                plan.show_action_buttons = true;
+                // Live park still owns ACP Approve. After Approve/Quit, the four
+                // idle CTAs still paint; feedback_active stays false so we do
+                // not re-arm Plan ready.
+                if self.plan_approval_view.is_none() && !self.should_arm_plan_decision_chrome() {
+                    plan.feedback_active = false;
+                } else {
+                    plan.feedback_active = self.plan_approval_view.is_some();
+                }
             }
         }
         if let Some(ref pav) = self.plan_approval_view
@@ -1406,6 +1479,18 @@ impl AgentView {
             return InputOutcome::Changed;
         }
         let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        // Isolated Preview idle plus a non-empty Operator paste plus Enter
+        // Approves with those notes. That submit wins over Session Multiline
+        // newline. Empty Enter never Approves. Line-comment overlay still
+        // saves. Shift+Enter still inserts a newline.
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && !is_commenting
+            && self.isolated_preview_idle_enter_approves_with_notes()
+        {
+            self.snapshot_or_clear_plan_feedback_draft();
+            return self.approve_plan();
+        }
         // Session Multiline: Enter inserts a newline. Preview must match
         // the main Human box. `[ui] composer_multiline = false` never
         // takes this arm (Enter still sends). Line-comment overlay
@@ -1478,6 +1563,10 @@ impl AgentView {
                     if intent != PlanPromptIntent::Comment && !panel_open && !text.trim().is_empty()
                     {
                         return self.send_composer_as_normal_prompt();
+                    }
+                    if self.isolated_preview_idle_enter_approves_with_notes() {
+                        self.snapshot_or_clear_plan_feedback_draft();
+                        return self.approve_plan();
                     }
                     let freeform = if text.trim().is_empty() {
                         None

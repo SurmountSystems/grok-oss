@@ -26,7 +26,9 @@ The agent exited plan mode without writing a plan.
 
 /// Status-line label while plan mode is active without a live reverse-request
 /// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
-/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
+/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]),
+/// or while a plan-update turn is rewriting-wait
+/// ([`PLAN_REWRITE_WAIT_STATUS`]).
 /// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
 
@@ -67,6 +69,37 @@ pub const PLAN_REVISING_STATUS: &str = "Revising plan...";
 /// present yet. Same no-idle-chrome contract as revise-in-flight.
 pub const PLAN_WAITING_UPDATED_STATUS: &str = "Waiting for updated plan...";
 
+/// Status while a plan-update turn is rewriting `plan.md` (second `/plan`
+/// prompt). Isolated Preview stays docked as rewriting-wait. Idle Approve
+/// / Comment / Revise / Exit do not arm. Empty Enter never Approves.
+pub const PLAN_REWRITE_WAIT_STATUS: &str = "Rewriting plan...";
+
+/// Isolated Preview heading while a plan-update turn is in flight.
+pub const PLAN_REWRITE_WAIT_HEADING: &str = "Rewriting the plan";
+
+/// Isolated Preview body while a plan-update turn is rewriting `plan.md`.
+/// Quotes the Operator's second prompt. Does not paint leftover `plan.md`
+/// as a live present. Does not persist this chrome as session `plan.md`.
+pub fn isolated_preview_rewrite_wait_markdown(operator_prompt: &str) -> String {
+    let quoted = operator_prompt
+        .trim()
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let quoted = if quoted.is_empty() {
+        "> (empty)".to_string()
+    } else {
+        quoted
+    };
+    format!(
+        "# {PLAN_REWRITE_WAIT_HEADING}\n\n\
+         Isolated Preview is waiting while the mill rewrites `plan.md` from this Operator prompt:\n\n\
+         {quoted}\n\n\
+         Idle Approve, Comment, Revise, and Exit are not armed. Empty Enter never Approves.\n"
+    )
+}
+
 /// What decisive plan feedback is waiting on before decision chrome re-arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanFeedbackInFlight {
@@ -74,6 +107,9 @@ pub enum PlanFeedbackInFlight {
     Revising,
     /// Clarify (ACP questions / Interject answer-only).
     Clarifying,
+    /// `/plan` extra Operator text / plan-update turn. Isolated Preview
+    /// stays docked as rewriting-wait until a new `exit_plan_mode` present.
+    Updating,
 }
 
 impl PlanFeedbackInFlight {
@@ -82,6 +118,7 @@ impl PlanFeedbackInFlight {
         match self {
             Self::Revising => PLAN_REVISING_STATUS,
             Self::Clarifying => PLAN_WAITING_UPDATED_STATUS,
+            Self::Updating => PLAN_REWRITE_WAIT_STATUS,
         }
     }
 }

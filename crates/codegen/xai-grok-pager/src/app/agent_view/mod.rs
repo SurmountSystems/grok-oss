@@ -1448,8 +1448,13 @@ pub struct AgentView {
     /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
     /// Click or /view-plan" status and local idle decision re-park until a new
     /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."
-    /// or "Waiting for updated plan..." instead.
+    /// or "Waiting for updated plan..." instead. A plan-update turn
+    /// (`Updating`) keeps Isolated Preview docked as rewriting-wait.
     pub(crate) plan_feedback_in_flight: Option<PlanFeedbackInFlight>,
+    /// Operator prompt quoted in Isolated Preview rewriting-wait chrome
+    /// while [`Self::plan_feedback_in_flight`] is `Updating`. Cleared on a
+    /// new `exit_plan_mode` present. Not session `plan.md`.
+    pub(crate) isolated_preview_rewrite_wait_prompt: Option<String>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).

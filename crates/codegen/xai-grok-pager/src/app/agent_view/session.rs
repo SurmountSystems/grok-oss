@@ -1188,6 +1188,7 @@ impl AgentView {
             plan_mode_pending: None,
             plan_decision_resolved: false,
             plan_feedback_in_flight: None,
+            isolated_preview_rewrite_wait_prompt: None,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,

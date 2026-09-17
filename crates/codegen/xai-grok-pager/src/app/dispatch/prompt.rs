@@ -195,7 +195,8 @@ fn enqueue_if_interject_dropped(
 ) -> Vec<Effect> {
     // `/plan` extra text is a plan-update turn. Interject the description,
     // not mill-continue close of Isolated Preview. Isolated Preview stays
-    // or re-reads current disk plan.md. Comment-then-Approve still works.
+    // docked as rewriting-wait. Comment-then-Approve still works after
+    // the new present.
     let send_text = if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
         crate::slash::queue_schedule::plan_description_from_command(&text)
             .unwrap_or_else(|| text.clone())
@@ -209,7 +210,7 @@ fn enqueue_if_interject_dropped(
     if mill_work_continues_after_isolated_preview(&text) {
         agent.leave_or_reread_isolated_preview_after_mill_continues();
     } else if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
-        agent.reread_isolated_preview_from_current_disk_plan_md();
+        agent.enter_isolated_preview_rewrite_wait(&send_text);
     }
     let sent = effects
         .iter()
@@ -481,12 +482,12 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
-/// Isolated Preview composer is a Human box unless Comment was clicked.
-/// Operator: soft planning is broken; lost that prompt; nothing happened;
-/// cannot submit the prompt now. Human text while Isolated Preview is open
-/// is a Human turn and WAL, not only plan comment 1. Non-empty Enter still
-/// sends while ride-Approve chrome is visible. Empty text is not held and
-/// never Approves. Comment CTA stashes once. Pane-shut rebuild resume with
+/// Isolated Preview composer is an Operator box unless Comment was clicked.
+/// Isolated Preview idle after present, a non-empty Operator box (including
+/// a paste chip), plus Enter Approves with those notes. It does not
+/// Plan-Exit and leave the paste. Empty text is not held and never Approves.
+/// After Plan Exit, non-empty Enter still sends. Comment CTA still focuses
+/// the Operator box for notes then Approve. Pane-shut rebuild resume with
 /// no waiter still holds so a follow-up cannot Wait for the model with no
 /// sampler. Prompt-focused Revise still asks the model when a live waiter
 /// can answer. Plan Exit already decided (`plan_decision_resolved`) does
@@ -499,7 +500,8 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// stay-after-present exists for Comment-then-Approve. Mill-continue close
 /// is a Human mill sentence / `/implement`, not `/plan` extra text. `/plan`
 /// with extra Operator text is a plan-update turn: Isolated Preview stays
-/// or re-reads current disk plan.md. Empty Enter never Approves.
+/// docked as rewriting-wait and quotes that prompt. Idle Approve does not
+/// arm on leftover `plan.md`. Empty Enter never Approves.
 fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -725,16 +727,17 @@ pub(super) fn dispatch_send_prompt_inner(
     }
 
     // `/plan` with extra Operator text is a plan-update turn. Isolated
-    // Preview leftover stays or re-reads current disk plan.md. PlanCommand
-    // (EnterPlanMode) used to consume_input then return no SendPrompt when
-    // leftover Isolated Preview still had a running turn. Composer empty,
-    // Isolated Preview closed, nothing on the transcript. Bare `/plan` and
-    // `/plan --soft` still run as commands. Empty Enter never Approves.
+    // Preview leftover stays docked as rewriting-wait, not leftover
+    // `plan.md` with idle Approve. PlanCommand (EnterPlanMode) used to
+    // consume_input then return no SendPrompt when leftover Isolated
+    // Preview still had a running turn. Composer empty, Isolated Preview
+    // closed, nothing on the transcript. Bare `/plan` and `/plan --soft`
+    // still run as commands. Empty Enter never Approves.
     if !literal
         && crate::slash::queue_schedule::plan_slash_is_update_turn(text.trim())
         && let Some(desc) = crate::slash::queue_schedule::plan_description_from_command(text.trim())
     {
-        agent.reread_isolated_preview_from_current_disk_plan_md();
+        agent.enter_isolated_preview_rewrite_wait(&desc);
         let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
         let enter_new_plan =
             !in_plan && agent.session.state.is_idle() && agent.session.session_id.is_some();

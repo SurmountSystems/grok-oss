@@ -1180,6 +1180,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
   `isolated_present_preview_enter_is_human_turn_then_click_approve`,
+  `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
@@ -1279,6 +1280,8 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `slash_plan_with_args_already_in_plan_submits_plan_update`,
   `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview`,
   `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish`,
+  `isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present`,
+  `user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt`,
   `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped`,
   `plan_slash_with_body_is_update_turn_bare_and_soft_are_not`,
   `user_guide_plan_slash_with_body_submits_plan_update`,
@@ -2412,6 +2415,7 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt`,
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
   `isolated_present_preview_enter_is_human_turn_then_click_approve`,
+  `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
@@ -2419,7 +2423,9 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_preview_human_send_closes_leftover_present_after_mill_continues`,
   `isolated_preview_implement_closes_leftover_present_after_mill_continues`,
   `isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it`,
-  `isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md`.
+  `isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md`,
+  `isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present`,
+  `user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt`.
 - `/rebuild` SHA-aware peer relaunch (fail-does-not-signal is not enough).
   Installed identity git SHA must match this workspace HEAD short SHA.
   TUI `/rebuild` starts from the session workspace. Named tests:

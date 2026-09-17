@@ -475,10 +475,108 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Grok OSS: Isolated Preview Human text is a Human turn, not only plan
-/// comment 1. Operator: soft planning is broken; lost that prompt; nothing
-/// happened; cannot submit the prompt now. Empty Enter never Approves.
-/// Click Approve still completes the live waiter. This diverges from
+/// Isolated Preview idle plus a non-empty Operator paste plus Enter
+/// Approves with those notes. It does not Plan-Exit and leave the paste.
+/// Empty Enter never Approves. This diverges from upstream xAI because
+/// FORK.md lost-prompt extra and the catalog Clickable Approve table.
+#[test]
+fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit() {
+    let mut app = make_app_with_agent("sess-paste-approve");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nApprove with pasted notes\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+        if let Some(viewer) = agent.line_viewer.as_mut() {
+            viewer.plan_mut().selected_cta =
+                Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+        }
+    }
+
+    let paste: String = (1..=15)
+        .map(|i| format!("line {i} of the pasted review"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let paste_outcome = app.handle_input(&Event::Paste(paste.clone()));
+    assert!(
+        !matches!(
+            paste_outcome,
+            InputOutcome::Action(_)
+                | InputOutcome::ActionThenForward(_)
+                | InputOutcome::ActionPair(_, _)
+        ),
+        "pasting into the Operator box must not Approve or Exit, got {paste_outcome:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.prompt.text().contains("line 1 of the pasted review"),
+            "15-line paste must land in the Operator box, got {:?}",
+            agent.prompt.text()
+        );
+    }
+
+    let empty_enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let enter_effects = dispatch_outcome(&mut app, empty_enter);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+            "Isolated Preview idle plus a non-empty Operator paste plus Enter must Approve"
+        );
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "composer clears only after Approve lands, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains("pasted review")
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with pasted notes must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        enter_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendInterject { text, .. }
+                if text.contains("line 1 of the pasted review")
+                    && text.contains("line 15 of the pasted review")
+        )),
+        "Enter must Interject the pasted notes with Approve, not Plan-Exit; effects={enter_effects:?}"
+    );
+    assert!(
+        !enter_effects.iter().any(|effect| match effect {
+            Effect::SendPrompt { text, .. } => {
+                text.contains("pasted review") && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+            }
+            Effect::SendPromptNow { .. } => true,
+            _ => false,
+        }),
+        "Approve with pasted notes must not SendPrompt those notes; effects={enter_effects:?}"
+    );
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+/// Isolated Preview idle plus typed Operator notes plus Enter Approves
+/// with those notes. Empty Enter never Approves. This diverges from
 /// upstream xAI because FORK.md lost-prompt extra and the catalog
 /// Clickable Approve table.
 #[test]
@@ -534,62 +632,31 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    assert!(
-        matches!(
-            enter,
-            InputOutcome::Action(Action::SendPrompt(_))
-                | InputOutcome::ActionThenForward(Action::SendPrompt(_))
-                | InputOutcome::Action(Action::SendPromptNow { .. })
-                | InputOutcome::Action(Action::Interject { .. })
+    let interject_text = match &enter {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => text.clone(),
+        other => panic!(
+            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
         ),
-        "Isolated Preview Human Enter must send, not only stash plan comment 1; got {enter:?}"
+    };
+    assert!(
+        interject_text.contains(HUMAN_BOX_PROMPT),
+        "Enter must Approve with the Operator notes, got {interject_text:?}"
     );
     let enter_effects = dispatch_outcome(&mut app, enter);
-    assert!(
-        enter_effects.iter().any(|effect| matches!(
-            effect,
-            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
-        )),
-        "Isolated Preview Human Enter must dispatch a send; effects={enter_effects:?}"
-    );
-    {
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.plan_approval_view.is_some(),
-            "Isolated Preview Enter must not Approve"
-        );
-        assert!(
-            agent.line_viewer.is_none(),
-            "Human send continues mill: Isolated Preview must not stay parked on leftover present"
-        );
-    }
-    assert!(
-        matches!(
-            rx.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ),
-        "Human send must leave the live waiter parked"
-    );
-
-    let _ = crate::app::dispatch::dispatch(Action::ShowPlan, &mut app);
-    {
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.line_viewer.is_some(),
-            "/view-plan must reopen Isolated Preview so Comment then Approve can run"
-        );
-    }
-
-    let after = click_approve_via_app(&mut app);
+    let after = AfterClickApprove {
+        interject_text: Some(interject_text),
+        effects: enter_effects,
+    };
     assert!(
         app.agents
             .get(&AgentId(0))
             .unwrap()
             .plan_approval_view
             .is_none(),
-        "click Approve must decide the parked plan"
+        "non-empty Enter must Approve the parked plan"
     );
-    let _ = after;
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
@@ -903,4 +970,3 @@ fn view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_clos
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);
 }
-

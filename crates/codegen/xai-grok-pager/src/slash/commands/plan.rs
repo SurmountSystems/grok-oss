@@ -162,9 +162,14 @@ impl AgentView {
                 pav.plan_content = Some(text);
                 pav.has_plan = true;
             }
-        } else {
+        } else if !matches!(
+            self.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Updating)
+        ) {
             // Bare `/plan` / `/plan --soft`: current disk plan.md, not leftover
             // Isolated Preview present ("why the agent stopped" / TECH.md).
+            // A plan-update rewriting-wait must not re-paint leftover disk
+            // as a live present.
             self.reread_isolated_preview_from_current_disk_plan_md();
         }
         self.view_plan_requested = true;

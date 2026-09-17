@@ -12,7 +12,9 @@ use ratatui::layout::Rect;
 use crate::actions::ActionRegistry;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+use crate::views::plan_approval_view::{
+    PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PlanApprovalFocus, PlanPromptIntent,
+};
 
 const POPUP: Rect = Rect {
     x: 0,
@@ -1268,8 +1270,8 @@ fn plan_preview_shift_enter_sends_when_composer_multiline_off() {
     crate::appearance::cache::set_composer_multiline(true);
 }
 
-/// Session Multiline on Preview: Shift+Enter sends, matching the main
-/// Human box. Enter still inserts a newline when composer multiline is on.
+/// Session Multiline on Isolated Preview idle: Enter Approves with notes.
+/// Shift+Enter still inserts a newline. Empty Enter never Approves.
 #[test]
 fn plan_preview_session_multiline_shift_enter_sends() {
     crate::appearance::cache::set_composer_multiline(true);
@@ -1281,15 +1283,37 @@ fn plan_preview_session_multiline_shift_enter_sends() {
     agent.multiline_mode = true;
     agent.prompt.set_text("hello");
     agent.prompt.set_cursor(5);
-    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(
-        agent.prompt.text().contains('\n'),
-        "Preview Enter in session Multiline must insert a newline, got {:?}",
-        agent.prompt.text()
+    let enter = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
     );
-    agent.prompt.set_text("hello");
-    agent.prompt.set_cursor(5);
-    let outcome = agent.handle_input(
+    match enter {
+        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::Interject {
+            text,
+            ..
+        })
+        | crate::app::app_view::InputOutcome::ActionThenForward(
+            crate::app::actions::Action::Interject { text, .. },
+        ) => {
+            assert!(
+                text.contains("hello"),
+                "Isolated Preview idle plus notes plus Enter must Approve with those notes, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
+        ),
+    }
+
+    let mut shift = agent_with_scrollable_plan();
+    {
+        let pav = shift.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    shift.multiline_mode = true;
+    shift.prompt.set_text("hello");
+    shift.prompt.set_cursor(5);
+    let outcome = shift.handle_input(
         &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
         &ActionRegistry::defaults(),
     );
@@ -1666,9 +1690,100 @@ fn letter_key_types_and_is_not_the_only_submit() {
     );
 }
 
-/// Isolated Preview Human text is a Human turn. Operator: soft planning
-/// is broken; lost that prompt; nothing happened; cannot submit the
-/// prompt now. Empty Enter never Approves.
+/// Isolated Preview idle plus a non-empty Operator paste plus Enter
+/// Approves with those notes. It does not Plan-Exit and leave the paste.
+/// Empty Enter never Approves.
+#[test]
+fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::prompt_widget::KIND_PASTE;
+
+    let paste: String = (1..=15)
+        .map(|i| format!("line {i} of the review notes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+    }
+    let _ = agent.handle_input(&Event::Paste(paste.clone()), &ActionRegistry::defaults());
+    assert!(
+        agent.prompt.text().contains("line 1 of the review notes"),
+        "15-line paste must land in the Operator box, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "15-line paste must fold into a paste chip"
+    );
+
+    let send = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match send {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains("line 1 of the review notes")
+                    && text.contains("line 15 of the review notes"),
+                "Enter must Approve with the pasted notes, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve with comment must wrap the paste as review notes, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview idle plus a non-empty Operator paste plus Enter must Approve with those notes; got {other:?}"
+        ),
+    }
+    assert!(
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Enter with pasted notes must Approve, not Plan-Exit"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve lands, got {:?}",
+        agent.prompt.text()
+    );
+
+    let mut empty = agent_with_scrollable_plan();
+    empty.prompt.set_text("");
+    let empty_enter = empty.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            empty_enter,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "empty Enter never Approves and must not send; got {empty_enter:?}"
+    );
+    assert!(
+        empty.plan_approval_view.is_some() && !empty.plan_decision_resolved,
+        "empty Enter never Approves"
+    );
+}
+
+/// Isolated Preview idle plus typed Operator notes plus Enter Approves
+/// with those notes. Empty Enter never Approves.
 #[test]
 fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
     use crate::app::actions::Action;
@@ -1687,21 +1802,25 @@ fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
         &ActionRegistry::defaults(),
     );
     match send {
-        InputOutcome::Action(Action::SendPrompt(text)) => {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
             assert!(
                 text.contains(HUMAN),
-                "Isolated Preview non-empty Enter must SendPrompt, got {text:?}"
+                "Isolated Preview idle plus notes plus Enter must Approve with those notes, got {text:?}"
             );
         }
-        other => panic!("Isolated Preview Human Enter must SendPrompt; got {other:?}"),
+        other => panic!(
+            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
+        ),
     }
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "Isolated Preview Enter must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Isolated Preview idle Enter with notes must Approve"
     );
 
-    agent.prompt.set_text("");
-    let empty_enter = agent.handle_input(
+    let mut empty = agent_with_scrollable_plan();
+    empty.prompt.set_text("");
+    let empty_enter = empty.handle_input(
         &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &ActionRegistry::defaults(),
     );
@@ -1715,13 +1834,13 @@ fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
         "empty Enter never Approves and must not send; got {empty_enter:?}"
     );
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        empty.plan_approval_view.is_some() && !empty.plan_decision_resolved,
         "empty Enter never Approves"
     );
 }
 
-/// Comment CTA can stash once. Non-empty Enter still sends while
-/// ride-Approve chrome is visible. Empty Enter never Approves.
+/// Comment CTA still focuses the Operator box. Non-empty Enter then
+/// Approves with those notes. Empty Enter never Approves.
 #[test]
 fn isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible() {
     use crate::app::actions::Action;
@@ -1731,7 +1850,7 @@ fn isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible() {
     let mut agent = agent_with_scrollable_plan();
     {
         let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
+        pav.focus = PlanApprovalFocus::Prompt;
         pav.prompt_intent = PlanPromptIntent::Comment;
     }
     agent.prompt.set_text("");
@@ -1740,40 +1859,21 @@ fn isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible() {
         &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &ActionRegistry::defaults(),
     );
-    assert!(
-        !matches!(
-            first,
-            InputOutcome::Action(Action::SendPrompt(_))
-                | InputOutcome::Action(Action::SendPromptNow { .. })
-                | InputOutcome::Action(Action::Interject { .. })
-        ),
-        "Comment CTA first Enter may stash; got {first:?}"
-    );
-    assert_eq!(
-        agent
-            .plan_approval_view
-            .as_ref()
-            .and_then(|p| p.feedback_draft.as_deref()),
-        Some(HUMAN)
-    );
-    let second = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &ActionRegistry::defaults(),
-    );
-    match second {
-        InputOutcome::Action(Action::SendPrompt(text)) => {
+    match first {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
             assert!(
                 text.contains(HUMAN),
-                "ride-Approve chrome must not block Human send, got {text:?}"
+                "Comment notes plus Enter must Approve with those notes, got {text:?}"
             );
         }
-        other => panic!(
-            "non-empty Enter while ride-Approve chrome is visible must SendPrompt; got {other:?}"
-        ),
+        other => {
+            panic!("Comment CTA then notes then Enter must Approve with those notes; got {other:?}")
+        }
     }
     assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "second Enter must not Approve"
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Comment notes plus Enter must Approve, not Plan-Exit"
     );
 }
 

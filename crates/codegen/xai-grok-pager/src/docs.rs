@@ -1144,6 +1144,12 @@ mod tests {
              not the first-draft snapshot"
         );
         assert!(
+            plan.content.contains("Approves with those notes")
+                && plan.content.contains("does not Plan-Exit")
+                && slash.content.contains("Approves with those notes"),
+            "user-guide must say Isolated Preview idle plus a non-empty Operator paste plus Enter Approves with those notes"
+        );
+        assert!(
             plan.content.contains("After Plan Exit")
                 && plan.content.contains("Esc:close")
                 && plan.content.contains("`/start`")
@@ -1197,6 +1203,17 @@ mod tests {
             "19-plan-mode.md must say `/plan` with extra Operator text submits a plan-update turn"
         );
         assert!(
+            plan.content.contains("rewriting-wait")
+                && plan.content.contains("quotes the Operator's second prompt")
+                && plan.content.contains("leftover stale"),
+            "19-plan-mode.md must document Isolated Preview rewriting-wait on a second plan prompt"
+        );
+        assert!(
+            slash.content.contains("rewriting-wait")
+                && slash.content.contains("quotes that Operator prompt"),
+            "04-slash-commands.md must document Isolated Preview rewriting-wait on a plan-update turn"
+        );
+        assert!(
             slash.content.contains("prompt write-ahead log")
                 && plan.content.contains("prompt write-ahead log"),
             "user-guide must say the plan-update submit writes the prompt write-ahead log"
@@ -1205,6 +1222,27 @@ mod tests {
             slash.content.contains("Empty Enter never Approves")
                 && plan.content.contains("Empty Enter never Approves"),
             "user-guide must keep empty Enter never Approves"
+        );
+    }
+
+    /// Isolated Preview rewriting-wait: a second plan prompt must not paint
+    /// leftover stale plan.md as a live present. Empty Enter never Approves.
+    #[test]
+    fn user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt() {
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
+        assert!(
+            plan.content.contains("rewriting-wait")
+                && plan.content.contains("quotes the Operator's second prompt")
+                && plan.content.contains("leftover stale")
+                && plan.content.contains("Empty Enter never Approves"),
+            "19-plan-mode.md must document Isolated Preview rewriting-wait on a second plan prompt"
+        );
+        assert!(
+            plan.content.contains("`/unstick`") && plan.content.contains("It is not `/resume`"),
+            "19-plan-mode.md must not teach /unstick as /resume"
         );
     }
 
