@@ -991,8 +991,11 @@ identifier that has no matching `fn`.
   Waiting must be a real sampler wait, not occupancy leftover. Enter after a
   paste chip must not wipe the composer without send or enqueue; footer
   `[pause]` button chrome (not engaged) must not swallow that Enter.
+  Enter on `[Pasted: 15 lines]` sends or interjects; it does not only
+  expand the chip. Expand is paste-again or double-click.
   Tests:
   `prompt_wal_appends_on_enter_before_model_wait`,
+  `enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand`,
   `enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue`,
   `enter_after_paste_chip_with_pause_button_chrome_still_sends`,
   `enter_while_drain_blocked_must_wal_queue_or_keep_composer`,
@@ -1050,6 +1053,7 @@ identifier that has no matching `fn`.
   `header_timeout_is_named_cold_start_class_with_retry_path`,
   `interject_does_not_wait_minutes_or_block_paint`,
   `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand`,
   `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,
   `enter_send_must_not_leave_duplicate_prompt_in_composer`,
   `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline`,
@@ -2492,6 +2496,7 @@ that drops them while keeping the seven is still a seam loss):
   `limits_help_lists_named_words_and_hyphenated_aliases`,
   `interject_does_not_wait_minutes_or_block_paint`,
   `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer`,
+  `enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand`,
   `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer`,
   `enter_send_must_not_leave_duplicate_prompt_in_composer`,
   `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline`,
@@ -2839,6 +2844,7 @@ cargo test -p xai-grok-pager --lib -- \
   queue_send_now_click_dispatches_send_interject \
   empty_ctrl_enter_mid_turn_does_not_send \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
   l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
   enter_send_must_not_leave_duplicate_prompt_in_composer \
   enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \

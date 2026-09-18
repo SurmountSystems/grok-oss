@@ -53,7 +53,7 @@ pub use crate::prompt_images::PROMPT_IMAGES_TRACING_TARGET;
 /// What kind of element interaction occurred when pressing Enter on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementInteraction {
-    /// Paste or file-ref element was inlined (expanded).
+    /// File-ref element was inlined (expanded). Paste chips submit on Enter.
     Inlined,
     /// Image chip was activated (caller should open preview).
     ImagePreview,
@@ -2821,8 +2821,8 @@ impl PromptWidget {
     }
 
     /// Check if the cursor is currently on a paste element (strict on-chip
-    /// match, mirroring the Enter-to-expand targeting in
-    /// [`Self::try_element_interaction`]).
+    /// match). Bare Enter submits that body; expand is paste-again or
+    /// double-click.
     ///
     /// Returns the element's buffer text if so.
     pub fn paste_element_at_cursor(&self) -> Option<&str> {
@@ -2849,18 +2849,15 @@ impl PromptWidget {
     /// Paste element text for the preview overlay.
     ///
     /// Shows the moment a chip is created (cursor right after it) as well
-    /// as with the cursor on it. Display-only: Enter handling keeps the
-    /// strict on-chip match, so Enter right after a chip keeps its normal
-    /// behavior (submit or newline) instead of expanding the chip.
+    /// as with the cursor on it. Display-only: Enter submits the pasted
+    /// body from either position. Expand is paste-again or double-click.
     fn paste_element_for_preview(&self) -> Option<&str> {
         self.paste_text(self.paste_element_near_cursor()?)
     }
 
-    /// Expand hint for the paste preview overlay, honest per position:
-    /// ON the chip Enter expands it; right after the chip Enter submits,
-    /// so the affordance advertised there is pasting the content again.
-    /// Double-click expands from either position (a click moves the
-    /// cursor onto the chip first).
+    /// Expand hint for the paste preview overlay. Enter always submits.
+    /// Expand is paste-again or double-click, including when the caret
+    /// sits on the chip.
     fn paste_preview_hint(&self, theme: &Theme) -> Line<'static> {
         let dim = Style::default().fg(theme.gray);
         // Chord deliberately deviates from the tips' text_secondary to a
@@ -2869,13 +2866,8 @@ impl PromptWidget {
         let chord = Style::default()
             .fg(theme.fuzzy_accent)
             .add_modifier(Modifier::BOLD);
-        let action = if self.paste_element_at_cursor().is_some() {
-            "enter"
-        } else {
-            "paste again"
-        };
         Line::from(vec![
-            Span::styled(action, chord),
+            Span::styled("paste again", chord),
             Span::styled(" or ", dim),
             Span::styled("double-click", chord),
             Span::styled(" to expand", dim),
@@ -2909,7 +2901,9 @@ impl PromptWidget {
 
     /// Try to interact with an element at the cursor.
     ///
-    /// - Enter on a paste/file-ref element → inline (expand) it.
+    /// - Enter on a paste chip is not an interaction. The caller submits
+    ///   the pasted body. Expand is paste-again or double-click.
+    /// - Enter on a file-ref element → inline (expand) it.
     /// - Enter on an image chip → signal the caller to open preview
     ///   (does NOT inline the placeholder text).
     ///
@@ -2920,7 +2914,8 @@ impl PromptWidget {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE || k == KIND_FILE_REF => {
+            k if k == KIND_PASTE => None,
+            k if k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
                 Some(ElementInteraction::Inlined)

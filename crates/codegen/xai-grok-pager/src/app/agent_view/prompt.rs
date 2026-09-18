@@ -527,7 +527,8 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // 1. Element interaction: Enter on paste/file-ref → inline (expand).
+        // 1. Element interaction: Enter on file-ref → inline (expand).
+        //    Enter on a paste chip is SendPrompt / interject, not expand.
         //    Enter on image chip → open preview (handled by caller).
         //    Must check before registry lookup since Enter is also SendPrompt.
         if let Some(interaction) = self.prompt.try_element_interaction(key) {
@@ -645,8 +646,9 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        if self.prompt.text().is_empty()
-                            || !composer_cursor_at_end_of_last_line(&self.prompt)
+                        if (self.prompt.text().is_empty()
+                            || !composer_cursor_at_end_of_last_line(&self.prompt))
+                            && self.prompt.paste_element_at_cursor().is_none()
                         {
                             self.prompt.textarea.insert_str("\n");
                             return InputOutcome::Changed;

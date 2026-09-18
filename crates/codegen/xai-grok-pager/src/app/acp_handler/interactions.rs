@@ -202,16 +202,21 @@ pub(super) fn handle_exit_plan_mode(
         agent.view_plan_requested = true;
         agent.prompt.set_text("");
     }
+    // Consume the rebuild dock marker even when Enter is send so a later
+    // empty-composer restore cannot inherit a leftover Isolated Preview open.
+    let isolated_preview_was_open = agent.session.session_id.as_ref().is_some_and(|sid| {
+        crate::slash::commands::plan::take_isolated_preview_open(
+            &agent.session.cwd.to_string_lossy(),
+            sid.0.as_ref(),
+        )
+    });
+    let send_armed_composer = !agent.prompt.text().trim().is_empty();
     let restore_open_pane = is_restore
+        && !send_armed_composer
         && (agent.is_plan_viewer()
             || agent.line_viewer.is_some()
             || agent.view_plan_requested
-            || agent.session.session_id.as_ref().is_some_and(|sid| {
-                crate::slash::commands::plan::take_isolated_preview_open(
-                    &agent.session.cwd.to_string_lossy(),
-                    sid.0.as_ref(),
-                )
-            }));
+            || isolated_preview_was_open);
 
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0;

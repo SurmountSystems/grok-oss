@@ -518,11 +518,25 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
         "pasting into the Operator box must not Approve or Exit, got {paste_outcome:?}"
     );
     {
-        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         assert!(
             agent.prompt.text().contains("line 1 of the pasted review"),
             "15-line paste must land in the Operator box, got {:?}",
             agent.prompt.text()
+        );
+        assert!(
+            agent
+                .prompt
+                .textarea
+                .elements()
+                .iter()
+                .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE),
+            "15-line paste must fold into a paste chip"
+        );
+        agent.prompt.set_cursor(0);
+        assert!(
+            agent.prompt.paste_element_at_cursor().is_some(),
+            "caret on the paste chip must still Approve with those notes"
         );
     }
 

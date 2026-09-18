@@ -1157,7 +1157,7 @@
     }
 
     #[test]
-    fn paste_preview_hint_on_chip_mentions_enter() {
+    fn paste_preview_hint_on_chip_mentions_paste_again_not_enter() {
         let mut pw = PromptWidget::new();
         pw.handle_paste("line1\nline2\nline3\nline4");
         pw.textarea.set_cursor(0);
@@ -1167,7 +1167,9 @@
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(hint.contains("enter"), "{hint}");
+        assert!(hint.contains("paste again"), "{hint}");
+        assert!(!hint.contains("enter"), "{hint}");
+        assert!(hint.contains("double-click"), "{hint}");
         assert!(hint.contains("expand"), "{hint}");
     }
 
@@ -1188,21 +1190,19 @@
     }
 
     #[test]
-    fn paste_element_enter_inlines() {
+    fn paste_element_enter_does_not_inline() {
         let mut pw = PromptWidget::new();
         let text = "line1\nline2\nline3\nline4";
         pw.handle_paste(text);
         assert_eq!(pw.textarea.elements().len(), 1);
 
-        // Move cursor onto the element
         pw.textarea.set_cursor(0);
-        // Enter should inline it
         assert_eq!(
             pw.try_element_interaction(&key!(Enter).to_key_event()),
-            Some(ElementInteraction::Inlined)
+            None,
+            "Enter on a paste chip must submit, not expand"
         );
-        assert!(pw.textarea.elements().is_empty());
-        // Text is still there
+        assert_eq!(pw.textarea.elements().len(), 1);
         assert_eq!(pw.textarea.text(), text);
     }
 

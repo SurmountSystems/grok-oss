@@ -640,6 +640,102 @@ mod tests {
         );
     }
 
+    /// Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip.
+    ///
+    /// Expand stays paste-again or double-click. Composer clears only after
+    /// the send lands. A live mill turn is interject via `Action::SendPrompt`.
+    #[test]
+    fn enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+        use crate::views::prompt_widget::KIND_PASTE;
+
+        let body = (1..=15)
+            .map(|n| format!("paste line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (label, mill_live) in [("idle", false), ("mill turn live", true)] {
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            let action = {
+                let agent = app.agents.get_mut(&id).unwrap();
+                if mill_live {
+                    agent.session.state = AgentState::TurnRunning;
+                }
+                agent.set_active_pane(ActivePane::Prompt, true);
+                let _ = agent.prompt.handle_paste(&body);
+                assert!(
+                    agent
+                        .prompt
+                        .textarea
+                        .elements()
+                        .iter()
+                        .any(|e| e.kind == KIND_PASTE),
+                    "{label}: 15-line paste must fold into a paste chip"
+                );
+                agent.prompt.set_cursor(0);
+                assert!(
+                    agent.prompt.paste_element_at_cursor().is_some(),
+                    "{label}: caret must sit on the paste chip"
+                );
+                match agent
+                    .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                {
+                    InputOutcome::Action(action) => action,
+                    other => panic!(
+                        "{label}: Enter on [Pasted: 15 lines] must send or interject, not only expand the chip; got {other:?}; composer={:?}",
+                        agent.prompt.text()
+                    ),
+                }
+            };
+            assert!(
+                matches!(&action, Action::SendPrompt(text) if text == &body),
+                "{label}: paste-chip Enter must submit the 15 lines, got {action:?}"
+            );
+            assert!(
+                app.agents[&id]
+                    .prompt
+                    .textarea
+                    .elements()
+                    .iter()
+                    .any(|e| e.kind == KIND_PASTE),
+                "{label}: key handler must not expand the chip before dispatch proves send landed"
+            );
+            assert_eq!(
+                app.agents[&id].prompt.text(),
+                body,
+                "{label}: key handler must not wipe before dispatch proves send/interject landed"
+            );
+            let effects = dispatch(action, &mut app);
+            if mill_live {
+                assert!(
+                    effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::SendInterject { text, .. } if text == &body)),
+                    "{label}: mill-live paste-chip Enter must interject, got {effects:?}"
+                );
+            } else {
+                assert!(
+                    effects.iter().any(
+                        |e| matches!(e, Effect::SendPrompt { text, .. } if text == &body)
+                            || matches!(e, Effect::SendPromptBlocks { .. })
+                    ),
+                    "{label}: idle paste-chip Enter must send, got {effects:?}"
+                );
+            }
+            assert!(
+                app.agents[&id].prompt.text().trim().is_empty(),
+                "{label}: composer clears only after the send lands; got {:?}",
+                app.agents[&id].prompt.text()
+            );
+            assert!(
+                app.agents[&id].prompt.textarea.elements().is_empty(),
+                "{label}: chip must leave because the send landed, not because Enter expanded it"
+            );
+        }
+    }
+
     /// Operator: "ctrl-enter could make it so we can't interject properly
     /// still. it should only act like shift-enter if interjection isn't
     /// appropriate." Mid-turn with text: interject is appropriate. Ctrl+Enter

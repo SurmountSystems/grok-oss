@@ -922,6 +922,23 @@ mod tests {
         );
     }
 
+    /// Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip.
+    #[test]
+    fn user_guide_paste_chip_enter_sends_not_only_expands() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("[Pasted: N lines]")
+                && content.contains("Enter sends or interjects that body")
+                && content.contains("does not only expand the chip")
+                && content.contains("paste-again or double-click"),
+            "03-keyboard-shortcuts.md must say paste-chip Enter sends, not only expands: {content}"
+        );
+    }
+
     /// Grok OSS Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
     /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
     /// Notes (`A`) is gone. Empty `a` does not Approve. This diverges from upstream

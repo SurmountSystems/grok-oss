@@ -1729,6 +1729,11 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
             .any(|e| e.kind == KIND_PASTE),
         "15-line paste must fold into a paste chip"
     );
+    agent.prompt.set_cursor(0);
+    assert!(
+        agent.prompt.paste_element_at_cursor().is_some(),
+        "caret on the paste chip must still Approve with those notes"
+    );
 
     let send = agent.handle_input(
         &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),

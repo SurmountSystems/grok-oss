@@ -370,17 +370,17 @@ thread_local! {
     static ALWAYS_EXPAND_THINKING_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `always_expand_thinking`, seeding from `[ui]` on first call.
-/// Default OFF when unset. Startup may override via resolve.
+/// Read cached `always_expand_thinking`. Default OFF until [`prime`] or
+/// [`set_always_expand_thinking`].
+///
+/// Do not lazy-read host `[ui] always_expand_thinking`. Cargo tests load this
+/// crate as a normal library, so a disk seed would inherit the operator's live
+/// config and collapse/expand contracts would not see the product default.
+/// Startup still applies disk through [`prime`].
 pub fn load_always_expand_thinking() -> bool {
     ALWAYS_EXPAND_THINKING_LOADED.with(|loaded| {
         if !loaded.get() {
-            ALWAYS_EXPAND_THINKING_CURRENT.with(|c| {
-                c.set(load_bool_from_effective_config(
-                    "always_expand_thinking",
-                    ALWAYS_EXPAND_THINKING_DEFAULT,
-                ))
-            });
+            ALWAYS_EXPAND_THINKING_CURRENT.with(|c| c.set(ALWAYS_EXPAND_THINKING_DEFAULT));
             loaded.set(true);
         }
     });
@@ -1329,6 +1329,18 @@ mod tests {
             assert!(load_always_expand_thinking());
             set_always_expand_thinking(false);
             assert!(!load_always_expand_thinking());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn load_always_expand_thinking_does_not_seed_from_host_disk() {
+        std::thread::spawn(|| {
+            assert!(
+                !load_always_expand_thinking(),
+                "unit tests must see the product default (collapsed headers), not the operator live [ui] always_expand_thinking"
+            );
         })
         .join()
         .unwrap();

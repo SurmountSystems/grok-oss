@@ -1360,6 +1360,7 @@ occupancy tests in the table below.
 | path::test | Contract |
 |------------|----------|
 | `prompt_wal_appends_on_enter_before_model_wait` | Enter send appends WAL before `Effect::SendPrompt`. Operator-verified known good (2026-09-02): live `send` records. |
+| `enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand` | Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip. Expand is paste-again or double-click. Composer clears only after the send lands. A live mill turn is interject. Catalog contract. |
 | `enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue` | Enter after a 15-line paste chip must WAL Send (or Queue with visible enqueue). Composer must not wipe when neither send nor enqueue landed. Do not fit tests to a wipe. Catalog contract. |
 | `enter_after_paste_chip_with_pause_button_chrome_still_sends` | Footer `[pause]` button chrome (not engaged; engaged paints `[resume]`) must not swallow Enter after a paste chip. Still `Effect::SendPrompt` + WAL Send. Catalog contract. |
 | `enter_while_drain_blocked_must_wal_queue_or_keep_composer` | `TurnCancelling` / drain_blocked Enter must WAL Queue and enqueue, or keep the composer. No silent wipe. Catalog contract. |
@@ -1387,6 +1388,7 @@ occupancy tests in the table below.
 ```bash
 cargo test -p xai-grok-pager --lib -- \
   prompt_wal_appends_on_enter_before_model_wait \
+  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
   enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue \
   enter_after_paste_chip_with_pause_button_chrome_still_sends \
   enter_while_drain_blocked_must_wal_queue_or_keep_composer \
@@ -1442,9 +1444,11 @@ or weaken these tests in recon.
 | `request_error_stream_error_sending_request_is_named_transport_miss` | `request error stream: error sending request` is a transport miss, not a silent hang. Not billing. |
 | `request_error_stream_error_sending_request_does_not_wipe_human_image_line` | That stream send miss must not wipe the Human `[Image #1]` line. |
 | `user_guide_ctrl_enter_interjects_when_appropriate` | User-guide defines when Ctrl+Enter interjects vs newline. Not last-known-good. |
+| `user_guide_paste_chip_enter_sends_not_only_expands` | User-guide says Enter on a `[Pasted: N lines]` chip sends or interjects; expand is paste-again or double-click. |
 | `prompt_wal_appends_on_mid_turn_interject` | WAL `kind=interject` still appends. Operator-verified known good for the WAL line, not for live Interject UI. |
 | `interject_does_not_wait_minutes_or_block_paint` | Interject returns `SendInterject` and paints without waiting a minute. Performance contract; not last-known-good. |
 | `enter_soft_interject_must_not_leave_duplicate_prompt_in_composer` | After bare mid-turn Enter soft-interjects, the Human box must not still hold that body. Not last-known-good. |
+| `enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand` | Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip. Expand is paste-again or double-click. Composer clears only after the send lands. |
 | `l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer` | L2 overlay Enter interject clears the parent Human box on success. Not last-known-good. |
 | `enter_send_must_not_leave_duplicate_prompt_in_composer` | Idle Enter send clears the Human box on success. Not last-known-good. |
 | `enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline` | Enter at the end of the last Human-box line must send immediately. It must not insert a silent extra newline. Not last-known-good. |
@@ -1467,9 +1471,11 @@ cargo test -p xai-grok-pager --lib -- \
   request_error_stream_error_sending_request_is_named_transport_miss \
   request_error_stream_error_sending_request_does_not_wipe_human_image_line \
   user_guide_ctrl_enter_interjects_when_appropriate \
+  user_guide_paste_chip_enter_sends_not_only_expands \
   prompt_wal_appends_on_mid_turn_interject \
   interject_does_not_wait_minutes_or_block_paint \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
   l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
   enter_send_must_not_leave_duplicate_prompt_in_composer \
   enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \
@@ -2356,6 +2362,7 @@ cargo test -p xai-grok-pager --lib -- \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
   rebuild_subcommand_parses \
   prompt_wal_appends_on_enter_before_model_wait \
+  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
   enter_after_paste_chip_must_wal_send_not_wipe_without_enqueue \
   enter_after_paste_chip_with_pause_button_chrome_still_sends \
   enter_while_drain_blocked_must_wal_queue_or_keep_composer \
@@ -2376,8 +2383,10 @@ cargo test -p xai-grok-pager --lib -- \
   request_error_stream_error_sending_request_is_named_transport_miss \
   request_error_stream_error_sending_request_does_not_wipe_human_image_line \
   user_guide_ctrl_enter_interjects_when_appropriate \
+  user_guide_paste_chip_enter_sends_not_only_expands \
   interject_does_not_wait_minutes_or_block_paint \
   enter_soft_interject_must_not_leave_duplicate_prompt_in_composer \
+  enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand \
   l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer \
   enter_send_must_not_leave_duplicate_prompt_in_composer \
   enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline \

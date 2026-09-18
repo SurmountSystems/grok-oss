@@ -279,6 +279,8 @@ Empty `Enter` never approves a plan. Use the clickable **Approve** button.
 
 The composer footer Enter cue is **send**, **queue**, or **interject**. It names what plain `Enter` will do.
 
+A `[Pasted: N lines]` chip in the Operator box is a prompt. Enter sends or interjects that body. It does not only expand the chip. Expand is paste-again or double-click. Isolated Preview idle after present, a non-empty Operator paste plus Enter, still Approves with those notes. Empty Enter never Approves.
+
 While the agent is generating:
 
 - **Plain `Enter`** (with text in the composer) **soft-interjects** into this turn (`x.ai/interject`). It does not wait as a serial queue row. Named `/queue` hold still waits.
