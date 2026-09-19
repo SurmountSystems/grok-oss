@@ -333,6 +333,7 @@ mod tests {
     }
 
     /// DOGE table: active Agent rail is pure magenta. Finished → no rail.
+    // Grok OSS: running agent rail under DOGE is magenta. This diverges from upstream xAI because FORK.md land class 4 and catalog § 4 pin Agent magenta as grok-oss DOGE chrome.
     #[test]
     fn agent_message_block_accent_is_magenta_rail_under_doge_while_running() {
         use ratatui::style::Color;

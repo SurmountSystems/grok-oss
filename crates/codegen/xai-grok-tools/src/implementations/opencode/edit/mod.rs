@@ -1203,6 +1203,8 @@ mod tests {
 
     #[tokio::test]
     async fn relative_path_resolution() {
+        let _skip =
+            crate::util::rust_edit_verify::SkipEditVerifyEnvAsyncGuard::unset_host_kill_switch();
         let tmp = TempDir::new().unwrap();
         let subdir = tmp.path().join("src");
         std::fs::create_dir(&subdir).unwrap();

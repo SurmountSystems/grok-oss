@@ -134,7 +134,7 @@ The scrollback is the main display area. It shows:
 - **Tool calls** -- file edits (with inline diffs), command executions, search results, and more
 - **Task lists** -- TODO items tracking progress
 
-Collapse or expand the selected entry with the `Left`/`Right` arrow keys (or `h`/`l` and `e` in Vim mode). In Vim mode, press `y` to copy its content and `Y` to copy its metadata (for example, the command that ran). Press `Enter` to open it in the fullscreen viewer (in any mode).
+Collapse or expand the selected entry with the `Left`/`Right` arrow keys (or `h`/`l` and `e` in Vim mode). In Vim mode, press `y` to copy its content and `Y` to copy its metadata (for example, the command that ran). When a collapsed or hidden block is selected (an image attachment shown as `[Image #1] ...`, or another folded hidden body), `Enter` expands it, same as `:expand`. Double-click on that collapsed block also expands it. `Enter` on an already-expanded selected entry opens the fullscreen viewer. Composer `Enter` with text still sends.
 
 ### Tools
 

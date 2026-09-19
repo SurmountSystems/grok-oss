@@ -4,9 +4,10 @@
 use agent_client_protocol as acp;
 
 use super::replay::{
-    ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, collect_unfinished_subagents,
-    filter_delta_replay_lines, for_each_replay_update_in_file, line_is_available_commands_update,
-    line_is_dropped_on_replay, line_is_in_progress_tool_call_update, prepare_replay_lines,
+    ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, chat_history_replay_lines,
+    collect_unfinished_subagents, filter_delta_replay_lines, for_each_replay_update_in_file,
+    line_is_available_commands_update, line_is_dropped_on_replay,
+    line_is_in_progress_tool_call_update, plan_replay_file, prepare_replay_lines,
     resolve_replay_updates_path, stream_replay_updates_at, stream_replay_updates_at_hinted,
 };
 use super::{
@@ -1105,6 +1106,82 @@ fn replay_tool_collapser_keeps_precompleted_tool_call() {
     );
     let out = collapser.push(tc);
     assert!(matches!(out, Some(acp::SessionUpdate::ToolCall(_))));
+}
+
+#[test]
+fn last_session_resume_paints_chat_history_when_updates_lack_user_agent_chunks() {
+    use crate::sampling::ConversationItem;
+    let items = vec![
+        ConversationItem::user("Mill 69 of 69 GREEN"),
+        ConversationItem::assistant("occupancy 49"),
+        ConversationItem::User(crate::sampling::UserItem {
+            content: vec![crate::sampling::ContentPart::Text {
+                text: "<system-reminder>skip</system-reminder>".into(),
+            }],
+            synthetic_reason: Some(crate::sampling::SyntheticReason::SystemReminder),
+            ..Default::default()
+        }),
+    ];
+    let lines = chat_history_replay_lines("sess", &items);
+    assert_eq!(
+        lines.len(),
+        2,
+        "synthetic reminders must not paint as Operator lines"
+    );
+    assert!(
+        lines[0].contains("user_message_chunk") && lines[0].contains("Mill 69 of 69 GREEN"),
+        "Operator mill turn must replay from chat_history: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("agent_message_chunk") && lines[1].contains("occupancy 49"),
+        "Agent reply must replay from chat_history: {}",
+        lines[1]
+    );
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("replay line must be JSON: {e} {line}"));
+    }
+}
+
+/// Named contract: last-session resume must not slurp `updates.jsonl` into one
+/// String before the first Operator line can forward. Offset plan lists the
+/// user chunk even when the file also has a later rewind-dead branch.
+#[test]
+fn plan_replay_file_keeps_user_chunk_without_slurping_as_one_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    let u1 = acp_envelope(
+        r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Mill 69 GREEN"}}"#,
+    );
+    let a1 = acp_envelope(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}"#,
+    );
+    let mem = xai_envelope(r#"{"sessionUpdate":"memory_session_saved","path":"/tmp/x.md"}"#);
+    std::fs::write(&path, format!("{u1}\n{a1}\n{mem}\n")).unwrap();
+    let plan = plan_replay_file(&path, None).unwrap();
+    assert!(
+        plan.has_user_or_agent_chunk,
+        "iso last-session occupancy with empty scrollback is a fail"
+    );
+    assert!(
+        plan.lines.len() >= 2,
+        "user and agent chunks must stay in the offset plan, got {}",
+        plan.lines.len()
+    );
+}
+
+#[test]
+fn plan_replay_file_memory_only_updates_are_not_a_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(UPDATES_FILE);
+    let mem = xai_envelope(r#"{"sessionUpdate":"memory_session_saved","path":"/tmp/x.md"}"#);
+    std::fs::write(&path, format!("{mem}\n")).unwrap();
+    let plan = plan_replay_file(&path, None).unwrap();
+    assert!(
+        !plan.has_user_or_agent_chunk,
+        "fork-parent memory_session_saved must fall back to chat_history"
+    );
 }
 
 #[test]

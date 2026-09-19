@@ -448,14 +448,21 @@ pub enum Action {
     /// that preserves the `default` canonical (the `bool` variant
     /// collapses `default` to `ask`).
     SetPermissionMode(PermissionModeKind),
-    /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
+    /// Toggle multiline input mode (mid-line Enter inserts a newline;
+    /// Enter at the end of the last line still sends).
     ToggleMultiline,
-    /// Set multiline input mode (swap Enter and Shift+Enter behavior).
-    /// Pager-owned, NOT persisted to disk — reset each session.
+    /// Set multiline input mode (mid-line Enter inserts a newline;
+    /// Enter at the end of the last line still sends).
+    /// Pager-owned, NOT persisted to disk. Reset each session.
     SetMultilineMode(bool),
     /// Allow newlines in the Human box from Enter / Shift+Enter.
     /// SHELL-owned: cache + `[ui].composer_multiline`. Default on.
     SetComposerMultiline(bool),
+    /// Allow session Multiline to be enabled (`Ctrl+M` / `/multiline` /
+    /// settings Multiline row). SHELL-owned: cache +
+    /// `[ui].allow_session_multiline`. Default on. When false, those paths
+    /// cannot set `multiline_mode = true`.
+    SetAllowSessionMultiline(bool),
     /// Open the prompt-history search panel on the active agent (composer
     /// as filter query). Dispatched by `/history`.
     OpenHistorySearch,
@@ -799,9 +806,20 @@ pub enum Action {
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
+    /// `/view-plan` uses this. Isolated Preview for a new feature is
+    /// [`Self::DockIsolatedPreview`], not this variant.
     ShowPlan,
+    /// `/plan --soft` docks Isolated Preview on the right. It does not
+    /// enter plan mode. It does not park L1. It does not enqueue the
+    /// description as a Prompt. Present is not Approve. Nested L2s stay
+    /// Working. `--soft` is not the queue hold token. Hard `/plan`
+    /// without `--soft` still uses [`Self::EnterPlanMode`].
+    DockIsolatedPreview {
+        description: Option<String>,
+    },
     /// Enter plan mode. If a description is provided, also start a turn
-    /// with that text as the prompt.
+    /// with that text as the prompt. Hard `/plan` only. `/plan --soft`
+    /// uses [`Self::DockIsolatedPreview`] and must not use this variant.
     EnterPlanMode {
         description: Option<String>,
     },

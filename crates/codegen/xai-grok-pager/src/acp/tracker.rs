@@ -1275,19 +1275,24 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
-        self.peel_user_facing_draft_from_current_thinking(scrollback);
-        self.finish_thinking(scrollback, false);
         let text = extract_text_from_content(&chunk.content);
+        // An empty content-start must not collapse "Thought for N.s" with no
+        // assistant row. After cancel / Goal Paused / "Can you please answer?",
+        // that left a blinking cursor and [pause] and no reply.
+        if self.current_agent_msg.is_none() && text.trim().is_empty() {
+            if !text.is_empty() {
+                tracing::warn!(
+                    text = %text.escape_debug(),
+                    "ignoring whitespace-only agent message chunk (no prior content)"
+                );
+            }
+            return false;
+        }
         if text.is_empty() {
             return false;
         }
-        if self.current_agent_msg.is_none() && text.trim().is_empty() {
-            tracing::warn!(
-                text = %text.escape_debug(),
-                "ignoring whitespace-only agent message chunk (no prior content)"
-            );
-            return false;
-        }
+        self.peel_user_facing_draft_from_current_thinking(scrollback);
+        self.finish_thinking(scrollback, false);
         let is_new = self.current_agent_msg.is_none();
         let id = *self.current_agent_msg.get_or_insert_with(|| {
             let entry_id = scrollback.start_streaming_agent();

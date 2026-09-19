@@ -216,6 +216,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut auto_implement_qid: Option<u64> = None;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
@@ -455,6 +456,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     child_updates_replayed: false,
                 },
             );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
+            );
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
             {
@@ -650,6 +655,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.tools_used = tools_used.into_iter().map(Arc::from).collect();
                 info.error_count = Some(error_count);
                 info.last_progress_at = std::time::Instant::now();
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                    &child_session_id,
+                    tokens_used,
+                );
             }
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
                 && context_window_tokens > 0
@@ -688,6 +697,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
+            let mill_completed = status == "completed";
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
             let info_ref = agent.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
@@ -755,7 +765,12 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.turns = Some(turns);
                 if tokens_used > 0 {
                     info.tokens_used = Some(tokens_used);
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                        &child_session_id,
+                        tokens_used,
+                    );
                 }
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
                 info.pending_kill = false;
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
@@ -769,6 +784,17 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 if !resuming {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
+            }
+            // Isolated Preview stay-after-present must not keep leftover
+            // present after mill L2 completion (mill 69 GREEN).
+            agent.leave_or_reread_isolated_preview_after_mill_continues();
+            // Nested mill never receives PromptResponse. Auto-run the
+            // trailing Next implement prompt on the parent.
+            if mill_completed && !resuming {
+                auto_implement_qid = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
             }
             true
         }
@@ -1217,6 +1243,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     };
     let extra = std::mem::take(&mut agent.pending_effects);
     app.pending_effects.extend(extra);
+    if let Some(qid) = auto_implement_qid {
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek_protecting(
+            app,
+            parent_id,
+            Some(qid),
+        );
+        app.pending_effects.extend(effects);
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()
@@ -1402,7 +1436,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
                     child_session_id: Arc::from(child_session_id.clone()),
-                    description: Arc::from(description),
+                    description: Arc::from(description.clone()),
                     subagent_type: Arc::from(subagent_type),
                     persona: persona.map(Arc::from),
                     role: role.map(Arc::from),
@@ -1441,6 +1475,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     child_updates_replayed: false,
                 },
             );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
+            );
             agent.ensure_subagent_child_view(&child_session_id);
             true
         }
@@ -1471,6 +1509,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.tools_used = tools_used.into_iter().map(Arc::from).collect();
             info.error_count = Some(error_count);
             info.last_progress_at = std::time::Instant::now();
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
             true
         }
         XaiSessionUpdate::SubagentFinished {
@@ -1494,6 +1536,11 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.turns = Some(turns);
             info.duration_ms = Some(duration_ms);
             info.tokens_used = Some(tokens_used);
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
             info.activity_label = None;
             info.pending_kill = false;
             info.kill_requested_at = None;
@@ -1509,6 +1556,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
+            agent.leave_or_reread_isolated_preview_after_mill_continues();
             true
         }
         _ => false,

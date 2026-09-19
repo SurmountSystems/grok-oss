@@ -925,6 +925,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "hide_header" => Some(Action::SetHideHeader(new)),
         "composer_multiline" => Some(Action::SetComposerMultiline(new)),
+        "allow_session_multiline" => Some(Action::SetAllowSessionMultiline(new)),
         "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "allow_worktree" => Some(Action::SetAllowWorktree(new)),
         "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),

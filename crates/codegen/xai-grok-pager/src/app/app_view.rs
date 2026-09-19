@@ -1871,6 +1871,21 @@ impl AppView {
             interim: None,
         };
     }
+
+    /// Session directory that holds `prompt_wal.jsonl` for this voice target.
+    /// Grok OSS: Until the Operator stops recording, PCM forks to `audio_wal.pcm`
+    /// beside that file. Dashboard dispatch has no session yet (pipeline temp).
+    pub(crate) fn audio_wal_session_dir_for(&self, target: VoiceTarget) -> Option<PathBuf> {
+        let id = match target {
+            VoiceTarget::Agent(id) | VoiceTarget::DashboardPeekReply(id) => id,
+            VoiceTarget::DashboardDispatch => return None,
+        };
+        let agent = self.agents.get(&id)?;
+        let session_id = agent.session.session_id.as_ref()?;
+        let cwd = agent.session.cwd.to_string_lossy();
+        xai_grok_shell::session::prompt_wal::prompt_wal_path(&cwd, session_id.0.as_ref())
+            .and_then(|p| p.parent().map(PathBuf::from))
+    }
     /// Set the live interim transcript. No-op unless recording, so a late event
     /// after a stop can't repopulate the overlay.
     pub(crate) fn voice_set_interim(&mut self, text: String) -> bool {

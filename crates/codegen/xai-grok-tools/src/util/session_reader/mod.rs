@@ -482,6 +482,28 @@ mod tests {
         assert!(try_parse_session_reader_intercept("python3 -c 'print(1)'").is_none());
     }
 
+    /// Operator: skills must not generate arbitrary Python or Bash and then run it.
+    #[test]
+    fn generated_python_or_bash_payload_is_not_allowlisted_session_reader_intercept() {
+        assert!(try_parse_session_reader_intercept("python3 -c 'print(1)'").is_none());
+        assert!(
+            try_parse_session_reader_intercept(
+                "cat > /tmp/s.py <<'EOF'\nprint(1)\nEOF\npython3 /tmp/s.py claude list"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn grok_oss_session_reader_cli_bin_is_intercepted() {
+        let hit = try_parse_session_reader_intercept(
+            "grok-oss-session-reader claude list --cwd /tmp --json",
+        )
+        .expect("CLI bin must intercept");
+        assert_eq!(hit.tool, SessionTool::Claude);
+        assert_eq!(hit.action, SessionAction::List);
+    }
+
     #[test]
     fn show_jsonl_path_fail_closed_on_missing() {
         let hit = SessionReaderIntercept {

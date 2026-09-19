@@ -184,6 +184,7 @@ mod prompt;
 mod queue;
 mod render;
 pub use render::AppRenderParams;
+pub(crate) mod l2_token_tracking;
 mod live_prompt_task;
 mod rewind;
 mod selection;
@@ -1447,8 +1448,13 @@ pub struct AgentView {
     /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
     /// Click or /view-plan" status and local idle decision re-park until a new
     /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."
-    /// or "Waiting for updated plan..." instead.
+    /// or "Waiting for updated plan..." instead. A plan-update turn
+    /// (`Updating`) keeps Isolated Preview docked as rewriting-wait.
     pub(crate) plan_feedback_in_flight: Option<PlanFeedbackInFlight>,
+    /// Operator prompt quoted in Isolated Preview rewriting-wait chrome
+    /// while [`Self::plan_feedback_in_flight`] is `Updating`. Cleared on a
+    /// new `exit_plan_mode` present. Not session `plan.md`.
+    pub(crate) isolated_preview_rewrite_wait_prompt: Option<String>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -2800,15 +2806,16 @@ pub(crate) mod test_fixtures {
             ScrollbackState::new(),
         )
     }
-    /// Interject chord for non–VS Code family tests (`Ctrl+Enter`).
+    /// Interject / send-now chord for non–VS Code family tests (`Ctrl+I`).
+    /// Grok OSS: Ctrl+Enter inserts a newline in the composer; it is not send-now.
     pub fn force_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL)
     }
     /// Interject chord for VS Code family tests (`Ctrl+L`).
     pub fn vscode_interject_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)
     }
-    /// Host-independent registry for queue/prompt interject tests (Ctrl+Enter).
+    /// Host-independent registry for queue/prompt interject tests (Ctrl+I send-now).
     pub fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()
     }

@@ -525,9 +525,9 @@ fn log_poll_delta_if_stepped(
 ) {
     let included_stepped = !float_same(prev.credit_usage_percent, next.credit_usage_percent);
     let build_stepped = optional_f64_stepped(prev.build_usage_percent, next.build_usage_percent);
-    let extras_stepped =
+    let dollar_credits_stepped =
         optional_i64_stepped(prev.prepaid_balance_cents, next.prepaid_balance_cents);
-    if !(included_stepped || build_stepped || extras_stepped) {
+    if !(included_stepped || build_stepped || dollar_credits_stepped) {
         return;
     }
     tracing::info!(
@@ -558,14 +558,14 @@ pub fn included_poll_history_for(identity_id: &str) -> Vec<IncludedPollSample> {
 /// Which SuperGrok meters were observed flat in a flat-poll window.
 ///
 /// `unproven` is true only when the detector fires. `observed_build` /
-/// `observed_extras` are true only when **every** sample in that window
+/// `observed_dollar_credits` are true only when **every** sample in that window
 /// carried the field (and it stayed flat). Honesty copy must not name Build
 /// or SuperGrok $ extras as flat unless the matching flag is true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FlatPollEvidence {
     pub unproven: bool,
     pub observed_build: bool,
-    pub observed_extras: bool,
+    pub observed_dollar_credits: bool,
 }
 
 /// Pure evidence for one sample series (same window rules as
@@ -582,11 +582,11 @@ pub fn flat_poll_evidence_for_samples(
     let window = recent_flat_candidate_window(samples, min_polls, min_window)
         .expect("included_debit_unproven true implies a candidate window");
     let observed_build = window.iter().all(|s| s.build_usage_percent.is_some());
-    let observed_extras = window.iter().all(|s| s.prepaid_balance_cents.is_some());
+    let observed_dollar_credits = window.iter().all(|s| s.prepaid_balance_cents.is_some());
     FlatPollEvidence {
         unproven: true,
         observed_build,
-        observed_extras,
+        observed_dollar_credits,
     }
 }
 
@@ -694,18 +694,23 @@ mod tests {
         Utc.timestamp_opt(secs, 0).single().expect("valid unix ts")
     }
 
-    fn sample(secs: i64, pct: f64, build: Option<f64>, extras: Option<i64>) -> IncludedPollSample {
+    fn sample(
+        secs: i64,
+        pct: f64,
+        build: Option<f64>,
+        dollar_credits: Option<i64>,
+    ) -> IncludedPollSample {
         IncludedPollSample {
             ts: ts(secs),
             credit_usage_percent: pct,
             build_usage_percent: build,
-            prepaid_balance_cents: extras,
+            prepaid_balance_cents: dollar_credits,
         }
     }
 
     /// Named contract: flat included % + flat SuperGrok $ extras → unproven.
     #[test]
-    fn poll_history_marks_flat_when_included_and_extras_unchanged() {
+    fn poll_history_marks_flat_when_included_and_dollar_credits_unchanged() {
         let samples = vec![
             sample(1_000, 65.0, Some(54.0), Some(10029)),
             sample(1_060, 65.0, Some(54.0), Some(10029)),
@@ -744,7 +749,7 @@ mod tests {
 
     /// Named contract: SuperGrok $ extras drop clears flat.
     #[test]
-    fn poll_history_clears_flat_when_extras_cents_drop() {
+    fn poll_history_clears_flat_when_dollar_credits_cents_drop() {
         let samples = vec![
             sample(1_000, 100.0, Some(80.0), Some(10029)),
             sample(1_060, 100.0, Some(80.0), Some(9900)),
@@ -794,7 +799,10 @@ mod tests {
         let ev = flat_poll_evidence_for_samples(&samples, 2, Duration::from_secs(30));
         assert!(ev.unproven);
         assert!(!ev.observed_build, "Build never on wire in this series");
-        assert!(ev.observed_extras, "extras present on every dense sample");
+        assert!(
+            ev.observed_dollar_credits,
+            "extras present on every dense sample"
+        );
     }
 
     /// Named contract: dense series that only recently stepped must clear.
@@ -840,9 +848,9 @@ mod tests {
     }
 
     /// Named contract (Issue 1): included-only flat series → unproven but
-    /// observed_build / observed_extras false (honesty must not claim them).
+    /// observed_build / observed_dollar_credits false (honesty must not claim them).
     #[test]
-    fn flat_evidence_included_only_does_not_mark_build_or_extras_observed() {
+    fn flat_evidence_included_only_does_not_mark_build_or_dollar_credits_observed() {
         let samples = vec![
             sample(1_000, 65.0, None, None),
             sample(1_060, 65.0, None, None),
@@ -854,7 +862,7 @@ mod tests {
             "Build never on wire → not observed flat"
         );
         assert!(
-            !ev.observed_extras,
+            !ev.observed_dollar_credits,
             "extras never on wire → not observed flat"
         );
     }
@@ -869,7 +877,7 @@ mod tests {
         let ev = flat_poll_evidence_for_samples(&samples, 2, Duration::from_secs(30));
         assert!(ev.unproven);
         assert!(ev.observed_build);
-        assert!(ev.observed_extras);
+        assert!(ev.observed_dollar_credits);
     }
 
     /// Named contract: two store handles (two processes) share samples on disk.
@@ -893,7 +901,7 @@ mod tests {
         assert_eq!(from_a.len(), 2, "A must see B's second sample");
         let ev = a.flat_evidence(2, Duration::from_secs(30));
         assert!(
-            ev.unproven && ev.observed_build && ev.observed_extras,
+            ev.unproven && ev.observed_build && ev.observed_dollar_credits,
             "flat evidence must fire across two store handles"
         );
         // No secrets: file is JSON with only meters + identity_id.

@@ -62,6 +62,7 @@ mod tests {
         }
     }
 
+    // Grok OSS: /unstick is a registered builtin and must not replace /resume. This diverges from upstream xAI because FORK.md pins /unstick as a grok-oss slash next to /resume.
     #[test]
     fn unstick_is_registered_builtin() {
         let names: Vec<_> = builtin_commands()
@@ -78,6 +79,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: /unstick dispatches UnstickLastL1Prompt while /resume stays the session picker. This diverges from upstream xAI because FORK.md and catalog pin /unstick as not /resume.
     #[test]
     fn unstick_does_not_collide_with_resume_slash() {
         let models = ModelState::default();

@@ -9,7 +9,6 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::global_work_pause::{GlobalWorkPause, PausedSessionSnapshot};
 use crate::scrollback::block::RenderBlock;
-use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use std::time::Instant;
 
@@ -121,7 +120,7 @@ fn idle_session_needs_over_window_compact_unstick(app: &AppView) -> bool {
     agent.session.state.is_idle()
         && agent.session.pending_prompts.is_empty()
         && session_is_over_sampling_window(agent)
-        && last_compact_stuck_index(&agent.scrollback).is_some()
+        && agent.last_compact_stuck_index().is_some()
 }
 
 fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Effect>> {
@@ -136,12 +135,44 @@ fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Ef
         continue_prompt_after_compact(agent)
     };
     let agent = app.agents.get_mut(&id)?;
+    // Compact first. Continue unfinished work only when that body is not
+    // already a Human turn. Occupancy drop must not keep issued text as a
+    // Prompt row (`continue_prior_work` is pause-resume, not this path).
     agent.session.enqueue_command("/compact".into());
     if let Some(text) = continue_text {
-        agent.session.enqueue_prompt(text);
+        agent.session.enqueue_continue_prior_work(text);
     }
+    agent.drop_stale_queue_occupancy_with_chat_history();
+    agent.sync_queue_pane();
     app.show_toast(OVER_WINDOW_COMPACT_RETRY_TOAST);
     Some(maybe_drain_queue_and_note_peek(app, id))
+}
+
+/// Last real work after Compact, not `/compact`, and not a body that already
+/// issued as a Human turn. Calls the compact-continue helpers so they stay
+/// on the live unstick path.
+fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
+    let text = last_real_user_prompt_for_compact_continue(agent)?;
+    if is_compact_slash(&text) {
+        return None;
+    }
+    // Scrollback still has that leftover `/implement` as a Human turn.
+    // After HTTP 502 that is unfinished work to continue, not the
+    // compact-fail stale-slash skip.
+    if agent.operator_prompt_already_issued_as_human_turn(&text)
+        && !agent.compact_fail_followed_by_http_502()
+    {
+        return None;
+    }
+    Some(text)
+}
+
+fn last_real_user_prompt_for_compact_continue(agent: &AgentView) -> Option<String> {
+    agent.continue_prompt_after_compact()
+}
+
+fn is_compact_slash(text: &str) -> bool {
+    crate::slash::queue_schedule::is_compact_slash(text)
 }
 
 fn session_is_over_sampling_window(agent: &AgentView) -> bool {
@@ -159,128 +190,6 @@ fn session_is_over_sampling_window(agent: &AgentView) -> bool {
         })
         .unwrap_or(0);
     window > 0 && used >= window
-}
-
-fn last_compact_stuck_index(scrollback: &ScrollbackState) -> Option<usize> {
-    for idx in (0..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(
-                    ev.event,
-                    SessionEvent::CompactionFailed { .. }
-                        | SessionEvent::CompactionSkippedTinySavings
-                        | SessionEvent::ContextTooLarge
-                ) {
-                    return Some(idx);
-                }
-                if compact_stuck_scan_skips_session_event(&ev.event) {
-                    continue;
-                }
-                return None;
-            }
-            Some(RenderBlock::System(_)) | Some(RenderBlock::UserPrompt(_)) => {}
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn compact_stuck_scan_skips_session_event(ev: &SessionEvent) -> bool {
-    matches!(
-        ev,
-        SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnCancelled { .. }
-            | SessionEvent::TurnHalted { .. }
-            | SessionEvent::RetryFailed { .. }
-            | SessionEvent::RequestFailed { .. }
-            | SessionEvent::CompactionStarted { .. }
-            | SessionEvent::CompactionCancelled
-    )
-}
-
-fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
-    if let Some(held) = agent.session.compact_held_prompt.as_ref() {
-        let t = held.text.trim();
-        if !t.is_empty() && !is_compact_slash(t) {
-            return Some(held.text.clone());
-        }
-    }
-    last_real_user_prompt_for_compact_continue(&agent.scrollback)
-}
-
-fn last_real_user_prompt_for_compact_continue(scrollback: &ScrollbackState) -> Option<String> {
-    let compact_idx = last_compact_stuck_index(scrollback);
-    let len = scrollback.len();
-    for idx in (0..len).rev() {
-        let Some(entry) = scrollback.entry(idx) else {
-            continue;
-        };
-        let RenderBlock::UserPrompt(block) = &entry.block else {
-            continue;
-        };
-        if block.is_bash || block.is_cron {
-            continue;
-        }
-        let text = block.text.trim();
-        if text.is_empty() || is_compact_slash(text) {
-            continue;
-        }
-        // Leftover `/implement` (or other slash replay) painted after compact
-        // fail is a cancel-resume / compact-held artifact, not a new typed turn.
-        // HTTP 502 after that compact fail is not this skip: leftover
-        // `/implement` is the work that hit 502 and should continue once the
-        // session can sample again.
-        if compact_idx.is_some_and(|c| idx > c)
-            && is_slash_resume_artifact(text)
-            && !http_502_after_compact_fail(scrollback, compact_idx)
-        {
-            continue;
-        }
-        return Some(text.to_string());
-    }
-    None
-}
-
-fn is_compact_slash(text: &str) -> bool {
-    let t = text.trim();
-    t == "/compact"
-        || t == "/compaction"
-        || t.starts_with("/compact ")
-        || t.starts_with("/compaction ")
-}
-
-fn is_slash_resume_artifact(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with('/') && !t.starts_with("//")
-}
-
-fn session_event_is_http_502(ev: &SessionEvent) -> bool {
-    match ev {
-        SessionEvent::RequestFailed {
-            status: Some(502), ..
-        } => true,
-        SessionEvent::RequestFailed {
-            headline, detail, ..
-        } if headline.contains("502") || detail.contains("502") => true,
-        SessionEvent::RetryFailed { error, .. } if error.contains("502") => true,
-        _ => false,
-    }
-}
-
-fn http_502_after_compact_fail(scrollback: &ScrollbackState, compact_idx: Option<usize>) -> bool {
-    let Some(compact_idx) = compact_idx else {
-        return false;
-    };
-    for idx in (compact_idx + 1..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) if session_event_is_http_502(&ev.event) => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 fn last_user_prompt_full_text(scrollback: &ScrollbackState) -> Option<String> {
@@ -365,8 +274,10 @@ pub(super) fn dispatch_resume_global_pause(app: &mut AppView) -> Vec<Effect> {
             continue;
         }
         // Front of local queue so the interrupted turn continues before
-        // newer typed follow-ups that arrived while paused.
-        agent.session.enqueue_prompt_front(text);
+        // newer typed follow-ups that arrived while paused. Mark continue
+        // so matching an earlier Human turn does not look like stale
+        // occupancy.
+        agent.session.enqueue_continue_prior_work_front(text);
         snap.mark_resume_consumed();
         resumed_count += 1;
         effects.extend(maybe_drain_queue_and_note_peek(app, snap.agent_id));

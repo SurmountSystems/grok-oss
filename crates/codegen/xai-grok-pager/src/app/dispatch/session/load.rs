@@ -51,7 +51,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session(
             });
         return vec![];
     }
-    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true)
+    dispatch_load_session_ungated(app, session_id, session_cwd, chat_kind, true, true)
 }
 /// Clear `session_id` from any existing agent that already owns the given
 /// session, then return a freshly constructed [`acp::SessionId`].
@@ -143,6 +143,7 @@ fn dispatch_load_session_ungated(
     session_cwd: Option<std::path::PathBuf>,
     chat_kind: bool,
     restore_fork_parent: bool,
+    focus: bool,
 ) -> Vec<Effect> {
     #[cfg(feature = "local-workspace")]
     let bypass_chat_refusal = app.welcome_history_load_as_build;
@@ -297,7 +298,9 @@ fn dispatch_load_session_ungated(
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
     wire_forked_from_from_disk(app, agent_id);
-    switch_to_agent(app, agent_id, SwitchCause::Load);
+    if focus {
+        switch_to_agent(app, agent_id, SwitchCause::Load);
+    }
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
@@ -337,7 +340,7 @@ fn ensure_fork_parent_loaded(
     let Some(parent_cwd) = parent_cwd else {
         return vec![];
     };
-    dispatch_load_session_ungated(app, parent_sid, Some(parent_cwd), chat_kind, false)
+    dispatch_load_session_ungated(app, parent_sid, Some(parent_cwd), chat_kind, false, false)
 }
 
 /// Stamp `forked_from` from `summary.json` once the parent is a live agent.
@@ -1256,6 +1259,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         if !adopting {
             apply_canceled_turn_resume_on_load(agent, resume_canceled_turn);
         }
+        crate::app::dispatch::rebuild::announce_rebuild_relaunch_identity(agent);
         agent.reconcile_restored_unsent_occupancy(adopting);
         agent.apply_persisted_plan_decision_on_load();
         let drain = maybe_drain_queue(agent);
@@ -1372,6 +1376,20 @@ fn apply_canceled_turn_resume_on_load(agent: &mut AgentView, resume_enabled: boo
         return;
     };
     if primary_user_turn_finished_successfully(&agent.scrollback) {
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return;
+    }
+    let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, &sid)
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    if xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
+        &marker.prompt_text,
+        &[],
+        &[],
+        chat_blob.as_deref(),
+    ) {
+        // Compact may have removed UserPrompt from live scrollback while
+        // chat history still has the finished Human turn. Do not enqueue
+        // that text as a queued Prompt.
         let _ = clear_canceled_turn_resume(&cwd, &sid);
         return;
     }

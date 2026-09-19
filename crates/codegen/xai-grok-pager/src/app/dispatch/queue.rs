@@ -214,10 +214,21 @@ impl QueueDrain {
 }
 
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+    maybe_drain_queue_protecting(agent, None)
+}
+
+/// Drain the next queued entry. `protect_queue_id` is the row this dispatch
+/// just enqueued: occupancy must not treat that body as leftover because
+/// WAL Send, live scrollback, or `chat_history.jsonl` already recorded the
+/// same words. After this drain paints, leftover copies still drop.
+pub(super) fn maybe_drain_queue_protecting(
+    agent: &mut AgentView,
+    protect_queue_id: Option<u64>,
+) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
-    let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+    let sid = agent.session.session_id.as_ref().map(|s| s.0.to_string());
     let queue_depth = agent.session.pending_prompts.len();
 
     let log_blocked = |reason: &str, sid: Option<&str>| {
@@ -230,18 +241,20 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         }
     };
 
+    agent.drop_stale_queue_occupancy_protecting(protect_queue_id);
+
     if !agent.session.state.is_idle() {
-        log_blocked("turn_running", sid);
+        log_blocked("turn_running", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Hold the drain during an in-flight model switch. See the
     // `model_switch_pending` field doc for why a reconnect must clear it.
     if agent.session.model_switch_pending {
-        log_blocked("model_switch_pending", sid);
+        log_blocked("model_switch_pending", sid.as_deref());
         return QueueDrain::blocked();
     }
     if agent.session.loading_replay {
-        log_blocked("loading_replay", sid);
+        log_blocked("loading_replay", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Server-owned next turn: a non-running server row (including this
@@ -257,7 +270,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         .iter()
         .any(|e| Some(e.id.as_str()) != running)
     {
-        log_blocked("server_queue_owns_next_turn", sid);
+        log_blocked("server_queue_owns_next_turn", sid.as_deref());
         return QueueDrain::blocked();
     }
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -354,7 +367,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         agent.note_self_originated_prompt(&prompt_id);
     }
 
-    match queued.kind {
+    let drain = match queued.kind {
         QueueEntryKind::Prompt => {
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
@@ -614,7 +627,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: flip.then_some(prompt_entry_id),
             }
         }
-    }
+    };
+    agent.drop_stale_queue_occupancy();
+    drain
 }
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e.
@@ -1096,6 +1111,17 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    maybe_drain_queue_and_note_peek_protecting(app, agent_id, None)
+}
+
+/// Same as [`maybe_drain_queue_and_note_peek`], keeping `protect_queue_id`
+/// so a just-enqueued mill Next implement prompt is not occupancy-dropped
+/// when its body matches the Human turn that just finished.
+pub(crate) fn maybe_drain_queue_and_note_peek_protecting(
+    app: &mut AppView,
+    agent_id: AgentId,
+    protect_queue_id: Option<u64>,
+) -> Vec<Effect> {
     if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
     }
@@ -1103,7 +1129,7 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
         };
-        maybe_drain_queue(agent)
+        maybe_drain_queue_protecting(agent, protect_queue_id)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects

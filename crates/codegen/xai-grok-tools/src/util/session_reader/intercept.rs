@@ -2,6 +2,8 @@
 
 /// Allowlisted script path segment (host resume-session skill + bundled mirror).
 const SESSION_READER_PY_MARKER: &str = "resume-session/session_reader.py";
+/// Shipped CLI bin of the same Rust function (Grok Build compatibility).
+const SESSION_READER_CLI_BIN: &str = "grok-oss-session-reader";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTool {
@@ -88,9 +90,21 @@ fn is_python_bin(tok: &str) -> bool {
     }
 }
 
+fn path_basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+}
+
 fn is_allowlisted(path: &str) -> bool {
     let p = path.replace('\\', "/");
     p.ends_with(SESSION_READER_PY_MARKER) || p.contains(&format!("/{SESSION_READER_PY_MARKER}"))
+}
+
+fn is_session_reader_stub_or_cli_bin(path: &str) -> bool {
+    let base = path_basename(path);
+    base == "session_reader.py" || base == SESSION_READER_CLI_BIN || is_allowlisted(path)
 }
 
 fn simple_tokens(s: &str) -> Vec<String> {
@@ -137,7 +151,7 @@ fn simple_tokens(s: &str) -> Vec<String> {
 
 fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
     let tokens = simple_tokens(cmd);
-    if tokens.len() < 4 {
+    if tokens.len() < 3 {
         return None;
     }
 
@@ -153,23 +167,31 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
         break;
     }
 
-    if i >= tokens.len() || !is_python_bin(&tokens[i]) {
+    if i >= tokens.len() {
         return None;
     }
-    i += 1;
 
-    while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
-        if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+    let script = if is_python_bin(&tokens[i]) {
+        i += 1;
+        while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
+            if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+                return None;
+            }
+            i += 1;
+        }
+        if i >= tokens.len() || !is_allowlisted(&tokens[i]) {
             return None;
         }
+        let script = tokens[i].clone();
         i += 1;
-    }
-
-    if i >= tokens.len() || !is_allowlisted(&tokens[i]) {
+        script
+    } else if is_session_reader_stub_or_cli_bin(&tokens[i]) {
+        let script = tokens[i].clone();
+        i += 1;
+        script
+    } else {
         return None;
-    }
-    let script = tokens[i].clone();
-    i += 1;
+    };
 
     if i >= tokens.len() {
         return None;

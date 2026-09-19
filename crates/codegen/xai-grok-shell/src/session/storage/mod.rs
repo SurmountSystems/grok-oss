@@ -1310,8 +1310,10 @@ pub use jsonl::JsonlStorageAdapter;
 #[cfg(any(test, feature = "test-support"))]
 pub use replay::load_updates_for_replay_at;
 pub use replay::{
-    PreparedReplay, ReplayEmission, ReplayLookupFallback, ReplayPathHint, load_updates_for_replay,
-    prepare_replay_lines, stream_replay_updates_at, stream_replay_updates_at_hinted,
+    PreparedReplay, ReplayEmission, ReplayFilePlan, ReplayLineLoc, ReplayLookupFallback,
+    ReplayPathHint, chat_history_replay_lines, load_updates_for_replay, plan_replay_file,
+    prepare_replay_lines, read_replay_line_at, stream_replay_updates_at,
+    stream_replay_updates_at_hinted,
 };
 pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines};
 
@@ -1357,7 +1359,7 @@ pub(crate) struct RawChunkMetaPeek {
 
 /// Role of one item in the rewind timeline, as seen by [`filter_rewind_by`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RewindStep {
+pub(crate) enum RewindStep {
     /// Rewind marker: truncate survivors back to `target`'s prompt boundary.
     Rewind { target: usize },
     /// User-message chunk opening (or continuing) a prompt run.
@@ -1371,7 +1373,7 @@ enum RewindStep {
 /// truncates survivors back to the target prompt. [`filter_rewind_lines`] and
 /// [`filter_rewind_updates`] wrap this over raw JSONL and typed updates so the
 /// two paths share one algorithm.
-fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Vec<T> {
+pub(crate) fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Vec<T> {
     let mut result: Vec<T> = Vec::with_capacity(items.len());
     let mut prompt_starts: Vec<usize> = Vec::new();
     let mut tracker = UserRunTurnTracker::new();
@@ -1400,7 +1402,7 @@ fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Ve
 
 /// Classify a raw JSONL line by peeking at its tag and `_meta` without fully
 /// deserializing the payload.
-fn rewind_step_for_line(line: &str) -> RewindStep {
+pub(crate) fn rewind_step_for_line(line: &str) -> RewindStep {
     let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
         let raw = env.params.map(|p| p.get()).unwrap_or(line);
         (raw, env.method == Some(XAI_SESSION_UPDATE_METHOD))

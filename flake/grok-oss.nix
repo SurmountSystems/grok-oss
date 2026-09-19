@@ -36,7 +36,6 @@ let
       protobuf
       cmake
       perl
-      ripgrep
       makeWrapper
     ]
     ++ lib.optionals stdenv.isLinux [
@@ -66,8 +65,6 @@ let
       }).version;
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
-    GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
-    GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
     GROK_GIT_SHA = self.shortRev or self.dirtyShortRev or "unknown";
     # Cap cargo fan-out inside the pure sandbox (free GHA ~16GB).
     CARGO_BUILD_JOBS = "2";

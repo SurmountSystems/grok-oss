@@ -54,6 +54,40 @@ impl ReplayCompletionDrain {
 }
 
 impl MvpAgent {
+    /// When `updates.jsonl` has no Operator/Agent UI chunks, paint
+    /// `chat_history.jsonl` so last-session resume is not chrome-only.
+    pub(super) async fn forward_chat_history_replay(
+        &self,
+        session_id: &acp::SessionId,
+        items: &[crate::sampling::ConversationItem],
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+    ) {
+        let lines = crate::session::storage::chat_history_replay_lines(session_id.0.as_ref(), items);
+        if lines.is_empty() {
+            return;
+        }
+        tracing::info!(
+            session_id = %session_id.0,
+            lines = lines.len(),
+            "replay: updates.jsonl had no user/agent chunks; painting chat_history.jsonl"
+        );
+        let mut drain = ReplayCompletionDrain::new();
+        let mut collapser = ReplayToolCollapser::new();
+        for line in &lines {
+            if let Some(rx) = self.forward_raw_replay_line(
+                line,
+                persist_data,
+                target_client_id,
+                true,
+                &mut collapser,
+            ) {
+                drain.push(rx).await;
+            }
+        }
+        drain.drain_all().await;
+    }
+
     /// Records written before completions were bounded can still be too long
     /// for a client to read. `None` drops one that cannot be shrunk, which
     /// costs a completion event but keeps the connection.
@@ -194,7 +228,7 @@ impl MvpAgent {
     }
 
     /// Replay updates from disk and drain completions.
-    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents)`.
+    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents, has_user_or_agent_chunk)`.
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,
@@ -203,36 +237,45 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
-    ) -> Result<(u64, u64, Vec<(String, String)>), acp::Error> {
+    ) -> Result<(u64, u64, Vec<(String, String)>, bool), acp::Error> {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
 
         let Some(updates_path) = updates_file_path.as_ref() else {
             tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, 0, Vec::new()));
+            return Ok((0, 0, Vec::new(), false));
         };
 
         let file_size = std::fs::metadata(updates_path)
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // Inline blocking I/O: spawn_blocking has multi-second latency on LocalSet.
-        let raw_contents = match std::fs::read_to_string(updates_path) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok((0, 0, Vec::new())),
-        };
-        let end_offset = raw_contents.len() as u64;
-
-        let mut prepared = {
+        // Offset plan, then one line at a time. Do not `read_to_string` the
+        // whole file: last-session resume of a gigabyte `updates.jsonl`
+        // painted chrome for minutes with an empty transcript.
+        let plan = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
+            match crate::session::storage::plan_replay_file(updates_path, cursor) {
+                Ok(p) => p,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok((0, 0, Vec::new(), false));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id.0,
+                        error = %e,
+                        "replay: failed to plan updates.jsonl; continuing without UI replay"
+                    );
+                    return Ok((0, 0, Vec::new(), false));
+                }
+            }
         };
-        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
+        let unfinished_subagents = plan.unfinished_subagents.clone();
 
         if cursor.is_some() {
-            let sending = prepared.lines.len();
-            if prepared.mark_replay {
+            let sending = plan.lines.len();
+            if plan.mark_replay {
                 tracing::warn!(
                     session_id = %session_id.0,
                     "replay: cursor not found, falling back to full replay"
@@ -240,36 +283,62 @@ impl MvpAgent {
             } else {
                 tracing::info!(
                     session_id = %session_id.0,
-                    skipped = prepared.total_live - sending,
+                    skipped = plan.total_live.saturating_sub(sending),
                     remaining = sending,
                     "replay: cursor found, skipping events"
                 );
             }
         }
 
-        let last_tokens = prepared.last_tokens;
-        let mark_replay = prepared.mark_replay;
+        let last_tokens = plan.last_tokens;
+        let mark_replay = plan.mark_replay;
+        let end_offset = plan.end_offset;
 
-        if let Some(max_seq) = prepared.max_event_seq {
+        if let Some(max_seq) = plan.max_event_seq {
             crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
         }
 
-        let lines_to_send = prepared.lines;
-        let updates_count = lines_to_send.len() as u64;
+        let updates_count = plan.lines.len() as u64;
         let mut drain = ReplayCompletionDrain::new();
+        let mut painted_ua = false;
 
         {
             let _timer = crate::instrumentation_timer!("session.replay.forward_updates");
             let mut collapser = ReplayToolCollapser::new();
-            for line in &lines_to_send {
-                if let Some(rx) = self.forward_raw_replay_line(
-                    line,
-                    persist_data,
-                    target_client_id,
-                    mark_replay,
-                    &mut collapser,
-                ) {
-                    drain.push(rx).await;
+            match std::fs::File::open(updates_path) {
+                Ok(mut file) => {
+                    let mut buf = String::new();
+                    for loc in &plan.lines {
+                        if crate::session::storage::read_replay_line_at(&mut file, *loc, &mut buf)
+                            .is_err()
+                        {
+                            break;
+                        }
+                        let line = buf.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        if line.contains("user_message_chunk") || line.contains("agent_message_chunk")
+                        {
+                            painted_ua = true;
+                        }
+                        if let Some(rx) = self.forward_raw_replay_line(
+                            line,
+                            persist_data,
+                            target_client_id,
+                            mark_replay,
+                            &mut collapser,
+                        ) {
+                            drain.push(rx).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id.0,
+                        error = %e,
+                        "replay: failed to open updates.jsonl for pass 2"
+                    );
                 }
             }
             // Do not flush collapser leftovers: synthesizing a ToolCall here
@@ -300,7 +369,7 @@ impl MvpAgent {
 
         replay_timer.with_field("updates_count", updates_count);
 
-        Ok((last_tokens, end_offset, unfinished_subagents))
+        Ok((last_tokens, end_offset, unfinished_subagents, painted_ua))
     }
 
     /// Enqueue replay notifications for updates appended after `from_offset`.

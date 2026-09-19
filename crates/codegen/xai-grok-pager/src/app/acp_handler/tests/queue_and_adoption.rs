@@ -36,6 +36,116 @@
         assert!(app.shared_prompt_queue("sess-1").is_none());
     }
 
+    /// Named contract: a prompt that already issued as a Human turn must not
+    /// come back as a queued stale Prompt after rebuild, occupancy drop,
+    /// Compact, or session reload. Duplicate occupancy for the same issued
+    /// text must not remain. `handle_queue_changed` leftover: drop stale
+    /// `[Send now]` / `shared_queue` rows that match issued Human text.
+    #[test]
+    fn handle_queue_changed_drops_shared_queue_rows_matching_issued_human_text() {
+        const ISSUED: &str =
+            "Convert this LightWave 3D scene to a sprite sheet with two extra lines.";
+        const UNSENT: &str = "follow-up that is not yet a Human turn";
+        let mut app = make_app_with_agent("sess-stale-occ");
+        let occ4 = crate::app::prompt_queue::QueueEntryWire {
+            id: "occ-4".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: ISSUED.into(),
+            position: 0,
+            combined_texts: None,
+        };
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("p-running".into());
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(ISSUED));
+            agent.shared_queue = vec![occ4.clone()];
+            crate::app::dispatch::arm_send_now_and_paint(agent, "occ-4", None);
+            assert!(
+                agent.send_now_painted_blocks.contains_key("occ-4"),
+                "fixture must paint [Send now] on the issued occupancy row before the broadcast"
+            );
+        }
+        let payload = crate::app::prompt_queue::QueueChanged {
+            session_id: "sess-stale-occ".into(),
+            entries: vec![
+                occ4,
+                crate::app::prompt_queue::QueueEntryWire {
+                    id: "occ-5".into(),
+                    version: 1,
+                    owner: None,
+                    last_editor: None,
+                    kind: "prompt".into(),
+                    text: ISSUED.into(),
+                    position: 1,
+                    combined_texts: None,
+                },
+                crate::app::prompt_queue::QueueEntryWire {
+                    id: "occ-6".into(),
+                    version: 1,
+                    owner: None,
+                    last_editor: None,
+                    kind: "prompt".into(),
+                    text: UNSENT.into(),
+                    position: 2,
+                    combined_texts: None,
+                },
+            ],
+            running_prompt_id: None,
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
+        };
+        let raw = serde_json::value::to_raw_value(&payload).unwrap();
+        let notif = acp::ExtNotification::new("x.ai/queue/changed", raw.into());
+        assert!(handle_queue_changed(&notif, &mut app));
+        let shared = app
+            .shared_prompt_queue("sess-stale-occ")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !shared.iter().any(|w| w.text.trim() == ISSUED),
+            "a prompt that already issued as a Human turn must not come back as a queued stale Prompt after rebuild, occupancy drop, Compact, or session reload; shared={shared:?}"
+        );
+        assert_eq!(
+            shared.iter().filter(|w| w.text.trim() == ISSUED).count(),
+            0,
+            "duplicate occupancy for the same issued text must not remain; shared={shared:?}"
+        );
+        assert!(
+            shared.iter().any(|w| w.text.trim() == UNSENT),
+            "a truly unsent follow-up must still occupy the shared queue; shared={shared:?}"
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted = agent.queue.entry_texts();
+        assert!(
+            !painted.iter().any(|t| t.trim() == ISSUED),
+            "the Operator-visible [Send now] pane must not show issued Human text; painted={painted:?}"
+        );
+        assert!(
+            painted.contains(&UNSENT),
+            "a truly unsent follow-up must still paint as a queue row; painted={painted:?}"
+        );
+        assert!(
+            !agent.send_now_painted_blocks.contains_key("occ-4"),
+            "stale [Send now] paint for issued Human text must retire"
+        );
+        assert_eq!(
+            agent
+                .shared_queue
+                .iter()
+                .filter(|w| w.text.trim() == ISSUED)
+                .count(),
+            0,
+            "agent shared_queue must drop issued Human text after handle_queue_changed"
+        );
+    }
+
     /// When a server-origin row being edited disappears from a later
     /// broadcast (drained / removed by another client), the queue handler
     /// exits `EditingQueued` so the composer isn't stranded.

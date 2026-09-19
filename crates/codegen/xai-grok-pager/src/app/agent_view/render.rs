@@ -1071,7 +1071,7 @@ impl AgentView {
             .models
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
-        let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        let effective_plan = self.composer_plan_flag_visible();
         let casual_commenting = self.is_casual_commenting();
         // Plan present keeps the composer typeable (letter keys). Paint the
         // Human box caret even while Preview owns Tab/?/y so typing is not
@@ -1182,6 +1182,10 @@ impl AgentView {
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
         let max_prompt_height = area.height / 2;
+        // Grok OSS: While recording, the prompt box grows with the transcript
+        // and must not clip spoken text. Overlay Some is the live recording path.
+        self.prompt
+            .set_voice_recording_grow(voice_listening, voice_interim);
         let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
             self.prompt
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
@@ -6656,8 +6660,12 @@ mod status_credits_meter_tests {
             "status bar must push \"credits\" so hit_credits.rect is a real rect"
         );
         assert!(
-            text.contains("included SuperGrok period limits"),
-            "status bar must paint the compact included SuperGrok period limits meter:\n{text}"
+            text.contains("SuperGrok period"),
+            "status bar must paint the compact SuperGrok period meter:\n{text}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
         );
         assert!(
             text.contains("24%"),
@@ -7617,6 +7625,67 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains("Waiting on plan approval"),
             "must not re-arm parked wait after Quit:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+    }
+
+    /// Operator (2026-09-11): Plan Exit, then footer still Plan ready.
+    /// Side panel open. Idle CTAs must not stay armed for that present.
+    #[test]
+    fn after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        agent.session.state = AgentState::Idle;
+        let before = draw_screen(&mut agent);
+        assert!(
+            before.contains("Plan ready. Side panel open"),
+            "fixture: live present paints Plan ready. Side panel open:\n{before}"
+        );
+
+        let _ = agent.abandon_plan();
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "after Plan Exit, idle CTAs must not stay armed for the exited present"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "after Plan Exit, the live park must be gone"
+        );
+    }
+
+    /// Operator (2026-09-12): Isolated Preview closed. Composer send.
+    /// Status still **plan**. After Plan Exit with Isolated Preview closed,
+    /// the turn-status draw must not keep composer `plan` chrome.
+    #[test]
+    fn after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        let _ = agent.abandon_plan();
+        agent.line_viewer = None;
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        assert!(
+            !agent.composer_plan_flag_visible(),
+            "after Plan Exit with Isolated Preview closed, chrome must not stay plan"
+        );
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
         );
     }
 

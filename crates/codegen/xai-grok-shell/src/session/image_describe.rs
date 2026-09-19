@@ -16,8 +16,11 @@
 //!
 //! The pipeline is wired into `SessionActor::handle_prompt` so a user
 //! turn that contains image blocks is routed through the vision model
-//! before being pushed onto chat state. If the describe call fails the
-//! whole turn fails -- we never silently drop the images.
+//! before being pushed onto chat state. A transport miss on that call
+//! (for example `error sending request`) must not abort the whole Human
+//! turn. Images stay persisted, a named unavailable stub is injected,
+//! and the coding model still sees `<image_files>`. We never silently
+//! drop the images.
 use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
@@ -418,8 +421,8 @@ pub(crate) enum DescribeError {
     /// caller's log line and the model-facing degraded message.
     ///
     /// Recommended caller behaviour: treat the round-trip as unavailable
-    /// for this turn; fall back to attaching the raw image bytes inline
-    /// when the surface supports it.
+    /// for this turn; fail-open with [`fail_open_image_description`] so
+    /// the Human turn continues. Do not abort on a transport miss.
     #[error("image describe call failed: {0}")]
     Sampling(String),
     /// The vision model returned blank text after `trim()`. This is a
@@ -433,6 +436,20 @@ pub(crate) enum DescribeError {
     /// unavailable" note) rather than abort the turn.
     #[error("image describe model returned no content")]
     EmptyResponse,
+}
+
+/// Transport and empty-description misses fail-open. Persist and session-dir
+/// failures abort before this is consulted.
+pub(crate) fn describe_error_aborts_human_turn(err: &DescribeError) -> bool {
+    match err {
+        DescribeError::Sampling(_) | DescribeError::EmptyResponse => false,
+    }
+}
+
+/// Named stub when vision describe cannot run. The Human turn continues
+/// with persisted `<image_files>` plus this note. Not billing. Not a silent drop.
+pub(crate) fn fail_open_image_description(err: &DescribeError) -> String {
+    format!("[image transcription unavailable: {err}]")
 }
 /// Call the vision model and return its description text.
 ///
@@ -528,6 +545,60 @@ pub(crate) fn persist_and_prepend_image_files(
 mod tests {
     use super::*;
     use xai_grok_sampling_types::conversation::{ConversationItem, UserItem};
+    /// Operator: "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again."
+    /// An image attach must not fail the whole Human turn when the describe HTTP
+    /// call gets "error sending request". Fail-open with named chrome. Not billing.
+    #[test]
+    fn image_attach_must_not_fail_human_turn_when_describe_http_error_sending_request() {
+        let operator = "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again.";
+        assert!(
+            operator.contains(
+                "image transcription failed: image describe call failed: request error: error sending request"
+            ),
+            "first test must quote the operator error text"
+        );
+        let err = DescribeError::Sampling("request error: error sending request".into());
+        assert_eq!(
+            format!("image transcription failed: {err}"),
+            "image transcription failed: image describe call failed: request error: error sending request"
+        );
+        assert!(
+            !describe_error_aborts_human_turn(&err),
+            "describe HTTP error sending request must not abort the Human turn"
+        );
+        let stub = fail_open_image_description(&err);
+        assert!(
+            stub.contains("image transcription unavailable"),
+            "fail-open chrome must be named, got {stub}"
+        );
+        assert!(
+            stub.contains("error sending request"),
+            "stub must keep the transport miss, got {stub}"
+        );
+        let lower = stub.to_ascii_lowercase();
+        assert!(
+            !lower.contains("billing") && !lower.contains("dollar"),
+            "must not invent billing, got {stub}"
+        );
+        let rendered = render_image_user_message(
+            &stub,
+            &["/ws/assets/image-1.png".to_owned()],
+            "<user_query>\nweird\n</user_query>",
+        );
+        assert!(
+            rendered.contains("weird"),
+            "Human query must stay on fail-open, got {rendered}"
+        );
+        assert!(
+            rendered.contains("<image_files>") && rendered.contains("/ws/assets/image-1.png"),
+            "persisted image paths must stay on fail-open, got {rendered}"
+        );
+        assert!(
+            rendered.contains("<image>") && rendered.contains("image transcription unavailable"),
+            "named unavailable stub must ride in the image envelope, got {rendered}"
+        );
+    }
+
     #[test]
     fn persist_and_prepend_image_files_writes_assets_and_lists_paths() {
         let dir = tempfile::tempdir().unwrap();

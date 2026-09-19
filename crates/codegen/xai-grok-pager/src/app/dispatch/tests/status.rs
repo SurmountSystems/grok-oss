@@ -1855,10 +1855,11 @@ fn fetch_failures_surface_in_open_modal() {
     assert_eq!(state.context_error.as_deref(), Some("ctx boom"));
 }
 
-/// `/spend` must open `$GROK_HOME/grok_oss.db` (or the Token Economy path
+/// Grok OSS: `/spend` must open `$GROK_HOME/grok_oss.db` (or the Token Economy path
 /// override), ingest session `usage.jsonl` into `local_usage_event`, persist a
 /// `reconciliation_run`, and format a real double-entry report. Not
-/// `DoubleEntryReport::default()`.
+/// `DoubleEntryReport::default()`. This diverges from upstream xAI because FORK.md
+/// and catalog class 3 pin Token Economy ingest; schema-exists is not proof.
 #[test]
 #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
 fn show_spend_ingests_usage_jsonl_and_is_not_empty_default() {

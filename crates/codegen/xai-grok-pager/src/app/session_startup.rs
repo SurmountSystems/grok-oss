@@ -1783,6 +1783,7 @@ mod tests {
             "stdout vs stderr is decided at the composition root, not from_pager_args"
         );
     }
+    // Grok OSS: interactive pager args open the remembered last session on start. This diverges from upstream xAI because FORK.md and catalog class 6 pin last-session, not Welcome first.
     #[test]
     fn from_pager_args_opens_last_session_on_start() {
         assert!(
@@ -2231,6 +2232,7 @@ mod tests {
                 ..tui_ctx()
             }
         }
+        // Grok OSS: interactive grok-oss opens the remembered last session for this working directory. This diverges from upstream xAI because FORK.md and catalog class 6 pin last-session on start, not Welcome first.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn materialize_new_auto_opens_last_session_when_one_exists() {
@@ -2269,6 +2271,7 @@ mod tests {
                 other => panic!("expected last session to open, got {other:?}"),
             }
         }
+        // Grok OSS: first-ever use stays Welcome when no last session exists. This diverges from upstream xAI because catalog class 6 keeps Welcome only for first-ever use.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn materialize_new_auto_stays_welcome_when_no_last_session() {
@@ -2282,6 +2285,7 @@ mod tests {
                 other => panic!("first-ever use must stay welcome, got {other:?}"),
             }
         }
+        // Grok OSS: headless does not steal last-session. This diverges from upstream xAI because catalog class 6 keeps last-session as an interactive TUI contract.
         #[serial_test::serial(GROK_HOME)]
         #[tokio::test]
         async fn materialize_new_auto_does_not_open_last_when_headless() {

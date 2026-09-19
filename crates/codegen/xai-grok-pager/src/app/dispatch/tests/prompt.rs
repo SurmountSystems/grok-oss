@@ -40,6 +40,38 @@ fn send_prompt_view_plan_never_sends_to_model() {
     );
 }
 
+/// Resume `/view-plan` can land as leftover slash-palette `/`. ShowPlan
+/// must dismiss that leftover so Approve stays clickable.
+#[test]
+fn view_plan_clears_leftover_slash_palette() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
+        agent.plan_mode_active = true;
+        agent.latest_inline_plan_content = Some("# Plan GBT3703Repro\n".into());
+    }
+    let effects = dispatch(Action::ShowPlan, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendInterject { .. })),
+        "ShowPlan must stay local, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        !matches!(agent.prompt.text().trim(), "/" | "/view-plan"),
+        "leftover slash palette must not cover Approve; composer={:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        !agent.prompt.slash_open(),
+        "slash palette must close so Approve is clickable"
+    );
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {
@@ -1816,6 +1848,64 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
     assert!(
         !toast,
         "a RequestFailed banner must suppress the error toast"
+    );
+}
+
+/// Operator: "Connection failed – request error stream: error sending request."
+/// Transport miss chrome must not wipe the Human image line.
+#[test]
+fn request_error_stream_error_sending_request_does_not_wipe_human_image_line() {
+    let operator = "Connection failed – request error stream: error sending request.";
+    assert!(operator.contains("request error stream: error sending request"));
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent
+            .scrollback
+            .push_block(RenderBlock::UserPrompt(UserPromptBlock::new(
+                "weird [Image #1]",
+            )));
+    }
+    let formatted = crate::app::error_display::format_request_failure(
+        None,
+        Some("http"),
+        "Connection failed – request error stream: error sending request.",
+    );
+    let msg = formatted.message();
+    assert!(
+        msg.contains("Transport miss") && msg.contains("not a silent hang"),
+        "must name a transport miss, not a hang, got {msg}"
+    );
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        !lower.contains("billing") && !lower.contains("dollar"),
+        "must not invent billing, got {msg}"
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(msg.clone()),
+            http_status: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    let human_texts: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.entry(i))
+        .filter_map(|e| match &e.block {
+            RenderBlock::UserPrompt(ub) => Some(ub.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        human_texts
+            .iter()
+            .any(|t| t.contains("[Image #1]") && t.contains("weird")),
+        "Human image line must stay, got {human_texts:?}"
     );
 }
 
@@ -5718,5 +5808,413 @@ fn http_502_failed_turn_does_not_auto_run_next_implement() {
             .iter()
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: after mill paints a Next implement prompt whose body
+/// starts with `/implement`, grok-oss sends that turn. The Operator does
+/// not paste it. The mill loop re-emits the same standing `/implement`
+/// under that heading; echo skip must not drop it.
+#[test]
+fn mill_turn_end_auto_runs_same_body_next_implement_prompt_without_operator_paste() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    const MILL: &str = "/implement --effort 3 Keep at least two L2s running\n\
+         1) next mill row on nixbuilder";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("mill-1".into());
+        agent.session.prompt_history = vec![MILL.into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(MILL));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Mill row GREEN.\n\n\
+             Next implement prompt\n\
+             /implement --effort 3 Keep at least two L2s running\n\
+             1) next mill row on nixbuilder",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("mill-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(&app, id, &effects, "Keep at least two L2s running"),
+        "after mill paints a Next implement prompt whose body starts with \
+         /implement, grok-oss must send that turn; the Operator does not paste it; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+const PLAN_COMMENT_CRITIQUE: &str = "keep the join order from the archive index";
+
+fn park_comment_plan(app: &mut crate::app::app_view::AppView) {
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+    pav.focus = PlanApprovalFocus::Prompt;
+    pav.prompt_intent = PlanPromptIntent::Comment;
+    agent.plan_approval_view = Some(pav);
+    agent.session.state = AgentState::Idle;
+}
+
+fn effects_start_model_prompt(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )
+    })
+}
+
+/// Surmount / grok-oss fork: named tests are contracts.
+/// After Comment, a non-empty Human-box critique must not dispatch a
+/// model Prompt. Empty Enter never Approves. The text stays so Approve
+/// can wrap [`PLAN_APPROVED_REVIEW_COMMENTS_LEAD`].
+#[test]
+fn comment_intent_send_prompt_does_not_start_model_wait() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    park_comment_plan(&mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("");
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "Comment critique must not start a Prompt; effects={effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Comment Enter must not Approve"
+    );
+    assert_eq!(agent.session.state, AgentState::Idle);
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "Comment critique must not queue a Prompt, got {:?}",
+        agent.session.pending_prompts
+    );
+    assert!(
+        agent.prompt.text().contains(PLAN_COMMENT_CRITIQUE),
+        "try_send restore: composer must keep the critique for Approve, got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.feedback_draft.as_deref()),
+        Some(PLAN_COMMENT_CRITIQUE)
+    );
+}
+
+/// Isolated Preview Human text is a Human turn. Operator: soft planning
+/// is broken; lost that prompt; nothing happened; cannot submit the
+/// prompt now. Empty Enter never Approves.
+#[test]
+fn isolated_preview_send_prompt_is_human_turn_not_only_plan_comment() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_approval_view =
+            Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: Isolated Preview pane must be open"
+        );
+        agent.prompt.set_text("");
+        agent.session.state = AgentState::Idle;
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        effects_start_model_prompt(&effects),
+        "Isolated Preview Human Enter must send; effects={effects:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "Isolated Preview Enter must not Approve"
+    );
+}
+
+/// Isolated Preview Human send appends WAL. Operator: lost that prompt.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_human_text_enter_appends_wal() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let sid = "wal-isolated-preview-human";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        agent.plan_approval_view =
+            Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+        agent.show_plan_preview();
+        agent.prompt.set_text("");
+        agent.session.state = AgentState::Idle;
+    }
+
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        effects_start_model_prompt(&effects),
+        "Isolated Preview Human Enter must send; effects={effects:?}"
+    );
+    let rows =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");
+    assert!(
+        rows.iter().any(|r| {
+            matches!(
+                r.kind,
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Send
+                    | xai_grok_shell::session::prompt_wal::PromptWalKind::Queue
+            ) && r.text.contains(PLAN_COMMENT_CRITIQUE)
+        }),
+        "lost Isolated Preview Human sentence must be on WAL, got {rows:?}"
+    );
+    assert!(
+        app.agents[&id].plan_approval_view.is_some(),
+        "Isolated Preview Enter must not Approve"
+    );
+}
+
+/// Held comments ride Approve with the review-comments lead. Empty Enter
+/// never Approves; this path is non-empty then click Approve.
+#[test]
+fn comment_intent_held_critique_rides_approve_with_review_lead() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    park_comment_plan(&mut app);
+    let effects = dispatch(Action::SendPrompt(PLAN_COMMENT_CRITIQUE.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "hold must happen before Approve; effects={effects:?}"
+    );
+
+    let outcome = app.agents.get_mut(&id).unwrap().approve_plan();
+    match outcome {
+        crate::app::app_view::InputOutcome::Action(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve must wrap with PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_COMMENT_CRITIQUE),
+                "Approve must carry the held critique, got {text:?}"
+            );
+        }
+        other => panic!("Approve after held Comment critique must Interject; got {other:?}"),
+    }
+    assert!(
+        app.agents.get(&id).unwrap().plan_approval_view.is_none(),
+        "Approve must decide the parked plan"
+    );
+}
+
+/// After /rebuild (or resume) plus Plan Exit, a follow-up in the plan
+/// composer must not leave L1 on Waiting for the model for many minutes
+/// with no sampler / no first token. Idle parked Comment Enter is a
+/// different surface (`comment_intent_send_prompt_does_not_start_model_wait`).
+/// Restore paint is a different surface
+/// (`resume_restore_must_not_show_waiting_when_nested_and_sampler_are_gone`).
+/// This is plan-comment-as-Prompt after rebuild + parked plan approval:
+/// default restore is Preview + Revise with the pane shut, so the hold
+/// that Isolated Preview uses when the pane is open used to miss.
+#[test]
+fn after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_with_no_sampler() {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+
+    const FOLLOW_UP: &str = "please keep the mill on nixbuilder";
+    let id = AgentId(0);
+
+    // Rebuild resume while still showing plan approval: waiter gone
+    // (`for_idle_decision`), default Revise, pane shut. That is the
+    // Operator footer `plan approval` hang.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Restored park\n".into(),
+            )),
+        );
+        agent.line_viewer = None;
+        agent.session.state = AgentState::Idle;
+        agent.turn_started_at = None;
+        agent.last_activity = None;
+        agent.prompt.set_text("");
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+        assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
+        assert!(pav.response_tx.is_none(), "rebuild idle park has no waiter");
+    }
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "rebuild + parked plan follow-up must not start a Prompt that never gets first token; effects={effects:?}"
+    );
+    {
+        let agent = app.agents.get(&id).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "parked plan approval must stay until Approve / Exit"
+        );
+        assert_eq!(agent.session.state, AgentState::Idle);
+        assert!(
+            agent.session.pending_prompts.is_empty(),
+            "must not queue a Prompt the shell will not start, got {:?}",
+            agent.session.pending_prompts
+        );
+        assert!(
+            !matches!(
+                agent.resolve_turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::Model))
+            ),
+            "must not paint Waiting for the model with no sampler, got {:?}",
+            agent.resolve_turn_activity()
+        );
+        assert!(
+            agent.prompt.text().contains(FOLLOW_UP)
+                || agent
+                    .plan_approval_view
+                    .as_ref()
+                    .and_then(|p| p.feedback_draft.as_deref())
+                    == Some(FOLLOW_UP),
+            "follow-up must stay as a parked comment, composer={:?} draft={:?}",
+            agent.prompt.text(),
+            agent
+                .plan_approval_view
+                .as_ref()
+                .and_then(|p| p.feedback_draft.clone())
+        );
+    }
+
+    // Same hang with a live reverse-request still parked and the pane
+    // shut (restore without docking). Preview + Revise used to SendPrompt
+    // because Isolated Preview hold required the pane.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+        pav.focus = PlanApprovalFocus::Preview;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        agent.plan_approval_view = Some(pav);
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.line_viewer = None;
+        agent.session.state = AgentState::Idle;
+        agent.turn_started_at = None;
+        agent.last_activity = None;
+        agent.prompt.set_text("");
+    }
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        !effects_start_model_prompt(&effects),
+        "live parked Preview follow-up with pane shut must not become a 10-minute Prompt; effects={effects:?}"
+    );
+    assert_eq!(app.agents[&id].session.state, AgentState::Idle);
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    assert!(
+        !matches!(
+            app.agents[&id].resolve_turn_activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Model))
+        ),
+        "no Waiting for the model without a live sampler, got {:?}",
+        app.agents[&id].resolve_turn_activity()
+    );
+
+    // Plan Exit already completed: the follow-up is a real turn.
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Exit me\n".into(),
+            )),
+        );
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.session.state = AgentState::Idle;
+    }
+    app.agents.get_mut(&id).unwrap().abandon_plan();
+    assert!(
+        app.agents[&id].plan_approval_view.is_none(),
+        "Exit must clear plan approval chrome"
+    );
+    assert!(
+        app.agents[&id].plan_decision_resolved,
+        "Exit must persist plan_decision_resolved"
+    );
+    let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
+    assert!(
+        effects_start_model_prompt(&effects)
+            || app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(FOLLOW_UP)),
+        "after Plan Exit the follow-up must start a sampler turn, not sit Waiting; effects={effects:?}"
+    );
+}
+
+/// Revise Prompt focus is revision notes, not this hold. A dispatched
+/// SendPrompt there still asks the model so we do not swallow every
+/// parked-plan send.
+#[test]
+fn revise_prompt_send_prompt_still_asks_the_model() {
+    use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut pav = crate::app::agent_view::test_fixtures::make_plan_approval_view_state();
+        pav.focus = PlanApprovalFocus::Prompt;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        agent.plan_approval_view = Some(pav);
+        agent.session.state = AgentState::Idle;
+    }
+    let effects = dispatch(
+        Action::SendPrompt("please use auth middleware".into()),
+        &mut app,
+    );
+    assert!(
+        effects_start_model_prompt(&effects)
+            || app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains("auth middleware")),
+        "Revise Prompt SendPrompt must not be swallowed as a held comment; effects={effects:?}"
     );
 }

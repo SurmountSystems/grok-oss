@@ -253,6 +253,7 @@ static PENDING_VERIFY_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static FORMAT_HOOK_ENTRIES: AtomicU32 = AtomicU32::new(0);
 static TEST_RUNNER: OnceLock<Mutex<Option<Arc<dyn EditVerifyCommandRunner>>>> = OnceLock::new();
 static VERIFY_RUNTIME_LOCK: Mutex<()> = Mutex::new(());
+static SKIP_EDIT_VERIFY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Hold this across format/flush tests so the spy runner and path queue
 /// do not leak between parallel cases.
@@ -260,6 +261,76 @@ pub fn lock_edit_verify_runtime() -> std::sync::MutexGuard<'static, ()> {
     VERIFY_RUNTIME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Serialize tests that mutate [`ENV_SKIP_EDIT_VERIFY`].
+pub fn lock_skip_edit_verify_env() -> std::sync::MutexGuard<'static, ()> {
+    SKIP_EDIT_VERIFY_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Restores `GROK_SKIP_EDIT_VERIFY` when dropped.
+pub struct SkipEditVerifyEnvGuard {
+    prev: Option<String>,
+}
+
+impl SkipEditVerifyEnvGuard {
+    /// Set or clear the kill switch for one test.
+    pub fn set(value: Option<&str>) -> Self {
+        let prev = std::env::var(ENV_SKIP_EDIT_VERIFY).ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var(ENV_SKIP_EDIT_VERIFY, v) },
+            None => unsafe { std::env::remove_var(ENV_SKIP_EDIT_VERIFY) },
+        }
+        Self { prev }
+    }
+
+    /// Host horizon exports `GROK_SKIP_EDIT_VERIFY=1`. Named rustfmt/clippy
+    /// contracts must still run the pipeline.
+    pub fn unset_host_kill_switch() -> Self {
+        Self::set(None)
+    }
+}
+
+impl Drop for SkipEditVerifyEnvGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => unsafe { std::env::set_var(ENV_SKIP_EDIT_VERIFY, v) },
+            None => unsafe { std::env::remove_var(ENV_SKIP_EDIT_VERIFY) },
+        }
+    }
+}
+
+/// Unsets `GROK_SKIP_EDIT_VERIFY` for an async test without holding
+/// [`lock_skip_edit_verify_env`] across `.await`.
+///
+/// The skip-env mutex is taken only while reading/writing the process
+/// environment. Restore state lives in this type (`Send`, no `MutexGuard`).
+/// Drop takes a new lock and restores the prior value.
+///
+/// Do not construct this while already holding [`lock_skip_edit_verify_env`];
+/// that mutex is not reentrant.
+pub struct SkipEditVerifyEnvAsyncGuard {
+    inner: Option<SkipEditVerifyEnvGuard>,
+}
+
+impl SkipEditVerifyEnvAsyncGuard {
+    /// Host horizon exports `GROK_SKIP_EDIT_VERIFY=1`. Named rustfmt/clippy
+    /// contracts must still run the pipeline.
+    pub fn unset_host_kill_switch() -> Self {
+        let _lock = lock_skip_edit_verify_env();
+        Self {
+            inner: Some(SkipEditVerifyEnvGuard::unset_host_kill_switch()),
+        }
+    }
+}
+
+impl Drop for SkipEditVerifyEnvAsyncGuard {
+    fn drop(&mut self) {
+        let _lock = lock_skip_edit_verify_env();
+        self.inner.take();
+    }
 }
 
 fn test_runner_slot() -> &'static Mutex<Option<Arc<dyn EditVerifyCommandRunner>>> {
@@ -802,34 +873,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    /// Serialize tests that mutate `GROK_SKIP_EDIT_VERIFY`.
-    static SKIP_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    const SKIP_ENV: &str = "GROK_SKIP_EDIT_VERIFY";
-
-    struct SkipEnvGuard {
-        prev: Option<String>,
-    }
-
-    impl SkipEnvGuard {
-        fn set(value: Option<&str>) -> Self {
-            let prev = std::env::var(SKIP_ENV).ok();
-            match value {
-                Some(v) => unsafe { std::env::set_var(SKIP_ENV, v) },
-                None => unsafe { std::env::remove_var(SKIP_ENV) },
-            }
-            Self { prev }
-        }
-    }
-
-    impl Drop for SkipEnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => unsafe { std::env::set_var(SKIP_ENV, v) },
-                None => unsafe { std::env::remove_var(SKIP_ENV) },
-            }
-        }
-    }
+    use super::{SkipEditVerifyEnvGuard, lock_skip_edit_verify_env};
 
     fn write(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
@@ -854,8 +898,8 @@ mod tests {
 
     #[test]
     fn classify_rust_source_runs_verify() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let path = Path::new("/tmp/edit-verify-fixture/src/lib.rs");
         assert_eq!(
             classify_edit_path(path, None),
@@ -866,8 +910,8 @@ mod tests {
 
     #[test]
     fn classify_markdown_is_not_rust() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let path = Path::new("/tmp/edit-verify-fixture/README.md");
         assert_eq!(
             classify_edit_path(path, None),
@@ -877,8 +921,8 @@ mod tests {
 
     #[test]
     fn classify_toml_is_not_rust() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let path = Path::new("/tmp/edit-verify-fixture/Cargo.toml");
         assert_eq!(
             classify_edit_path(path, None),
@@ -888,8 +932,8 @@ mod tests {
 
     #[test]
     fn classify_third_party_rust_is_skipped() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let path = Path::new("/tmp/proj/third_party/syn/src/lib.rs");
         assert_eq!(
             classify_edit_path(path, None),
@@ -899,8 +943,8 @@ mod tests {
 
     #[test]
     fn classify_session_plan_file_is_skipped() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let plan = Path::new("/home/user/.grok/sessions/proj/abc/plan.md");
         let decision = classify_edit_path(plan, Some(plan));
         assert!(
@@ -916,8 +960,8 @@ mod tests {
 
     #[test]
     fn classify_session_plan_path_skips_even_when_suffix_is_rs() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(None);
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(None);
         let plan = Path::new("/tmp/session/plan.rs");
         assert_eq!(
             classify_edit_path(plan, Some(plan)),
@@ -928,8 +972,8 @@ mod tests {
 
     #[test]
     fn classify_kill_switch_skips_verify() {
-        let _lock = SKIP_ENV_LOCK.lock().unwrap();
-        let _env = SkipEnvGuard::set(Some("1"));
+        let _lock = lock_skip_edit_verify_env();
+        let _env = SkipEditVerifyEnvGuard::set(Some("1"));
         let path = Path::new("/tmp/edit-verify-fixture/src/lib.rs");
         assert_eq!(
             classify_edit_path(path, None),
@@ -1043,6 +1087,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because rustfmt must take the edited paths, not cargo fmt --all.
     #[test]
     fn rustfmt_argv_edition_2024_config_and_absolute_files() {
         let first = PathBuf::from("/tmp/edit-verify-fixture/src/lib.rs");
@@ -1071,6 +1116,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must lint the edited file, not cargo clippy --lib.
     #[test]
     fn clippy_argv_lints_the_edited_file_not_crate_lib() {
         let lib = PathBuf::from("/tmp/edit-verify-fixture/src/lib.rs");
@@ -1078,6 +1124,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&lib));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a bin path must be linted as that file, not the crate lib.
     #[test]
     fn clippy_argv_includes_bin_path_not_package_lib() {
         let bin = PathBuf::from("/tmp/edit-verify-fixture/src/bin/tool.rs");
@@ -1085,6 +1132,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&bin));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because an integration test path must be linted as that file, not the crate lib.
     #[test]
     fn clippy_argv_includes_integration_test_path_not_package_lib() {
         let test_file = PathBuf::from("/tmp/edit-verify-fixture/tests/owns_this.rs");
@@ -1092,6 +1140,7 @@ mod tests {
         assert_file_level_clippy_argv(&argv, std::slice::from_ref(&test_file));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must not become cargo clippy -p --lib.
     #[test]
     fn clippy_argv_is_file_level_not_package_lib() {
         let file = PathBuf::from(
@@ -1107,6 +1156,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because tests/owns_this.rs must run cargo test -p --test owns_this, not --workspace.
     #[test]
     fn test_plan_integration_file_runs_package_test_filter() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1161,6 +1211,7 @@ mod tests {
         }
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a src module must use cargo test -p --lib <module>, not the whole crate.
     #[test]
     fn test_plan_src_module_uses_lib_filter_from_path() {
         let file = PathBuf::from("/tmp/edit-verify-fixture/src/util/rust_edit_verify.rs");
@@ -1272,19 +1323,19 @@ mod tests {
     }
 
     struct RuntimeGuard {
-        _env: SkipEnvGuard,
+        _env: SkipEditVerifyEnvGuard,
         _skip: std::sync::MutexGuard<'static, ()>,
         _runtime: std::sync::MutexGuard<'static, ()>,
     }
 
     impl RuntimeGuard {
         fn lock() -> Self {
-            let skip = SKIP_ENV_LOCK.lock().unwrap();
+            let skip = lock_skip_edit_verify_env();
             let runtime = lock_edit_verify_runtime();
             clear_test_command_runner();
             clear_pending_verify_paths();
             reset_format_hook_entry_count();
-            let env = SkipEnvGuard::set(None);
+            let env = SkipEditVerifyEnvGuard::unset_host_kill_switch();
             Self {
                 _env: env,
                 _skip: skip,
@@ -1321,6 +1372,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because several structured writes must clippy each edited file, not crate-wide cargo.
     #[test]
     fn several_rust_writes_run_file_level_clippy_per_file() {
         let _g = RuntimeGuard::lock();
@@ -1446,6 +1498,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because clippy-driver must emit into a temp out-dir, not rust_out at the workspace root.
     #[test]
     fn clippy_driver_uses_temp_out_dir_not_the_workspace_root() {
         let _g = RuntimeGuard::lock();

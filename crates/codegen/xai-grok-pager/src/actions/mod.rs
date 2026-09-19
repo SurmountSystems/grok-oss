@@ -340,9 +340,10 @@ impl ActionRegistry {
             if def.id == ActionId::HalfPageDown {
                 def.default_key = key!('d', CONTROL);
             }
+            // Grok OSS: Ctrl+Enter is composer newline; send-now is Ctrl+I.
             if def.id == ActionId::InterjectPrompt {
-                def.default_key = key!(Enter, CONTROL);
-                def.alt_keys = vec![key!('i', CONTROL)];
+                def.default_key = key!('i', CONTROL);
+                def.alt_keys = vec![];
             }
             if def.id == ActionId::OpenExtensions {
                 def.default_key = key!('l', CONTROL);
@@ -367,9 +368,10 @@ impl ActionRegistry {
         use crate::key;
         let mut actions = defaults::default_actions(screen_mode, false);
         for def in actions.iter_mut() {
+            // Grok OSS: Ctrl+Enter is composer newline; do not bind it as send-now.
             if def.id == ActionId::InterjectPrompt {
                 def.default_key = key!('o', CONTROL);
-                def.alt_keys = vec![key!(Enter, CONTROL), key!('i', CONTROL)];
+                def.alt_keys = vec![key!('i', CONTROL)];
             }
         }
         Self::new(actions)

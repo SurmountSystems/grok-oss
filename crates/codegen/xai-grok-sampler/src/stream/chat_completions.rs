@@ -139,11 +139,13 @@ pub fn stream_chat_completions<'a>(
 
             if !first_chunk_seen {
                 model = chunk.model.clone();
+                first_chunk_seen = true;
+            }
+            if model_fingerprint.is_none() {
                 model_fingerprint = chunk
                     .system_fingerprint
                     .clone()
                     .filter(|s| !s.is_empty());
-                first_chunk_seen = true;
             }
 
             if let Some(u) = chunk.usage.clone() {
@@ -445,6 +447,36 @@ mod tests {
                 assert_eq!(a.content.as_ref(), "Hello, world!");
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert_eq!(response.message_chunks_emitted, 2);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Named contract: Chat Completions stream copies `system_fingerprint`
+    /// onto the assistant item even when the first chunk omits it. Fingerprint
+    /// is serving-path config, not a SHA of the weights.
+    #[tokio::test]
+    async fn chat_completions_stream_copies_system_fingerprint_onto_assistant() {
+        let first = text_chunk("hello");
+        let mut last = final_chunk(FinishReason::Stop);
+        last.system_fingerprint = Some("fp_84ff176447".into());
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![Ok(first), Ok(last)];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let a = response.assistant().expect("assistant item present");
+                assert_eq!(
+                    a.model_fingerprint.as_deref(),
+                    Some("fp_84ff176447"),
+                    "owed: stream copies late-chunk system_fingerprint onto the assistant"
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }

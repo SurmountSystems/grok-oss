@@ -1988,6 +1988,116 @@ mod link_click_tests {
             "expected fall-through to OpenBlockViewer, got {outcome:?}"
         );
     }
+
+    /// Operator: after selecting a collapsed/hidden block (image attachment
+    /// ellipsis, and other hidden blocks the product folds), Enter expands it.
+    /// Same as `:expand`. A short bash prompt is not this path.
+    fn collapsed_hidden_user_prompt_with_image_chip() -> String {
+        [
+            "Here.",
+            "",
+            "1. [Image #1]",
+            "2. more of the folded prompt body",
+            "3. still hidden until expand",
+            "4. last hidden line",
+        ]
+        .join("\n")
+    }
+
+    fn push_collapsed_image_user_prompt(agent: &mut AgentView) {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                collapsed_hidden_user_prompt_with_image_chip(),
+            ));
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+        let entry = agent.scrollback.entry(0).expect("user prompt");
+        assert!(
+            entry.is_foldable(),
+            "fixture must fold so the transcript shows [Image #1] plus ellipsis"
+        );
+        assert_ne!(
+            entry.display_mode,
+            crate::scrollback::types::DisplayMode::Expanded,
+            "fixture must start collapsed/hidden"
+        );
+    }
+
+    /// After selecting a collapsed/hidden block (image attachment ellipsis,
+    /// and other hidden blocks the product folds), Enter expands it. Same as
+    /// `:expand`. Do not steal composer Enter when the composer is focused
+    /// and has text (do not break send). When the transcript item is
+    /// selected/focused for expand, Enter expands.
+    #[test]
+    fn enter_on_selected_collapsed_image_prompt_expands() {
+        let mut agent = make_agent();
+        setup_scrollback_area(&mut agent, Rect::new(0, 0, 80, 24));
+        push_collapsed_image_user_prompt(&mut agent);
+        let registry = ActionRegistry::defaults();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::Expand)),
+            "Enter on a selected collapsed [Image #1] block must Expand (same as :expand), got {outcome:?}"
+        );
+        agent.scrollback.expand_selected();
+        let entry = agent.scrollback.entry(0).expect("user prompt");
+        assert_eq!(
+            entry.display_mode,
+            crate::scrollback::types::DisplayMode::Expanded,
+            "Expand must show the hidden prompt body, not no-op OpenBlockViewer"
+        );
+    }
+
+    /// Collapsed tool output is another hidden block the product folds.
+    /// Enter expands it instead of jumping to the fullscreen viewer.
+    #[test]
+    fn enter_on_selected_collapsed_tool_expands() {
+        let mut agent = make_agent();
+        setup_scrollback_area(&mut agent, Rect::new(0, 0, 80, 24));
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::tool_call(
+                "read_file",
+                "src/lib.rs",
+                true,
+            ));
+        if let Some(entry) = agent.scrollback.entry_mut(0) {
+            entry.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
+        }
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+        let registry = ActionRegistry::defaults();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let outcome = agent.handle_scrollback_key(&enter, &registry);
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::Expand)),
+            "Enter on a selected collapsed tool block must Expand, got {outcome:?}"
+        );
+    }
+
+    /// Double-click on that collapsed block also expands it.
+    #[test]
+    fn double_click_on_collapsed_image_prompt_expands() {
+        let mut agent = make_agent();
+        setup_scrollback_area(&mut agent, Rect::new(0, 0, 80, 24));
+        push_collapsed_image_user_prompt(&mut agent);
+        let now = std::time::Instant::now();
+        (agent.last_click, _) = agent.handle_scrollback_click(now, 0, false);
+        let _ = agent.handle_scrollback_click(now + std::time::Duration::from_millis(10), 0, false);
+        let entry = agent.scrollback.entry(0).expect("user prompt");
+        assert_eq!(
+            entry.display_mode,
+            crate::scrollback::types::DisplayMode::Expanded,
+            "double-click on a collapsed [Image #1] block must expand hidden content"
+        );
+        assert!(
+            agent.inline_edit.is_none(),
+            "double-click expand must not start inline edit"
+        );
+    }
+
     /// Double-click on a user prompt: enters inline edit when the feature is
     /// enabled; while gated off it does NOT edit (falls through to the fold
     /// arm), leaving the prompt free for text selection. Written for both flag

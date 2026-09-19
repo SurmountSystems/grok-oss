@@ -64,16 +64,17 @@ impl GrokOssStore {
     ) -> Result<PlanRecordedChoiceRow> {
         let id = xai_grok_tools::util::ulid::mint();
         let now = Utc::now().to_rfc3339();
+        let store_id = self.grok_oss_store_session_key(session_id);
         self.connection()
             .execute(
                 "INSERT INTO plan_recorded_choice (id, session_id, plan_identity, choice, chosen_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, session_id, plan_identity, choice.as_str(), now],
+                rusqlite::params![id, store_id, plan_identity, choice.as_str(), now],
             )
             .context("insert plan_recorded_choice")?;
         Ok(PlanRecordedChoiceRow {
             id,
-            session_id: session_id.to_owned(),
+            session_id: store_id,
             plan_identity: plan_identity.to_owned(),
             choice,
             chosen_at: now,
@@ -86,40 +87,47 @@ impl GrokOssStore {
         session_id: &str,
         plan_identity: &str,
     ) -> Result<Option<PlanRecordedChoiceRow>> {
-        self.connection()
-            .query_row(
-                "SELECT id, session_id, plan_identity, choice, chosen_at
-                 FROM plan_recorded_choice
-                 WHERE session_id = ?1 AND plan_identity = ?2
-                 ORDER BY chosen_at DESC, id DESC
-                 LIMIT 1",
-                rusqlite::params![session_id, plan_identity],
-                |row| {
-                    let choice_raw: String = row.get(3)?;
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        choice_raw,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .context("load plan_recorded_choice")?
-            .map(|(id, session_id, plan_identity, choice_raw, chosen_at)| {
-                let choice = PlanRecordedChoice::parse(&choice_raw).ok_or_else(|| {
-                    anyhow::anyhow!("unknown plan_recorded_choice value {choice_raw}")
-                })?;
-                Ok(PlanRecordedChoiceRow {
-                    id,
-                    session_id,
-                    plan_identity,
-                    choice,
-                    chosen_at,
-                })
-            })
-            .transpose()
+        for key in self.grok_oss_session_lookup_keys(session_id) {
+            let found = self
+                .connection()
+                .query_row(
+                    "SELECT id, session_id, plan_identity, choice, chosen_at
+                     FROM plan_recorded_choice
+                     WHERE session_id = ?1 AND plan_identity = ?2
+                     ORDER BY chosen_at DESC, id DESC
+                     LIMIT 1",
+                    rusqlite::params![key, plan_identity],
+                    |row| {
+                        let choice_raw: String = row.get(3)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            choice_raw,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("load plan_recorded_choice")?;
+            if found.is_some() {
+                return found
+                    .map(|(id, session_id, plan_identity, choice_raw, chosen_at)| {
+                        let choice = PlanRecordedChoice::parse(&choice_raw).ok_or_else(|| {
+                            anyhow::anyhow!("unknown plan_recorded_choice value {choice_raw}")
+                        })?;
+                        Ok(PlanRecordedChoiceRow {
+                            id,
+                            session_id,
+                            plan_identity,
+                            choice,
+                            chosen_at,
+                        })
+                    })
+                    .transpose();
+            }
+        }
+        Ok(None)
     }
 }
 

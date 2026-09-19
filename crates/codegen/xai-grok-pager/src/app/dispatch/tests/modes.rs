@@ -316,8 +316,11 @@ fn queue_plan_does_not_invoke_immediately() {
     assert_eq!(app.agents[&id].session.queue_len(), 1);
 }
 
+/// Operator: "/plan never submits, it just pulls up the stale plan."
+/// `/plan` with extra Human text already in plan mode is a plan-update
+/// turn, not a `/view-plan` toast.
 #[test]
-fn slash_plan_with_args_already_in_plan_is_noop() {
+fn slash_plan_with_args_already_in_plan_submits_plan_update() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().plan_mode_active = true;
@@ -327,8 +330,377 @@ fn slash_plan_with_args_already_in_plan_is_noop() {
         &mut app,
     );
 
-    assert!(effects.is_empty(), "expected no effects, got: {effects:?}");
-    assert!(read_toast(&app).contains("/view-plan"));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. }
+                | Effect::SetModeThenPrompt { text, .. }
+                | Effect::SendInterject { text, .. }
+                if text == "add auth to the app"
+        )),
+        "`/plan <desc>` already in plan mode must SendPrompt, not vanish onto the queue only; got {effects:?}"
+    );
+    // No toast is success. `read_toast` panics when none is set, which
+    // would fail a correct submit that does not toast `/view-plan`.
+    let toast = app.agents[&id]
+        .toast
+        .as_ref()
+        .map(|(s, _)| s.as_str())
+        .unwrap_or("");
+    assert!(
+        !toast.contains("/view-plan"),
+        "already in plan mode must not swallow `/plan` with extra Human text into a /view-plan toast; toast={toast:?}"
+    );
+}
+
+/// Operator (2026-09-12): "wait, actually, exiting the plan mode does
+/// unstick it if I type something, but a new /plan prompt got ignored"
+/// After Plan Exit, `/plan` must dock Isolated Preview. Compact must not
+/// swallow `/plan`. Empty Enter never Approves.
+#[test]
+fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent
+            .session
+            .start_command(crate::app::agent::AgentCommand::Compact);
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. }
+                | Effect::SetModeThenPrompt { .. }
+                | Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+        )),
+        "after Plan Exit, `/plan` must dock Isolated Preview, not enter plan mode or vanish into compact; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "after Plan Exit, `/plan` must dock Isolated Preview, not be ignored"
+    );
+    assert!(
+        agent.plan_decision_resolved,
+        "docking Isolated Preview after Exit must not undo Plan Exit"
+    );
+    assert!(
+        agent.plan_approval_view.is_none()
+            || agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.plan_ref().is_none_or(|p| !p.feedback_active)),
+        "empty Enter never Approves after Plan Exit `/plan` dock"
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "`/plan` during compact must not vanish onto pending_prompts; got {:?}",
+        agent.session.pending_prompts
+    );
+    assert!(
+        matches!(
+            agent.session.state,
+            AgentState::CommandRunning {
+                command: crate::app::agent::AgentCommand::Compact,
+                ..
+            }
+        ),
+        "docking Isolated Preview must not abort compact"
+    );
+}
+
+/// Operator (2026-09-14): "It's still broken. /plan never submits, it just
+/// pulls up the stale plan." After Plan Exit, `/plan` with extra Human text
+/// submits a plan-update turn. Bare `/plan` still docks Isolated Preview.
+/// Empty Enter never Approves.
+#[test]
+fn after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.latest_inline_plan_content =
+            Some("# Plan: why the agent stopped, and what we do instead\n".to_string());
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt(
+            "/plan update the plan with what was accomplished and all that remains please".into(),
+        ),
+        &mut app,
+    );
+
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { text, .. }
+                | Effect::SetModeThenPrompt { text, .. }
+                | Effect::SendInterject { text, .. }
+                if text.contains("update the plan with what was accomplished")
+        )),
+        "after Plan Exit, `/plan` with extra Operator text must SendPrompt/SetModeThenPrompt, not vanish; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.plan_decision_resolved,
+        "plan-update submit must not Approve; empty Enter never Approves"
+    );
+    assert!(
+        agent.session.pending_prompts.iter().all(|p| p.text
+            != "/plan update the plan with what was accomplished and all that remains please"
+            || p.text.contains("update the plan")),
+        "plan-update must not vanish; queue={:?}",
+        agent.session.pending_prompts
+    );
+}
+
+/// Operator: compact at 100% / over 500k must not swallow `/plan`.
+/// Auto-compact is a running turn. `/plan --soft` after Exit must dock.
+#[test]
+fn after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = Some(false);
+        agent.plan_decision_resolved = true;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .session
+            .set_compaction_activity(Some(crate::acp::tracker::TurnActivity::AutoCompacting));
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. }
+                | Effect::SetModeThenPrompt { .. }
+                | Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+        )),
+        "after Plan Exit, `/plan --soft` during compact must dock Isolated Preview, not vanish; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.is_plan_viewer(),
+        "after Plan Exit, `/plan --soft` must dock Isolated Preview during compact"
+    );
+    assert_eq!(
+        agent.session.state,
+        AgentState::TurnRunning,
+        "`/plan --soft` must not park L1 during compact"
+    );
+    assert!(
+        agent.session.pending_prompts.is_empty(),
+        "`/plan --soft` must not be swallowed onto pending_prompts"
+    );
+    assert!(agent.plan_decision_resolved, "empty Enter never Approves");
+}
+
+/// Named contract: `/plan --soft` docks Isolated Preview on the right.
+/// It does not enter plan mode. It does not park L1 exclusive. Nested
+/// L2s stay Working. Present is not Approve. Empty Enter never Approves.
+#[test]
+fn plan_soft_docks_isolated_preview_without_entering_plan_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let mut nested = super::make_test_subagent("child-sess", "l2-worker");
+        nested.status = Some(Arc::from("Working"));
+        agent
+            .subagent_sessions
+            .insert("child-l2".to_string(), nested);
+    }
+
+    let effects = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::CancelTurn { .. }
+                | Effect::SetModeThenPrompt { .. }
+                | Effect::SetSessionMode { .. }
+        )),
+        "`/plan --soft` must not enter plan mode, cancel nested work, or Approve, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.plan_mode_pending.is_none(),
+        "`/plan --soft` must not set plan mode"
+    );
+    assert!(
+        !agent.plan_mode_active,
+        "`/plan --soft` must not enter plan mode"
+    );
+    assert_eq!(
+        agent.session.state,
+        AgentState::TurnRunning,
+        "`/plan --soft` must not park L1; nested work stays running"
+    );
+    assert!(
+        agent.is_plan_viewer(),
+        "`/plan --soft` must dock Isolated Preview"
+    );
+    assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.is_soft_plan_side_pane()),
+        "Isolated Preview is a right dock, not a covering exclusive present"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "present is not Approve; empty Enter never Approves"
+    );
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        !nested.pending_kill && !nested.finished,
+        "nested L2 must stay Working; docking Isolated Preview is not Cancelling"
+    );
+    assert_eq!(
+        nested.status.as_deref(),
+        Some("Working"),
+        "nested L2 must stay Working"
+    );
+}
+
+/// Named contract: `/plan --soft add feature` does not grow
+/// pending_prompts with that text. The description seeds Isolated
+/// Preview. It does not enter plan mode.
+#[test]
+fn plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let mut nested = super::make_test_subagent("child-sess", "l2-worker");
+        nested.status = Some(Arc::from("Working"));
+        agent
+            .subagent_sessions
+            .insert("child-l2".to_string(), nested);
+    }
+
+    let effects = dispatch(
+        Action::SendPrompt("/plan --soft add feature".into()),
+        &mut app,
+    );
+
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan --soft add feature` must not enter plan mode or send a Prompt, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.plan_mode_pending.is_none() && !agent.plan_mode_active,
+        "`/plan --soft add feature` must not enter plan mode"
+    );
+    assert_eq!(
+        agent.session.queue_len(),
+        0,
+        "`/plan --soft add feature` must not grow pending_prompts"
+    );
+    assert!(
+        agent
+            .session
+            .pending_prompts
+            .iter()
+            .all(|p| p.text != "add feature"),
+        "`/plan --soft add feature` must not enqueue that text as a Prompt"
+    );
+    assert!(
+        agent.is_plan_viewer(),
+        "`/plan --soft add feature` must dock Isolated Preview"
+    );
+    let preview = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.markdown_content_for_test())
+        .or(agent.latest_inline_plan_content.as_deref())
+        .or(agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|p| p.plan_content.as_deref()))
+        .unwrap_or("");
+    assert!(
+        preview.contains("add feature"),
+        "description must seed Isolated Preview, got {preview:?}"
+    );
+    assert!(!agent.plan_decision_resolved, "present is not Approve");
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        !nested.pending_kill && !nested.finished,
+        "nested L2 must stay Working"
+    );
+}
+
+/// Named contract: `--soft` is not the queue hold token. Keep `queue`
+/// and `later`. `/plan --soft` still runs this turn and docks Isolated
+/// Preview. It does not enter plan mode.
+#[test]
+fn plan_soft_is_not_the_queue_hold_token() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let via_soft = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+    assert!(
+        via_soft.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan --soft` must not enter plan mode this turn, got {via_soft:?}"
+    );
+    assert!(
+        app.agents[&id].is_plan_viewer(),
+        "`/plan --soft` must run this turn and dock Isolated Preview"
+    );
+    assert_eq!(
+        app.agents[&id].session.queue_len(),
+        0,
+        "`--soft` must not hold the command on the prompt queue"
+    );
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .pending_prompts
+        .clear();
+    app.agents.get_mut(&id).unwrap().plan_mode_pending = None;
+    app.agents.get_mut(&id).unwrap().plan_mode_active = false;
+    let via_token = dispatch(Action::SendPrompt("/plan queue --soft".into()), &mut app);
+    assert!(
+        via_token.iter().all(|e| !matches!(
+            e,
+            Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan queue --soft` must still hold, got {via_token:?}"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 1);
 }
 
 /// Multi-agent fan-out (sibling for `plan_mode`).

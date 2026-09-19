@@ -1157,7 +1157,7 @@
     }
 
     #[test]
-    fn paste_preview_hint_on_chip_mentions_enter() {
+    fn paste_preview_hint_on_chip_mentions_paste_again_not_enter() {
         let mut pw = PromptWidget::new();
         pw.handle_paste("line1\nline2\nline3\nline4");
         pw.textarea.set_cursor(0);
@@ -1167,7 +1167,9 @@
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(hint.contains("enter"), "{hint}");
+        assert!(hint.contains("paste again"), "{hint}");
+        assert!(!hint.contains("enter"), "{hint}");
+        assert!(hint.contains("double-click"), "{hint}");
         assert!(hint.contains("expand"), "{hint}");
     }
 
@@ -1188,21 +1190,19 @@
     }
 
     #[test]
-    fn paste_element_enter_inlines() {
+    fn paste_element_enter_does_not_inline() {
         let mut pw = PromptWidget::new();
         let text = "line1\nline2\nline3\nline4";
         pw.handle_paste(text);
         assert_eq!(pw.textarea.elements().len(), 1);
 
-        // Move cursor onto the element
         pw.textarea.set_cursor(0);
-        // Enter should inline it
         assert_eq!(
             pw.try_element_interaction(&key!(Enter).to_key_event()),
-            Some(ElementInteraction::Inlined)
+            None,
+            "Enter on a paste chip must submit, not expand"
         );
-        assert!(pw.textarea.elements().is_empty());
-        // Text is still there
+        assert_eq!(pw.textarea.elements().len(), 1);
         assert_eq!(pw.textarea.text(), text);
     }
 
@@ -5687,5 +5687,105 @@
         assert!(
             text.contains("Save a memory note"),
             "mode override must still paint, got {text:?}"
+        );
+    }
+
+    /// Grok OSS: While recording, the composer frame (the white line around the prompt box) paints red. When not recording, it is not red.
+    #[test]
+    fn while_recording_composer_frame_paints_red_when_idle_it_does_not() {
+        // While recording, the composer frame (the white line around the prompt box) paints red. When not recording, it is not red.
+        use crate::theme::cache;
+        use crate::views::prompt_widget::recording_frame::{
+            composer_frame_color, composer_frame_is_red,
+        };
+        use crate::views::prompt_widget::VoicePromptOverlay;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = theme.prompt_border_active;
+        let red = theme.accent_error;
+        assert_ne!(red, theme.accent_running, "recording red is not magenta running");
+        assert!(composer_frame_is_red(true));
+        assert!(!composer_frame_is_red(false));
+        assert_eq!(composer_frame_color(true, &theme, white), red);
+        assert_eq!(composer_frame_color(false, &theme, white), white);
+
+        let style = PromptStyle {
+            focused: true,
+            show_borders: true,
+            chrome: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let mut pw = PromptWidget::new();
+        let area = Rect::new(0, 0, 40, 4);
+        let mut rec_buf = Buffer::empty(area);
+        pw.draw(
+            &mut rec_buf,
+            area,
+            None,
+            &style,
+            None,
+            Some(VoicePromptOverlay {
+                interim: Some("spoken"),
+                color: theme.accent_running,
+            }),
+        );
+        let rec_rule = rec_buf.cell((1, 0)).expect("recording top rule");
+        assert_eq!(
+            rec_rule.fg, red,
+            "recording composer frame must be theme error/red, got {:?}",
+            rec_rule.fg
+        );
+        assert_ne!(
+            rec_rule.fg, theme.accent_running,
+            "recording frame must not be magenta running"
+        );
+
+        let mut idle_buf = Buffer::empty(area);
+        pw.draw(&mut idle_buf, area, None, &style, None, None);
+        let idle_rule = idle_buf.cell((1, 0)).expect("idle top rule");
+        assert_ne!(
+            idle_rule.fg, red,
+            "when not recording the composer frame is not red"
+        );
+    }
+
+    /// Grok OSS: While recording, the prompt box grows with incoming transcript / audio activity. It must not clip or cut off the spoken text.
+    #[test]
+    fn while_recording_prompt_box_grows_with_interim_and_does_not_clip_spoken_text() {
+        // While recording, the prompt box grows with incoming transcript / audio activity. It must not clip or cut off the spoken text.
+        use crate::views::prompt_widget::recording_frame::{
+            recording_box_clips_spoken_text, wrapped_transcript_rows,
+        };
+
+        let style = PromptStyle {
+            chrome: true,
+            show_borders: true,
+            vpad_top: 1,
+            ..Default::default()
+        };
+        let mut pw = PromptWidget::new();
+        let idle = pw.desired_height(40, &style, true, 40);
+        let long = "spoken word ".repeat(40);
+        pw.set_voice_recording_grow(true, Some(long.as_str()));
+        let growing = pw.desired_height(40, &style, true, 40);
+        assert!(
+            growing > idle,
+            "recording box must grow with a long interim transcript: idle={idle} growing={growing}"
+        );
+        let rows = wrapped_transcript_rows("", Some(long.as_str()), 32);
+        assert!(
+            rows > 1,
+            "long interim must wrap to more than one row, got {rows}"
+        );
+        assert!(
+            !recording_box_clips_spoken_text(&long, 32, rows),
+            "wrapped spoken text must not be clipped or cut off"
+        );
+        assert!(
+            !recording_box_clips_spoken_text(&long, 32, growing.saturating_sub(style.vpad_top + style.info_block(true))),
+            "desired recording height must fit the spoken text"
         );
     }

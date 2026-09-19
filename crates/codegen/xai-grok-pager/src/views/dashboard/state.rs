@@ -2979,8 +2979,9 @@ impl DashboardState {
             {
                 return Some(InputOutcome::Changed);
             }
-            let enter_is_newline =
-                focused && compose_enter_is_newline(self.multiline_mode, mod_enter);
+            let enter_is_newline = focused
+                && compose_enter_is_newline(self.multiline_mode, mod_enter)
+                && self.peek_reply.paste_element_at_cursor().is_none();
             if !enter_is_newline {
                 let Some(row) = self.peek.as_ref().map(|p| p.row.clone()) else {
                     return Some(InputOutcome::Unchanged);
@@ -3573,11 +3574,13 @@ impl DashboardState {
                 return InputOutcome::Changed;
             }
             // slash_accepted_send: no-arg slash accept must submit, not newline.
-            let enter_is_newline =
-                !slash_accepted_send && compose_enter_is_newline(self.multiline_mode, mod_enter);
-            // Expand paste/file chips only for real bare Enter. Apple Terminal
-            // rescue yields bare Enter while is_mod_enter is true — that must
-            // send/newline, not expand (peek already gates the same way).
+            let enter_is_newline = !slash_accepted_send
+                && compose_enter_is_newline(self.multiline_mode, mod_enter)
+                && self.dispatch.paste_element_at_cursor().is_none();
+            // Expand file-ref chips only for real bare Enter. Paste-chip Enter
+            // submits. Apple Terminal rescue yields bare Enter while
+            // is_mod_enter is true — that must send/newline, not expand
+            // (peek already gates the same way).
             if !mod_enter
                 && matches!(
                     self.dispatch.try_element_interaction(key),

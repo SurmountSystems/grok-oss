@@ -158,6 +158,16 @@ pub(super) fn classify_plan_file_read(result: Result<String, std::io::Error>) ->
         Err(_) => PlanFileRead::Unreadable,
     }
 }
+/// Isolated Preview / present: SQL first, then an already-read disk body,
+/// unless session `plan.md` was rewritten after that SQL row.
+fn prefer_sql_plan_body_then_disk(
+    session_id: &str,
+    disk_plan_md: Option<&std::path::Path>,
+    disk_body: Option<String>,
+) -> Option<String> {
+    crate::grok_oss::prefer_sql_plan_body_fail_open(session_id, disk_plan_md, disk_body)
+}
+
 /// Whether to intercept exit-plan tools for client-side plan approval.
 ///
 /// A mode-switch back to agent with `PlanFileRead::Absent` skips intercept
@@ -1478,10 +1488,21 @@ impl SessionActor {
         } else {
             PlanFileRead::Absent
         };
-        let plan_content = match &plan_read {
+        let disk_body = match &plan_read {
             PlanFileRead::Present(s) => Some(s.clone()),
             PlanFileRead::Absent | PlanFileRead::Unreadable => None,
         };
+        let plan_content = prefer_sql_plan_body_then_disk(
+            self.session_info.id.0.as_ref(),
+            Some(plan_file_path.as_path()),
+            disk_body,
+        );
+        if let Some(body) = plan_content.as_deref() {
+            crate::grok_oss::GrokOssStore::upsert_session_plan_body_fail_open(
+                self.session_info.id.0.as_ref(),
+                body,
+            );
+        }
         if should_intercept_exit_plan_approval(
             is_exit_plan_mode,
             is_cursor_switch_to_agent,
@@ -1834,15 +1855,24 @@ impl SessionActor {
             ));
         }
         let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
-        let plan_content = match tokio::fs::read_to_string(&plan_path).await {
-            Ok(s) if !s.trim().is_empty() => s,
-            _ => {
-                tracing::info!("[exit_plan_mode] resume: no plan.md; clearing awaiting flag");
-                self.plan_mode.lock().set_awaiting_plan_approval(false);
-                self.persist_plan_mode_state();
-                return;
-            }
+        let disk_body = match tokio::fs::read_to_string(&plan_path).await {
+            Ok(s) if !s.trim().is_empty() => Some(s),
+            _ => None,
         };
+        let Some(plan_content) = prefer_sql_plan_body_then_disk(
+            self.session_info.id.0.as_ref(),
+            Some(plan_path.as_path()),
+            disk_body,
+        ) else {
+            tracing::info!("[exit_plan_mode] resume: no plan body; clearing awaiting flag");
+            self.plan_mode.lock().set_awaiting_plan_approval(false);
+            self.persist_plan_mode_state();
+            return;
+        };
+        crate::grok_oss::GrokOssStore::upsert_session_plan_body_fail_open(
+            self.session_info.id.0.as_ref(),
+            &plan_content,
+        );
         let tool_call_id = acp::ToolCallId::new(Arc::from(
             format!("exit-plan-mode-resume-{}", self.session_info.id.0).as_str(),
         ));

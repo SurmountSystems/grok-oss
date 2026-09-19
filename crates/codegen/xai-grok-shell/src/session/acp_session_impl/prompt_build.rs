@@ -987,9 +987,10 @@ impl SessionActor {
     }
     /// Run the image-transcription pipeline for a turn that contains
     /// user-supplied images. Returns the new `user_message` text with the
-    /// `<image>` / `<image_files>` envelopes prepended; on any failure
-    /// returns an `acp::Error` so the entire turn is aborted (per product
-    /// decision -- we never silently drop image context).
+    /// `<image>` / `<image_files>` envelopes prepended. Persist / session-dir
+    /// failures still abort. A describe transport miss (for example
+    /// `error sending request`) fail-opens with a named stub so the Human
+    /// turn continues. Images are never silently dropped.
     pub(super) async fn transcribe_user_images(
         &self,
         original_user_message: String,
@@ -1034,11 +1035,23 @@ impl SessionActor {
                 self.client_identifier.clone(),
                 Some(self.max_retries),
             );
-        let client = xai_grok_sampler::SamplingClient::new(sampler_config).map_err(|e| {
-            acp::Error::internal_error().data(format!(
-                "failed to build image-describe sampling client: {e}"
-            ))
-        })?;
+        let client = match xai_grok_sampler::SamplingClient::new(sampler_config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "failed to build image-describe sampling client; fail-open so the Human turn continues"
+                );
+                let stub = crate::session::image_describe::fail_open_image_description(
+                    &crate::session::image_describe::DescribeError::Sampling(format!("{e}")),
+                );
+                return Ok(crate::session::image_describe::render_image_user_message(
+                    &stub,
+                    &image_paths,
+                    &original_user_message,
+                ));
+            }
+        };
         let model = &describe_model;
         let limit = crate::session::image_describe::IMAGE_DESCRIPTION_PROCESSING_LIMIT;
         let skip_count = persisted.len().saturating_sub(limit);
@@ -1056,7 +1069,8 @@ impl SessionActor {
             let part = if i < skip_count {
                 crate::session::image_describe::SKIPPED_IMAGE_MARKER.to_owned()
             } else {
-                self.image_describe_cache
+                match self
+                    .image_describe_cache
                     .get_or_describe(
                         client.clone(),
                         model,
@@ -1068,10 +1082,20 @@ impl SessionActor {
                         "",
                     )
                     .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("image transcription failed: {e}"))
-                    })?
+                {
+                    Ok(part) => part,
+                    Err(e) => {
+                        if crate::session::image_describe::describe_error_aborts_human_turn(&e) {
+                            return Err(acp::Error::internal_error()
+                                .data(format!("image transcription failed: {e}")));
+                        }
+                        tracing::error!(
+                            error = %e,
+                            "image describe failed; fail-open so the Human turn continues"
+                        );
+                        crate::session::image_describe::fail_open_image_description(&e)
+                    }
+                }
             };
             if persisted.len() > 1 {
                 description_parts.push(format!("Image {}: {}", i + 1, part));

@@ -85,7 +85,8 @@ use session_notification::{
 };
 
 pub(crate) use queue::PendingRunningAdoption;
-use queue::{handle_prompt_complete, handle_queue_changed};
+use queue::handle_prompt_complete;
+pub(crate) use queue::handle_queue_changed;
 
 use background::{
     derive_child_cwd, handle_git_head_changed, handle_monitor_event, handle_scheduled_task_created,

@@ -1695,6 +1695,7 @@ mod tests {
             "child task description must require distinct L3 descriptions"
         );
     }
+    // Grok OSS: nested L2 spawn L3 only if the problem is actually hard. This diverges from upstream xAI because FORK.md agent-depth pins easy work on L2 and forbids compact-and-continue on L3.
     #[test]
     fn child_task_description_is_concise() {
         assert!(

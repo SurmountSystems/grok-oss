@@ -153,6 +153,10 @@ pub struct QueuedPrompt {
     pub chip_elements: Vec<ChipElement>,
     /// Combined-turn display segments (len ≥ 2); drain paints one bubble each.
     pub combined_texts: Vec<String>,
+    /// True when this row intentionally re-drives prior user work (pause
+    /// resume, compact-fail continue, cancel-resume). Stale occupancy must
+    /// not drop it just because the same text is already a Human turn.
+    pub continue_prior_work: bool,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default. Sites needing
@@ -172,6 +176,7 @@ impl QueuedPrompt {
             human_schedule: None,
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
+            continue_prior_work: false,
         }
     }
     /// Whether the wire payload is exactly the display text.
@@ -711,7 +716,7 @@ impl GoalDisplayState {
 ///
 /// Enforces mutual exclusivity: the agent is either idle, running a turn,
 /// or running a command — never two at once.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AgentState {
     /// Nothing happening. Queue can drain.
     #[default]
@@ -1094,6 +1099,29 @@ impl AgentSession {
     /// during the placeholder window so the directive runs first.
     pub fn enqueue_prompt_front(&mut self, text: String) -> u64 {
         self.enqueue_entry_at(text, QueueEntryKind::Prompt, true, Vec::new())
+    }
+    /// Re-drive prior user work after pause, compact-fail unstick, or
+    /// cancel-resume. Marks the row so stale occupancy does not drop it
+    /// when the same text is already a Human turn in scrollback.
+    pub fn enqueue_continue_prior_work_front(&mut self, text: String) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        self.pending_prompts.push_front(QueuedPrompt {
+            continue_prior_work: true,
+            ..QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+        });
+        id
+    }
+    /// Same as [`enqueue_continue_prior_work_front`], at the back of the queue
+    /// (compact retry first, then continue).
+    pub fn enqueue_continue_prior_work(&mut self, text: String) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        self.pending_prompts.push_back(QueuedPrompt {
+            continue_prior_work: true,
+            ..QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+        });
+        id
     }
     /// Requeue a failed plain prompt without dropping its attachments.
     pub fn enqueue_in_flight_prompt_front(&mut self, prompt: InFlightPrompt) -> u64 {

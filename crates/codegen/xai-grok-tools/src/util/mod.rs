@@ -28,7 +28,6 @@ pub mod truncate;
 pub mod ulid;
 pub mod unicode_confusables;
 
-pub use crate::implementations::grok_build::grep::ripgrep::rg_path;
 pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]
 pub use env::detach_from_tty;

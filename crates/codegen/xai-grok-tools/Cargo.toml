@@ -32,6 +32,7 @@ crc32fast = { workspace = true }
 ignore = { workspace = true }
 infer = { workspace = true }
 globset = { workspace = true }
+grep = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 kamadak-exif = { workspace = true, optional = true }
 pdf_oxide = { workspace = true }
@@ -124,11 +125,17 @@ wiremock = { workspace = true }
 xai-grok-test-support = { workspace = true }
 xai-test-utils = { workspace = true }
 
-[build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
-flate2 = { workspace = true }
-sha2 = { workspace = true }
-tar = { workspace = true }
+[[bin]]
+name = "grok-oss-implement-memory"
+path = "src/bin/grok_oss_skill_cli.rs"
+
+[[bin]]
+name = "grok-oss-plan-validate"
+path = "src/bin/grok_oss_skill_cli.rs"
+
+[[bin]]
+name = "grok-oss-session-reader"
+path = "src/bin/grok_oss_skill_cli.rs"
 
 [lints]
 workspace = true

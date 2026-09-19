@@ -90,7 +90,8 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
                 let requested_label = format_waited_duration(requested);
                 format!(
                     "Waited {waited_label}, the per-call maximum, of the {requested_label} you requested; \
-                     the {noun} is still running. You do not need to call this again."
+                     the {noun} is still running. You do not need to call this again. \
+                     Do not re-arm a blocking wait for a living builder."
                 )
             } else {
                 format!("Waited the requested {waited_label}; the {noun} is still running.")
@@ -99,7 +100,7 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
         WaitHint::ReturnedEarly => {
             format!("Wait returned early because another finished; this {noun} is still running.")
         }
-        WaitHint::NotRequested => "Use timeout_ms to wait for completion.".to_string(),
+        WaitHint::NotRequested => "Snapshot only. Do not start a blocking wait.".to_string(),
     };
     format!("{lead} You will be notified automatically when the {noun} completes.")
 }
@@ -1133,14 +1134,14 @@ mod tests {
     }
 
     #[test]
-    fn still_running_wait_hint_omitted_invites_timeout_ms() {
+    fn still_running_wait_hint_omitted_is_snapshot_not_a_blocking_wait() {
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Task),
-            "Use timeout_ms to wait for completion. You will be notified automatically when the task completes."
+            "Snapshot only. Do not start a blocking wait. You will be notified automatically when the task completes."
         );
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Subagent),
-            "Use timeout_ms to wait for completion. You will be notified automatically when the subagent completes."
+            "Snapshot only. Do not start a blocking wait. You will be notified automatically when the subagent completes."
         );
     }
 
@@ -1172,12 +1173,14 @@ mod tests {
             still_running_wait_hint(hint, WaitSubject::Task),
             "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
              the task is still running. You do not need to call this again. \
+             Do not re-arm a blocking wait for a living builder. \
              You will be notified automatically when the task completes."
         );
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Subagent),
             "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
              the subagent is still running. You do not need to call this again. \
+             Do not re-arm a blocking wait for a living builder. \
              You will be notified automatically when the subagent completes."
         );
     }
@@ -1352,7 +1355,7 @@ mod tests {
         );
         assert!(
             rendered.contains("Omit max_wait or pass 0")
-                && rendered.contains("positive max_wait wait"),
+                && rendered.contains("positive max_wait only when you must join"),
             "renamed timeout_ms must appear:\n{rendered}"
         );
         assert!(
@@ -2103,8 +2106,10 @@ mod tests {
                     r.output
                 );
                 assert!(
-                    r.output.contains("timeout_ms"),
-                    "output should suggest timeout_ms: {}",
+                    r.output.contains("Snapshot only")
+                        && r.output.contains("Do not start a blocking wait")
+                        && r.output.contains("notified automatically"),
+                    "snapshot must not teach a blocking wait: {}",
                     r.output
                 );
             }

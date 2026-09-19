@@ -63,6 +63,8 @@ impl AgentView {
                 if let Some(eff) = self.notify_plugin_cta_text_changed() {
                     self.pending_effects.push(eff);
                 }
+                self.snapshot_or_clear_plan_feedback_draft();
+                self.persist_unsent_composer_draft();
                 (InputOutcome::Changed, ClipboardTextInsertion::Inserted)
             }
             PromptEvent::Ignored => (InputOutcome::Changed, ClipboardTextInsertion::Failed),

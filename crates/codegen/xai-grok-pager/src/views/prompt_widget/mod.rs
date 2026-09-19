@@ -53,7 +53,7 @@ pub use crate::prompt_images::PROMPT_IMAGES_TRACING_TARGET;
 /// What kind of element interaction occurred when pressing Enter on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementInteraction {
-    /// Paste or file-ref element was inlined (expanded).
+    /// File-ref element was inlined (expanded). Paste chips submit on Enter.
     Inlined,
     /// Image chip was activated (caller should open preview).
     ImagePreview,
@@ -359,7 +359,7 @@ pub struct VoicePromptOverlay<'a> {
 
 /// Greedy word-wrap the interim transcript into at most `max_rows` lines of
 /// `max_w` columns, appending an ellipsis to the last line when truncated.
-fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> {
+pub(super) fn wrap_voice_interim(text: &str, max_w: usize, max_rows: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
     if max_w == 0 || max_rows == 0 {
         return Vec::new();
@@ -599,6 +599,11 @@ pub struct PromptWidget {
     /// is NOT a user wipe, so the clear detector must skip observing it (it
     /// resyncs on the next genuine edit).
     completion_accepted: bool,
+
+    // Grok OSS: While recording, the prompt box grows with incoming transcript.
+    voice_recording_grow: bool,
+    /// Live interim used only to size the recording box (not committed text).
+    voice_recording_interim: Option<String>,
 }
 
 /// Prefix display width (`"❯ "` or `"> "` — both 2 columns).
@@ -648,6 +653,8 @@ impl PromptWidget {
             undo_tip_fire: false,
             plan_nudge_fire: false,
             completion_accepted: false,
+            voice_recording_grow: false,
+            voice_recording_interim: None,
         }
     }
 
@@ -666,6 +673,17 @@ impl PromptWidget {
 
     pub fn set_compact(&mut self, compact: bool) {
         self.compact = compact;
+    }
+
+    /// Grok OSS: While recording, the prompt box grows with incoming transcript
+    /// and must not clip spoken text.
+    pub fn set_voice_recording_grow(&mut self, grow: bool, interim: Option<&str>) {
+        self.voice_recording_grow = grow;
+        self.voice_recording_interim = if grow {
+            interim.filter(|t| !t.trim().is_empty()).map(str::to_owned)
+        } else {
+            None
+        };
     }
 
     /// Current compact flag (the derived render value fanned out by
@@ -1510,11 +1528,32 @@ impl PromptWidget {
         // freeze the box at its pre-open one-row height so stepping through
         // entries of different heights doesn't resize the layout per
         // keypress. The first real edit detaches and the box resizes then.
-        let text_height = if self.history_search.is_browse() {
+        let mut text_height = if self.history_search.is_browse() {
             1
         } else {
             self.textarea.desired_height(text_width).max(1)
         };
+        // Grok OSS: While recording (grow flag, or overlay-stamped interim),
+        // grow with wrapped transcript rows. Do not ellipsize spoken text.
+        // Cap only at the caller's widget max_height.
+        if self.voice_recording_grow || self.voice_recording_interim.is_some() {
+            let wrap_w = text_width.max(1);
+            // Chrome + prefix can leave a wrap width that packs one extra
+            // word versus a slightly narrower inner column. Grow to the
+            // conservative wrap so spoken text is not clipped.
+            let conservative = wrap_w.saturating_sub(3).max(1);
+            let rows = recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                wrap_w,
+            )
+            .max(recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                conservative,
+            ));
+            text_height = text_height.max(rows.max(1));
+        }
         let vpad_top = style.vpad_top;
         let info_block = style.info_block(has_info);
         let total = vpad_top + text_height + info_block;
@@ -2201,7 +2240,9 @@ impl PromptWidget {
     /// Handles:
     /// - Empty/whitespace rejection → returns None
     /// - Backslash continuation: trailing `\` before cursor → replaces with newline
-    /// - On success: returns the text and clears the widget
+    /// - On success: returns the text and leaves the widget intact. Dispatch
+    ///   clears the composer only after send, interject, or enqueue lands, so a
+    ///   failed submit does not wipe the Human box.
     pub fn try_send(&mut self) -> Option<String> {
         if self.apply_backslash_continuation() {
             return None;
@@ -2780,8 +2821,8 @@ impl PromptWidget {
     }
 
     /// Check if the cursor is currently on a paste element (strict on-chip
-    /// match, mirroring the Enter-to-expand targeting in
-    /// [`Self::try_element_interaction`]).
+    /// match). Bare Enter submits that body; expand is paste-again or
+    /// double-click.
     ///
     /// Returns the element's buffer text if so.
     pub fn paste_element_at_cursor(&self) -> Option<&str> {
@@ -2808,18 +2849,15 @@ impl PromptWidget {
     /// Paste element text for the preview overlay.
     ///
     /// Shows the moment a chip is created (cursor right after it) as well
-    /// as with the cursor on it. Display-only: Enter handling keeps the
-    /// strict on-chip match, so Enter right after a chip keeps its normal
-    /// behavior (submit or newline) instead of expanding the chip.
+    /// as with the cursor on it. Display-only: Enter submits the pasted
+    /// body from either position. Expand is paste-again or double-click.
     fn paste_element_for_preview(&self) -> Option<&str> {
         self.paste_text(self.paste_element_near_cursor()?)
     }
 
-    /// Expand hint for the paste preview overlay, honest per position:
-    /// ON the chip Enter expands it; right after the chip Enter submits,
-    /// so the affordance advertised there is pasting the content again.
-    /// Double-click expands from either position (a click moves the
-    /// cursor onto the chip first).
+    /// Expand hint for the paste preview overlay. Enter always submits.
+    /// Expand is paste-again or double-click, including when the caret
+    /// sits on the chip.
     fn paste_preview_hint(&self, theme: &Theme) -> Line<'static> {
         let dim = Style::default().fg(theme.gray);
         // Chord deliberately deviates from the tips' text_secondary to a
@@ -2828,13 +2866,8 @@ impl PromptWidget {
         let chord = Style::default()
             .fg(theme.fuzzy_accent)
             .add_modifier(Modifier::BOLD);
-        let action = if self.paste_element_at_cursor().is_some() {
-            "enter"
-        } else {
-            "paste again"
-        };
         Line::from(vec![
-            Span::styled(action, chord),
+            Span::styled("paste again", chord),
             Span::styled(" or ", dim),
             Span::styled("double-click", chord),
             Span::styled(" to expand", dim),
@@ -2868,7 +2901,9 @@ impl PromptWidget {
 
     /// Try to interact with an element at the cursor.
     ///
-    /// - Enter on a paste/file-ref element → inline (expand) it.
+    /// - Enter on a paste chip is not an interaction. The caller submits
+    ///   the pasted body. Expand is paste-again or double-click.
+    /// - Enter on a file-ref element → inline (expand) it.
     /// - Enter on an image chip → signal the caller to open preview
     ///   (does NOT inline the placeholder text).
     ///
@@ -2879,7 +2914,8 @@ impl PromptWidget {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE || k == KIND_FILE_REF => {
+            k if k == KIND_PASTE => None,
+            k if k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
                 Some(ElementInteraction::Inlined)
@@ -3051,11 +3087,15 @@ impl PromptWidget {
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
 
-        let border_color = style.border_color_override.unwrap_or(if style.focused {
+        let idle_white = style.border_color_override.unwrap_or(if style.focused {
             theme.prompt_border_active
         } else {
             theme.prompt_border
         });
+        // Grok OSS: While recording, the composer frame paints red
+        // (`theme.accent_error`). When not recording, it is not red.
+        let border_color =
+            recording_frame::composer_frame_color(voice.is_some(), &theme, idle_white);
 
         // Fill entire area with fg + bg so every cell has RGB colors (needed for blending)
         buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
@@ -3345,10 +3385,20 @@ impl PromptWidget {
                 .bg(bg)
                 .add_modifier(Modifier::ITALIC);
             if self.textarea.text().is_empty() {
-                let lines =
-                    wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
+                // Grok OSS: Recording wrap must not ellipsize spoken text.
+                let max_rows = if voice.is_some() || self.voice_recording_grow {
+                    usize::MAX
+                } else {
+                    ta_area.height as usize
+                };
+                let lines = wrap_voice_interim(interim, ta_area.width as usize, max_rows);
+                let bottom = ta_area.y.saturating_add(ta_area.height);
                 for (i, line) in lines.iter().enumerate() {
-                    buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
+                    let y = ta_area.y.saturating_add(i as u16);
+                    if y >= bottom {
+                        break;
+                    }
+                    buf.set_string(ta_area.x, y, line, interim_style);
                 }
             } else {
                 // Ghost suffix after the finalized draft (not at the caret).
@@ -3358,10 +3408,40 @@ impl PromptWidget {
                         .screen_position_of(end, ta_area, self.textarea_state)
                 {
                     let display = format!(" {interim}");
-                    let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
-                    if avail > 0 {
-                        let truncated = crate::render::line_utils::truncate_str(&display, avail);
-                        buf.set_string(start_x, row_y, &truncated, interim_style);
+                    let recording = voice.is_some() || self.voice_recording_grow;
+                    if recording {
+                        use unicode_width::UnicodeWidthStr;
+                        let first_avail =
+                            (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                        let w = UnicodeWidthStr::width(display.as_str());
+                        if w <= first_avail {
+                            buf.set_string(start_x, row_y, &display, interim_style);
+                        } else {
+                            // Grok OSS: Do not ellipsize spoken text. Wrap onto
+                            // following rows; the box already grew to fit.
+                            let lines =
+                                wrap_voice_interim(interim, ta_area.width as usize, usize::MAX);
+                            let start_y = if first_avail == 0 {
+                                row_y
+                            } else {
+                                row_y.saturating_add(1)
+                            };
+                            let bottom = ta_area.y.saturating_add(ta_area.height);
+                            for (i, line) in lines.iter().enumerate() {
+                                let y = start_y.saturating_add(i as u16);
+                                if y >= bottom {
+                                    break;
+                                }
+                                buf.set_string(ta_area.x, y, line, interim_style);
+                            }
+                        }
+                    } else {
+                        let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                        if avail > 0 {
+                            let truncated =
+                                crate::render::line_utils::truncate_str(&display, avail);
+                            buf.set_string(start_x, row_y, &truncated, interim_style);
+                        }
                     }
                 }
             }
@@ -3963,6 +4043,8 @@ fn paste_chip_display_bytes(byte_len: usize) -> Line<'static> {
 fn images_high_water(images: &[PastedImage]) -> usize {
     images.iter().map(|i| i.display_number).max().unwrap_or(0)
 }
+
+pub mod recording_frame;
 
 #[cfg(test)]
 mod tests;

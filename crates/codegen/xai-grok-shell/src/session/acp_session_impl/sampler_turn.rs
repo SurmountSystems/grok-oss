@@ -1704,13 +1704,14 @@ mod ranked_auto_turn_tests {
     use crate::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
     use crate::auth::xai_console::add_console_api_key;
     use crate::auth::{
-        AuthMode, GrokAuth, clear_included_billing_cache, remember_supergrok_dollar_extras,
+        AuthMode, GrokAuth, clear_included_billing_cache, remember_supergrok_dollar_credits,
         remember_supergrok_included_billing, upsert_supergrok_session,
     };
     use xai_grok_test_support::EnvGuard;
 
     #[test]
     #[serial_test::serial]
+    // Grok OSS: hop-neighbor. prepare_sampler_for_turn aligns to ranked included primary. Rank helpers are not hop proof. SuperGrok is paid.
     fn prepare_sampler_for_turn_aligns_to_ranked_included_primary() {
         clear_included_billing_cache();
         let dir = tempfile::tempdir().unwrap();
@@ -1757,7 +1758,7 @@ mod ranked_auto_turn_tests {
             Some("2026-08-20T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_dollar_credits("user-p", 10_029);
         remember_supergrok_included_billing(
             "team-biz",
             40.0,
@@ -1795,6 +1796,7 @@ mod ranked_auto_turn_tests {
     /// dollar-credit JWT. SuperGrok Heavy is a distinct weekly pool.
     #[test]
     #[serial_test::serial]
+    // Grok OSS: hop-neighbor. False 100% plus missing SuperGrok Heavy must not flatten sibling included remaining. Rank helpers are not hop proof. SuperGrok is paid.
     fn prepare_sampler_for_turn_does_not_flatten_missing_heavy_100_off_sibling() {
         clear_included_billing_cache();
         let dir = tempfile::tempdir().unwrap();
@@ -1842,7 +1844,7 @@ mod ranked_auto_turn_tests {
             Some("2026-08-20T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_dollar_credits("user-p", 10_029);
         remember_supergrok_included_billing(
             "team-biz",
             100.0,
@@ -1878,6 +1880,7 @@ mod ranked_auto_turn_tests {
     /// dollar credits.
     #[test]
     #[serial_test::serial]
+    // Grok OSS: hop-neighbor. SuperGrok dollar credits on both plus missing SuperGrok Heavy must hop to Team included remaining. Rank helpers are not hop proof. SuperGrok is paid.
     fn prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both() {
         clear_included_billing_cache();
         let dir = tempfile::tempdir().unwrap();
@@ -1924,14 +1927,14 @@ mod ranked_auto_turn_tests {
             Some("2026-08-20T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("user-p", 10_029);
+        remember_supergrok_dollar_credits("user-p", 10_029);
         remember_supergrok_included_billing(
             "team-biz",
             100.0,
             Some("2026-08-21T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("team-biz", 10_029);
+        remember_supergrok_dollar_credits("team-biz", 10_029);
 
         let mut api_key = Some("tok-personal-dollars".into());
         let mut failover = vec!["console-must-not-win".into()];

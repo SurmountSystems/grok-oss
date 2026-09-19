@@ -894,6 +894,7 @@ mod tests {
 
     /// Named contract: this git tree must not grow non-excepted Python under
     /// project skill roots. Host `~/.agents/skills` is out of scope.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because a restack must not install junk .py under skill roots.
     #[test]
     fn product_repo_skill_roots_have_no_non_excepted_python() {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -909,6 +910,47 @@ mod tests {
             bad.is_empty(),
             "product skill roots must not contain non-excepted Python: {bad:?}"
         );
+    }
+
+    /// Operator: skills must not generate arbitrary Python or Bash and then
+    /// run it. Default product skill markdown must not teach that.
+    #[test]
+    fn default_product_skill_markdown_does_not_tell_agents_to_generate_python_or_bash() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let mut hits = Vec::new();
+        collect_generated_script_steers(&root, &mut hits);
+        assert!(
+            hits.is_empty(),
+            "default product skills must not tell agents to write then exec Python or Bash: {hits:?}"
+        );
+    }
+
+    fn collect_generated_script_steers(root: &Path, hits: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_generated_script_steers(&path, hits);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "md") {
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let lower = body.to_ascii_lowercase();
+                if lower.contains("cat >") && (lower.contains(".py") || lower.contains(".sh")) {
+                    hits.push((path.clone(), "cat > generated script".into()));
+                }
+                if lower.contains("python3 -c") {
+                    hits.push((path.clone(), "python3 -c".into()));
+                }
+                if lower.contains("write a python") || lower.contains("write a bash") {
+                    hits.push((path.clone(), "write a python/bash".into()));
+                }
+            }
+        }
     }
 
     fn collect_non_excepted_skill_python(root: &Path, bad: &mut Vec<PathBuf>) {
@@ -939,6 +981,7 @@ mod tests {
     /// office/docx/pptx/xlsx/pdf scripts may stay. A restack that reintroduces
     /// helper `.py` files (review JSON builders, invented uuid helpers, the
     /// Python unit test for `memory.py`) is a failed land.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because sanitize must drop junk .py so restack cannot install them.
     #[test]
     fn sanitize_rejects_non_excepted_skill_python() {
         assert_eq!(
@@ -1117,6 +1160,7 @@ mod tests {
     /// Named contract: a network restack archive that contains junk `.py`
     /// under skills must not write those files into `~/.grok/bundled/skills`.
     /// Allowlisted intercept CLI stubs still extract.
+    // Grok OSS: product skills are not a Python runtime. This diverges from upstream xAI because extract must skip junk .py so restack cannot install them.
     #[test]
     fn extract_archive_skips_non_excepted_skill_python() {
         let tmp = TempDir::new().unwrap();

@@ -105,6 +105,38 @@ pub(crate) fn format_request_failure(
             .flatten()
     });
     let extracted = extract_error_detail(raw);
+    if is_headers_timeout_cold_start(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(is_headers_timeout_cold_start)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Cold start: response headers timed out".to_string(),
+            detail: "The model host may still be starting. Retry is in progress. This is not Thought-only."
+                .to_string(),
+        };
+    }
+    if is_image_transcription_transport_miss(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(is_image_transcription_transport_miss)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Image transcription unavailable".to_string(),
+            detail: "Transport miss: error sending request. The Human image line stays. This is not a silent hang. Try sending again."
+                .to_string(),
+        };
+    }
+    if is_transport_send_miss(raw) || extracted.as_deref().is_some_and(is_transport_send_miss) {
+        return FormattedRequestFailure {
+            status,
+            headline: "Connection failed".to_string(),
+            detail: "Transport miss: error sending request. This is not a silent hang. Check your network and try again."
+                .to_string(),
+        };
+    }
     let team_prepaid = xai_grok_sampling_types::is_console_team_prepaid_message(raw)
         || extracted
             .as_deref()
@@ -369,6 +401,29 @@ fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     }
     let code: u16 = s[..3].parse().ok()?;
     (400..600).contains(&code).then_some(code)
+}
+
+/// Header-timeout / cold-start class: TCP accepted but no HTTP response
+/// headers within the stream-headers budget (default 2m). Not billing.
+pub(crate) fn is_headers_timeout_cold_start(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("timed out waiting for response headers")
+        || (lower.contains("response headers") && lower.contains("timed out"))
+}
+
+/// Fail-closed describe path: "image transcription failed" plus a send miss.
+/// Named chrome so the pager does not paint a generic Request failed turn kill
+/// as if the Human image were gone.
+pub(crate) fn is_image_transcription_transport_miss(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("image transcription failed") && lower.contains("error sending request")
+}
+
+/// HTTP/SSE send miss (`error sending request`). Covers `request error stream`
+/// and `reqwest error stream` when they carry that cause. Not a silent hang.
+/// Not billing.
+pub(crate) fn is_transport_send_miss(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("error sending request")
 }
 
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
@@ -798,6 +853,45 @@ mod tests {
         );
     }
 
+    /// Operator: "Connection failed – request error stream: timed out waiting
+    /// for response headers after 2m0s"; retry attempt 2; "might be caused by
+    /// it being a cold start, not warm." Chrome must name the cold-start
+    /// class and keep a retry path. Not Thought-only. Not billing.
+    #[test]
+    fn header_timeout_is_named_cold_start_class_with_retry_path() {
+        let raw = "Connection failed – request error stream: timed out waiting for response headers after 2m0s";
+        let formatted = format_request_failure(None, Some("http"), raw);
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Cold start") && msg.contains("response headers timed out"),
+            "header timeout must name the cold-start class, got {msg}"
+        );
+        assert!(
+            msg.contains("Retry is in progress"),
+            "must keep a retry path, not Thought-only, got {msg}"
+        );
+        assert!(
+            !msg.contains("Thought") || msg.contains("not Thought-only"),
+            "must not leave Thought-only chrome, got {msg}"
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("dollar")
+                && !msg.to_ascii_lowercase().contains("billing"),
+            "must not invent billing, got {msg}"
+        );
+        let retry = crate::app::subagent::format_activity_label(
+            &crate::acp::tracker::TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: u32::MAX,
+                reason: "cold start: response headers timed out".into(),
+            },
+        );
+        assert!(
+            retry.contains("Retrying (2)"),
+            "retry attempt 2 must stay Retrying chrome, got {retry}"
+        );
+    }
+
     #[test]
     fn strips_reqwest_url_from_connection_error() {
         let formatted = format_request_failure(
@@ -805,15 +899,86 @@ mod tests {
             Some("http"),
             "error sending request for url (https://server.grok.com/v1/responses)",
         );
+        let msg = formatted.message();
+        assert!(!msg.contains("http"), "{msg}");
         assert!(
-            !formatted.message().contains("http"),
-            "{}",
-            formatted.message()
+            msg.contains("Connection failed") && msg.contains("Transport miss"),
+            "send miss must name transport, got {msg}"
         );
-        assert_eq!(
-            formatted.message(),
-            "Connection failed \u{2014} error sending request. \
-             Check your network and try again."
+        assert!(
+            msg.contains("not a silent hang"),
+            "must not look like a hang, got {msg}"
+        );
+        assert!(
+            msg.contains("Check your network") && msg.contains("try again"),
+            "must keep a retry path, got {msg}"
+        );
+    }
+
+    /// Operator: "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again."
+    /// Backstop chrome if a fail-closed ACP error still reaches the pager.
+    /// Not billing. Not a silent hang.
+    #[test]
+    fn image_transcription_error_sending_request_is_named_transport_miss() {
+        let operator = "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again.";
+        assert!(operator.contains(
+            "image transcription failed: image describe call failed: request error: error sending request"
+        ));
+        let formatted = format_request_failure(
+            None,
+            None,
+            "image transcription failed: image describe call failed: request error: error sending request",
+        );
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Image transcription unavailable") && msg.contains("Transport miss"),
+            "must not paint generic Request failed for this miss, got {msg}"
+        );
+        assert!(
+            msg.contains("Human image line stays") && msg.contains("not a silent hang"),
+            "must name the Human image line and the hang class, got {msg}"
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("billing") && !lower.contains("dollar"),
+            "must not invent billing, got {msg}"
+        );
+    }
+
+    /// Operator: "Connection failed – request error stream: error sending request."
+    /// Transport miss, not a silent hang, not billing.
+    #[test]
+    fn request_error_stream_error_sending_request_is_named_transport_miss() {
+        let operator = "Connection failed – request error stream: error sending request.";
+        assert!(operator.contains("request error stream: error sending request"));
+        let formatted = format_request_failure(
+            None,
+            Some("http"),
+            "Connection failed – request error stream: error sending request.",
+        );
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Connection failed") && msg.contains("Transport miss"),
+            "stream send miss must name transport, got {msg}"
+        );
+        assert!(
+            msg.contains("not a silent hang"),
+            "must not look like a hang, got {msg}"
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("billing") && !lower.contains("dollar"),
+            "must not invent billing, got {msg}"
+        );
+        let reqwest = format_request_failure(
+            None,
+            Some("http"),
+            "reqwest error stream: error sending request",
+        );
+        assert!(
+            reqwest.message().contains("Transport miss"),
+            "reqwest error stream must classify the same, got {}",
+            reqwest.message()
         );
     }
 

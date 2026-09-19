@@ -30,12 +30,16 @@ mod permissions;
 mod prompt;
 mod queue;
 pub(crate) mod rebuild;
+#[cfg(test)]
+mod rebuild_wal_already_issued;
 mod rewind;
 mod router;
 mod running;
 mod session;
 mod settings;
 mod soft_stop;
+#[cfg(test)]
+mod stale_queue_occupancy;
 mod start;
 mod status;
 mod task_result;
@@ -46,7 +50,10 @@ mod voice;
 
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
-pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
+pub(crate) use billing::{
+    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, background_billing_poll_fetch_billing,
+    is_credit_limit_error,
+};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 #[cfg(test)]
 pub(crate) use notes::FEEDBACK_QUESTION_LABEL;
@@ -54,9 +61,11 @@ pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
-pub(crate) use queue::maybe_drain_queue_and_note_peek;
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, note_peek_page_flip, shim_renders_own_user_block,
+};
+pub(crate) use queue::{
+    maybe_drain_queue_and_note_peek, maybe_drain_queue_and_note_peek_protecting,
 };
 pub(in crate::app) use rewind::{find_user_prompt_entry_for_shell_index, shell_prompt_index_at};
 pub(crate) use router::dispatch;
@@ -66,6 +75,8 @@ pub(crate) use turn::{reconcile_overdue_cancels, reconcile_overdue_turn_ends};
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.
+#[cfg(test)]
+pub(crate) use billing::background_billing_poll_snapshot_mode;
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]

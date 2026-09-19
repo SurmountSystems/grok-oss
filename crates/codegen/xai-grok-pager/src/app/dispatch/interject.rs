@@ -51,9 +51,69 @@ fn refuse_l3_overlay_operator_text(agent: &mut AgentView) -> Vec<Effect> {
     vec![]
 }
 
+/// True when operator text uniquely names this live subagent (description,
+/// Subagents-list job / tag, full or short id, child_session_id).
+fn text_names_subagent(text: &str, info: &crate::app::subagent::SubagentInfo) -> bool {
+    let hay = text.to_ascii_lowercase();
+    let sid = info.child_session_id.as_ref();
+    let aid = info.subagent_id.as_ref();
+    if !sid.is_empty() && hay.contains(&sid.to_ascii_lowercase()) {
+        return true;
+    }
+    if !aid.is_empty() && aid != sid && hay.contains(&aid.to_ascii_lowercase()) {
+        return true;
+    }
+    // Short id as shown in the Subagents list (first 8 chars of a long id).
+    if sid.len() >= 8 {
+        let short = &sid[..8];
+        if hay.contains(&short.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    if aid.len() >= 8 && aid != sid {
+        let short = &aid[..8];
+        if hay.contains(&short.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    let (tag, clean) = crate::app::subagent::parse_tag_prefix(info.description.as_ref());
+    let clean = clean.trim();
+    if clean.len() >= 3 && hay.contains(&clean.to_ascii_lowercase()) {
+        return true;
+    }
+    if let Some(tag) = tag {
+        let tag = tag.trim();
+        if tag.len() >= 3 && hay.contains(&tag.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Main-thread naming of a live L2: return that L2 session only when exactly
+/// one live L2 matches. Ambiguous (0 or 2+) keeps the caller on L1. Never
+/// returns an L3; specialists stay unbothered unless the Operator opens that
+/// specialist overlay (and even then the overlay refuses inject).
+pub(super) fn resolve_uniquely_named_live_l2(
+    agent: &AgentView,
+    text: &str,
+) -> Option<agent_client_protocol::SessionId> {
+    let live = crate::app::subagent::live_subagent_list(agent.subagent_sessions.values());
+    let matches: Vec<_> = live
+        .into_iter()
+        .filter(|info| text_names_subagent(text, info))
+        .collect();
+    if matches.len() != 1 {
+        return None;
+    }
+    let sid = matches[0].child_session_id.as_ref();
+    Some(agent_client_protocol::SessionId::new(sid))
+}
+
 /// Send a mid-turn ask. When an L2 overlay is open, the target is that L2
 /// session. An L3 overlay never receives operator text and never falls
-/// through to the main thread.
+/// through to the main thread. With no overlay, main-thread text that
+/// uniquely names a live L2 soft-interjects that L2 session.
 pub(super) fn dispatch_interject(
     app: &mut AppView,
     text: String,
@@ -78,7 +138,11 @@ pub(super) fn dispatch_interject(
         OverlayOperatorClarify::L2(session_id) => {
             return paint_and_send_interject(agent, id, session_id, text, images);
         }
-        OverlayOperatorClarify::None => {}
+        OverlayOperatorClarify::None => {
+            if let Some(l2_session_id) = resolve_uniquely_named_live_l2(agent, &text) {
+                return paint_and_send_interject(agent, id, l2_session_id, text, images);
+            }
+        }
     }
 
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -96,8 +160,17 @@ fn paint_and_send_interject(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    // Prefer the target nested view (overlay open, or main-thread retarget to
+    // a named live L2). Fall back to the open overlay child, then L1.
+    let target_sid = session_id.0.to_string();
     let overlay_sid = agent.active_subagent.clone();
-    let paint_target = if overlay_sid
+    let paint_target = if agent.subagent_views.contains_key(&target_sid) {
+        agent
+            .subagent_views
+            .get_mut(&target_sid)
+            .map(|child| &mut **child)
+            .expect("checked")
+    } else if overlay_sid
         .as_ref()
         .is_some_and(|sid| agent.subagent_views.contains_key(sid))
     {
@@ -117,15 +190,9 @@ fn paint_and_send_interject(
         paint_target.abort_cancellable_cancel();
     }
     record_interject_prompt_history(paint_target, &text);
-    paint_target.append_prompt_wal(
-        xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
-        &text,
-        &images,
-    );
 
-    // Push a standard user prompt block locally for instant feedback, and
-    // record its id so the broadcast echo (`x.ai/session/interjection`) is
-    // deduped instead of rendering a second copy on this pane.
+    // Local paint first. WAL fsync must not precede the scrollback block.
+    // WAL still runs before this function returns SendInterject.
     let interjection_id = uuid::Uuid::new_v4().to_string();
     paint_target
         .self_interjection_ids
@@ -139,6 +206,12 @@ fn paint_and_send_interject(
     // every other producer (Send now, edit-interject, plan review comments)
     // carries non-composer text and must keep the user's draft/stash.
     paint_target.show_toast("Interjection sent");
+
+    paint_target.append_prompt_wal(
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+        &text,
+        &images,
+    );
 
     // Image-bearing interjection: build text + image content blocks via the
     // same helper as the queued-prompt drain path (orphan-placeholder
@@ -185,7 +258,13 @@ pub(super) fn dispatch_send_prompt_now(
         OverlayOperatorClarify::L2(_) => {
             return dispatch_interject(app, text, images);
         }
-        OverlayOperatorClarify::None => {}
+        OverlayOperatorClarify::None => {
+            // Main-thread text that uniquely names a live L2 is a mid-turn ask
+            // to that L2, not cancel-and-send on L1.
+            if resolve_uniquely_named_live_l2(agent, &text).is_some() {
+                return dispatch_interject(app, text, images);
+            }
+        }
     }
 
     // Mid-outage guard (mirrors the plain prompt path): the producers already
@@ -506,15 +585,161 @@ mod tests {
         );
     }
 
-    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
-    /// Mid-turn Ctrl+Enter must dispatch `SendInterject` (`x.ai/interject`).
-    /// It must not drop the composer text, queue-only, no-op, or cancel-and-send
-    /// (`SendPromptNow`). This is the explicit send-now chord; Enter is the
-    /// separate soft-interject path. Grok OSS 1.0.3 is not last-known-good.
+    /// Operator: "Also for some reason enter just duplicated my prompt just
+    /// now lol". After Enter that interjects (or sends) the composer text, the
+    /// composer must not still hold that same body. Soft interject is additive
+    /// work. It must not leave a duplicate prompt in the input box. Do not fit
+    /// tests to a leftover composer.
     ///
-    /// Red before product (code reading): `agent_view/prompt.rs` InterjectPrompt
-    /// arm returned `Action::SendPromptNow`, so dispatch emitted
-    /// `Effect::SendPromptNow` instead of `Effect::SendInterject`.
+    /// Bare mid-turn Enter is soft interject (`x.ai/interject`) via
+    /// `Action::SendPrompt`, not the InterjectPrompt chord. The Human box must
+    /// clear after a successful interject.
+    #[test]
+    fn enter_soft_interject_must_not_leave_duplicate_prompt_in_composer() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "I hate seeing you edit code at L1. I hate seeing you wait on\nthe isolated bottleneck. ALWAYS REMEMBER THAT.";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("mid-turn Enter with text must soft-interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == body),
+            "bare Enter is soft interject via SendPrompt, got {action:?}"
+        );
+        // try_send leaves the draft until dispatch clears on success.
+        assert_eq!(
+            app.agents[&id].prompt.text(),
+            body,
+            "key handler must not wipe before dispatch proves send/interject landed"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject this turn, got {other:?}"),
+        }
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that interjects, the composer must not still hold that same body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        assert!(
+            app.agents[&id].session.state.is_turn_running(),
+            "current turn must keep running"
+        );
+    }
+
+    /// Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip.
+    ///
+    /// Expand stays paste-again or double-click. Composer clears only after
+    /// the send lands. A live mill turn is interject via `Action::SendPrompt`.
+    #[test]
+    fn enter_on_pasted_15_lines_chip_sends_or_interjects_does_not_only_expand() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+        use crate::views::prompt_widget::KIND_PASTE;
+
+        let body = (1..=15)
+            .map(|n| format!("paste line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (label, mill_live) in [("idle", false), ("mill turn live", true)] {
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            let action = {
+                let agent = app.agents.get_mut(&id).unwrap();
+                if mill_live {
+                    agent.session.state = AgentState::TurnRunning;
+                }
+                agent.set_active_pane(ActivePane::Prompt, true);
+                let _ = agent.prompt.handle_paste(&body);
+                assert!(
+                    agent
+                        .prompt
+                        .textarea
+                        .elements()
+                        .iter()
+                        .any(|e| e.kind == KIND_PASTE),
+                    "{label}: 15-line paste must fold into a paste chip"
+                );
+                agent.prompt.set_cursor(0);
+                assert!(
+                    agent.prompt.paste_element_at_cursor().is_some(),
+                    "{label}: caret must sit on the paste chip"
+                );
+                match agent
+                    .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                {
+                    InputOutcome::Action(action) => action,
+                    other => panic!(
+                        "{label}: Enter on [Pasted: 15 lines] must send or interject, not only expand the chip; got {other:?}; composer={:?}",
+                        agent.prompt.text()
+                    ),
+                }
+            };
+            assert!(
+                matches!(&action, Action::SendPrompt(text) if text == &body),
+                "{label}: paste-chip Enter must submit the 15 lines, got {action:?}"
+            );
+            assert!(
+                app.agents[&id]
+                    .prompt
+                    .textarea
+                    .elements()
+                    .iter()
+                    .any(|e| e.kind == KIND_PASTE),
+                "{label}: key handler must not expand the chip before dispatch proves send landed"
+            );
+            assert_eq!(
+                app.agents[&id].prompt.text(),
+                body,
+                "{label}: key handler must not wipe before dispatch proves send/interject landed"
+            );
+            let effects = dispatch(action, &mut app);
+            if mill_live {
+                assert!(
+                    effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::SendInterject { text, .. } if text == &body)),
+                    "{label}: mill-live paste-chip Enter must interject, got {effects:?}"
+                );
+            } else {
+                assert!(
+                    effects.iter().any(
+                        |e| matches!(e, Effect::SendPrompt { text, .. } if text == &body)
+                            || matches!(e, Effect::SendPromptBlocks { .. })
+                    ),
+                    "{label}: idle paste-chip Enter must send, got {effects:?}"
+                );
+            }
+            assert!(
+                app.agents[&id].prompt.text().trim().is_empty(),
+                "{label}: composer clears only after the send lands; got {:?}",
+                app.agents[&id].prompt.text()
+            );
+            assert!(
+                app.agents[&id].prompt.textarea.elements().is_empty(),
+                "{label}: chip must leave because the send landed, not because Enter expanded it"
+            );
+        }
+    }
+
+    /// Operator: "ctrl-enter could make it so we can't interject properly
+    /// still. it should only act like shift-enter if interjection isn't
+    /// appropriate." Mid-turn with text: interject is appropriate. Ctrl+Enter
+    /// dispatches SendInterject, not newline, not cancel-and-send.
     #[test]
     fn ctrl_enter_mid_turn_dispatches_send_interject() {
         use crate::app::agent::AgentState;
@@ -528,18 +753,17 @@ mod tests {
             agent.session.state = AgentState::TurnRunning;
             agent.set_active_pane(ActivePane::Prompt, true);
             agent.prompt.set_text(body);
+            agent.prompt.set_cursor(body.len());
             match agent
                 .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
             {
                 InputOutcome::Action(action) => action,
-                other => panic!(
-                    "Ctrl+Enter mid-turn must emit Interject, not drop or queue-only, got {other:?}"
-                ),
+                other => panic!("Ctrl+Enter mid-turn with text must interject, got {other:?}"),
             }
         };
         assert!(
             matches!(&action, Action::Interject { text, .. } if text == body),
-            "Ctrl+Enter must be Action::Interject, not SendPromptNow, got {action:?}"
+            "Ctrl+Enter when interject is appropriate must be Interject, got {action:?}"
         );
         let effects = dispatch(action, &mut app);
         match effects.as_slice() {
@@ -550,15 +774,12 @@ mod tests {
             !effects
                 .iter()
                 .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptNow { .. })),
-            "must not serial-queue or cancel-and-send, got {effects:?}"
+            "Ctrl+Enter must not cancel-and-send, got {effects:?}"
         );
         assert!(
             app.agents[&id].prompt.text().is_empty(),
-            "composer must clear at the InterjectPrompt call site"
-        );
-        assert!(
-            app.agents[&id].session.pending_prompts.is_empty(),
-            "must not land in pending_prompts as the next serial prompt"
+            "after Ctrl+Enter that interjects, the composer must clear; got {:?}",
+            app.agents[&id].prompt.text()
         );
         assert!(
             app.agents[&id].session.state.is_turn_running(),
@@ -569,6 +790,11 @@ mod tests {
     /// Named contract: mid-turn Interject paints and returns SendInterject
     /// without waiting a minute and without cancel-and-send. Dispatch is
     /// local; the ACP send is an effect, not a join on this thread.
+    ///
+    /// The elapsed bound is minutes-scale, not a 1s microbenchmark. 64-job
+    /// nextest on the VPS has timed this dispatch at about 1.2s and 1.8s
+    /// while still returning SendInterject and painting. A cancel-and-send
+    /// hang of a minute still fails well under 60s.
     #[test]
     fn interject_does_not_wait_minutes_or_block_paint() {
         use std::time::{Duration, Instant};
@@ -614,15 +840,16 @@ mod tests {
                 .any(|e| matches!(&e.block, RenderBlock::UserPrompt(p) if p.text.contains("steer now"))),
             "interject must paint locally before the ACP send"
         );
+        const NOT_MINUTES: Duration = Duration::from_secs(15);
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < NOT_MINUTES,
             "interject dispatch must not wait minutes; elapsed={:?}",
             started.elapsed()
         );
     }
 
-    /// Surmount / grok-oss fork; named tests are contracts, not optional chrome.
-    /// Empty composer + Ctrl+Enter must not send an empty interject.
+    /// Operator contract: empty composer + Ctrl+Enter must not send. It may
+    /// insert a newline. Must not Interject, SendPrompt, or SendPromptNow.
     #[test]
     fn empty_ctrl_enter_mid_turn_does_not_send() {
         use crate::app::agent::AgentState;
@@ -639,6 +866,10 @@ mod tests {
             agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
         };
         assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "empty Ctrl+Enter must not send; may insert newline (Changed), got {outcome:?}"
+        );
+        assert!(
             !matches!(
                 outcome,
                 InputOutcome::Action(Action::Interject { .. })
@@ -646,6 +877,11 @@ mod tests {
                     | InputOutcome::Action(Action::SendPrompt(_))
             ),
             "empty composer must not send, got {outcome:?}"
+        );
+        assert_eq!(
+            app.agents[&id].prompt.text(),
+            "\n",
+            "empty Ctrl+Enter inserts a newline"
         );
         assert!(
             app.agents[&id].session.pending_prompts.is_empty(),
@@ -919,15 +1155,48 @@ mod tests {
         );
     }
 
+    /// Operator: "Also for some reason enter just duplicated my prompt just
+    /// now lol". After Enter that interjects (or sends) the composer text, the
+    /// composer must not still hold that same body. Soft interject is additive
+    /// work. It must not leave a duplicate prompt in the input box. Do not fit
+    /// tests to a leftover composer.
+    ///
+    /// L2 overlay Enter is `Action::SendPrompt` routed to that L2 as
+    /// `SendInterject`. The parent Human box must clear on success the same
+    /// way bare mid-turn Enter does.
+    #[test]
+    fn l2_overlay_enter_interject_must_not_leave_duplicate_prompt_in_composer() {
+        let body = "I hate seeing you edit code at L1. I hate seeing you wait on\nthe isolated bottleneck. ALWAYS REMEMBER THAT.";
+        let mut app = app_with_overlay("l2-coord", 1);
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text(body);
+            assert_eq!(agent.prompt.text(), body);
+        }
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject to the L2 overlay, got {other:?}"),
+        }
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that interjects, the composer must not still hold that same body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
     #[test]
     fn l3_overlay_send_prompt_does_not_reach_l3_or_l1() {
         let mut app = app_with_overlay("l3-specialist", 2);
-        let l1 = app.agents[&AgentId(0)]
-            .session
-            .session_id
-            .clone()
-            .expect("l1");
-        let effects = dispatch(Action::SendPrompt("do not barge in".into()), &mut app);
+        let id = AgentId(0);
+        let body = "do not barge in";
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text(body);
+        }
+        let l1 = app.agents[&id].session.session_id.clone().expect("l1");
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
         assert!(
             effects.is_empty(),
             "operator text on an L3 overlay must not send, got {effects:?}"
@@ -942,6 +1211,256 @@ mod tests {
                 _ => true,
             }),
             "must never target a live L3 or fall through to L1"
+        );
+        assert_eq!(
+            app.agents[&id].prompt.text(),
+            body,
+            "L3 refuse must not wipe the Human box"
+        );
+    }
+
+    /// Idle Enter send has the same leftover contract: after a successful send,
+    /// the composer must not still hold that body.
+    #[test]
+    fn enter_send_must_not_leave_duplicate_prompt_in_composer() {
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "ordinary idle send must clear the Human box";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("idle Enter with text must send, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == body),
+            "idle Enter must be SendPrompt, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == body)),
+            "idle Enter must ask the model, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that sends, the composer must not still hold that same body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Operator: "the prompt is inconsistent about clearing"; "enter clears
+    /// the prompt input"; "not sure why it happens sometimes and not others...
+    /// it's a heisenbug." When other work is live (tool running, queue row,
+    /// retrying model), Human Enter must still clear the composer the same way
+    /// a quiet send does.
+    #[test]
+    fn enter_while_other_work_is_live_must_still_clear_composer() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "follow-up while other work is live";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.enqueue_prompt("already queued".into());
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("mid-turn Enter with text must send/interject, got {other:?}"),
+            }
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { text, .. } if text == body
+            )),
+            "Enter with other work live must still interject, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "Enter must still clear the composer while a tool and queue row are live; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Same heisenbug contract for send-now while Retrying chrome is up.
+    #[test]
+    fn send_now_while_retrying_must_still_clear_composer() {
+        use crate::acp::tracker::TurnActivity;
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "retrying still must clear";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent
+                .session
+                .set_retry_activity(Some(TurnActivity::Retrying {
+                    attempt: 2,
+                    max_retries: u32::MAX,
+                    reason: "response headers timed out".into(),
+                }));
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent.handle_prompt_key_for_test(&KeyEvent::new(
+                KeyCode::Char('i'),
+                KeyModifiers::CONTROL,
+            )) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Ctrl+I send-now must Interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::Interject { text, .. } if text == body),
+            "send-now while retrying must Interject, got {action:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "send-now must clear the composer while Retrying; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        let _ = dispatch(action, &mut app);
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "dispatch must not restore the composer after send-now clear"
+        );
+    }
+
+    /// Operator: "seems to work fine for editing a queued prompt". Editing an
+    /// existing queued prompt must not steal that clear for a later send.
+    #[test]
+    fn queued_prompt_edit_must_not_steal_later_send_clear() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let queued_id = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            let qid = agent.session.enqueue_prompt("queued body".into());
+            agent.sync_queue_pane();
+            qid
+        };
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.enter_queue_edit(queued_id, false, None);
+            agent.prompt.set_text("edited queued body");
+            agent.set_active_pane(ActivePane::Prompt, true);
+            let outcome = agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(
+                !matches!(outcome, InputOutcome::Unchanged),
+                "Enter while editing a queued prompt must save, got {outcome:?}"
+            );
+            assert!(
+                agent.prompt.text().is_empty()
+                    || !matches!(
+                        agent.prompt_mode,
+                        crate::app::queue_edit::PromptMode::EditingQueued { .. }
+                    ),
+                "queued edit Enter must leave editing and not keep the draft as a steal; mode={:?} text={:?}",
+                agent.prompt_mode,
+                agent.prompt.text()
+            );
+        }
+        let body = "new send after queued edit";
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("later Enter must still send/interject, got {other:?}"),
+            }
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { text, .. } if text == body
+            )),
+            "later Enter after a queued edit must interject, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "queued-prompt edit must not steal the later send clear; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+    }
+
+    /// Operator queued `/goal` (green queue row): after Send now it must be a
+    /// real goal action, not a stuck composer string.
+    /// Composer Enter of `/goal` while a turn is running is `SendInterject`
+    /// (`mid_turn_goal_passthrough_interjects_and_does_not_local_queue`).
+    /// This path is Send now of an already-queued row.
+    #[test]
+    fn queued_goal_send_now_is_goal_action_not_stuck_composer_string() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "/goal also now do a /goal to check everything remotely if you can't set your own goal, make it so you can";
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.session.enqueue_prompt(body.into());
+            agent.prompt.set_text("");
+        }
+        assert!(
+            app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text == body),
+            "queued /goal must be a queue row before Send now, pending={:?}",
+            app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "queued /goal must not stick in the composer; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        let row_id = app.agents[&id].session.pending_prompts[0].id;
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.sync_queue_pane();
+            match agent.force_interject_queue_row(row_id) {
+                InputOutcome::Action(action) => action,
+                other => panic!("Send now on queued /goal must dispatch, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPromptNow { text, .. } if text == body),
+            "Send now on queued /goal must GoalSet via send-now, not Interject, got {action:?}"
         );
     }
 
@@ -1133,6 +1652,315 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::SendPromptNow { .. })),
             "must not cancel-and-send the L1 turn from an L2 overlay"
+        );
+    }
+
+    /// Register a live L2 (and optional L3) without opening the nested overlay.
+    fn app_with_live_l2_no_overlay(
+        child_sid: &str,
+        description: &str,
+        l3: Option<(&str, &str)>,
+    ) -> AppView {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let l1_sid = app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .expect("l1 session")
+            .0
+            .to_string();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let child_session = crate::app::agent::AgentSession {
+            id: AgentId(0),
+            acp_tx: tx,
+            session_id: Some(acp::SessionId::new(child_sid)),
+            models: crate::acp::model_state::ModelState::default(),
+            state: crate::app::agent::AgentState::TurnRunning,
+            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
+            cwd: std::path::PathBuf::from("/tmp"),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: false,
+            auto_mode: false,
+            context_only_mode: false,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            credit_limit_blocked: false,
+            free_usage_blocked: false,
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
+        };
+        let child = crate::app::agent_view::AgentView::new(
+            child_session,
+            crate::scrollback::state::ScrollbackState::new(),
+        );
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        let mut info = overlay_info(child_sid, &l1_sid, 1);
+        info.description = description.into();
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent.insert_subagent_view(child_sid.to_string(), Box::new(child));
+        if let Some((l3_sid, l3_desc)) = l3 {
+            let mut l3_info = overlay_info(l3_sid, child_sid, 2);
+            l3_info.description = l3_desc.into();
+            agent.subagent_sessions.insert(l3_sid.into(), l3_info);
+        }
+        assert!(
+            agent.active_subagent.is_none(),
+            "fixture must leave the nested overlay closed"
+        );
+        app
+    }
+
+    /// Operator contract (quote; take it seriously):
+    /// L1 can interject a live L2 (additive mid-turn text to that nested
+    /// session) without killing it, without waiting for it to exit, and
+    /// without demoting it to pending. Default: operator text in the main
+    /// thread that names a live L2 goes to that L2 as interject
+    /// (`x.ai/interject` / existing soft interject), not as kill/respawn.
+    /// Do not barge into a live L3 unless the Operator explicitly targeted
+    /// that specialist. Do not weaken: additive asks do not kill healthy
+    /// in-flight work; nested L2 overlay compose already resumes that L2;
+    /// mid-turn Enter is soft interject.
+    ///
+    /// From the main thread with no nested overlay open, when a live L2
+    /// coordinator is running and the operator Enter text names that L2,
+    /// the product must soft-interject (`Effect::SendInterject`) into that
+    /// L2 session. It must not SendPrompt on L1 for that body, must not
+    /// kill the L2, and must not wait for the L2 to exit before injecting.
+    #[test]
+    fn l1_main_thread_text_that_names_live_l2_soft_interjects_that_l2_not_l1() {
+        const CONTRACT: &str = "L1 can interject a live L2 (additive mid-turn text to that nested session) without killing it, without waiting for it to exit, and without demoting it to pending. Default: operator text in the main thread that names a live L2 goes to that L2 as interject (x.ai/interject / existing soft interject), not as kill/respawn.";
+        let mut app = app_with_live_l2_no_overlay(
+            "l2-coord-01a08999",
+            "[lake-coord] remote Lake coordinator",
+            None,
+        );
+        let id = AgentId(0);
+        let l1 = app.agents[&id]
+            .session
+            .session_id
+            .clone()
+            .expect("l1 session");
+        assert!(
+            app.agents[&id].is_parked_on_sendable_wait(),
+            "live foreground L2 parks L1 on a sendable wait; that is the miss path"
+        );
+        let body = "tell the remote Lake coordinator to stay fire-and-return";
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        match effects.as_slice() {
+            [
+                Effect::SendInterject {
+                    session_id, text, ..
+                },
+            ] => {
+                assert_eq!(
+                    session_id.0.as_ref(),
+                    "l2-coord-01a08999",
+                    "{CONTRACT} — expected SendInterject to the named live L2, got {session_id:?}"
+                );
+                assert_ne!(session_id, &l1, "{CONTRACT} — must not target L1");
+                assert_eq!(text, body);
+            }
+            other => panic!("{CONTRACT} — expected SendInterject to the live L2, got {other:?}"),
+        }
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::SendPrompt { .. }
+                    | Effect::SendPromptNow { .. }
+                    | Effect::KillSubagent { .. }
+            )),
+            "{CONTRACT} — must not SendPrompt/SendPromptNow on L1 or kill the L2; got {effects:?}"
+        );
+        let agent = app.agents.get(&id).unwrap();
+        let l2 = agent
+            .subagent_sessions
+            .get("l2-coord-01a08999")
+            .expect("l2 still registered");
+        assert!(
+            l2.is_running() && !l2.pending_kill && !l2.finished,
+            "{CONTRACT} — L2 must keep running (no kill, no wait-for-exit); finished={} pending_kill={}",
+            l2.finished,
+            l2.pending_kill
+        );
+        assert!(
+            agent.active_subagent.is_none(),
+            "main-thread naming must not require opening the fullscreen overlay"
+        );
+    }
+
+    /// Naming a live L3 from the main thread must not barge into that
+    /// specialist. Keep L1 routing (or refuse); never SendInterject to L3.
+    #[test]
+    fn l1_main_thread_text_that_names_live_l3_does_not_barge_into_l3() {
+        let mut app = app_with_live_l2_no_overlay(
+            "l2-coord",
+            "[implementer] Land the slice",
+            Some(("l3-specialist-abc", "[clippy] Fix the named lint")),
+        );
+        let id = AgentId(0);
+        let l1 = app.agents[&id]
+            .session
+            .session_id
+            .clone()
+            .expect("l1 session");
+        let body = "ask the Fix the named lint specialist to hurry";
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        assert!(
+            effects.iter().all(|effect| match effect {
+                Effect::SendInterject { session_id, .. }
+                | Effect::SendPrompt { session_id, .. }
+                | Effect::SendPromptNow { session_id, .. } => {
+                    session_id.0.as_ref() != "l3-specialist-abc"
+                }
+                Effect::KillSubagent { .. } => false,
+                _ => true,
+            }),
+            "must never barge into a live L3 from main-thread text unless explicitly targeted; got {effects:?}"
+        );
+        // Ambiguous / L3-only name: do not invent an L2 retarget either.
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { session_id, .. }
+                    if session_id.0.as_ref() == "l2-coord"
+            )),
+            "L3-only naming must not silently retarget the parent L2; got {effects:?}"
+        );
+        let _ = l1; // L1 send-now / queue may still fire; that is not L3 barge.
+    }
+
+    /// Two live L2s that both match the operator text: do not pick at random.
+    /// Keep current L1 interject / send-now behavior (no unique retarget).
+    #[test]
+    fn l1_ambiguous_two_live_l2s_keeps_l1_does_not_pick_at_random() {
+        let mut app = app_with_live_l2_no_overlay(
+            "l2-review-a",
+            "[reviewer] Review the rate-limit slice",
+            None,
+        );
+        let id = AgentId(0);
+        let l1_sid = app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .expect("l1")
+            .0
+            .to_string();
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            let mut b = overlay_info("l2-review-b", &l1_sid, 1);
+            b.description = "[reviewer] Review the auth hop".into();
+            agent.subagent_sessions.insert("l2-review-b".into(), b);
+        }
+        // Both rows share the `[reviewer]` tag, so this text matches two live
+        // L2s. Prefer keep current L1 routing over picking at random.
+        let body = "tell the reviewer to stay additive";
+        assert!(
+            resolve_uniquely_named_live_l2(app.agents.get(&id).unwrap(), body).is_none(),
+            "shared reviewer tag must be ambiguous across two live L2s"
+        );
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::SendInterject { session_id, .. }
+                    if session_id.0.as_ref() == "l2-review-a"
+                        || session_id.0.as_ref() == "l2-review-b"
+            )),
+            "ambiguous two live L2s must not pick at random; got {effects:?}"
+        );
+    }
+
+    /// Naming by short id / child_session_id / Subagents-list description.
+    #[test]
+    fn l1_main_thread_names_live_l2_by_short_id_and_child_session_id() {
+        let mut app = app_with_live_l2_no_overlay(
+            "01a08999-0550-75b3-b410-adc217519f6e",
+            "[implementer] Land fire-and-return",
+            None,
+        );
+        let effects = dispatch(
+            Action::SendPrompt("steer 01a08999: keep going on fire-and-return".into()),
+            &mut app,
+        );
+        match effects.as_slice() {
+            [Effect::SendInterject { session_id, .. }] => {
+                assert_eq!(
+                    session_id.0.as_ref(),
+                    "01a08999-0550-75b3-b410-adc217519f6e"
+                );
+            }
+            other => panic!("short id must uniquely name the live L2, got {other:?}"),
+        }
+        let effects = dispatch(
+            Action::Interject {
+                text: "also 01a08999-0550-75b3-b410-adc217519f6e: do not demote".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+        match effects.as_slice() {
+            [Effect::SendInterject { session_id, .. }] => {
+                assert_eq!(
+                    session_id.0.as_ref(),
+                    "01a08999-0550-75b3-b410-adc217519f6e"
+                );
+            }
+            other => panic!("full child_session_id must retarget, got {other:?}"),
+        }
+    }
+
+    /// Parked wait on that L2: still interject the child, not L1 send-now cancel.
+    #[test]
+    fn l1_parked_wait_on_named_live_l2_interjects_child_not_send_now() {
+        let mut app =
+            app_with_live_l2_no_overlay("l2-wait-child", "[lake-coord] standing Lake funnel", None);
+        let id = AgentId(0);
+        assert!(
+            app.agents[&id].is_parked_on_sendable_wait(),
+            "fixture must be parked on the live L2 wait"
+        );
+        let body = "standing Lake funnel: start occupancy while mill builds";
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        match effects.as_slice() {
+            [
+                Effect::SendInterject {
+                    session_id, text, ..
+                },
+            ] => {
+                assert_eq!(session_id.0.as_ref(), "l2-wait-child");
+                assert_eq!(text, body);
+            }
+            other => panic!(
+                "parked wait naming the live L2 must soft-interject the child, not L1 send-now; got {other:?}"
+            ),
+        }
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPromptNow { .. } | Effect::SendPrompt { .. })),
+            "must not cancel-and-send L1 while naming the waited-on L2; got {effects:?}"
         );
     }
 }

@@ -2980,25 +2980,21 @@ fn multiline_paste_folds_into_dispatch_input() {
     );
 }
 
-/// Enter with the caret on a paste chip expands it instead of
-/// dispatching (agent prompt parity).
+/// Enter with the caret on a paste chip dispatches that body. Expand is
+/// paste-again or double-click.
 #[test]
-fn enter_on_dispatch_paste_chip_expands() {
+fn enter_on_dispatch_paste_chip_dispatches() {
     let mut state = DashboardState::new();
     let reg = crate::actions::ActionRegistry::defaults();
     let pasted = "line one\nline two\nline three\nline four";
     let _ = state.handle_input(&Event::Paste(pasted.to_string()), &reg);
     state.dispatch.set_cursor(0);
-    let outcome = state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg);
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "Enter on chip must expand, got {outcome:?}"
-    );
-    assert!(
-        state.dispatch.textarea.elements().is_empty(),
-        "chip must be inlined"
-    );
-    assert_eq!(state.dispatch.text(), pasted);
+    match state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg) {
+        InputOutcome::Action(Action::DashboardDispatch { text, .. }) => {
+            assert_eq!(text, pasted);
+        }
+        other => panic!("Enter on paste chip must dispatch, got {other:?}"),
+    }
 }
 
 /// Enter with the caret right after a paste chip still dispatches
@@ -3018,9 +3014,10 @@ fn enter_after_dispatch_paste_chip_dispatches() {
     }
 }
 
-/// Peek reply: Enter on a paste chip expands rather than sending.
+/// Peek reply: Enter on a paste chip sends that body. Expand is
+/// paste-again or double-click.
 #[test]
-fn enter_on_peek_reply_paste_chip_expands() {
+fn enter_on_peek_reply_paste_chip_sends() {
     let mut state = state_with_open_peek();
     let reg = crate::actions::ActionRegistry::defaults();
     state.peek.as_mut().unwrap().focused = true;
@@ -3029,19 +3026,18 @@ fn enter_on_peek_reply_paste_chip_expands() {
     let _ = state.handle_input(&Event::Paste(pasted.to_string()), &reg);
     assert_eq!(state.peek_reply.textarea.elements().len(), 1);
     state.peek_reply.set_cursor(0);
-    let outcome = state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg);
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "Enter on peek chip must expand, got {outcome:?}"
-    );
-    assert!(state.peek_reply.textarea.elements().is_empty());
-    assert_eq!(state.peek_reply.text(), pasted);
+    match state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg) {
+        InputOutcome::Action(Action::DashboardPeekReply { text, .. }) => {
+            assert_eq!(text, pasted);
+        }
+        other => panic!("Enter on peek paste chip must send, got {other:?}"),
+    }
 }
 
-/// Multiline peek still expands paste chips before treating bare Enter
-/// as a newline (dispatch + agent order).
+/// Multiline peek still submits a paste chip on bare Enter. Expand is
+/// paste-again or double-click. It must not insert an extra newline.
 #[test]
-fn multiline_peek_enter_on_paste_chip_expands() {
+fn multiline_peek_enter_on_paste_chip_sends() {
     let mut state = state_with_open_peek();
     state.multiline_mode = true;
     let reg = crate::actions::ActionRegistry::defaults();
@@ -3050,21 +3046,12 @@ fn multiline_peek_enter_on_paste_chip_expands() {
     let _ = state.handle_input(&Event::Paste(pasted.to_string()), &reg);
     assert_eq!(state.peek_reply.textarea.elements().len(), 1);
     state.peek_reply.set_cursor(0);
-    let outcome = state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg);
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "multiline Enter on peek chip must expand, got {outcome:?}"
-    );
-    assert!(
-        state.peek_reply.textarea.elements().is_empty(),
-        "chip must be inlined, not left as an element"
-    );
-    assert_eq!(state.peek_reply.text(), pasted);
-    assert!(
-        !state.peek_reply.text().contains("\n\n"),
-        "must expand, not insert an extra newline: {:?}",
-        state.peek_reply.text()
-    );
+    match state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg) {
+        InputOutcome::Action(Action::DashboardPeekReply { text, .. }) => {
+            assert_eq!(text, pasted);
+        }
+        other => panic!("multiline Enter on peek paste chip must send, got {other:?}"),
+    }
 }
 
 /// Enter on an image chip still dispatches — dashboard has no image
@@ -3115,7 +3102,7 @@ fn peek_row_change_clears_prompt_click_timer() {
 }
 
 #[test]
-fn enter_on_reject_feedback_paste_chip_expands() {
+fn enter_on_reject_feedback_paste_chip_submits() {
     let mut state = DashboardState::new();
     let reg = crate::actions::ActionRegistry::defaults();
     let mut f = peek_fields_for_test("Awaiting your input");
@@ -3138,13 +3125,12 @@ fn enter_on_reject_feedback_paste_chip_expands() {
     let _ = state.handle_input(&Event::Paste(pasted.to_string()), &reg);
     assert_eq!(state.peek_reply.textarea.elements().len(), 1);
     state.peek_reply.set_cursor(0);
-    let outcome = state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg);
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "Enter on reject freeform paste chip must expand, got {outcome:?}"
-    );
-    assert!(state.peek_reply.textarea.elements().is_empty());
-    assert_eq!(state.peek_reply.text(), pasted);
+    match state.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &reg) {
+        InputOutcome::Action(Action::DashboardPermissionFollowup { text, .. }) => {
+            assert_eq!(text, pasted);
+        }
+        other => panic!("Enter on reject paste chip must submit feedback, got {other:?}"),
+    }
 }
 
 #[test]
