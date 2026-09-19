@@ -956,6 +956,327 @@ fn isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tec
     );
 }
 
+fn mill_next_implement_was_started(app: &AppView, marker: &str) -> bool {
+    let sent = app.pending_effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::SendPrompt { text, .. } if text.contains("/implement") && text.contains(marker)
+        )
+    });
+    let queued = app.agents[&AgentId(0)]
+        .session
+        .pending_prompts
+        .iter()
+        .any(|p| p.text.contains("/implement") && p.text.contains(marker));
+    sent || queued
+}
+
+fn paint_mill_next_implement(app: &mut AppView, child_sid: &str, body: &str) {
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-parent",
+            test_subagent_spawned("sess-parent", child_sid),
+        ),
+        app,
+    );
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let child = agent
+        .subagent_views
+        .get_mut(child_sid)
+        .expect("mill child view");
+    child
+        .scrollback
+        .push_block(RenderBlock::agent_message(body));
+}
+
+/// Named contract: after mill paints a Next implement prompt whose body
+/// starts with `/implement`, grok-oss sends that turn. Nested mill L2
+/// never receives PromptResponse. The Operator does not paste it.
+/// Occupancy still running on a sibling L2 does not skip the send.
+/// Isolated Preview leftover must not Approve. Empty Enter never Approves.
+#[test]
+fn mill_nested_finish_auto_runs_next_implement_prompt_without_operator_paste() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = make_app_with_agent("sess-parent");
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-parent",
+            test_subagent_spawned("sess-parent", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    paint_mill_next_implement(
+        &mut app,
+        "mill-70",
+        "Mill row GREEN.\n\n\
+         Next implement prompt\n\
+         /implement --effort 3 Keep at least two L2s running\n\
+         1) next mill row on nixbuilder",
+    );
+    assert!(
+        app.agents[&AgentId(0)]
+            .subagent_sessions
+            .get("occupancy-l2")
+            .is_some_and(|i| !i.finished),
+        "fixture: occupancy sibling is still running"
+    );
+    let _ = handle(
+        make_ext_session_notification("sess-parent", test_subagent_finished("mill-70")),
+        &mut app,
+    );
+    assert!(
+        mill_next_implement_was_started(&app, "Keep at least two L2s running"),
+        "after mill paints a Next implement prompt whose body starts with \
+         /implement, grok-oss must send that turn; the Operator does not paste it; \
+         effects={:?} queue={:?}",
+        app.pending_effects,
+        app.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Painted mill heading without markdown hashes still auto-runs.
+#[test]
+fn mill_nested_finish_auto_runs_painted_heading_without_hashes() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = make_app_with_agent("sess-parent");
+    paint_mill_next_implement(
+        &mut app,
+        "mill-70",
+        "## Next implement prompt\n\
+         /implement --effort 3 Keep at least two L2s running\n\
+         1) next mill row on nixbuilder",
+    );
+    let _ = handle(
+        make_ext_session_notification("sess-parent", test_subagent_finished("mill-70")),
+        &mut app,
+    );
+    assert!(
+        mill_next_implement_was_started(&app, "Keep at least two L2s running"),
+        "hashed Next implement prompt must auto-run; effects={:?} queue={:?}",
+        app.pending_effects,
+        app.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Auto-run does not fire on bare `implement` without the slash.
+#[test]
+fn mill_nested_finish_does_not_auto_run_bare_implement_without_slash() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = make_app_with_agent("sess-parent");
+    paint_mill_next_implement(
+        &mut app,
+        "mill-70",
+        "Next implement prompt\n\
+         implement leftover without slash\n\
+         1) do not send this",
+    );
+    let _ = handle(
+        make_ext_session_notification("sess-parent", test_subagent_finished("mill-70")),
+        &mut app,
+    );
+    assert!(
+        !mill_next_implement_was_started(&app, "leftover without slash"),
+        "bare implement without the slash must not auto-run; effects={:?} queue={:?}",
+        app.pending_effects,
+        app.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Isolated Preview leftover present after mill: auto-run `/implement`
+/// must not Approve. Empty Enter never Approves.
+#[test]
+fn mill_nested_finish_auto_run_does_not_approve_isolated_preview() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = make_app_with_agent("sess-parent");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    paint_mill_next_implement(
+        &mut app,
+        "mill-70",
+        "Next implement prompt\n\
+         /implement --effort 3 Keep at least two L2s running\n\
+         1) next mill row on nixbuilder",
+    );
+    let _ = handle(
+        make_ext_session_notification("sess-parent", test_subagent_finished("mill-70")),
+        &mut app,
+    );
+    assert!(
+        mill_next_implement_was_started(&app, "Keep at least two L2s running"),
+        "mill Next implement prompt must auto-run under leftover Isolated Preview"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "mill auto-run /implement must not Approve leftover Isolated Preview"
+    );
+}
+
+/// A leftover slash-palette `/` is not mill continue. Isolated Preview
+/// leftover must stay. Empty Enter never Approves.
+#[test]
+fn leftover_slash_palette_is_not_mill_continue() {
+    let mut app = make_app_with_agent("sess-slash-not-mill");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    let effects = crate::app::dispatch::dispatch(Action::SendPrompt("/".into()), &mut app);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "leftover slash `/` must not Approve Isolated Preview"
+    );
+    assert!(
+        agent.line_viewer.is_some(),
+        "leftover slash `/` must not mill-continue close Isolated Preview"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "leftover slash `/` must not steal the next model turn; effects={effects:?}"
+    );
+}
+
+/// Resume re-park: leftover slash `/` then `/view-plan` binds Approve.
+/// Approve still implements. Mill auto-run must not steal that waiter.
+#[test]
+fn restored_plan_approval_view_plan_after_slash_leftover_still_approves() {
+    let mut app = make_app_with_agent("sess-resume-gbt3703");
+    let resume_id = "exit-plan-mode-resume-gbt3703";
+    let session_id = {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        seed_pending_tool(agent, resume_id, "Plan: Exit");
+        agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
+        agent
+            .session
+            .session_id
+            .as_ref()
+            .map(|s| s.0.to_string())
+            .unwrap_or_else(|| "sess-resume-gbt3703".into())
+    };
+    let (ext, rx) = make_exit_plan_ext_for_session(
+        &session_id,
+        resume_id,
+        Some("# Plan GBT3703Repro\n\nResume must restore plan approval.\n"),
+    );
+    assert!(
+        handle_exit_plan_mode(ext, &mut app),
+        "resume must re-park a live waiter"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "resume must restore plan approval"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "resume must not auto-dock Isolated Preview"
+        );
+    }
+
+    let _ = crate::app::dispatch::dispatch(Action::SendPrompt("/".into()), &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "leftover slash `/` must not Approve a restored waiter"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "leftover slash `/` must not mill-continue a restored waiter"
+        );
+    }
+
+    let _ = crate::app::dispatch::dispatch(Action::SendPrompt("/view-plan".into()), &mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.is_some(),
+            "/view-plan must bind Approve to the restored waiter"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "/view-plan must not Approve"
+        );
+        assert!(
+            !matches!(agent.prompt.text().trim(), "/" | "/view-plan"),
+            "leftover slash palette must not cover Approve; composer={:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.slash_open(),
+            "slash palette must close so Approve is clickable"
+        );
+    }
+
+    arm_comment_and_approve_hit_rects(&mut app);
+    let outcome = app.handle_input(&mouse_down(12, 20));
+    let _ = dispatch_outcome(&mut app, outcome);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_decision_resolved,
+        "panel Approve must leave plan mode and start the implement turn"
+    );
+    drop(rx);
+}
+
+/// Failed mill L2 must not auto-run leftover `/implement`.
+#[test]
+fn mill_nested_failed_finish_does_not_auto_run_next_implement() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    let mut app = make_app_with_agent("sess-parent");
+    paint_mill_next_implement(
+        &mut app,
+        "mill-70",
+        "Next implement prompt\n\
+         /implement --effort 3 Keep at least two L2s running",
+    );
+    let mut finished = test_subagent_finished("mill-70");
+    if let XaiSessionUpdate::SubagentFinished { status, .. } = &mut finished {
+        *status = "failed".into();
+    }
+    let _ = handle(
+        make_ext_session_notification("sess-parent", finished),
+        &mut app,
+    );
+    assert!(
+        !mill_next_implement_was_started(&app, "Keep at least two L2s running"),
+        "failed mill must not auto-run; effects={:?} queue={:?}",
+        app.pending_effects,
+        app.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Operator (2026-09-15): "also now this is a regression... see? then I hit
 /// enter and it just disappears and nothing fucking happens. you didn't
 /// fix stale plans. you broke them." Isolated Preview leftover mill 69 /

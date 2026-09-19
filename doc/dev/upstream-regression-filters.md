@@ -1585,6 +1585,12 @@ must not enqueue a Human turn already in chat history.
 
 | path::test | Contract |
 |------------|----------|
+| `mill_turn_end_auto_runs_same_body_next_implement_prompt_without_operator_paste` | After mill paints a Next implement prompt whose body starts with `/implement`, grok-oss sends that turn. The Operator does not paste it. Same standing mill `/implement` body under that heading still auto-runs. |
+| `mill_nested_finish_auto_runs_next_implement_prompt_without_operator_paste` | Nested mill L2 never receives PromptResponse. After mill paints a Next implement prompt whose body starts with `/implement`, grok-oss sends that turn on the parent. Occupancy still running on a sibling L2 does not skip the send. The Operator does not paste it. |
+| `mill_nested_finish_auto_runs_painted_heading_without_hashes` | Painted mill `## Next implement prompt` still auto-runs. |
+| `mill_nested_finish_does_not_auto_run_bare_implement_without_slash` | Auto-run does not fire on bare `implement` without the slash. |
+| `mill_nested_finish_auto_run_does_not_approve_isolated_preview` | Mill auto-run `/implement` must not Approve leftover Isolated Preview. Empty Enter never Approves. |
+| `mill_nested_failed_finish_does_not_auto_run_next_implement` | Failed mill L2 must not auto-run leftover `/implement`. |
 | `compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt` | `/compact` complete must not re-enqueue occupancy or auto-run leftover `/implement` |
 | `auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt` | AUTO compact must not re-enqueue occupancy or any operator prompt |
 | `sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty` | After Compact empties live scrollback, the painted queue still drops `shared_queue` Prompt wires whose text is already a parsed user turn in `chat_history.jsonl` |
@@ -1594,6 +1600,12 @@ must not enqueue a Human turn already in chat history.
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
+  mill_turn_end_auto_runs_same_body_next_implement_prompt_without_operator_paste \
+  mill_nested_finish_auto_runs_next_implement_prompt_without_operator_paste \
+  mill_nested_finish_auto_runs_painted_heading_without_hashes \
+  mill_nested_finish_does_not_auto_run_bare_implement_without_slash \
+  mill_nested_finish_auto_run_does_not_approve_isolated_preview \
+  mill_nested_failed_finish_does_not_auto_run_next_implement \
   compact_complete_does_not_reenqueue_occupancy_or_any_operator_prompt \
   auto_compact_completed_does_not_reenqueue_occupancy_or_any_operator_prompt \
   sync_queue_pane_drops_shared_queue_rows_already_in_chat_history_when_scrollback_is_empty \

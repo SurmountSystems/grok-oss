@@ -648,6 +648,7 @@ impl AgentView {
     /// waiting. With no live park, falls through to the saved preview (and
     /// may park a local idle decision when chrome should arm).
     pub(crate) fn open_plan_from_view_plan_or_status(&mut self) {
+        self.clear_leftover_view_plan_slash_palette();
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
         if self
@@ -674,6 +675,16 @@ impl AgentView {
             self.prompt.text().trim(),
             "/view-plan" | "/show-plan" | "/plan-view"
         )
+    }
+
+    /// Resume `/view-plan` can land as a leftover slash-palette `/` that
+    /// covers Approve. Dismiss that leftover. Keep Revise / Comment notes.
+    pub(crate) fn clear_leftover_view_plan_slash_palette(&mut self) {
+        let trimmed = self.prompt.text().trim();
+        if matches!(trimmed, "/" | "/view-plan" | "/show-plan" | "/plan-view") {
+            self.prompt.slash_close();
+            self.prompt.set_text("");
+        }
     }
 
     pub(crate) fn clear_view_plan_request_if_waiter_bound(&mut self) {

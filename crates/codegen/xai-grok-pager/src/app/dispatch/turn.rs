@@ -2,7 +2,7 @@
 
 use super::ctx::{active_subagent_view_mut, find_agent_by_session_id};
 use super::permissions::drain_permission_queue;
-use super::queue::{apply_turn_start_shim, maybe_drain_queue, note_peek_page_flip};
+use super::queue::{apply_turn_start_shim, maybe_drain_queue_protecting, note_peek_page_flip};
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::{ActivePane, AgentView};
@@ -871,13 +871,15 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         } else {
             None
         };
-        if !was_cancelling && !was_bash_turn {
+        let auto_implement_qid = if !was_cancelling && !was_bash_turn {
             match pending.stop_reason.as_deref() {
-                Some("error") | Some("rate_limit") | Some("cancelled") => {}
+                Some("error") | Some("rate_limit") | Some("cancelled") => None,
                 _ => crate::app::auto_implement::on_successful_turn_end(agent),
             }
-        }
-        let drain = maybe_drain_queue(agent);
+        } else {
+            None
+        };
+        let drain = maybe_drain_queue_protecting(agent, auto_implement_qid);
         effects.extend(drain.effects);
         drained_ids.push((id, adopted_page_flip.or(drain.page_flip_entry)));
     }

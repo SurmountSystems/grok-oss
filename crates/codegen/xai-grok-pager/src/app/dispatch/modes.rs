@@ -45,6 +45,7 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    agent.clear_leftover_view_plan_slash_palette();
     agent.open_plan_from_view_plan_or_status();
     vec![]
 }

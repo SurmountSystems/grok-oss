@@ -502,19 +502,31 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// with extra Operator text is a plan-update turn: Isolated Preview stays
 /// docked as rewriting-wait and quotes that prompt. Idle Approve does not
 /// arm on leftover `plan.md`. Empty Enter never Approves.
+///
+/// A leftover slash-palette `/` is not mill continue. Resume `/view-plan`
+/// plus Approve must still implement a restored waiter. Mill auto-run
+/// `/implement` must not Approve leftover Isolated Preview.
 fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return false;
     }
     let token = trimmed.trim_end_matches('/');
+    if token.is_empty() {
+        return false;
+    }
     if matches!(token, "/view-plan" | "/show-plan" | "/plan-view") {
         return false;
     }
     if token == "/plan" || trimmed.starts_with("/plan ") {
         return false;
     }
-    true
+    if crate::app::auto_implement::is_implement_command_sentence(trimmed)
+        || crate::app::auto_implement::is_implement_command_sentence(token)
+    {
+        return true;
+    }
+    !trimmed.starts_with('/')
 }
 
 fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
@@ -896,8 +908,9 @@ pub(super) fn dispatch_send_prompt_inner(
                     CommandResult::PassThrough(text.clone())
                 }
             } else {
-                // Bare `/` or malformed -- pass through.
-                CommandResult::PassThrough(text.clone())
+                // Bare `/` is leftover slash-palette, not a model prompt.
+                // Resume `/view-plan` plus Approve must still implement.
+                CommandResult::Handled
             }
         };
 
@@ -2094,11 +2107,13 @@ pub(super) fn handle_prompt_response(
         // drain. `bash_turn` is already cleared; skip bash via `was_bash_turn`.
         // A failed 502 turn never reaches here as `Ok`. A 502 retry that later
         // succeeded is a successful turn and must loop.
-        if result.is_ok() && !was_cancelling && !was_bash_turn {
-            crate::app::auto_implement::on_successful_turn_end(agent);
-        }
+        let auto_implement_qid = if result.is_ok() && !was_cancelling && !was_bash_turn {
+            crate::app::auto_implement::on_successful_turn_end(agent)
+        } else {
+            None
+        };
 
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue_protecting(agent, auto_implement_qid);
         let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
         let mut effects = drain.effects;
 

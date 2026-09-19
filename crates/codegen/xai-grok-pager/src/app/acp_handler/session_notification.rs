@@ -216,6 +216,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut auto_implement_qid: Option<u64> = None;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
@@ -696,6 +697,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
+            let mill_completed = status == "completed";
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
             let info_ref = agent.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
@@ -786,6 +788,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             // Isolated Preview stay-after-present must not keep leftover
             // present after mill L2 completion (mill 69 GREEN).
             agent.leave_or_reread_isolated_preview_after_mill_continues();
+            // Nested mill never receives PromptResponse. Auto-run the
+            // trailing Next implement prompt on the parent.
+            if mill_completed && !resuming {
+                auto_implement_qid = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
+            }
             true
         }
         XaiSessionUpdate::HookAnnotation { message } => {
@@ -1233,6 +1243,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     };
     let extra = std::mem::take(&mut agent.pending_effects);
     app.pending_effects.extend(extra);
+    if let Some(qid) = auto_implement_qid {
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek_protecting(
+            app,
+            parent_id,
+            Some(qid),
+        );
+        app.pending_effects.extend(effects);
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()

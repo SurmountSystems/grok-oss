@@ -1111,6 +1111,17 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    maybe_drain_queue_and_note_peek_protecting(app, agent_id, None)
+}
+
+/// Same as [`maybe_drain_queue_and_note_peek`], keeping `protect_queue_id`
+/// so a just-enqueued mill Next implement prompt is not occupancy-dropped
+/// when its body matches the Human turn that just finished.
+pub(crate) fn maybe_drain_queue_and_note_peek_protecting(
+    app: &mut AppView,
+    agent_id: AgentId,
+    protect_queue_id: Option<u64>,
+) -> Vec<Effect> {
     if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
     }
@@ -1118,7 +1129,7 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             return vec![];
         };
-        maybe_drain_queue(agent)
+        maybe_drain_queue_protecting(agent, protect_queue_id)
     };
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects

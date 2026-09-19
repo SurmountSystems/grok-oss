@@ -40,6 +40,38 @@ fn send_prompt_view_plan_never_sends_to_model() {
     );
 }
 
+/// Resume `/view-plan` can land as leftover slash-palette `/`. ShowPlan
+/// must dismiss that leftover so Approve stays clickable.
+#[test]
+fn view_plan_clears_leftover_slash_palette() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
+        agent.plan_mode_active = true;
+        agent.latest_inline_plan_content = Some("# Plan GBT3703Repro\n".into());
+    }
+    let effects = dispatch(Action::ShowPlan, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendInterject { .. })),
+        "ShowPlan must stay local, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        !matches!(agent.prompt.text().trim(), "/" | "/view-plan"),
+        "leftover slash palette must not cover Approve; composer={:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        !agent.prompt.slash_open(),
+        "slash palette must close so Approve is clickable"
+    );
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {
@@ -5769,6 +5801,57 @@ fn http_502_failed_turn_does_not_auto_run_next_implement() {
             "remaining residual after the first slice"
         ),
         "a failed 502 turn must not auto-run leftover /implement; \
+         effects={effects:?} queue={:?}",
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Named contract: after mill paints a Next implement prompt whose body
+/// starts with `/implement`, grok-oss sends that turn. The Operator does
+/// not paste it. The mill loop re-emits the same standing `/implement`
+/// under that heading; echo skip must not drop it.
+#[test]
+fn mill_turn_end_auto_runs_same_body_next_implement_prompt_without_operator_paste() {
+    crate::appearance::cache::set_auto_run_implement(true);
+    crate::appearance::cache::set_economic_mode(false);
+
+    const MILL: &str = "/implement --effort 3 Keep at least two L2s running\n\
+         1) next mill row on nixbuilder";
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("mill-1".into());
+        agent.session.prompt_history = vec![MILL.into()];
+        agent.scrollback.push_block(RenderBlock::user_prompt(MILL));
+        agent.scrollback.push_block(RenderBlock::agent_message(
+            "Mill row GREEN.\n\n\
+             Next implement prompt\n\
+             /implement --effort 3 Keep at least two L2s running\n\
+             1) next mill row on nixbuilder",
+        ));
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            prompt_id: Some("mill-1".into()),
+        }),
+        &mut app,
+    );
+
+    assert!(
+        next_implement_was_started(&app, id, &effects, "Keep at least two L2s running"),
+        "after mill paints a Next implement prompt whose body starts with \
+         /implement, grok-oss must send that turn; the Operator does not paste it; \
          effects={effects:?} queue={:?}",
         app.agents[&id]
             .session
