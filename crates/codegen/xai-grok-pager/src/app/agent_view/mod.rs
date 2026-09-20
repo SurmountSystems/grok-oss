@@ -1215,6 +1215,11 @@ pub struct AgentView {
     pub hit_bg_status: HitArea,
     pub hit_goal_status: HitArea,
     pub hit_goal_close: HitArea,
+    pub hit_goal_resume: HitArea,
+    pub hit_goal_pause: HitArea,
+    pub hit_goal_status_cmd: HitArea,
+    pub hit_goal_clear: HitArea,
+    pub hit_goal_esc_close: HitArea,
     pub hit_bg_button: HitArea,
     #[allow(dead_code)]
     pub(crate) last_bg_click: Option<Instant>,

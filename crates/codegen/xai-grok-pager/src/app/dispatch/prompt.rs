@@ -260,6 +260,37 @@ fn enqueue_if_interject_dropped(
     effects
 }
 
+/// `/goal clear` while a turn is running: dismiss the card now, enqueue the
+/// shell builtin, and do not interject. Nested work keeps running.
+fn enqueue_goal_clear_without_interject(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    consume_input: bool,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    agent.show_goal_detail = false;
+    if let Some(g) = agent.goal_state.take() {
+        agent.last_cleared_goal_id = Some(g.goal_id);
+    }
+    agent.append_prompt_wal(
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
+        &text,
+        &[],
+    );
+    agent.start_pending_live_prompt_task(&text);
+    agent.session.enqueue_prompt(text.clone());
+    if consume_input {
+        drain_prompt_state_to_last_queued(agent);
+        agent.prompt.set_text("");
+        agent.clear_sent_human_from_plan_feedback_draft(&text);
+    }
+    agent.persist_pending_prompts();
+    vec![]
+}
+
 /// Clear the active prompt and record non-empty text in prompt history (Esc Esc).
 pub(super) fn dispatch_clear_prompt(app: &mut AppView) -> Vec<Effect> {
     with_active_agent(app, |agent| {
@@ -1116,11 +1147,22 @@ pub(super) fn dispatch_send_prompt_inner(
             CommandResult::PassThrough(pass_text) => {
                 // Mid-turn Enter: slash PassThrough that is not a named hold
                 // (including `/goal ...`) merges into this turn via
-                // `x.ai/interject`. Named `/queue /finish` is QueueLater
-                // above. Send now of an already-queued `/goal` row is
-                // GoalSet (`SendPromptNow` in `force_interject_queue_row`),
-                // a different path. Idle `/goal` still enqueues as GoalSet.
+                // `x.ai/interject`. `/goal clear` is not that path: dismiss
+                // the card immediately and enqueue the shell builtin so it
+                // runs when the actor can, without steering the model.
+                // Named `/queue /finish` is QueueLater above. Send now of
+                // an already-queued `/goal` row is GoalSet (`SendPromptNow`
+                // in `force_interject_queue_row`), a different path. Idle
+                // `/goal` still enqueues as GoalSet.
                 if consume_input && agent.session.state.is_turn_running() {
+                    if crate::slash::queue_schedule::is_goal_clear_slash(&pass_text) {
+                        return enqueue_goal_clear_without_interject(
+                            app,
+                            id,
+                            pass_text,
+                            consume_input,
+                        );
+                    }
                     let images = agent.prompt.drain_images();
                     return enqueue_if_interject_dropped(app, id, pass_text, images);
                 } else {
@@ -1202,6 +1244,9 @@ pub(super) fn dispatch_send_prompt_inner(
         // a queued row) are other paths. Ctrl+Enter / Send now is the
         // explicit InterjectPrompt path (`SendInterject`), not cancel-and-send.
         if consume_input && agent.session.state.is_turn_running() {
+            if crate::slash::queue_schedule::is_goal_clear_slash(&text) {
+                return enqueue_goal_clear_without_interject(app, id, text, consume_input);
+            }
             let named_live_l2 = matches!(
                 interject::overlay_operator_clarify(agent),
                 interject::OverlayOperatorClarify::None

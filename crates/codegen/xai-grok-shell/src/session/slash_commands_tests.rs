@@ -1928,6 +1928,22 @@ fn goal_clear_resolves_to_clear() {
     assert!(matches!(resolve_goal("clear"), BuiltinAction::GoalClear));
 }
 
+/// `/goal clear` dismisses without waiting on nested work. Interject text
+/// must still resolve to GoalClear, not a model steer.
+#[test]
+fn mid_turn_goal_clear_is_goal_clear_builtin_not_steer() {
+    assert!(matches!(
+        super::mid_turn_goal_builtin("/goal clear"),
+        Some(BuiltinAction::GoalClear)
+    ));
+    assert!(matches!(
+        super::mid_turn_goal_builtin("  /GOAL CLEAR  "),
+        Some(BuiltinAction::GoalClear)
+    ));
+    assert!(super::mid_turn_goal_builtin("/goal just check-remote").is_none());
+    assert!(super::mid_turn_goal_builtin("/goal resume").is_none());
+}
+
 #[test]
 fn goal_objective_resolves_to_set() {
     match resolve_goal("implement auth module") {

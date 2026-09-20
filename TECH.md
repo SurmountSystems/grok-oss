@@ -33,6 +33,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Finish Isolated Preview report
     - L3 specialists (when spawned)
+  - L2 Finish goal card wiring
+    - L3 specialists (when spawned)
+  - L2 Finish goal-clear report
+    - L3 specialists (when spawned)
   - L2 Finish totals report
     - L3 specialists (when spawned)
   - L2 Fix /plan already-in-plan submit
@@ -61,6 +65,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix GHA just ci fail
     - L3 specialists (when spawned)
+  - L2 Fix GoalDetailHovers test args
+    - L3 specialists (when spawned)
   - L2 Fix Isolated Preview plan stay
     - L3 specialists (when spawned)
   - L2 Fix Isolated Preview vanish
@@ -76,6 +82,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Fix blank transcript on start
     - L3 specialists (when spawned)
   - L2 Fix from_ref SubagentInfo types
+    - L3 specialists (when spawned)
+  - L2 Fix goal clear and clickable card
     - L3 specialists (when spawned)
   - L2 Fix image describe request fail
     - L3 specialists (when spawned)
@@ -121,6 +129,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix subagent token chrome
     - L3 specialists (when spawned)
+  - L2 Goal card clickable clear
+    - L3 specialists (when spawned)
   - L2 Goal check-remote closeout
     - L3 specialists (when spawned)
   - L2 Green Isolated Preview present tests
@@ -132,6 +142,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Implement Isolated Preview --soft tests
     - L3 specialists (when spawned)
   - L2 Implement Isolated Preview plan dispatch
+    - L3 specialists (when spawned)
+  - L2 Implement goal card clicks
     - L3 specialists (when spawned)
   - L2 Implement grok-oss rebuild plan
     - L3 specialists (when spawned)
@@ -157,13 +169,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Land totals and report
     - L3 specialists (when spawned)
+  - L2 Locate goal card files
+    - L3 specialists (when spawned)
   - L2 One check-remote after Approve split
+    - L3 specialists (when spawned)
+  - L2 One check-remote after GoalDetailHovers
     - L3 specialists (when spawned)
   - L2 One check-remote after dead-code
     - L3 specialists (when spawned)
   - L2 One check-remote after draft-vs-Approve
     - L3 specialists (when spawned)
   - L2 One check-remote after from_ref
+    - L3 specialists (when spawned)
+  - L2 One check-remote after goal card
+    - L3 specialists (when spawned)
+  - L2 One check-remote after goal wrap
     - L3 specialists (when spawned)
   - L2 One check-remote after rebuild resume
     - L3 specialists (when spawned)
@@ -217,6 +237,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Soft plan tests then product
     - L3 specialists (when spawned)
+  - L2 Stay until wrap then one gate
+    - L3 specialists (when spawned)
   - L2 Subagents L2 token totals
     - L3 specialists (when spawned)
   - L2 TDD plan exit stale panel
@@ -229,15 +251,23 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Wait then one check-remote
     - L3 specialists (when spawned)
+  - L2 Wait then one check-remote
+    - L3 specialists (when spawned)
   - L2 Wire Subagents list helpers
+    - L3 specialists (when spawned)
+  - L2 Wire goal-clear no-interject
     - L3 specialists (when spawned)
   - L2 Wire or drop unused commenting fn
     - L3 specialists (when spawned)
   - L2 Wire unused subagent list helpers
     - L3 specialists (when spawned)
+  - L2 Wrap-only rustfmt goal card
+    - L3 specialists (when spawned)
   - L2 Wrap-only rustfmt rebuild 403
     - L3 specialists (when spawned)
   - L2 Wrap-only rustfmt three files
+    - L3 specialists (when spawned)
+  - L2 Write goal card tests
     - L3 specialists (when spawned)
   - L2 Write rebuild resume contracts
     - L3 specialists (when spawned)
@@ -294,6 +324,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Finish 403 paint product | nested L2 session usage | L2 | 180278 | estimate | exited |
 | Finish 403 paint slice | nested L2 session usage | L2 | 151260 | estimate | exited |
 | Finish Isolated Preview report | nested L2 session usage | L2 | 133004 | estimate | exited |
+| Finish goal card wiring | nested L2 session usage | L2 | 204391 | estimate | exited |
+| Finish goal-clear report | nested L2 session usage | L2 | 202356 | estimate | exited |
 | Finish totals report | nested L2 session usage | L2 | 201460 | estimate | exited |
 | Fix /plan already-in-plan submit | nested L2 session usage | L2 | 141546 | estimate | exited |
 | Fix /plan ignored after Exit | nested L2 session usage | L2 | 205062 | estimate | exited |
@@ -308,6 +340,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix GHA just ci 85f3c6ad | nested L2 session usage | L2 | 92472 | estimate | exited |
 | Fix GHA just ci a35a047 | nested L2 session usage | L2 | 136692 | estimate | exited |
 | Fix GHA just ci fail | nested L2 session usage | L2 | 87091 | estimate | exited |
+| Fix GoalDetailHovers test args | nested L2 session usage | L2 | 79475 | estimate | exited |
 | Fix Isolated Preview plan stay | nested L2 session usage | L2 | 77227 | estimate | exited |
 | Fix Isolated Preview vanish | nested L2 session usage | L2 | 164545 | estimate | exited |
 | Fix RetryState and session_id borrow | nested L2 session usage | L2 | 90120 | estimate | exited |
@@ -316,6 +349,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix await holding skip-env lock | nested L2 session usage | L2 | 99018 | estimate | exited |
 | Fix blank transcript on start | nested L2 session usage | L2 | 250157 | estimate | exited |
 | Fix from_ref SubagentInfo types | nested L2 session usage | L2 | 89943 | estimate | exited |
+| Fix goal clear and clickable card | nested L2 session usage | L2 | 145928 | estimate | exited |
 | Fix image describe request fail | nested L2 session usage | L2 | 198548 | estimate | exited |
 | Fix interject elapsed bound | nested L2 session usage | L2 | 131141 | estimate | exited |
 | Fix just install ripgrep | nested L2 session usage | L2 | 125135 | estimate | exited |
@@ -338,12 +372,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix stale plan panel snapshot | nested L2 session usage | L2 | 166403 | estimate | exited |
 | Fix stale prompt hang | nested L2 session usage | L2 | 166405 | estimate | exited |
 | Fix subagent token chrome | nested L2 session usage | L2 | 0 | estimate | exited |
+| Goal card clickable clear | nested L2 session usage | L2 | 199757 | estimate | exited |
 | Goal check-remote closeout | nested L2 session usage | L2 | 85842 | estimate | exited |
 | Green Isolated Preview present tests | nested L2 session usage | L2 | 156883 | estimate | exited |
 | Green mill leftover Isolated Preview | nested L2 session usage | L2 | 152759 | estimate | exited |
 | Idle mill plan vanish | nested L2 session usage | L2 | 107469 | estimate | exited |
 | Implement Isolated Preview --soft tests | nested L2 session usage | L2 | 95359 | estimate | exited |
 | Implement Isolated Preview plan dispatch | nested L2 session usage | L2 | 202803 | estimate | exited |
+| Implement goal card clicks | nested L2 session usage | L2 | 198624 | estimate | exited |
 | Implement grok-oss rebuild plan | nested L2 session usage | L2 | 202953 | estimate | exited |
 | Implement rebuild disconnect resume | nested L2 session usage | L2 | 183209 | estimate | exited |
 | Implement rewrite-wait Isolated Preview | nested L2 session usage | L2 | 197335 | estimate | exited |
@@ -356,10 +392,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | L2 present-plus-past token totals | nested L2 session usage | L2 | 83961 | estimate | exited |
 | Land rebuild resume tests | nested L2 session usage | L2 | 202916 | estimate | exited |
 | Land totals and report | nested L2 session usage | L2 | 162630 | estimate | exited |
+| Locate goal card files | nested L2 session usage | L2 | 146163 | estimate | exited |
 | One check-remote after Approve split | nested L2 session usage | L2 | 118279 | estimate | exited |
+| One check-remote after GoalDetailHovers | nested L2 session usage | L2 | 110243 | estimate | exited |
 | One check-remote after dead-code | nested L2 session usage | L2 | 111510 | estimate | exited |
 | One check-remote after draft-vs-Approve | nested L2 session usage | L2 | 119614 | estimate | exited |
 | One check-remote after from_ref | nested L2 session usage | L2 | 94239 | estimate | exited |
+| One check-remote after goal card | nested L2 session usage | L2 | 77109 | estimate | exited |
+| One check-remote after goal wrap | nested L2 session usage | L2 | 78312 | estimate | exited |
 | One check-remote after rebuild resume | nested L2 session usage | L2 | 116235 | estimate | exited |
 | One check-remote after rustc | nested L2 session usage | L2 | 86345 | estimate | exited |
 | One check-remote after rustfmt | nested L2 session usage | L2 | 94829 | estimate | exited |
@@ -386,17 +426,22 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Runner surmount-1 quality install | nested L2 session usage | L2 | 92031 | estimate | exited |
 | Second just check-remote | nested L2 session usage | L2 | 83414 | estimate | exited |
 | Soft plan tests then product | nested L2 session usage | L2 | 86959 | estimate | exited |
+| Stay until wrap then one gate | nested L2 session usage | L2 | 97692 | estimate | exited |
 | Subagents L2 token totals | nested L2 session usage | L2 | 199285 | estimate | exited |
 | TDD plan exit stale panel | nested L2 session usage | L2 | 184069 | estimate | exited |
 | Unstick Isolated Preview resume | nested L2 session usage | L2 | 196993 | estimate | exited |
 | Unwedge parked Isolated Preview | nested L2 session usage | L2 | 112874 | estimate | exited |
 | User-guide exclusive plan stay | nested L2 session usage | L2 | 129812 | estimate | exited |
 | Wait then one check-remote | nested L2 session usage | L2 | 114808 | estimate | exited |
+| Wait then one check-remote | nested L2 session usage | L2 | 87994 | estimate | exited |
 | Wire Subagents list helpers | nested L2 session usage | L2 | 118938 | estimate | exited |
+| Wire goal-clear no-interject | nested L2 session usage | L2 | 196106 | estimate | exited |
 | Wire or drop unused commenting fn | nested L2 session usage | L2 | 106056 | estimate | exited |
 | Wire unused subagent list helpers | nested L2 session usage | L2 | 103808 | estimate | exited |
+| Wrap-only rustfmt goal card | nested L2 session usage | L2 | 81443 | estimate | exited |
 | Wrap-only rustfmt rebuild 403 | nested L2 session usage | L2 | 86635 | estimate | exited |
 | Wrap-only rustfmt three files | nested L2 session usage | L2 | 78355 | estimate | exited |
+| Write goal card tests | nested L2 session usage | L2 | 202779 | estimate | exited |
 | Write rebuild resume contracts | nested L2 session usage | L2 | 195270 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 105347 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 116324 | estimate | exited |

@@ -301,6 +301,26 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         },
     },
 ];
+
+/// Parser used by tests: mid-turn `/goal clear` is GoalClear, not steer text.
+/// Pager enqueue is the product path (`is_goal_clear_slash`).
+#[cfg(test)]
+pub(super) fn mid_turn_goal_builtin(text: &str) -> Option<BuiltinAction> {
+    let trimmed = text.trim();
+    let (cmd, args) = match trimmed.split_once(char::is_whitespace) {
+        Some((c, rest)) => (c, rest.trim()),
+        None => (trimmed, ""),
+    };
+    if !cmd.eq_ignore_ascii_case("/goal") {
+        return None;
+    }
+    match args.to_ascii_lowercase().as_str() {
+        "clear" => Some(BuiltinAction::GoalClear),
+        "pause" => Some(BuiltinAction::GoalPause),
+        "status" | "" => Some(BuiltinAction::GoalStatus),
+        _ => None,
+    }
+}
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
 ///
 /// Only a TRAILING, standalone flag is consumed: the flag must be its own

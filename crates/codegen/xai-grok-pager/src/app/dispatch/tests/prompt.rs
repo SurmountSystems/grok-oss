@@ -1144,6 +1144,53 @@ fn send_prompt_while_running_queues_without_drain() {
     );
 }
 
+/// `/goal clear` dismisses without waiting on nested work.
+#[test]
+fn goal_clear_while_turn_running_is_not_interject_and_closes_card() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.show_goal_detail = true;
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.prompt.set_text("/goal clear");
+    }
+    let effects = dispatch(Action::SendPrompt("/goal clear".into()), &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendInterject { .. })),
+        "/goal clear must not wait as interject; got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        !agent.show_goal_detail,
+        "goal card must dismiss immediately"
+    );
+    assert!(
+        agent.goal_state.is_none(),
+        "goal card state must drop immediately"
+    );
+    assert_eq!(
+        agent.last_cleared_goal_id.as_deref(),
+        Some("g-test"),
+        "cleared goal id must stick so a late GoalUpdated cannot resurrect the card"
+    );
+    assert!(
+        agent
+            .session
+            .pending_prompts
+            .iter()
+            .any(|p| p.text.trim() == "/goal clear"),
+        "shell builtin /goal clear must enqueue for when the actor can run it"
+    );
+    assert!(
+        agent.session.state.is_turn_running(),
+        "nested/turn keep running"
+    );
+}
+
 /// Composer Enter must not vanish a draft when interject cannot land (no
 /// session). Enqueue locally instead of leaving Ctrl-Z as the only recovery.
 #[test]

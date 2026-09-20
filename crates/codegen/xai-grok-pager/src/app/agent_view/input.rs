@@ -681,16 +681,46 @@ impl AgentView {
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                && self.hit_goal_close.contains(mouse.column, mouse.row)
             {
-                self.show_goal_detail = false;
-                return InputOutcome::Changed;
+                if self.hit_goal_close.contains(mouse.column, mouse.row)
+                    || self.hit_goal_clear.contains(mouse.column, mouse.row)
+                {
+                    self.show_goal_detail = false;
+                    if let Some(g) = self.goal_state.take() {
+                        self.last_cleared_goal_id = Some(g.goal_id);
+                    }
+                    return InputOutcome::Action(Action::SendPrompt("/goal clear".into()));
+                }
+                if self.hit_goal_esc_close.contains(mouse.column, mouse.row) {
+                    self.show_goal_detail = false;
+                    return InputOutcome::Changed;
+                }
+                if self.hit_goal_resume.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal resume".into()));
+                }
+                if self.hit_goal_pause.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal pause".into()));
+                }
+                if self.hit_goal_status_cmd.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal status".into()));
+                }
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Moved)
-                && self.hit_goal_close.update_hover(mouse.column, mouse.row)
             {
-                return InputOutcome::Changed;
+                let changed = self.hit_goal_close.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_clear.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_esc_close
+                        .update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_resume.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_pause.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_status_cmd
+                        .update_hover(mouse.column, mouse.row);
+                if changed {
+                    return InputOutcome::Changed;
+                }
             }
             if matches!(ev, Event::Mouse(_) | Event::Paste(_)) {
                 return InputOutcome::Changed;

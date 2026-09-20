@@ -4657,7 +4657,7 @@ impl AgentView {
             let active_subagent_tokens = crate::app::subagent::sum_live_nested_session_windows(
                 self.subagent_sessions.values(),
             );
-            let close_rect = crate::views::goal_detail::render_goal_detail(
+            let hits = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,
                 goal,
@@ -4665,9 +4665,21 @@ impl AgentView {
                 tick,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
-                self.hit_goal_close.hovered,
+                crate::views::goal_detail::GoalDetailHovers {
+                    close: self.hit_goal_close.hovered,
+                    esc_close: self.hit_goal_esc_close.hovered,
+                    resume: self.hit_goal_resume.hovered,
+                    pause: self.hit_goal_pause.hovered,
+                    status: self.hit_goal_status_cmd.hovered,
+                    clear: self.hit_goal_clear.hovered,
+                },
             );
-            self.hit_goal_close.rect = close_rect;
+            self.hit_goal_close.rect = hits.close;
+            self.hit_goal_esc_close.rect = hits.esc_close;
+            self.hit_goal_resume.rect = hits.resume;
+            self.hit_goal_pause.rect = hits.pause;
+            self.hit_goal_status_cmd.rect = hits.status;
+            self.hit_goal_clear.rect = hits.clear;
             self.frame_occluder_rects.push(overlay_rect);
         }
         if self.show_workflows {

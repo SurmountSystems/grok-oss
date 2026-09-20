@@ -43,6 +43,17 @@ pub fn is_goal_slash(text: &str) -> bool {
     first_slash_token(text) == "/goal"
 }
 
+/// `/goal clear` dismisses without waiting on nested work. Not GoalSet.
+pub fn is_goal_clear_slash(text: &str) -> bool {
+    if !is_goal_slash(text) {
+        return false;
+    }
+    text.trim()
+        .strip_prefix("/goal")
+        .map(|rest| rest.trim().eq_ignore_ascii_case("clear"))
+        .unwrap_or(false)
+}
+
 pub fn compact_command_text(rest: &str) -> String {
     if rest.is_empty() {
         "/compact".to_string()
@@ -188,6 +199,18 @@ mod tests {
         assert!(is_goal_slash("/goal"));
         assert!(!is_goal_slash("/goals"));
         assert!(!is_goal_slash("goal check remotely"));
+    }
+
+    /// `/goal clear` dismisses without waiting on nested work.
+    #[test]
+    fn is_goal_clear_slash_is_only_the_clear_subcommand() {
+        assert!(is_goal_clear_slash("/goal clear"));
+        assert!(is_goal_clear_slash("  /goal  CLEAR  "));
+        assert!(!is_goal_clear_slash("/goal"));
+        assert!(!is_goal_clear_slash("/goal pause"));
+        assert!(!is_goal_clear_slash(
+            "/goal also now do a /goal to check everything remotely"
+        ));
     }
 
     /// Operator: "/plan never submits, it just pulls up the stale plan."
