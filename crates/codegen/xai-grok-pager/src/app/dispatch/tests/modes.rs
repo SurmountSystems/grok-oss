@@ -1,6 +1,7 @@
 //! Tests for plan, yolo, auto, and permission mode transitions.
 
 use super::*;
+use std::sync::Arc;
 
 /// `/view-plan` on welcome must stick the request so `--continue` can dock
 /// Approve after SessionLoaded. Idle resume still does not auto-dock.
@@ -355,8 +356,9 @@ fn slash_plan_with_args_already_in_plan_submits_plan_update() {
 
 /// Operator (2026-09-12): "wait, actually, exiting the plan mode does
 /// unstick it if I type something, but a new /plan prompt got ignored"
-/// After Plan Exit, `/plan` must dock Isolated Preview. Compact must not
-/// swallow `/plan`. Empty Enter never Approves.
+/// After Plan Exit, `/plan` paints covering exclusive present. Compact
+/// must not swallow `/plan`. Empty Enter never Approves. Nested
+/// implementers are exclusive-blocked.
 #[test]
 fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
     let mut app = test_app_with_agent();
@@ -371,6 +373,17 @@ fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
         agent
             .session
             .start_command(crate::app::agent::AgentCommand::Compact);
+        let mut nested = super::make_test_subagent("child-sess", "l2-worker");
+        nested.status = Some(Arc::from("Working"));
+        agent
+            .subagent_sessions
+            .insert("child-l2".to_string(), nested);
+        let mut done = super::make_test_subagent("done-sess", "l2-done");
+        done.finished = true;
+        done.status = Some(Arc::from("completed"));
+        agent
+            .subagent_sessions
+            .insert("child-done".to_string(), done);
     }
 
     let effects = dispatch(Action::SendPrompt("/plan".into()), &mut app);
@@ -382,25 +395,43 @@ fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
                 | Effect::SetModeThenPrompt { .. }
                 | Effect::SendPrompt { .. }
                 | Effect::SendInterject { .. }
+                | Effect::CancelTurn { .. }
         )),
-        "after Plan Exit, `/plan` must dock Isolated Preview, not enter plan mode or vanish into compact; got {effects:?}"
+        "after Plan Exit, `/plan` must exclusive-cover, not enter plan mode, CancelTurn the parent, or vanish into compact; got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::KillSubagent { subagent_id, .. } if subagent_id == "l2-worker"
+        )),
+        "after Plan Exit, bare `/plan` exclusive-blocks live nested implementers; got {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::KillSubagent { subagent_id, .. } if subagent_id == "l2-done"
+        )),
+        "exclusive `/plan` must not KillSubagent already-finished rows; got {effects:?}"
     );
     let agent = &app.agents[&id];
     assert!(
-        agent.is_plan_viewer(),
-        "after Plan Exit, `/plan` must dock Isolated Preview, not be ignored"
+        agent
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.fullscreen && !v.is_soft_plan_side_pane()),
+        "after Plan Exit, `/plan` is covering exclusive present, not Isolated Preview leftover dock"
     );
     assert!(
         agent.plan_decision_resolved,
-        "docking Isolated Preview after Exit must not undo Plan Exit"
+        "exclusive covering after Exit must not undo Plan Exit; empty Enter never Approves"
     );
     assert!(
-        agent.plan_approval_view.is_none()
-            || agent
-                .line_viewer
-                .as_ref()
-                .is_some_and(|v| v.plan_ref().is_none_or(|p| !p.feedback_active)),
-        "empty Enter never Approves after Plan Exit `/plan` dock"
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .is_none_or(|p| p.selected_cta.is_none()),
+        "empty Enter never Approves exclusive covering; nothing selected"
     );
     assert!(
         agent.session.pending_prompts.is_empty(),
@@ -415,13 +446,23 @@ fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
                 ..
             }
         ),
-        "docking Isolated Preview must not abort compact"
+        "exclusive covering must not abort compact"
+    );
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        nested.pending_kill && !nested.finished,
+        "live nested implementer must be exclusive-blocked"
+    );
+    let done = &agent.subagent_sessions["child-done"];
+    assert!(
+        done.finished && !done.pending_kill,
+        "already-finished nested row must not be exclusive-blocked"
     );
 }
 
 /// Operator (2026-09-14): "It's still broken. /plan never submits, it just
 /// pulls up the stale plan." After Plan Exit, `/plan` with extra Human text
-/// submits a plan-update turn. Bare `/plan` still docks Isolated Preview.
+/// submits a plan-update turn. Bare `/plan` is covering exclusive present.
 /// Empty Enter never Approves.
 #[test]
 fn after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview() {
@@ -582,6 +623,106 @@ fn plan_soft_docks_isolated_preview_without_entering_plan_mode() {
         nested.status.as_deref(),
         Some("Working"),
         "nested L2 must stay Working"
+    );
+}
+
+/// Named contract: live nested implementers get `KillSubagent` on bare
+/// `/plan` and stay Working on `/plan --soft`. Exclusive `/plan` does not
+/// CancelTurn the parent. Empty Enter never Approves.
+#[test]
+fn bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        let mut nested = super::make_test_subagent("child-sess", "l2-worker");
+        nested.status = Some(Arc::from("Working"));
+        agent
+            .subagent_sessions
+            .insert("child-l2".to_string(), nested);
+        let mut done = super::make_test_subagent("done-sess", "l2-done");
+        done.finished = true;
+        agent
+            .subagent_sessions
+            .insert("child-done".to_string(), done);
+    }
+
+    let soft = dispatch(Action::SendPrompt("/plan --soft".into()), &mut app);
+    assert!(
+        soft.iter().all(|e| !matches!(
+            e,
+            Effect::KillSubagent { .. } | Effect::CancelTurn { .. } | Effect::SetSessionMode { .. }
+        )),
+        "`/plan --soft` must not exclusive-block nested implementers; got {soft:?}"
+    );
+    {
+        let agent = &app.agents[&id];
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.is_soft_plan_side_pane()),
+            "`/plan --soft` docks Isolated Preview, not covering exclusive present"
+        );
+        let nested = &agent.subagent_sessions["child-l2"];
+        assert!(
+            !nested.pending_kill && !nested.finished,
+            "nested implementers stay Working under `/plan --soft`"
+        );
+        assert_eq!(nested.status.as_deref(), Some("Working"));
+    }
+
+    let exclusive = dispatch(Action::SendPrompt("/plan".into()), &mut app);
+    assert!(
+        exclusive.iter().any(|e| matches!(
+            e,
+            Effect::KillSubagent { subagent_id, .. } if subagent_id == "l2-worker"
+        )),
+        "bare `/plan` exclusive-blocks live nested implementers; got {exclusive:?}"
+    );
+    assert!(
+        exclusive.iter().all(|e| !matches!(
+            e,
+            Effect::KillSubagent { subagent_id, .. } if subagent_id == "l2-done"
+        )),
+        "bare `/plan` must not KillSubagent already-finished rows; got {exclusive:?}"
+    );
+    assert!(
+        exclusive
+            .iter()
+            .all(|e| !matches!(e, Effect::CancelTurn { .. })),
+        "exclusive `/plan` must not CancelTurn the parent; got {exclusive:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.fullscreen && !v.is_soft_plan_side_pane()),
+        "bare `/plan` is covering exclusive present"
+    );
+    assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .is_none_or(|p| p.selected_cta.is_none()),
+        "empty Enter never Approves exclusive covering; nothing selected"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "exclusive covering is not Approve"
+    );
+    let nested = &agent.subagent_sessions["child-l2"];
+    assert!(
+        nested.pending_kill && !nested.finished,
+        "live nested implementer must be exclusive-blocked"
+    );
+    let done = &agent.subagent_sessions["child-done"];
+    assert!(
+        done.finished && !done.pending_kill,
+        "already-finished nested row must not be exclusive-blocked"
     );
 }
 

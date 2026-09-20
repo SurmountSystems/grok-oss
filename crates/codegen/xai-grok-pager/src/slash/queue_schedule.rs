@@ -69,9 +69,10 @@ pub fn plan_description_from_command(text: &str) -> Option<String> {
     }
 }
 
-/// `/plan` with extra Human text is a plan-update turn (Human send / plan
-/// rewrite). Bare `/plan` and `/plan --soft` dock Isolated Preview. `queue`
-/// / `later` still hold. `--soft` is not the queue hold token.
+/// `/plan` with extra Operator text is a plan-update turn (Operator send /
+/// plan rewrite). Bare `/plan` exclusive-blocks nested implementers.
+/// `/plan --soft` docks Isolated Preview. `queue` / `later` still hold.
+/// `--soft` is not the queue hold token.
 pub fn plan_slash_is_update_turn(text: &str) -> bool {
     if !is_plan_slash(text) {
         return false;
@@ -190,8 +191,9 @@ mod tests {
     }
 
     /// Operator: "/plan never submits, it just pulls up the stale plan."
-    /// Extra Human text after `/plan` is a plan-update turn. Bare `/plan`
-    /// and `/plan --soft` still dock Isolated Preview.
+    /// Extra Operator text after `/plan` is a plan-update turn. Bare `/plan`
+    /// exclusive-blocks nested implementers. `/plan --soft` docks Isolated
+    /// Preview.
     #[test]
     fn plan_slash_with_body_is_update_turn_bare_and_soft_are_not() {
         assert!(plan_slash_is_update_turn(

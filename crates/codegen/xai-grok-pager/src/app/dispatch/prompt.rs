@@ -208,6 +208,10 @@ fn enqueue_if_interject_dropped(
         return effects;
     };
     if mill_work_continues_after_isolated_preview(&text) {
+        // Isolated Preview with a live waiter stays until Esc, Exit, or
+        // Approve. Operator `/implement` must not vanish the pane. Human
+        // mill-continue still re-reads current disk plan.md when nested
+        // work rewrote that file.
         agent.leave_or_reread_isolated_preview_after_mill_continues();
     } else if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
         agent.enter_isolated_preview_rewrite_wait(&send_text);
@@ -496,16 +500,20 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
 /// prompt queue, and `--soft` is not the queue hold token.
 ///
 /// Operator: "/plan never submits, it just pulls up the stale plan." Bare
-/// `/plan` and `/plan --soft` still dock Isolated Preview. Isolated Preview
-/// stay-after-present exists for Comment-then-Approve. Mill-continue close
-/// is a Human mill sentence / `/implement`, not `/plan` extra text. `/plan`
-/// with extra Operator text is a plan-update turn: Isolated Preview stays
-/// docked as rewriting-wait and quotes that prompt. Idle Approve does not
-/// arm on leftover `plan.md`. Empty Enter never Approves.
+/// `/plan` exclusive-blocks nested implementers and paints covering
+/// exclusive present. `/plan --soft` docks Isolated Preview. Isolated
+/// Preview stay-after-present exists for Comment-then-Approve. Isolated
+/// Preview stays until Esc, Exit, or Approve. Human mill-continue still
+/// re-reads current disk plan.md when nested work rewrote that file.
+/// Nested specialist finish must not close Isolated Preview. `/plan`
+/// extra text is a plan-update turn: Isolated Preview stays docked as
+/// rewriting-wait and quotes that prompt. Idle Approve does not arm on
+/// leftover `plan.md`. Empty Enter never Approves.
 ///
 /// A leftover slash-palette `/` is not mill continue. Resume `/view-plan`
-/// plus Approve must still implement a restored waiter. Mill auto-run
-/// `/implement` must not Approve leftover Isolated Preview.
+/// plus Approve must still implement a restored waiter. Auto-run
+/// `/implement` must not Approve leftover Isolated Preview and must not
+/// vanish a pane with a live waiter.
 fn mill_work_continues_after_isolated_preview(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -725,15 +733,42 @@ pub(super) fn dispatch_send_prompt_inner(
     // (ambient tips live out their TTL across the submit).
     agent.ephemeral_tip.clear_on_submit();
 
+    // Isolated Preview idle: SendPrompt of Operator notes is Approve with
+    // comment, not mill-continue close and not a held toast. `/implement`
+    // and leftover slash-palette `/` still mill-continue or stay local.
+    // Empty Enter never Approves. Approve before the parked-comment hold
+    // so vanished Isolated Preview Preview notes still Approve.
+    if agent.isolated_preview_idle_enter_approves_with_notes() {
+        if agent.prompt.text().trim() != text.trim() {
+            agent.prompt.set_text(&text);
+        }
+        agent.snapshot_or_clear_plan_feedback_draft();
+        agent.prompt.slash_close();
+        let outcome = agent.approve_plan();
+        return match outcome {
+            crate::app::app_view::InputOutcome::Action(action)
+            | crate::app::app_view::InputOutcome::ActionThenForward(action) => {
+                dispatch(action, app)
+            }
+            crate::app::app_view::InputOutcome::ActionPair(first, second) => {
+                let mut effects = dispatch(first, app);
+                effects.extend(dispatch(second, app));
+                effects
+            }
+            _ => vec![],
+        };
+    }
     if hold_parked_plan_review_comments(agent, &text) {
         return vec![];
     }
     // Isolated Preview stays after present so Comment then Approve can run.
-    // Human mill-continue / `/implement` must not keep leftover Isolated
-    // Preview parked. `/plan` extra text is not mill-continue close: that
-    // close-then-hope-drain wiped the Operator box with Isolated Preview
-    // gone and no send. Bare `/plan` and `/plan --soft` still dock Isolated
-    // Preview. Empty Enter never Approves.
+    // Isolated Preview with a live waiter stays until Esc, Exit, or Approve.
+    // Operator `/implement` / auto-run `/implement` must not vanish the pane.
+    // Human mill-continue still re-reads current disk plan.md when nested
+    // work rewrote that file. `/plan` extra text is not mill-continue close:
+    // that close-then-hope-drain wiped the Operator box with Isolated Preview
+    // gone and no send. Bare `/plan` exclusive-blocks nested implementers.
+    // `/plan --soft` docks Isolated Preview. Empty Enter never Approves.
     if mill_work_continues_after_isolated_preview(&text) {
         agent.leave_or_reread_isolated_preview_after_mill_continues();
     }
@@ -743,8 +778,9 @@ pub(super) fn dispatch_send_prompt_inner(
     // `plan.md` with idle Approve. PlanCommand (EnterPlanMode) used to
     // consume_input then return no SendPrompt when leftover Isolated
     // Preview still had a running turn. Composer empty, Isolated Preview
-    // closed, nothing on the transcript. Bare `/plan` and `/plan --soft`
-    // still run as commands. Empty Enter never Approves.
+    // closed, nothing on the transcript. Bare `/plan` exclusive covering
+    // and `/plan --soft` Isolated Preview still run as commands. Empty
+    // Enter never Approves.
     if !literal
         && crate::slash::queue_schedule::plan_slash_is_update_turn(text.trim())
         && let Some(desc) = crate::slash::queue_schedule::plan_description_from_command(text.trim())

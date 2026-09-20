@@ -1185,6 +1185,9 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
   `isolated_present_preview_enter_is_human_turn_then_click_approve`,
   `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit`,
+  `isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment`,
+  `isolated_preview_vanished_pane_notes_enter_approves_with_comment`,
+  `isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
@@ -1233,11 +1236,16 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   not park L1, does not enqueue a Prompt. Nested L2s stay Working. Hard
   `/plan` without `--soft` enters plan mode. `--soft` is not the queue hold
   token. Present is not Approve. Empty Enter never Approves. Comment then
-  Approve carries notes. Tests:
+  Approve carries notes. Soft planning does not reset the primary plan. It
+  makes a secondary plan. Isolated Preview does not immediately pull up
+  leftover current `plan.md`. Comment then Approve still works on a real
+  present of that secondary plan after `exit_plan_mode` writes it. Tests:
   `plan_soft_flag_dispatches_isolated_preview_dock_not_plan_mode`,
   `plan_soft_docks_isolated_preview_without_entering_plan_mode`,
   `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt`,
   `plan_soft_is_not_the_queue_hold_token`,
+  `soft_planning_does_not_reset_the_primary_plan_it_makes_a_secondary_plan`,
+  `isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md`,
   `user_guide_plan_soft_docks_isolated_preview`.
 - [x] **Isolated Preview re-reads rewritten `plan.md`**: after Revise
   rewrites session `plan.md` and re-presents, Isolated Preview paints the
@@ -1254,14 +1262,17 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   in this process. It is not `/resume`. After Plan Exit, Isolated Preview
   must paint this session's current disk `plan.md`, not leftover TECH.md,
   or close. With Isolated Preview closed, chrome must not stay **plan**.
-  `/plan` or `/plan --soft` after Exit docks Isolated Preview. Compact
-  at 100% / over 500k must not swallow `/plan`. Typing a Human sentence
-  after Exit still sends. Empty Enter never Approves.
-  `/plan` with extra Human text submits a plan-update turn (Human send /
-  plan rewrite) and writes the prompt write-ahead log. It must not only
-  dock leftover Isolated Preview ("why the agent stopped" / TECH.md).
-  Bare `/plan` or `/plan --soft` with no extra text still docks Isolated
-  Preview from current disk `plan.md`.
+  Bare `/plan` after Exit paints covering exclusive present from current
+  disk `plan.md` and exclusive-blocks nested implementers. It is not
+  leftover Isolated Preview. `/plan --soft` does not reset the primary
+  plan. It makes a secondary plan. Isolated Preview does not immediately
+  pull up leftover current `plan.md`. Isolated Preview stays until Esc,
+  Exit, or Approve. Compact at 100% / over 500k must not swallow `/plan`.
+  Typing an Operator sentence after Exit still sends. Empty Enter never
+  Approves. `/plan` with extra Operator text submits a plan-update turn of
+  the primary plan (Operator send / plan rewrite) and writes the prompt
+  write-ahead log. It must not only dock leftover Isolated Preview ("why
+  the agent stopped" / TECH.md).
   GitHub issue 96 and issue 98. Tests:
   `isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot`,
   `isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot`,
@@ -1286,7 +1297,14 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish`,
   `isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present`,
   `user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt`,
-  `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped`,
+  `leftover_isolated_preview_bare_plan_exclusive_covering_from_current_disk`,
+  `bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working`,
+  `empty_enter_never_approves_exclusive_covering_present_github_122`,
+  `isolated_preview_must_not_close_on_nested_specialist_finish`,
+  `isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_tick`,
+  `isolated_preview_has_no_plan_exit_wall_clock_timer`,
+  `plan_soft_must_not_close_on_nested_tick`,
+  `isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md`,
   `plan_slash_with_body_is_update_turn_bare_and_soft_are_not`,
   `user_guide_plan_slash_with_body_submits_plan_update`,
   `after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview`,
@@ -1326,24 +1344,39 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   (`app/subagent.rs`),
   `l2_row_shows_live_l3_count_not_specialist_names`
   (`views/tasks_pane.rs`).
-- [ ] **Subagents list measured L2 tokens and TECH.md**: nested L2 session
+- [x] **Subagents list compact window counts and TECH.md**: nested session
   usage is an in-memory map (`agent_view::l2_token_tracking`). The nested
-  L2 token accumulator is an `AtomicU64` high-water (`fetch_max`) so
-  concurrent ACP usage ticks do not race. Grok OSS: this map is not
-  upstream xAI. A racy last-write `u64` can drop 10232 when a stale
-  smaller tick lands last. The Subagents list suffix is a compact count
-  (`format_tokens_compact`) plus `tokens` (for example `53.4k tokens`,
-  not a raw integer like 53407, and not the word `measured`). Internal
-  field names such as `measured_tokens` and the TECH.md table column
-  "measured tokens" stay. `format_subagent_label`
-  calls `format_subagents_list_description` so `format_measured_tokens_suffix`
-  is used in the shipped lib. TECH.md at the workspace
-  root (tests inject a temp path) has a description-label L1 to L2 to L3
-  tree and a table with columns id, contract/aspect, owner, measured
-  tokens, estimate, status. Layout must not parse the session transcript
-  jsonl. Those counts are not included SuperGrok period limits, not
-  SuperGrok dollar credits, and not console team prepaid / console API
-  credits. Tests:
+  accumulator is an `AtomicU64` high-water (`fetch_max`) so concurrent ACP
+  usage ticks do not race. Subagents list paint uses the live
+  `SubagentProgress` sample, not that high-water, so compact cannot leave
+  a stale 90k leftover. Grok OSS: this map is not upstream xAI. The
+  Subagents list suffix is a compact count (`format_tokens_compact`) with
+  an implicit unit (`90k`, `112.6k`, `53.4k`). Operator-visible chrome
+  must not print the word `tokens` (truncation must not become
+  `112.6k token...`), must not paint a raw integer like 53407, and must
+  not contain `measured`. Each L2 row is a live atomic total of that
+  L2's present plus past usage, including every specialist it spawned,
+  with each unit counted once. Specialists still show separately. Do not
+  add nested windows into the parent `239K / 500K` L1 context chip.
+  `sum_live_nested_session_windows` adds each live nested session once
+  and does not add an L3 both inside its L2 figure and again in the
+  total. Internal field names such as `measured_tokens` and the
+  TECH.md table column "measured tokens" stay. `format_subagent_label`
+  calls `format_subagent_label_parts` so `format_measured_tokens_suffix`
+  is used in the shipped lib. TECH.md at the workspace root (tests inject
+  a temp path) has a description-label L1 to L2 to L3 tree and a table
+  with columns id, contract/aspect, owner, measured tokens, estimate,
+  status. Layout must not parse the session transcript jsonl. Those
+  counts are not included SuperGrok period limits, not SuperGrok dollar
+  credits, and not console team prepaid / console API credits. Tests:
+  `subagents_list_omits_the_word_tokens`,
+  `subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists`,
+  `nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window`,
+  `nested_specialist_windows_are_not_double_counted_in_the_total`,
+  `l2_row_paints_present_plus_past_atomic_total_including_specialists`,
+  `parent_context_chip_is_l1_window_and_does_not_add_nested_windows`,
+  `format_live_subagents_list_row_uses_live_sample_not_tracker_high_water`,
+  `subagents_list_truncation_does_not_split_compact_count`,
   `subagents_list_shows_measured_tokens_per_nested_l2`,
   `format_subagents_list_description_shows_measured_tokens_suffix`,
   `format_subagent_label_shows_measured_tokens_suffix`,
@@ -2420,6 +2453,9 @@ that drops them while keeping the seven is still a seam loss):
   `isolated_present_click_approve_dispatches_interject_with_prompt_text`,
   `isolated_present_preview_enter_is_human_turn_then_click_approve`,
   `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit`,
+  `isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment`,
+  `isolated_preview_vanished_pane_notes_enter_approves_with_comment`,
+  `isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment`,
   `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt`,
   `isolated_preview_stays_after_present_so_comment_then_approve_can_run`,
   `isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt`,
@@ -2892,8 +2928,16 @@ cargo test -p xai-grok-pager --lib -- \
   live_subagent_list_shows_only_l2_and_reports_live_l3_count \
   l2_row_shows_live_l3_count_not_specialist_names
 
-# Extra: Subagents list measured L2 tokens and TECH.md (not billing meters)
+# Extra: Subagents list compact window counts and TECH.md (not billing meters)
 cargo test -p xai-grok-pager --lib -- \
+  subagents_list_omits_the_word_tokens \
+  subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists \
+  nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window \
+  nested_specialist_windows_are_not_double_counted_in_the_total \
+  l2_row_paints_present_plus_past_atomic_total_including_specialists \
+  parent_context_chip_is_l1_window_and_does_not_add_nested_windows \
+  format_live_subagents_list_row_uses_live_sample_not_tracker_high_water \
+  subagents_list_truncation_does_not_split_compact_count \
   subagents_list_shows_measured_tokens_per_nested_l2 \
   format_subagents_list_description_shows_measured_tokens_suffix \
   format_subagent_label_shows_measured_tokens_suffix \

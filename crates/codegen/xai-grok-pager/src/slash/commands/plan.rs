@@ -1,15 +1,20 @@
-//! `/plan` enters plan mode. `/plan <description>` enters plan mode and starts
-//! a turn with the description after the mode switch completes.
+//! `/plan` enters plan mode. Bare `/plan` exclusive-blocks nested
+//! implementers and paints covering exclusive present. `/plan <description>`
+//! enters plan mode and starts a turn with the description after the mode
+//! switch completes.
 //!
 //! `/plan --soft` docks Isolated Preview, the existing plan present surface
 //! on the right. It does not enter plan mode. It does not park L1. It does
 //! not enqueue the description as a Prompt. L1 docking Isolated Preview
-//! must not cancel nested L2s. Nested work stays Working. Present is not
-//! Approve. `--soft` is not the queue hold token (`queue` / `later`).
+//! must not cancel nested L2s. Nested work stays Working. Soft planning
+//! does not reset the primary plan. It makes a secondary plan. Isolated
+//! Preview does not immediately pull up leftover current `plan.md`. Isolated
+//! Preview stays until Esc, Exit, or Approve. Present is not Approve.
+//! `--soft` is not the queue hold token (`queue` / `later`).
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
-use crate::app::actions::{Action, PlanModeKind};
+use crate::app::actions::{Action, Effect, PlanModeKind};
 use crate::app::agent_view::AgentView;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::queue_schedule::{plan_command_text, queue_later_command, split_schedule_token};
@@ -140,47 +145,119 @@ impl AgentView {
     /// not cancel nested L2s. Nested work stays Working. Present is not
     /// Approve. A live Approve waiter, if parked, stays parked.
     ///
-    /// `/plan --soft` is the dock for a new feature. `/rebuild` restore uses
-    /// this same crate-visible surface.
+    /// `/view-plan` and `/rebuild` restore dock Isolated Preview from the
+    /// primary session `plan.md`. Bare `/plan` uses
+    /// [`Self::enter_exclusive_plan_covering`]. `/plan --soft` uses
+    /// [`Self::dock_isolated_preview_with_feature`].
     pub(crate) fn dock_isolated_preview(&mut self) {
-        self.dock_isolated_preview_with_feature(None);
-    }
-
-    /// `/plan --soft [description]` docks Isolated Preview. A feature
-    /// description seeds Isolated Preview. It does not enter plan mode and
-    /// does not enqueue that text as a Prompt.
-    pub(crate) fn dock_isolated_preview_with_feature(&mut self, feature: Option<String>) {
-        let feature = feature.filter(|s| !s.trim().is_empty());
-        if let Some(text) = feature.clone() {
-            self.latest_inline_plan_content = Some(text.clone());
-            if let Some(pav) = self.plan_approval_view.as_mut()
-                && pav
-                    .plan_content
-                    .as_ref()
-                    .is_none_or(|c| c.trim().is_empty())
-            {
-                pav.plan_content = Some(text);
-                pav.has_plan = true;
-            }
-        } else if !matches!(
+        self.isolated_preview_shows_secondary_plan = false;
+        if !matches!(
             self.plan_feedback_in_flight,
             Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Updating)
         ) {
-            // Bare `/plan` / `/plan --soft`: current disk plan.md, not leftover
-            // Isolated Preview present ("why the agent stopped" / TECH.md).
-            // A plan-update rewriting-wait must not re-paint leftover disk
-            // as a live present.
             self.reread_isolated_preview_from_current_disk_plan_md();
         }
+        self.finish_isolated_preview_dock();
+    }
+
+    /// Bare `/plan` covering exclusive present from current disk `plan.md`.
+    /// Covering is `line_viewer.fullscreen` and not a soft side pane.
+    /// Nested implementers are exclusive-blocked by the caller. Empty
+    /// Enter never Approves. Isolated Preview leftover dock is `/plan --soft`
+    /// and `/view-plan`, not this path.
+    pub(crate) fn enter_exclusive_plan_covering(&mut self) {
+        self.isolated_preview_shows_secondary_plan = false;
+        if !matches!(
+            self.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Updating)
+        ) {
+            self.reread_isolated_preview_from_current_disk_plan_md();
+        }
+        self.finish_isolated_preview_dock();
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.fullscreen = true;
+            viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+            viewer.plan_mut().selected_cta = None;
+        }
+    }
+
+    /// Exclusive `/plan` exclusive-blocks live nested implementers. Marks
+    /// each live row `pending_kill` and returns `Effect::KillSubagent`
+    /// (`session_id` + `subagent_id`). Does not CancelTurn the parent.
+    /// Does not kill already-finished rows.
+    pub(crate) fn exclusive_block_nested_implementers(&mut self) -> Vec<Effect> {
+        let Some(session_id) = self.session.session_id.clone() else {
+            return vec![];
+        };
+        let mut effects = Vec::new();
+        for info in self.subagent_sessions.values_mut() {
+            if info.finished {
+                continue;
+            }
+            if info.pending_kill {
+                continue;
+            }
+            info.pending_kill = true;
+            info.kill_requested_at = Some(std::time::Instant::now());
+            effects.push(Effect::KillSubagent {
+                session_id: session_id.clone(),
+                subagent_id: info.subagent_id.to_string(),
+            });
+        }
+        effects
+    }
+
+    /// `/plan --soft [description]` docks Isolated Preview as a secondary
+    /// plan. It does not enter plan mode, does not enqueue that text as a
+    /// Prompt, and does not reset the primary session `plan.md`. Isolated
+    /// Preview must not immediately pull up leftover current `plan.md`.
+    pub(crate) fn dock_isolated_preview_with_feature(&mut self, feature: Option<String>) {
+        self.isolated_preview_shows_secondary_plan = true;
+        let feature = feature.filter(|s| !s.trim().is_empty());
+        let secondary =
+            self.session_plan_body_from_identity(xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY);
+        let leftover_primary = |s: &str| {
+            s.contains("why the agent stopped")
+                || s.contains("TECH.md")
+                || s.contains("Mill leftover")
+                || s.contains("Current mill plan.md")
+        };
+        let body = feature
+            .clone()
+            .or_else(|| secondary.filter(|s| !leftover_primary(s)))
+            .unwrap_or_else(|| {
+                crate::views::plan_approval_view::SECONDARY_PLAN_PLACEHOLDER.to_owned()
+            });
+        self.latest_inline_plan_content = Some(body.clone());
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(body.clone());
+            pav.has_plan = true;
+        }
+        self.view_plan_requested = true;
+        self.snapshot_or_clear_plan_feedback_draft();
+        self.paint_secondary_isolated_preview(body);
+        if let Some(text) = feature {
+            self.persist_session_plan_body_for(
+                xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+                &text,
+            );
+        }
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.fullscreen = false;
+            viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        }
+        self.restore_plan_feedback_draft_if_composer_lost();
+        self.clear_view_plan_request_if_waiter_bound();
+        self.persist_session_plan_dock_open(self.line_viewer.is_some());
+    }
+
+    fn finish_isolated_preview_dock(&mut self) {
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
         if self.plan_approval_view.is_some() {
             self.reopen_plan_approval();
         } else {
             self.park_local_idle_plan_decision_if_needed();
-            // `/plan --soft` docks Isolated Preview even when plan mode is
-            // off. After Plan Exit, plan_decision_resolved stays true so we
-            // must not invent a live idle park that paints Plan ready.
             if self.plan_approval_view.is_none()
                 && !self.plan_decision_resolved
                 && self.plan_feedback_in_flight.is_none()
@@ -194,9 +271,6 @@ impl AgentView {
                 self.plan_approval_view = Some(pav);
             }
             self.show_plan_preview();
-            // After Plan Exit, idle park is not invented (empty Enter never
-            // Approves). `/plan` / `/plan --soft` must still dock Isolated
-            // Preview. Compact must not swallow that slash.
             if self.line_viewer.is_none()
                 && self.plan_decision_resolved
                 && let Some(mut viewer) =
@@ -221,9 +295,6 @@ impl AgentView {
         self.restore_plan_feedback_draft_if_composer_lost();
         self.clear_view_plan_request_if_waiter_bound();
         self.persist_session_plan_dock_open(self.line_viewer.is_some());
-        // Isolated Preview dock must not re-stamp session_plans with the
-        // painted body. Present persist writes the live plan. Re-stamping
-        // here freezes Isolated Preview over a newer disk plan.md.
     }
 }
 

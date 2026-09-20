@@ -508,8 +508,10 @@ cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_
 
 Fork-owned. `/plan --soft` docks Isolated Preview on the right. It does
 not enter plan mode. It does not park L1. It does not enqueue the
-description as a Prompt. Nested L2s stay Working. Hard `/plan` without
-`--soft` enters plan mode. `--soft` is not the queue hold token.
+description as a Prompt. Nested L2s stay Working. Soft planning does
+not reset the primary plan. It makes a secondary plan. Isolated Preview
+does not immediately pull up leftover current `plan.md`. Hard `/plan`
+without `--soft` enters plan mode. `--soft` is not the queue hold token.
 Present is not Approve. Empty Enter never Approves.
 
 | path::test | Contract |
@@ -518,8 +520,13 @@ Present is not Approve. Empty Enter never Approves.
 | `plan_soft_docks_isolated_preview_without_entering_plan_mode` | Dispatch docks Isolated Preview; L1 stays running; nested L2s stay Working |
 | `plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt` | `/plan --soft add feature` seeds Isolated Preview and does not grow pending_prompts |
 | `plan_soft_is_not_the_queue_hold_token` | `--soft` is not `queue` / `later` |
+| `soft_planning_does_not_reset_the_primary_plan_it_makes_a_secondary_plan` | Soft planning does not reset the primary plan. It makes a secondary plan. Isolated Preview does not immediately pull up leftover current `plan.md`. |
+| `isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md` | `/plan --soft` while mill leftover Isolated Preview is docked must not paint leftover current `plan.md`. Mill stays running. Empty Enter never Approves. |
 | `user_guide_plan_soft_docks_isolated_preview` | 04-slash-commands and 19-plan-mode say `--soft` does not enter plan mode |
 | `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit` | Isolated Preview idle plus a non-empty Operator paste plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. Empty Enter never Approves. |
+| `isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment` | Isolated Preview idle: leftover slash-palette `/` plus Operator notes plus click Approve is Approve with comment. Empty Enter never Approves. |
+| `isolated_preview_vanished_pane_notes_enter_approves_with_comment` | Isolated Preview vanished with a live waiter: Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
+| `isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment` | Isolated Preview idle leftover slash-palette `/` plus notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible` | Comment CTA then notes then Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_send_prompt_is_human_turn_not_only_plan_comment` | Isolated Preview SendPrompt is a Human turn. Empty Enter never Approves. |
@@ -537,14 +544,20 @@ Present is not Approve. Empty Enter never Approves.
 | `after_plan_exit_esc_clears_isolated_preview_open_marker` | Esc:close after Plan Exit clears the Isolated Preview dock marker so `/rebuild` does not re-wedge the pane. |
 | `after_plan_exit_closed_isolated_preview_composer_must_not_stay_plan` | After Plan Exit with Isolated Preview closed, composer chrome must not stay plan. Typing a Human sentence after Exit still sends. |
 | `after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome` | After Plan Exit with Isolated Preview closed, the draw must not keep composer plan chrome. |
-| `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored` | After Plan Exit, `/plan` docks Isolated Preview. Compact must not swallow `/plan`. Empty Enter never Approves. |
+| `after_plan_exit_slash_plan_docks_isolated_preview_not_ignored` | After Plan Exit, `/plan` paints covering exclusive present (`fullscreen` and not a soft side pane). Compact must not swallow `/plan`. Empty Enter never Approves. Nested implementers are exclusive-blocked. |
 | `after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_preview` | After Plan Exit, `/plan` with extra Human text submits a plan-update turn. It does not only dock leftover Isolated Preview. Empty Enter never Approves. |
 | `slash_plan_with_args_already_in_plan_submits_plan_update` | `/plan <desc>` already in plan mode submits a plan-update turn, not a `/view-plan` toast |
 | `isolated_preview_plan_slash_with_body_submits_plan_update_not_only_stale_preview` | Isolated Preview leftover: `/plan update the plan...` submits a plan-update turn and WAL. Isolated Preview stays docked as rewriting-wait. Empty Enter never Approves. |
 | `isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish` | Isolated Preview leftover plus a running turn: `/plan update the plan...` Enter:send produces SendPrompt/SendInterject, not consume_input with empty effects. Isolated Preview stays rewriting-wait. |
 | `isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present` | A second plan prompt must not pop leftover mill-69 / first-draft plan.md with idle Approve. Isolated Preview stays rewriting-wait until exit_plan_mode writes current disk. Empty Enter never Approves. Paste-then-Enter Approve works after the new present. |
 | `user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt` | 19-plan-mode documents Isolated Preview rewriting-wait on a second plan prompt. `/unstick` is not `/resume`. |
-| `leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped` | Bare `/plan` docks current disk plan.md, not leftover why-the-agent-stopped / TECH.md |
+| `leftover_isolated_preview_bare_plan_exclusive_covering_from_current_disk` | Bare `/plan` paints covering exclusive present from current disk plan.md, not leftover Isolated Preview why-the-agent-stopped / TECH.md |
+| `bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working` | Live nested implementers get `KillSubagent` on bare `/plan` and stay Working on `/plan --soft` |
+| `empty_enter_never_approves_exclusive_covering_present_github_122` | GitHub #122. Empty Enter never Approves exclusive covering. Clickable Approve is the only Approve. |
+| `isolated_preview_must_not_close_on_nested_specialist_finish` | Nested implementer finish must not vanish Isolated Preview. Stay until Esc, Exit, or Approve. |
+| `isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_tick` | Nested occupancy ticks must not close Isolated Preview. There is no Plan Exit wall-clock timer. |
+| `isolated_preview_has_no_plan_exit_wall_clock_timer` | Isolated Preview has no Plan Exit wall-clock timer. Stay until Esc, Exit, or Approve. |
+| `plan_soft_must_not_close_on_nested_tick` | `/plan --soft` Isolated Preview must not close on nested occupancy tick or specialist finish. |
 | `plan_slash_with_body_is_update_turn_bare_and_soft_are_not` | `/plan` with extra Human text is a plan-update turn. Bare `/plan` and `/plan --soft` are not |
 | `user_guide_plan_slash_with_body_submits_plan_update` | 04-slash-commands and 19-plan-mode say `/plan` with extra Human text submits a plan-update turn |
 | `after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview` | After Plan Exit, `/plan --soft` during auto-compact docks Isolated Preview. Compact must not swallow `/plan`. |
@@ -562,6 +575,9 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   plan_soft_is_not_the_queue_hold_token \
   user_guide_plan_soft_docks_isolated_preview \
   isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
+  isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment \
+  isolated_preview_vanished_pane_notes_enter_approves_with_comment \
+  isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment \
   isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment \
   isolated_preview_non_empty_enter_sends_while_ride_approve_chrome_visible \
   isolated_preview_send_prompt_is_human_turn_not_only_plan_comment \
@@ -586,7 +602,14 @@ cargo test -p xai-grok-pager --lib -- plan_soft_flag_dispatches_isolated_preview
   isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
   isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present \
   user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt \
-  leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
+  leftover_isolated_preview_bare_plan_exclusive_covering_from_current_disk \
+  bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working \
+  empty_enter_never_approves_exclusive_covering_present_github_122 \
+  isolated_preview_must_not_close_on_nested_specialist_finish \
+  isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_tick \
+  isolated_preview_has_no_plan_exit_wall_clock_timer \
+  plan_soft_must_not_close_on_nested_tick \
+  isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \
   after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \
@@ -615,6 +638,9 @@ have a piece; never fit the contract to a wipe.
 | `isolated_present_prompt_focus_click_approve_does_not_drop_human_box_prompt` | Comment then Prompt focus, type, click Approve does not drop the Human-box prompt |
 | `isolated_present_click_approve_dispatches_interject_with_prompt_text` | Click Approve dispatches Interject that carries the prompt text |
 | `isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit` | Isolated Preview idle plus a non-empty Operator paste plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. Empty Enter never Approves. |
+| `isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment` | Isolated Preview idle: leftover slash-palette `/` plus Operator notes plus click Approve is Approve with comment. Empty Enter never Approves. |
+| `isolated_preview_vanished_pane_notes_enter_approves_with_comment` | Isolated Preview vanished with a live waiter: Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
+| `isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment` | Isolated Preview idle leftover slash-palette `/` plus notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_present_preview_enter_is_human_turn_then_click_approve` | Isolated Preview idle plus typed Operator notes plus Enter Approves with those notes. Empty Enter never Approves. |
 | `isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt` | Isolated Preview Approve with notes in the plan composer submits those notes with Approve, not as a queued Prompt, and does not drop them. Empty Enter never Approves. |
 | `isolated_preview_stays_after_present_so_comment_then_approve_can_run` | Isolated Preview stays after present so Comment then Approve can run. Empty Enter never Approves. |
@@ -633,6 +659,9 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   isolated_present_preview_enter_is_human_turn_then_click_approve \
   isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
+  isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment \
+  isolated_preview_vanished_pane_notes_enter_approves_with_comment \
+  isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   isolated_preview_stays_after_present_so_comment_then_approve_can_run \
   isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not_as_prompt \
@@ -1089,31 +1118,54 @@ cargo test -p xai-grok-pager --lib -- \
 
 #### Nested L2 measured tokens (not billing meters)
 
-Subagents list shows a compact count plus `tokens` (for example `53.4k
-tokens`) from in-memory nested L2 session usage. Operator-visible chrome
-must not contain the word `measured` and must not paint a raw integer like
-53407. The nested L2 token accumulator is an `AtomicU64` high-water
-(`fetch_max`) so concurrent ACP usage ticks do not race. Grok OSS: this
-map is not upstream xAI. A racy last-write `u64` can drop 10232 when a
-stale smaller tick lands last. Layout must not read the session transcript
-jsonl. TECH.md records spawn, usage tick, and L2 exit, including the
-measured number in the table. Those counts are not included SuperGrok
-period limits, not SuperGrok dollar credits, and not console team prepaid
-/ console API credits. `format_subagent_label` calls
-`format_live_subagents_list_row` so `format_measured_tokens_suffix` is
-used in the shipped lib.
+Subagents list shows a compact count with an implicit unit (for example
+`53.4k`, `90k`, `112.6k`) from present plus past nested usage. Operator-visible
+chrome must omit the word `tokens` (truncation must not become `112.6k
+token...`; Iso must not show `112.6k tokens`), must not contain `measured`,
+and must not paint a raw integer like 53407. Each L2 row is a live atomic
+total of that L2's present plus past usage, including every specialist it
+spawned, with each unit counted once. Specialists still show separately.
+Parent `239K / 500K` is the L1 window and must not add nested windows.
+`sum_live_nested_session_windows` adds each live nested session once and
+does not double-count an L3 that already has its own window. List paint
+uses the live `SubagentProgress` sample, not the tracker high-water, so
+compact cannot leave a stale leftover. The nested
+accumulator is still an `AtomicU64` high-water (`fetch_max`) for TECH.md so
+concurrent ACP usage ticks do not race. Grok OSS: this map is not upstream
+xAI. Layout must not read the session transcript jsonl. TECH.md records
+spawn, usage tick, and L2 exit, including the measured number in the table.
+Those counts are not included SuperGrok period limits, not SuperGrok dollar
+credits, and not console team prepaid / console API credits.
+`format_subagent_label` calls `format_subagent_label_parts` so
+`format_measured_tokens_suffix` is used in the shipped lib.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-pager` `subagents_list_shows_measured_tokens_per_nested_l2` | After spawn and a 53407 usage tick, the Subagents list row contains `53.4k tokens`, does not contain `measured`, and does not contain `53407` |
-| `xai-grok-pager` `format_subagents_list_description_shows_measured_tokens_suffix` | Shared description helper paints `12.4k tokens` after a 12400 usage tick, does not contain `measured`, and omits the suffix before the first tick |
-| `xai-grok-pager` `format_subagent_label_shows_measured_tokens_suffix` | Operator-visible `format_subagent_label` description contains `12.4k tokens` after an in-memory 12400 usage tick and does not contain `measured` |
+| `xai-grok-pager` `subagents_list_omits_the_word_tokens` | Subagents list paints `112.6k` and omits the word tokens |
+| `xai-grok-pager` `subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists` | L2 row is `140k` for present 25000 plus past 65000 plus specialist 50000; specialist row stays `50k`; not 190000 |
+| `xai-grok-pager` `nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window` | Compact 90000 to 25000 keeps past 65000 so present plus past is 90000, then 40000 present is 105000 |
+| `xai-grok-pager` `nested_specialist_windows_are_not_double_counted_in_the_total` | Live nested sum is 140000 (L2 90k plus L3 50k), not 190000 |
+| `xai-grok-pager` `l2_row_paints_present_plus_past_atomic_total_including_specialists` | Subagents list L2 paint is `140k` including specialists; L3 paint stays `50k` |
+| `xai-grok-pager` `parent_context_chip_is_l1_window_and_does_not_add_nested_windows` | Parent chip is `239K / 500K` and is not `379K / 500K` |
+| `xai-grok-pager` `format_live_subagents_list_row_uses_live_sample_not_tracker_high_water` | After a 90000 high-water, a live 40100 sample paints `40.1k`, not a stale `90k` |
+| `xai-grok-pager` `subagents_list_truncation_does_not_split_compact_count` | Long job name plus activity still paints `112.6k` in its own span and never `token...` |
+| `xai-grok-pager` `subagents_list_shows_measured_tokens_per_nested_l2` | After spawn and a 53407 usage tick, the Subagents list row contains `53.4k`, does not contain `tokens`, does not contain `measured`, and does not contain `53407` |
+| `xai-grok-pager` `format_subagents_list_description_shows_measured_tokens_suffix` | Shared description helper paints `12.4k` after a 12400 usage tick, does not contain `tokens` or `measured`, and omits the suffix before the first tick |
+| `xai-grok-pager` `format_subagent_label_shows_measured_tokens_suffix` | Operator-visible `format_subagent_label` description contains `12.4k` after an in-memory 12400 usage tick and does not contain `tokens` or `measured` |
 | `xai-grok-pager` `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit` | Temp TECH.md has the measured number, L1 to L2 to L3 tree, aspect table columns, and the not-billing-meters sentence |
 | `xai-grok-pager` `subagents_list_layout_does_not_read_chat_history_jsonl` | Paint takes in-memory counts only and does not open the session transcript file |
-| `xai-grok-pager` `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water` | Concurrent 10232 and 8000 usage ticks keep high-water 10232 on AtomicU64; Subagents row contains `10.2k tokens`, does not contain `measured`, and does not contain `10232` |
+| `xai-grok-pager` `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water` | Concurrent 10232 and 8000 usage ticks keep high-water 10232 on AtomicU64; Subagents row contains `10.2k`, does not contain `tokens` or `measured`, and does not contain `10232` |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
+  subagents_list_omits_the_word_tokens \
+  subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists \
+  nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window \
+  nested_specialist_windows_are_not_double_counted_in_the_total \
+  l2_row_paints_present_plus_past_atomic_total_including_specialists \
+  parent_context_chip_is_l1_window_and_does_not_add_nested_windows \
+  format_live_subagents_list_row_uses_live_sample_not_tracker_high_water \
+  subagents_list_truncation_does_not_split_compact_count \
   subagents_list_shows_measured_tokens_per_nested_l2 \
   format_subagents_list_description_shows_measured_tokens_suffix \
   format_subagent_label_shows_measured_tokens_suffix \
@@ -2252,6 +2304,7 @@ cargo test -p xai-grok-tools --lib -- \
 cargo test -p xai-grok-shell --lib -- \
   migrate_v5_file_to_v6_adds_session_plans_without_dropping_v5_tables \
   plan_soft_sets_dock_open_without_requiring_markdown_write_lock \
+  soft_planning_does_not_reset_the_primary_plan_it_makes_a_secondary_plan \
   present_upserts_session_plan_body_without_rewriting_plan_md \
   isolated_preview_and_present_read_sql_first_then_disk_plan_md_fallback \
   isolated_preview_prefers_rewritten_plan_md_over_stale_sql_snapshot \
@@ -2292,6 +2345,9 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_present_click_approve_dispatches_interject_with_prompt_text \
   isolated_present_preview_enter_is_human_turn_then_click_approve \
   isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_plan_exit \
+  isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment \
+  isolated_preview_vanished_pane_notes_enter_approves_with_comment \
+  isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment \
   isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as_prompt \
   isolated_preview_after_revise_rereads_plan_md_not_first_draft_snapshot \
   after_plan_exit_idle_ctas_must_not_stay_armed_for_the_exited_present \
@@ -2313,7 +2369,14 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_preview_plan_slash_with_body_while_turn_running_sends_not_vanish \
   isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present \
   user_guide_isolated_preview_rewrite_wait_on_second_plan_prompt \
-  leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped \
+  leftover_isolated_preview_bare_plan_exclusive_covering_from_current_disk \
+  bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working \
+  empty_enter_never_approves_exclusive_covering_present_github_122 \
+  isolated_preview_must_not_close_on_nested_specialist_finish \
+  isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_tick \
+  isolated_preview_has_no_plan_exit_wall_clock_timer \
+  plan_soft_must_not_close_on_nested_tick \
+  isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md \
   plan_slash_with_body_is_update_turn_bare_and_soft_are_not \
   user_guide_plan_slash_with_body_submits_plan_update \
   after_plan_exit_slash_plan_soft_during_autocompact_docks_isolated_preview \

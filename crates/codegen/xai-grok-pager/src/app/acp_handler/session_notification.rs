@@ -441,6 +441,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     turn_count: None,
                     tool_call_count: None,
                     tokens_used: None,
+                    tokens_past: 0,
                     context_window_tokens: None,
                     context_usage_pct: None,
                     tools_used: Vec::new(),
@@ -785,11 +786,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
             }
-            // Isolated Preview stay-after-present must not keep leftover
-            // present after mill L2 completion (mill 69 GREEN).
-            agent.leave_or_reread_isolated_preview_after_mill_continues();
-            // Nested mill never receives PromptResponse. Auto-run the
-            // trailing Next implement prompt on the parent.
+            // Nested implementer finish must not close Isolated Preview.
+            // Isolated Preview stays until Esc, Exit, or Approve. Keep
+            // auto-run Next implement on the parent.
+
             if mill_completed && !resuming {
                 auto_implement_qid = crate::app::auto_implement::enqueue_nested_l2_next_implement(
                     agent,
@@ -1313,7 +1313,11 @@ pub(super) fn handle_child_session_notification(
                 return false;
             }
             let compact_tokens = match &update {
-                XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } => Some(*tokens_after),
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before,
+                    tokens_after,
+                    ..
+                } => Some((*tokens_before, *tokens_after)),
                 _ => None,
             };
             let mut changed = false;
@@ -1339,14 +1343,14 @@ pub(super) fn handle_child_session_notification(
                 {
                     child_view.session_sampling_window = Some(*context_window);
                 }
-                if let Some(tokens_after) = compact_tokens {
+                if let Some((_, tokens_after)) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);
                 }
             }
-            if let Some(tokens_after) = compact_tokens
+            if let Some((tokens_before, tokens_after)) = compact_tokens
                 && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
             {
-                info.tokens_used = Some(tokens_after);
+                info.record_compact(tokens_before, tokens_after);
                 if let Some(cw) = info.context_window_tokens.filter(|&cw| cw > 0) {
                     info.context_usage_pct =
                         Some(xai_token_estimation::usage_percentage_u8(tokens_after, cw));
@@ -1460,6 +1464,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     turn_count: None,
                     tool_call_count: None,
                     tokens_used: None,
+                    tokens_past: 0,
                     context_window_tokens: None,
                     context_usage_pct: None,
                     tools_used: Vec::new(),
@@ -1556,7 +1561,6 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
-            agent.leave_or_reread_isolated_preview_after_mill_continues();
             true
         }
         _ => false,

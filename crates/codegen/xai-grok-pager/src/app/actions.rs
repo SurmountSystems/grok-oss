@@ -812,8 +812,9 @@ pub enum Action {
     /// `/plan --soft` docks Isolated Preview on the right. It does not
     /// enter plan mode. It does not park L1. It does not enqueue the
     /// description as a Prompt. Present is not Approve. Nested L2s stay
-    /// Working. `--soft` is not the queue hold token. Hard `/plan`
-    /// without `--soft` still uses [`Self::EnterPlanMode`].
+    /// Working. `--soft` is not the queue hold token. Bare `/plan`
+    /// exclusive-blocks nested implementers via [`Self::SetPlanMode`] or
+    /// [`Self::EnterPlanMode`].
     DockIsolatedPreview {
         description: Option<String>,
     },

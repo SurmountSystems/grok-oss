@@ -29,7 +29,9 @@ mod prompt_tasks;
 pub(crate) mod serving_fingerprint;
 mod session_ids;
 pub(crate) mod session_plans;
-pub use plan_choice::{PlanRecordedChoice, PlanRecordedChoiceRow, SESSION_PLAN_IDENTITY};
+pub use plan_choice::{
+    PlanRecordedChoice, PlanRecordedChoiceRow, SECONDARY_PLAN_IDENTITY, SESSION_PLAN_IDENTITY,
+};
 pub use prompt_exec::{
     HonestWorkClock, LivePromptTask, PromptExecEstimate, PromptExecMetrics, PromptExecRecord,
     tokens_per_dollar,

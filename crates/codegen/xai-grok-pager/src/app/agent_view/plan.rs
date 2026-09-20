@@ -81,18 +81,23 @@ impl AgentView {
     }
 
     /// Isolated Preview stays after present so Comment then Approve can run.
-    /// After mill work continues (Human send that is not Comment notes,
-    /// `/implement`, nested mill L2 exit, mill rewrite of session plan.md),
-    /// Isolated Preview must not stay parked on leftover present. Re-read
-    /// current session plan.md if mill rewrote it. Else close Isolated
-    /// Preview. `/plan` extra text is a plan-update turn and must not take
-    /// this mill-continue close. Empty Enter never Approves. Does not
+    /// Isolated Preview stays until Esc, Exit, or Approve. There is no Plan
+    /// Exit wall-clock timer. Nested occupancy ticks and specialist finish
+    /// must not call this close. Secondary `/plan --soft` already
+    /// early-returns; keep that. Operator `/implement` / auto-run
+    /// `/implement` with a live waiter must not vanish the pane. Human
+    /// mill-continue still re-reads current disk `plan.md` when nested
+    /// work rewrote that file. `/plan` extra text is a plan-update turn
+    /// and must not take this close. Empty Enter never Approves. Does not
     /// Approve the parked plan.
     pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
         if matches!(
             self.plan_feedback_in_flight,
             Some(PlanFeedbackInFlight::Updating)
         ) {
+            return;
+        }
+        if self.isolated_preview_shows_secondary_plan {
             return;
         }
         if !self.is_plan_viewer() {
@@ -115,12 +120,17 @@ impl AgentView {
                 return;
             }
         }
+        if self.plan_approval_view.is_some() && !self.plan_decision_resolved {
+            return;
+        }
         self.leave_parked_isolated_preview();
     }
 
-    /// Bare `/plan` / `/plan --soft` docks Isolated Preview from current
-    /// disk plan.md, not leftover "why the agent stopped" / TECH.md persist
-    /// overwrite. Does not Approve. Empty Enter never Approves.
+    /// Exclusive `/plan` and `/view-plan` re-read current disk plan.md, not
+    /// leftover "why the agent stopped" / TECH.md persist overwrite. Soft
+    /// planning (`/plan --soft`) must not call this: it makes a secondary
+    /// plan and must not immediately pull up leftover current `plan.md`.
+    /// Does not Approve. Empty Enter never Approves.
     pub(crate) fn reread_isolated_preview_from_current_disk_plan_md(&mut self) {
         if matches!(
             self.plan_feedback_in_flight,
@@ -156,8 +166,8 @@ impl AgentView {
     /// `plan.md` as a live present. Idle Approve / Comment / Revise / Exit
     /// do not arm. Empty Enter never Approves. Does not persist this chrome
     /// as session `plan.md`. A later `exit_plan_mode` present re-reads
-    /// current disk and arms idle CTAs. Do not close Isolated Preview here:
-    /// mill-continue close already vanished `/plan` extra text once.
+    /// current disk and arms idle CTAs. Isolated Preview stays until Esc,
+    /// Exit, or Approve. Do not close Isolated Preview here.
     pub(crate) fn enter_isolated_preview_rewrite_wait(&mut self, operator_prompt: &str) {
         if !self.is_plan_viewer() {
             return;
@@ -187,6 +197,7 @@ impl AgentView {
     /// Mill rewrote session plan.md. Isolated Preview must paint that file,
     /// not leftover present / TECH.md persist overwrite. Does not Approve.
     fn paint_isolated_preview_from_mill_plan_md(&mut self, disk: String) {
+        self.isolated_preview_shows_secondary_plan = false;
         if let Some(pav) = self.plan_approval_view.as_mut() {
             pav.plan_content = Some(disk.clone());
             pav.has_plan = true;
@@ -598,9 +609,13 @@ impl AgentView {
     }
 
     fn session_plan_body_from_sql(&self) -> Option<String> {
+        self.session_plan_body_from_identity(xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY)
+    }
+
+    pub(crate) fn session_plan_body_from_identity(&self, plan_identity: &str) -> Option<String> {
         let sid = self.session.session_id.as_ref()?.0.to_string();
         let store = self.grok_oss_store_for_plan_choice()?;
-        match store.load_session_plan_body(&sid, xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY) {
+        match store.load_session_plan_body(&sid, plan_identity) {
             Ok(body) => body,
             Err(e) => {
                 tracing::debug!(error = %e, "session_plans load failed (fail-open)");
@@ -616,18 +631,35 @@ impl AgentView {
         let Some(store) = self.grok_oss_store_for_plan_choice() else {
             return;
         };
-        if let Err(e) = store.set_session_plan_dock_open(
-            &sid,
-            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
-            open,
-        ) {
+        let identity = if self.isolated_preview_shows_secondary_plan {
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY
+        } else {
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY
+        };
+        if let Err(e) = store.set_session_plan_dock_open(&sid, identity, open) {
             tracing::debug!(error = %e, "session_plans dock_open write failed (fail-open)");
         }
+    }
+
+    pub(crate) fn secondary_session_plan_is_docked(&self) -> bool {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return false;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return false;
+        };
+        store.session_plan_is_dock_open(&sid, xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY)
     }
 
     /// Present / Isolated Preview: persist the live body without requiring a
     /// markdown write lock on session `plan.md`.
     pub(crate) fn persist_session_plan_body(&self, body: &str) {
+        self.persist_session_plan_body_for(xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY, body);
+    }
+
+    /// Persist a named plan identity. Soft planning writes the secondary
+    /// plan and must not reset the primary session `plan.md`.
+    pub(crate) fn persist_session_plan_body_for(&self, plan_identity: &str, body: &str) {
         if body.trim().is_empty() {
             return;
         }
@@ -637,9 +669,44 @@ impl AgentView {
         let Some(store) = self.grok_oss_store_for_plan_choice() else {
             return;
         };
-        if let Err(e) = store.upsert_session_plan_body(&sid, body) {
+        if let Err(e) = store.upsert_session_plan_body_for(&sid, plan_identity, body) {
             tracing::debug!(error = %e, "session_plans body write failed (fail-open)");
         }
+    }
+
+    /// Isolated Preview for `/plan --soft`. Paints the secondary plan. Does
+    /// not copy leftover primary `plan.md` and does not persist mill leftover
+    /// as the primary body.
+    pub(crate) fn paint_secondary_isolated_preview(&mut self, body: String) {
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(body.clone());
+            pav.has_plan = true;
+        }
+        self.latest_inline_plan_content = Some(body.clone());
+        let Some(mut viewer) = LineViewerState::open_markdown_content(
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+            body,
+            None,
+        ) else {
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override = Some(xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string());
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.feedback_active = self.plan_approval_view.is_some();
+        }
+        if let Some(ref pav) = self.plan_approval_view
+            && !pav.comments.is_empty()
+        {
+            viewer.rebuild_with_comments(&pav.comments);
+        } else if !self.plan_comments.is_empty() {
+            viewer.rebuild_with_comments(&self.plan_comments);
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
     }
     /// `/view-plan` and the plan status / chip click.
     ///
@@ -976,12 +1043,13 @@ impl AgentView {
         };
         let notes = notes_owned.as_str();
         // Isolated present leaves the composer as the agent prompt. Consume
-        // it as review notes when the plan pane is open (Preview typing
-        // after park is the Human box), when Comment / Revise / Clarify is
-        // armed, or when that text is the keep-draft snapshot. Pane shut:
-        // a restored agent prompt is not review notes. Image chips with no
-        // leftover text are still the Approve payload: drain them onto the
-        // implement turn.
+        // it as review notes when those notes are Isolated Preview comment
+        // notes (text already in the Operator box at live present, Preview
+        // typing after park, Comment hub, leftover slash plus notes on a
+        // real present). Keep-draft after close / reopen / resume is the
+        // next Operator turn, not review notes. Image chips with no leftover
+        // text are still the Approve payload: drain them onto the implement
+        // turn.
         let feedback_armed = self.plan_approval_view.as_ref().is_some_and(|pav| {
             matches!(
                 pav.focus,
@@ -990,7 +1058,8 @@ impl AgentView {
         });
         let has_images = !self.prompt.images.is_empty();
         let keep_draft_snapshot = self.plan_approval_view.as_ref().is_some_and(|pav| {
-            pav.stashed_prompt.text.trim() == notes
+            pav.keep_draft_is_next_operator_turn
+                && pav.stashed_prompt.text.trim() == notes
                 && pav.stashed_prompt.images.len() == self.prompt.images.len()
                 && (!notes.is_empty() || has_images)
         });
@@ -1016,11 +1085,28 @@ impl AgentView {
                         .as_deref()
                         .is_some_and(|d| !d.trim().is_empty()))
         });
-        let consumed_composer = (feedback_armed
-            || keep_draft_snapshot
-            || images_only_idle
-            || pane_open_notes
-            || comment_hub_notes)
+        // Isolated Preview idle: click Approve with a non-empty Operator box
+        // is Approve with comment, including notes already in the box at
+        // live present. Do not require a keystroke snapshot of
+        // `feedback_draft`. Leftover slash-palette `/` plus paste used to
+        // skip that snapshot, Approve empty, and leave the notes sitting.
+        // Stash match from live present `stash()` is not keep-draft.
+        let isolated_idle_composer_notes = self.plan_approval_view.is_some()
+            && !self.plan_decision_resolved
+            && self.plan_feedback_in_flight.is_none()
+            && self.composer_has_operator_notes()
+            && !self.composer_is_leftover_slash_palette_only()
+            && !self.composer_is_recognized_slash_command()
+            && !keep_draft_snapshot
+            && (!notes.is_empty() || has_images);
+        // Keep-draft after close / reopen / resume is the next Operator
+        // turn. Do not wrap it as review notes.
+        let consumed_composer = !keep_draft_snapshot
+            && (feedback_armed
+                || images_only_idle
+                || pane_open_notes
+                || comment_hub_notes
+                || isolated_idle_composer_notes)
             && (!notes.is_empty() || has_images || comment_hub_notes);
         let images = if consumed_composer {
             self.prompt.drain_images()
@@ -1057,9 +1143,10 @@ impl AgentView {
         };
         let sent_acp = pav.send_approved();
         if consumed_composer {
-            // Notes were the live composer (keep-draft stash is the same
-            // snapshot). Drop that stash so close cannot restore it into a
-            // second prompt after Interject paints the wrapped review line.
+            // Notes were the live composer (including idle notes already in
+            // the Operator box at present). Drop that stash so close cannot
+            // restore it into a second prompt after Interject paints the
+            // wrapped review line.
             let _ = std::mem::take(&mut pav.stashed_prompt);
         }
         self.close_plan_review(pav, "build");
@@ -1342,6 +1429,13 @@ impl AgentView {
             // steal a mid-compose draft into Prompt focus; Approve would
             // then treat it as review notes.
             pav.focus = PlanApprovalFocus::Preview;
+            if keep_draft {
+                // Typed while the pane was shut: keep as the next prompt.
+                // Copy text only; stash() drains image chips.
+                pav.stashed_prompt.text = self.prompt.text().to_string();
+                pav.stashed_prompt.cursor = live_cursor;
+                pav.keep_draft_is_next_operator_turn = true;
+            }
         }
         if keep_draft {
             self.prompt.set_cursor(live_cursor);
@@ -1500,6 +1594,7 @@ impl AgentView {
             && self.isolated_preview_idle_enter_approves_with_notes()
         {
             self.snapshot_or_clear_plan_feedback_draft();
+            self.prompt.slash_close();
             return self.approve_plan();
         }
         // Session Multiline: Enter inserts a newline. Preview must match

@@ -841,7 +841,9 @@ fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
     );
 }
 
-/// `/implement` continues mill. Isolated Preview leftover present must close.
+/// `/implement` continues nested work. Isolated Preview with a live waiter
+/// stays until Esc, Exit, or Approve. Operator `/implement` must not vanish
+/// the pane.
 #[test]
 fn isolated_preview_implement_closes_leftover_present_after_mill_continues() {
     let mut app = make_app_with_agent("sess-mill-implement");
@@ -860,8 +862,8 @@ fn isolated_preview_implement_closes_leftover_present_after_mill_continues() {
         "/implement must not Approve"
     );
     assert!(
-        agent.line_viewer.is_none(),
-        "Isolated Preview must not stay parked on leftover present after /implement"
+        agent.line_viewer.is_some(),
+        "Isolated Preview with a live waiter stays until Esc, Exit, or Approve; operator /implement must not vanish the pane"
     );
 }
 
@@ -900,16 +902,17 @@ fn isolated_preview_rereads_current_disk_plan_md_when_mill_rewrote_it() {
     );
 }
 
-/// After mill completion, Isolated Preview must not still paint leftover
-/// present / TECH.md persist overwrite while chat is mill 69 GREEN.
+/// Nested implementer finish must not vanish Isolated Preview. Operator:
+/// Isolated Preview must not vanish every couple of minutes. Stay until
+/// Esc, Exit, or Approve. There is no wall-clock Plan Exit timer.
 #[test]
 #[serial_test::serial(GROK_HOME)]
-fn isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md() {
+fn isolated_preview_must_not_close_on_nested_specialist_finish() {
     let grok_home = tempfile::tempdir().expect("home");
     let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let proj = tempfile::tempdir().expect("cwd");
     let cwd = proj.path().to_path_buf();
-    let sid = "sess-mill-green";
+    let sid = "sess-nested-finish-stay";
     let mut app = make_app_with_agent(sid);
     bind_session_home(&mut app, cwd.clone(), sid);
     let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
@@ -918,41 +921,36 @@ fn isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tec
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent
             .subagent_sessions
-            .insert("mill-69".into(), make_subagent_info("mill-69"));
+            .insert("nested-69".into(), make_subagent_info("nested-69"));
     }
     let _ = crate::app::acp_handler::handle(
         make_ext_session_notification(
             sid,
             XaiSessionUpdate::SubagentFinished {
-                subagent_id: "mill-69".into(),
-                child_session_id: "mill-69".into(),
+                subagent_id: "nested-69".into(),
+                child_session_id: "nested-69".into(),
                 status: "completed".into(),
                 error: None,
                 tool_calls: 1,
                 turns: 1,
                 duration_ms: 1000,
                 tokens_used: 0,
-                output: Some("mill 69 of 69 GREEN".into()),
+                output: Some("nested implementer GREEN".into()),
                 will_wake: false,
             },
         ),
         &mut app,
     );
-    let painted = leftover_isolated_preview_body(&app);
-    if let Some(painted) = painted {
-        assert!(
-            painted.contains("Mill 69 of 69 GREEN") && !painted.contains("why the agent stopped"),
-            "after mill completion Isolated Preview must paint mill plan.md, not leftover present; got {painted:?}"
-        );
-        assert!(
-            !painted.contains("TECH.md persist overwrite"),
-            "after mill completion Isolated Preview must not paint TECH.md persist overwrite; got {painted:?}"
-        );
-    }
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("Isolated Preview must stay after nested specialist finish");
+    assert!(
+        painted.contains("why the agent stopped"),
+        "nested specialist finish must not vanish Isolated Preview leftover present; got {painted:?}"
+    );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "mill completion must not Approve leftover present"
+        "nested specialist finish must not Approve leftover present"
     );
 }
 
@@ -1131,6 +1129,10 @@ fn mill_nested_finish_auto_run_does_not_approve_isolated_preview() {
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "mill auto-run /implement must not Approve leftover Isolated Preview"
+    );
+    assert!(
+        agent.line_viewer.is_some(),
+        "Isolated Preview must stay until Esc, Exit, or Approve; nested auto-run /implement must not vanish the pane"
     );
 }
 
@@ -1715,12 +1717,12 @@ fn isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present
     );
 }
 
-/// Operator: bare `/plan` still docks Isolated Preview from current disk
-/// plan.md, not leftover why-the-agent-stopped / TECH.md. Empty Enter
-/// never Approves.
+/// Operator: bare `/plan` exclusive-blocks nested implementers the way
+/// exclusive plan mode used to. It is not leftover Isolated Preview that
+/// leaves nested work running. Empty Enter never Approves.
 #[test]
 #[serial_test::serial(GROK_HOME)]
-fn leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stopped() {
+fn leftover_isolated_preview_bare_plan_exclusive_covering_from_current_disk() {
     let grok_home = tempfile::tempdir().expect("home");
     let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
     let proj = tempfile::tempdir().expect("cwd");
@@ -1739,11 +1741,11 @@ fn leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stop
         )),
         "bare `/plan` must not invent a plan-update Prompt; effects={effects:?}"
     );
-    let painted =
-        leftover_isolated_preview_body(&app).expect("bare `/plan` must dock Isolated Preview");
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("bare `/plan` must open exclusive covering from current disk plan.md");
     assert!(
         painted.contains("Mill 69 of 69 GREEN") && painted.contains("Current mill plan.md"),
-        "bare `/plan` must dock current disk plan.md; got {painted:?}"
+        "bare `/plan` must paint current disk plan.md; got {painted:?}"
     );
     assert!(
         !painted.contains("why the agent stopped")
@@ -1752,7 +1754,500 @@ fn leftover_isolated_preview_bare_plan_docks_current_disk_not_why_the_agent_stop
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.fullscreen && !v.is_soft_plan_side_pane()),
+        "bare `/plan` is covering exclusive plan, not Isolated Preview on the right"
+    );
+    assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "bare `/plan` must not Approve leftover present"
+    );
+}
+
+/// Named contract: soft planning does not reset the primary plan; it
+/// makes a secondary plan; Isolated Preview does not immediately pull
+/// up leftover current `plan.md`. Mill nested work stays Working.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn isolated_preview_soft_planning_does_not_pull_up_leftover_current_plan_md() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-secondary";
+
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    }
+    let primary_before = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        std::fs::read_to_string(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(sid)
+                .join("plan.md"),
+        )
+        .expect("primary plan.md")
+    };
+    let effects = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature".into()),
+        &mut app,
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::CancelTurn { .. }
+                | Effect::SetSessionMode { .. }
+                | Effect::SetModeThenPrompt { .. }
+        )),
+        "`/plan --soft` must not stop mill work or enter plan mode; effects={effects:?}"
+    );
+    let painted =
+        leftover_isolated_preview_body(&app).expect("`/plan --soft` must dock Isolated Preview");
+    assert!(
+        painted.contains("add feature"),
+        "`/plan --soft add feature` must seed Isolated Preview; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("why the agent stopped")
+            && !painted.contains("TECH.md persist overwrite")
+            && !painted.contains("Current mill plan.md")
+            && !painted.contains("Mill 69 of 69 GREEN"),
+        "Isolated Preview must not immediately pull up leftover current plan.md; got {painted:?}"
+    );
+    let cwd_str = cwd.to_string_lossy();
+    let encoded = urlencoding::encode(&cwd_str);
+    let disk = std::fs::read_to_string(
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("plan.md"),
+    )
+    .expect("primary plan.md after --soft");
+    assert_eq!(
+        disk, primary_before,
+        "soft planning must not reset the primary plan.md"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(
+        agent.session.state,
+        crate::app::agent::AgentState::TurnRunning,
+        "`/plan --soft` must not park L1; mill stays running"
+    );
+    assert!(
+        agent.isolated_preview_shows_secondary_plan,
+        "`/plan --soft` must dock Isolated Preview as a secondary plan"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "empty Enter never Approves leftover mill present"
+    );
+    let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+    if db.is_file() {
+        let store = xai_grok_shell::grok_oss::open_at(&db).expect("grok_oss.db");
+        if let Ok(Some(primary)) =
+            store.load_session_plan_body(sid, xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY)
+        {
+            assert!(
+                !primary.contains("add feature"),
+                "soft planning must not reset the primary plan SQL body; got {primary:?}"
+            );
+        }
+        if let Ok(Some(secondary)) =
+            store.load_session_plan_body(sid, xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY)
+        {
+            assert!(
+                secondary.contains("add feature") && !secondary.contains("Current mill plan.md"),
+                "soft planning must make a secondary plan; got {secondary:?}"
+            );
+        }
+    }
+}
+
+/// Operator: Isolated Preview must not vanish every couple of minutes.
+/// Occupancy ticks (nested implementer progress) must not close Isolated
+/// Preview. There is no wall-clock Plan Exit timer. Stay until Esc, Exit,
+/// or Approve.
+#[test]
+fn isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_tick() {
+    let mut app = make_app_with_agent("sess-occupancy-tick");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-occupancy-tick",
+            test_subagent_spawned("sess-occupancy-tick", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    for _ in 0..3 {
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-occupancy-tick",
+                test_subagent_progress("sess-occupancy-tick", "occupancy-l2"),
+            ),
+            &mut app,
+        );
+    }
+    let painted = leftover_isolated_preview_body(&app).expect(
+        "Isolated Preview must not vanish every couple of minutes on nested occupancy ticks",
+    );
+    assert!(
+        painted.contains("why the agent stopped"),
+        "occupancy tick must not close Isolated Preview leftover present; got {painted:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "occupancy tick must not Approve Isolated Preview"
+    );
+    assert!(
+        agent
+            .subagent_sessions
+            .get("occupancy-l2")
+            .is_some_and(|i| !i.finished && !i.pending_kill),
+        "occupancy nested implementer must stay Working"
+    );
+}
+
+/// Named contract: there is no Plan Exit wall-clock timer that closes
+/// Isolated Preview. Nested implementer occupancy ticks and specialist
+/// finish must not close it. Stay until Esc, Exit, or Approve.
+#[test]
+fn isolated_preview_has_no_plan_exit_wall_clock_timer() {
+    let mut app = make_app_with_agent("sess-no-plan-exit-timer");
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-no-plan-exit-timer",
+            test_subagent_spawned("sess-no-plan-exit-timer", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-no-plan-exit-timer",
+            test_subagent_progress("sess-no-plan-exit-timer", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-no-plan-exit-timer",
+            test_subagent_finished("occupancy-l2"),
+        ),
+        &mut app,
+    );
+    assert!(
+        leftover_isolated_preview_body(&app).is_some(),
+        "Isolated Preview must not vanish every couple of minutes; there is no Plan Exit wall-clock timer"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.line_viewer.is_some() && agent.plan_approval_view.is_some(),
+        "Isolated Preview stays until Esc, Exit, or Approve"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "nested occupancy finish is not Plan Exit and not Approve"
+    );
+}
+
+/// GitHub #122. Empty Enter never Approves a plan present, Isolated Preview
+/// and exclusive covering. Enter with nothing selected does not Approve.
+/// Clickable Approve is the only Approve.
+#[test]
+fn empty_enter_never_approves_exclusive_covering_present_github_122() {
+    let mut app = make_app_with_agent("sess-exclusive-empty-enter");
+    let _rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Exclusive covering\n\nEmpty Enter never Approves\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.fullscreen = true;
+        viewer.plan_mut().selected_cta = None;
+        viewer.plan_mut().approve_button_area = Some(APPROVE_HIT);
+        viewer.last_modal_area = Some(MODAL_AREA);
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "GitHub #122: empty Enter never Approves exclusive covering; Enter with nothing selected does not Approve"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
+            "empty Enter must not vanish exclusive covering"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    arm_comment_and_approve_hit_rects(&mut app);
+    let click = app.handle_input(&mouse_down(APPROVE_HIT.x + 1, APPROVE_HIT.y));
+    let click_effects = dispatch_outcome(&mut app, click);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_decision_resolved || agent.plan_approval_view.is_none(),
+        "GitHub #122: clickable Approve is the only Approve; got decision_resolved={} park={}",
+        agent.plan_decision_resolved,
+        agent.plan_approval_view.is_some()
+    );
+    assert!(
+        click_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )) || agent.plan_decision_resolved
+            || agent.plan_approval_view.is_none(),
+        "clickable Approve must Approve; effects={click_effects:?}"
+    );
+}
+
+/// Operator: "soft planning is still very broken; two tests were not enough."
+/// Leftover Isolated Preview already open must not immediately dock leftover
+/// primary `plan.md`. Nested implementers keep running.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn plan_soft_leftover_isolated_preview_already_open_does_not_dock_leftover_primary() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-leftover-open";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _rx = isolated_present(&mut app, "create-plan-call", LEFTOVER_PRESENT);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        let mut nested = make_subagent_info("nested-soft");
+        nested.status = Some(std::sync::Arc::from("Working"));
+        agent.subagent_sessions.insert("nested-soft".into(), nested);
+    }
+    let primary_before = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        std::fs::read_to_string(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(sid)
+                .join("plan.md"),
+        )
+        .expect("primary plan.md")
+    };
+    let effects = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft rewrite auth".into()),
+        &mut app,
+    );
+    assert!(
+        effects.iter().all(|e| !matches!(
+            e,
+            Effect::CancelTurn { .. } | Effect::KillSubagent { .. } | Effect::SetSessionMode { .. }
+        )),
+        "`/plan --soft` must not exclusive-block nested implementers; effects={effects:?}"
+    );
+    let painted =
+        leftover_isolated_preview_body(&app).expect("`/plan --soft` must keep Isolated Preview");
+    assert!(
+        painted.contains("rewrite auth"),
+        "`/plan --soft rewrite auth` must seed Isolated Preview; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("why the agent stopped")
+            && !painted.contains("Current mill plan.md")
+            && !painted.contains("TECH.md persist overwrite"),
+        "leftover Isolated Preview already open must not immediately dock leftover primary plan.md; got {painted:?}"
+    );
+    let disk = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        std::fs::read_to_string(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(sid)
+                .join("plan.md"),
+        )
+        .expect("primary after --soft")
+    };
+    assert_eq!(
+        disk, primary_before,
+        "soft planning must not reset the primary plan.md"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.isolated_preview_shows_secondary_plan,
+        "`/plan --soft` is a secondary plan"
+    );
+    let nested = &agent.subagent_sessions["nested-soft"];
+    assert!(
+        !nested.pending_kill && !nested.finished,
+        "nested implementers keep running under `/plan --soft`"
+    );
+}
+
+/// Soft Isolated Preview must not close on nested occupancy tick or
+/// specialist finish. Operator: two tests were not enough.
+#[test]
+fn plan_soft_must_not_close_on_nested_tick() {
+    let mut app = make_app_with_agent("sess-soft-nested-tick");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    }
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature".into()),
+        &mut app,
+    );
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-soft-nested-tick",
+            test_subagent_spawned("sess-soft-nested-tick", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-soft-nested-tick",
+            test_subagent_progress("sess-soft-nested-tick", "occupancy-l2"),
+        ),
+        &mut app,
+    );
+    let _ = handle(
+        make_ext_session_notification(
+            "sess-soft-nested-tick",
+            test_subagent_finished("occupancy-l2"),
+        ),
+        &mut app,
+    );
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("`/plan --soft` Isolated Preview must not close on nested tick");
+    assert!(
+        painted.contains("add feature"),
+        "nested tick must not vanish `/plan --soft` Isolated Preview; got {painted:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.isolated_preview_shows_secondary_plan,
+        "nested tick must not convert `/plan --soft` Isolated Preview into leftover primary"
+    );
+}
+
+/// Identity collision: upserting the secondary plan must not overwrite the
+/// primary `plan.md` row even when the feature text looks like leftover
+/// primary body. Operator: two tests were not enough.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn plan_soft_identity_collision_does_not_reset_primary() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-identity";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature".into()),
+        &mut app,
+    );
+    let cwd_str = cwd.to_string_lossy();
+    let encoded = urlencoding::encode(&cwd_str);
+    let disk = std::fs::read_to_string(
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("plan.md"),
+    )
+    .expect("primary plan.md");
+    assert_eq!(
+        disk, MILL_PLAN_MD,
+        "secondary Isolated Preview must not collide with primary plan.md identity"
+    );
+    let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+    if db.is_file() {
+        let store = xai_grok_shell::grok_oss::open_at(&db).expect("grok_oss.db");
+        let primary = store
+            .load_session_plan_body(sid, xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY)
+            .ok()
+            .flatten();
+        let secondary = store
+            .load_session_plan_body(sid, xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY)
+            .ok()
+            .flatten();
+        if let Some(primary) = primary {
+            assert!(
+                !primary.contains("add feature"),
+                "primary upsert identity must stay primary; got {primary:?}"
+            );
+        }
+        if let Some(secondary) = secondary {
+            assert!(
+                secondary.contains("add feature"),
+                "secondary identity must hold the `/plan --soft` body; got {secondary:?}"
+            );
+        }
+    }
+}
+
+/// `exit_plan_mode` writing the primary must present that file. `/plan --soft`
+/// leftover placeholder must not stay as if it were leftover Isolated Preview
+/// leftover body paint. Operator: two tests were not enough.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn plan_soft_exit_plan_mode_writes_primary_and_presents_it() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-exit-primary";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft leftover placeholder".into()),
+        &mut app,
+    );
+    write_mill_session_plan_md(&cwd, sid, MILL_PLAN_MD);
+    let presented = "# Current disk plan.md after exit_plan_mode\n\nsecond present after rewrite\n";
+    let _rx = isolated_present(&mut app, "create-plan-call-2", presented);
+    let painted =
+        leftover_isolated_preview_body(&app).expect("exit_plan_mode must present Isolated Preview");
+    assert!(
+        painted.contains("second present after rewrite")
+            && painted.contains("Current disk plan.md after exit_plan_mode"),
+        "exit_plan_mode writing the primary must present that file; got {painted:?}"
+    );
+    assert!(
+        !painted.contains("leftover placeholder"),
+        "leftover `/plan --soft` body must not stay after exit_plan_mode writes the primary; got {painted:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "exit_plan_mode present is review, not Approve"
     );
 }

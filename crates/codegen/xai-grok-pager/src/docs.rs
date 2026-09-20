@@ -1059,11 +1059,13 @@ mod tests {
                 && plan.content.contains("Comment then Approve")
                 && plan
                     .content
-                    .contains("must not stay parked on leftover present")
+                    .contains("Isolated Preview does not close when nested implementers continue")
                 && slash.content.contains("Empty Enter never Approves")
-                && plan.content.contains("Empty Enter never Approves"),
-            "user-guide must keep Isolated Preview leftover-present, Comment then Approve, \
-             `/plan` extra Operator text, and empty Enter never Approves"
+                && plan.content.contains("Empty Enter never Approves")
+                && plan.content.contains("Clickable Approve only")
+                && slash.content.contains("Clickable Approve only"),
+            "user-guide must keep Isolated Preview stay, Comment then Approve, \
+             `/plan` extra Operator text, empty Enter never Approves, and clickable Approve only"
         );
         assert!(
             !slash.content.contains("Human box")
@@ -1084,15 +1086,22 @@ mod tests {
     /// Grok OSS Named contract: `/plan --soft` docks Isolated Preview for a new
     /// feature. It does not enter plan mode. It does not park L1. It does
     /// not enqueue the description as a Prompt. Present is not Approve.
-    /// Nested work stays Working. `--soft` is not the queue hold token.
-    /// Empty Enter never Approves. This diverges from upstream xAI because
-    /// FORK.md and catalog `/plan --soft` pin Isolated Preview, not plan mode.
+    /// Nested implementers stay Working. Exclusive `/plan` exclusive-blocks
+    /// nested implementers. Isolated Preview stays until Esc, Exit, or Approve.
+    /// Isolated Preview is not a Plan Exit timer. `--soft` is not the queue hold
+    /// token. Empty Enter never Approves. Clickable Approve only (GitHub #122).
+    /// This diverges from upstream xAI because FORK.md and catalog `/plan --soft`
+    /// pin Isolated Preview, not exclusive `/plan`.
     #[test]
     fn user_guide_plan_soft_docks_isolated_preview() {
         let slash = USER_GUIDE
             .iter()
             .find(|d| d.filename == "04-slash-commands.md")
             .expect("04-slash-commands.md is embedded");
+        let plan = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "19-plan-mode.md")
+            .expect("19-plan-mode.md is embedded");
         assert!(
             slash.content.contains("/plan --soft"),
             "04-slash-commands.md must document /plan --soft"
@@ -1118,8 +1127,48 @@ mod tests {
             "04-slash-commands.md must keep empty Enter never Approves"
         );
         assert!(
-            slash.content.contains("Nested subagents stay Working"),
-            "04-slash-commands.md must say nested subagents stay Working"
+            slash.content.contains("Nested implementers stay Working"),
+            "04-slash-commands.md must say nested implementers stay Working under /plan --soft"
+        );
+        assert!(
+            slash
+                .content
+                .contains("exclusive-blocks nested implementers")
+                && plan
+                    .content
+                    .contains("exclusive-blocks nested implementers"),
+            "user-guide must say exclusive /plan exclusive-blocks nested implementers"
+        );
+        assert!(
+            slash
+                .content
+                .contains("Isolated Preview does not close when nested implementers continue")
+                && plan
+                    .content
+                    .contains("Isolated Preview does not close when nested implementers continue")
+                && slash
+                    .content
+                    .contains("Isolated Preview stays until Esc, Exit, or Approve")
+                && plan
+                    .content
+                    .contains("Isolated Preview stays until Esc, Exit, or Approve")
+                && slash.content.contains("not a Plan Exit timer")
+                && plan.content.contains("not a Plan Exit timer"),
+            "user-guide must say Isolated Preview stays until Esc, Exit, or Approve and is not a Plan Exit timer"
+        );
+        assert!(
+            slash.content.contains("Clickable Approve only")
+                && plan.content.contains("Clickable Approve only")
+                && slash.content.contains("#122")
+                && plan.content.contains("#122"),
+            "user-guide must say clickable Approve only and name GitHub #122"
+        );
+        assert!(
+            !slash.content.contains("mill work")
+                && !plan.content.contains("mill work")
+                && !plan.content.contains("if mill")
+                && !plan.content.contains("After mill"),
+            "user-guide must not say mill; say nested implementers, Isolated Preview, exclusive /plan"
         );
         assert!(
             slash.content.contains("/plan --soft add feature"),
@@ -1129,10 +1178,6 @@ mod tests {
             !slash.content.contains("still enters plan mode"),
             "04-slash-commands.md must not say /plan --soft still enters plan mode"
         );
-        let plan = USER_GUIDE
-            .iter()
-            .find(|d| d.filename == "19-plan-mode.md")
-            .expect("19-plan-mode.md is embedded");
         assert!(
             plan.content.contains("/plan --soft"),
             "19-plan-mode.md must document /plan --soft"
@@ -1159,6 +1204,25 @@ mod tests {
                 && plan.content.contains("first-draft snapshot"),
             "19-plan-mode.md must say Isolated Preview re-reads session plan.md after Revise, \
              not the first-draft snapshot"
+        );
+        assert!(
+            slash.content.contains("does not reset the primary plan")
+                && slash.content.contains("makes a secondary plan")
+                && slash
+                    .content
+                    .contains("does not immediately pull up leftover current")
+                && plan.content.contains("does not reset the primary plan")
+                && plan.content.contains("makes a secondary plan")
+                && plan
+                    .content
+                    .contains("does not immediately pull up leftover current"),
+            "user-guide must say soft planning does not reset the primary plan; it makes a \
+             secondary plan; Isolated Preview does not immediately pull up leftover current plan.md"
+        );
+        assert!(
+            slash.content.contains("does not dock leftover primary")
+                && plan.content.contains("does not dock leftover primary"),
+            "user-guide must say Isolated Preview does not dock leftover primary plan.md"
         );
         assert!(
             plan.content.contains("Approves with those notes")
@@ -1196,7 +1260,8 @@ mod tests {
 
     /// Operator: "/plan never submits, it just pulls up the stale plan."
     /// User-guide must say `/plan` with extra Operator text submits a plan-update
-    /// turn. Bare `/plan` still docks Isolated Preview from current disk.
+    /// turn. Exclusive `/plan` exclusive-blocks nested implementers. Isolated
+    /// Preview is `/plan --soft`.
     #[test]
     fn user_guide_plan_slash_with_body_submits_plan_update() {
         let slash = USER_GUIDE
@@ -1302,18 +1367,27 @@ mod tests {
             "user-guide must say after Plan Exit with Isolated Preview closed, chrome must not stay plan"
         );
         assert!(
-            plan.content.contains("`/plan` or `/plan --soft`")
-                && slash.content.contains("`/plan` or `/plan --soft`")
+            plan.content
+                .contains("exclusive-blocks nested implementers")
+                && slash
+                    .content
+                    .contains("exclusive-blocks nested implementers")
                 && plan.content.contains("must not swallow `/plan`")
                 && slash.content.contains("must not swallow `/plan`"),
-            "user-guide must say /plan after Exit docks Isolated Preview and compact must not swallow /plan"
+            "user-guide must say exclusive /plan exclusive-blocks nested implementers and compact must not swallow /plan"
         );
         assert!(
             plan.content
-                .contains("must not stay parked on leftover present")
-                && plan.content.contains("if mill rewrote it")
-                && plan.content.contains("TECH.md persist overwrite"),
-            "19-plan-mode.md must say Isolated Preview does not stay parked on leftover present after mill work continues"
+                .contains("Isolated Preview does not close when nested implementers continue")
+                && plan
+                    .content
+                    .contains("Isolated Preview stays until Esc, Exit, or Approve")
+                && plan.content.contains("not a Plan Exit timer")
+                && plan.content.contains("does not dock leftover primary")
+                && plan.content.contains("TECH.md persist overwrite")
+                && !plan.content.contains("if mill")
+                && !plan.content.contains("mill work"),
+            "19-plan-mode.md must say Isolated Preview stays until Esc, Exit, or Approve when nested implementers continue"
         );
     }
 

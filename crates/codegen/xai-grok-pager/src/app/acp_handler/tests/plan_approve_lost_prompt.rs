@@ -589,6 +589,189 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
+/// Operator: "Also approve with comment STILL does not work on the latest
+/// commit and build you gave me yesterday." Isolated Preview idle after
+/// present: leftover slash-palette `/` plus Operator notes plus click
+/// Approve must Approve with those notes. It must not Approve empty and
+/// leave the notes sitting. Empty Enter never Approves. This diverges
+/// from upstream xAI because FORK.md lost-prompt extra and the catalog
+/// Clickable Approve table.
+#[test]
+fn isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with_comment() {
+    let mut app = make_app_with_agent("sess-leftover-slash-approve-click");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nApprove with comment still broken\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.focus),
+            Some(PlanApprovalFocus::Preview)
+        );
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
+        assert!(
+            agent.prompt.slash_open() || agent.prompt.text().trim() == "/",
+            "fixture: leftover slash palette `/`"
+        );
+        // set_text, not keystroke snapshot. Leftover `/` used to skip
+        // `feedback_draft`, so click Approve consumed nothing.
+        agent.prompt.set_text(HUMAN_BOX_PROMPT);
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.feedback_draft = None;
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+    }
+
+    let after = click_approve_via_app(&mut app);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+            "click Approve with notes in the Operator box is Approve with comment"
+        );
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "composer clears only after Approve lands, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text.contains(HUMAN_BOX_PROMPT)
+                    && !p.text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            "Approve with comment must not queue those notes as a Prompt, got {:?}",
+            agent.session.pending_prompts
+        );
+    }
+    assert!(
+        !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
+        "click Approve with notes must Interject, not SendPrompt; effects={:?} pending={:?}",
+        after.effects,
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
+    );
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
+/// Operator: "Also approve with comment STILL does not work on the latest
+/// commit and build you gave me yesterday." Isolated Preview vanished
+/// (pane shut) with a live waiter and Preview focus: Operator notes plus
+/// Enter must Approve with those notes. It must not mill-continue close
+/// or hold a toast with no Approve button. Empty Enter never Approves.
+#[test]
+fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
+    let mut app = make_app_with_agent("sess-vanished-pane-approve-empty");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx_empty = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nVanished Isolated Preview empty Enter\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.cancel_line_viewer();
+        assert!(
+            agent.line_viewer.is_none(),
+            "fixture: Isolated Preview vanished"
+        );
+        agent.prompt.set_text("");
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.feedback_draft = None;
+        }
+    }
+    let empty = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    std::mem::drop(rx_empty);
+
+    let mut app = make_app_with_agent("sess-vanished-pane-approve-notes");
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Isolated plan.md\n\nVanished Isolated Preview notes\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.cancel_line_viewer();
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.focus = PlanApprovalFocus::Preview;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+            pav.feedback_draft = None;
+        }
+        agent.prompt.set_text(HUMAN_BOX_PROMPT);
+    }
+    let enter = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let interject_text = match &enter {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => text.clone(),
+        other => panic!(
+            "vanished Isolated Preview plus Operator notes plus Enter must Approve with those notes; got {other:?}"
+        ),
+    };
+    assert!(
+        interject_text.contains(HUMAN_BOX_PROMPT),
+        "Enter must Approve with the Operator notes, got {interject_text:?}"
+    );
+    let enter_effects = dispatch_outcome(&mut app, enter);
+    let after = AfterClickApprove {
+        interject_text: Some(interject_text),
+        effects: enter_effects,
+    };
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+            "non-empty Enter must Approve the parked plan"
+        );
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "composer clears only after Approve lands, got {:?}",
+            agent.prompt.text()
+        );
+    }
+    assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
+    assert_acp_approved_notes_not_in_feedback(rx);
+}
+
 /// Isolated Preview idle plus typed Operator notes plus Enter Approves
 /// with those notes. Empty Enter never Approves. This diverges from
 /// upstream xAI because FORK.md lost-prompt extra and the catalog

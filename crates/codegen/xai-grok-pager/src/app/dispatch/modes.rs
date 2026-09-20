@@ -70,9 +70,12 @@ pub(super) fn dispatch_dock_isolated_preview(
 /// Enter plan mode via hard `/plan`.
 ///
 /// When not in plan mode: emits `SetSessionMode` (or `SetModeThenPrompt`
-/// if a description is provided). Bare `/plan` already in plan mode, or
-/// after Plan Exit, docks Isolated Preview from current disk plan.md.
-/// `/plan` with extra Human text submits a plan-update turn even when
+/// if a description is provided). Bare `/plan` (no extra text) paints
+/// covering exclusive present from current disk plan.md and
+/// exclusive-blocks nested implementers. After Plan Exit with plan mode
+/// still on, covering is still required; it is not leftover Isolated
+/// Preview. Enter `SetSessionMode` plan when not already in plan.
+/// `/plan` with extra Operator text submits a plan-update turn even when
 /// Isolated Preview leftover is docked or plan mode is already on. That
 /// submit must not wipe the sentence without sending it. WAL records it.
 /// Use `/view-plan` to open the current saved plan preview without a
@@ -92,22 +95,36 @@ pub(super) fn dispatch_enter_plan_mode(
         return vec![];
     };
     let description = description.filter(|s| !s.trim().is_empty());
-    let in_plan = {
+    if description.is_none() {
         let Some(agent) = app.agents.get_mut(&id) else {
             return vec![];
         };
         let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-        // Operator: "/plan never submits, it just pulls up the stale plan."
-        // Bare `/plan` after Exit docks Isolated Preview from current disk
-        // plan.md. Extra Human text is a plan-update turn, not a feature seed.
-        // Empty Enter never Approves. Compact must not swallow this.
-        if description.is_none()
-            && (agent.plan_decision_resolved || in_plan || agent.is_plan_viewer())
-        {
-            agent.dock_isolated_preview();
-            return vec![];
+        // Bare `/plan` exclusive covering from current disk plan.md.
+        // Exclusive-blocks nested implementers. Empty Enter never Approves.
+        // Compact must not swallow this. Isolated Preview leftover dock is
+        // `/plan --soft`, not this path.
+        agent.enter_exclusive_plan_covering();
+        let mut effects = agent.exclusive_block_nested_implementers();
+        if !in_plan {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("No active session");
+                return effects;
+            };
+            agent.plan_mode_pending = Some(true);
+            tracing::info!("Plan mode entered via /plan slash command");
+            effects.push(Effect::SetSessionMode {
+                session_id,
+                mode_id: acp::SessionModeId::new("plan"),
+            });
         }
-        in_plan
+        return effects;
+    }
+    let in_plan = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        agent.plan_mode_pending.unwrap_or(agent.plan_mode_active)
     };
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -119,7 +136,8 @@ pub(super) fn dispatch_enter_plan_mode(
 
     let mode_id = acp::SessionModeId::new("plan");
 
-    let (effects, page_flip_entry) = if let Some(desc) = description {
+    let desc = description.expect("bare /plan returned covering above");
+    let (effects, page_flip_entry) = {
         // Plan-update turn: Isolated Preview leftover / already in plan /
         // after Plan Exit must still send. WAL records the sentence so a
         // consume_input wipe is not a lost prompt. Protect this enqueue so
@@ -197,16 +215,6 @@ pub(super) fn dispatch_enter_plan_mode(
             }
         }
         (effects, page_flip_entry)
-    } else {
-        agent.plan_mode_pending = Some(true);
-        tracing::info!("Plan mode entered via /plan slash command");
-        (
-            vec![Effect::SetSessionMode {
-                session_id,
-                mode_id,
-            }],
-            None,
-        )
     };
     note_peek_page_flip(app, id, page_flip_entry);
     effects
@@ -246,15 +254,36 @@ pub(super) fn set_plan_mode(
     let new = kind.to_bool();
 
     // Operator: after Plan Exit, `/plan` must not be ignored. Shell plan
-    // mode can still be on. Dock Isolated Preview from current disk
-    // plan.md, not leftover "why the agent stopped" / TECH.md. Empty Enter
-    // never Approves. Compact must not swallow this. Leftover Isolated
-    // Preview already docked still rereads current disk.
-    if new && (agent.plan_decision_resolved || agent.is_plan_viewer()) {
-        agent.dock_isolated_preview();
+    // mode can still be on. Bare `/plan` paints covering exclusive present
+    // from current disk plan.md and exclusive-blocks nested implementers.
+    // Empty Enter never Approves. Compact must not swallow this. After
+    // Plan Exit with plan mode still on, covering is still required; it
+    // is not leftover Isolated Preview (`fullscreen = false`).
+    if new {
+        agent.enter_exclusive_plan_covering();
+        let covering = agent.exclusive_block_nested_implementers();
         if prev == new {
-            return vec![];
+            // Idempotent ON still toasts. Covering exclusive `/plan` still
+            // exclusive-blocks nested implementers; skip the ACP round-trip.
+            agent.show_toast(&plan_mode_toast(kind));
+            return covering;
         }
+        agent.plan_mode_pending = Some(new);
+        refresh_open_settings_modals(app);
+        app.show_toast(&plan_mode_toast(kind));
+        tracing::info!(
+            target: "settings",
+            key = "plan_mode",
+            value = new,
+            "setting changed",
+        );
+        let mode_id = acp::SessionModeId::new(xai_grok_tools::types::SessionMode::Plan.as_id());
+        let mut effects = covering;
+        effects.push(Effect::SetSessionMode {
+            session_id,
+            mode_id,
+        });
+        return effects;
     }
 
     // Idempotent: toast but skip the ACP round-trip.

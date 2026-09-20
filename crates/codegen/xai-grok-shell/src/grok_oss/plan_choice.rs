@@ -14,6 +14,11 @@ use super::GrokOssStore;
 /// Identity for the session's current `plan.md`.
 pub const SESSION_PLAN_IDENTITY: &str = "plan.md";
 
+/// Isolated Preview secondary plan. Soft planning (`/plan --soft`) stores
+/// this identity in `session_plans` and does not reset the primary `plan.md`
+/// row. This is not a second on-disk home.
+pub const SECONDARY_PLAN_IDENTITY: &str = "secondary-plan.md";
+
 /// One idle plan CTA the operator explicitly chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanRecordedChoice {

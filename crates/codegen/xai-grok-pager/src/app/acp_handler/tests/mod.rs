@@ -102,6 +102,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         turn_count: None,
         tool_call_count: None,
         tokens_used: None,
+        tokens_past: 0,
         context_window_tokens: Some(131072),
         context_usage_pct: Some(85),
         tools_used: Vec::new(),

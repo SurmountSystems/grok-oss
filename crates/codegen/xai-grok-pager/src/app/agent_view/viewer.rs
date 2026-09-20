@@ -149,7 +149,7 @@ impl AgentView {
                 .is_some_and(|pav| !pav.comments.is_empty())
     }
 
-    fn composer_has_operator_notes(&self) -> bool {
+    pub(super) fn composer_has_operator_notes(&self) -> bool {
         !self.prompt.text().trim().is_empty()
             || !self.prompt.images.is_empty()
             || self
@@ -160,19 +160,36 @@ impl AgentView {
                 .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
     }
 
+    /// Leftover slash-palette `/` (or `/view-plan`) is not review notes.
+    pub(super) fn composer_is_leftover_slash_palette_only(&self) -> bool {
+        matches!(
+            self.prompt.text().trim(),
+            "/" | "/view-plan" | "/show-plan" | "/plan-view"
+        )
+    }
+
+    pub(super) fn composer_is_recognized_slash_command(&self) -> bool {
+        let trimmed = self.prompt.text().trim();
+        let Some(invocation) = crate::slash::parse_invocation(trimmed) else {
+            return false;
+        };
+        let reg = self.prompt.slash_controller.registry();
+        reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
+    }
+
     /// Isolated Preview idle after present: a non-empty Operator box
     /// (typed notes or a paste chip) plus Enter Approves with those notes.
     /// Empty Enter never Approves. Keep-draft from before present still
     /// SendPrompt. Slash commands still send. Line-comment overlay still
     /// saves. Prompt-focused Revise / Questions keep those intents.
-    pub(super) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
+    /// Vanished Isolated Preview (pane shut, live waiter, Preview focus)
+    /// still Approves with those notes. Leftover slash-palette `/` is not
+    /// notes.
+    pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
         if self.plan_decision_resolved {
             return false;
         }
         if self.plan_feedback_in_flight.is_some() {
-            return false;
-        }
-        if !self.is_plan_viewer() {
             return false;
         }
         let Some(pav) = self.plan_approval_view.as_ref() else {
@@ -181,19 +198,20 @@ impl AgentView {
         if pav.focus == PlanApprovalFocus::Commenting {
             return false;
         }
+        if !self.is_plan_viewer() && pav.focus != PlanApprovalFocus::Preview {
+            return false;
+        }
         if !self.composer_has_operator_notes() {
+            return false;
+        }
+        if self.composer_is_leftover_slash_palette_only() {
             return false;
         }
         if self.composer_is_keep_draft_from_before_present() {
             return false;
         }
-        let trimmed = self.prompt.text().trim();
-        if let Some(invocation) = crate::slash::parse_invocation(trimmed) {
-            let reg = self.prompt.slash_controller.registry();
-            if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
-            {
-                return false;
-            }
+        if self.composer_is_recognized_slash_command() {
+            return false;
         }
         if pav.focus == PlanApprovalFocus::Prompt {
             return matches!(
@@ -415,6 +433,7 @@ impl AgentView {
             }
             if self.isolated_preview_idle_enter_approves_with_notes() {
                 self.snapshot_or_clear_plan_feedback_draft();
+                self.prompt.slash_close();
                 return self.approve_plan();
             }
             if self.hold_parked_plan_review_comments_from_enter() {

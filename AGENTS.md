@@ -173,10 +173,12 @@ less than product code and tests. Do not invent long essays or git nags.
    just check-remote (pinned 2026-09-16).** After a product change in
    this tree, the same wave runs `just install` and `just check-remote`.
    Not later. Not only when the Operator nags. One live
-   `just check-remote` at a time. Do not restart a live remote compile
-   at five minutes. `just test-remote` stays operator-owned unless they
-   also whitelist it. Never git commit. Dual-pin: [`FORK.md`](FORK.md)
-   Process same heading; host `~/.grok/AGENTS.md` same heading.
+   `just check-remote` at a time. The runner L2 owns that gate (see
+   § *Jobs queue*). Implementors do not each start `just check-remote`.
+   Do not restart a live remote compile at five minutes.
+   `just test-remote` stays operator-owned unless they also whitelist
+   it. Never git commit. Dual-pin: [`FORK.md`](FORK.md) Process same
+   heading; host `~/.grok/AGENTS.md` same heading.
 3b-remote-clippy. **Remote quality clippy must use many workers (pinned
    2026-08-23).** Do not invoke `cargo clippy` on `workspace-cargo-quality`.
    That external binary lets the outer cargo start a 1-token jobserver;
@@ -463,15 +465,14 @@ less than product code and tests. Do not invent long essays or git nags.
    build still does not match) is a named failure mode under § *The
    operator's words are the spec*. A dropped operator prompt is a
    product defect under § *Wasted human time* (hard constraint 24).
-   Operator speech is work. Take the Operator seriously. Prefer
-   Operator and Agent as speaker labels. Never name
-   that Anthropic assistant. Report finished nested work the same turn
-   the host says the nested agent exited. Full host pin:
+   Operator speech is work. Never ignore the Operator. Take the
+   Operator seriously. Prefer Operator and Agent as speaker labels.
+   Never name that Anthropic assistant. Report finished nested work
+   the same turn the host says the nested agent exited. Full host pin:
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
-   speech is work*, § *Take the Operator seriously*, § *Operator and
-   Agent*, § *Never name
-   that Anthropic assistant*, § *Report finished nested work the same
-   turn*.
+   speech is work*, § *Never ignore the Operator*, § *Take the Operator
+   seriously*, § *Operator and Agent*, § *Never name that Anthropic
+   assistant*, § *Report finished nested work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -786,6 +787,38 @@ the prompt write-ahead log known-good tests, L1 lean, or the
 Hierarchical fast path. Dual-pin: this file and host
 `~/.grok/AGENTS.md` same heading.
 
+## Never ignore the Operator (pinned 2026-09-19)
+
+Never ignore the Operator. A question, a correction, "are you going
+to answer", "HELLO", or anger about silence is work this turn. Answer
+in the same chat turn in ordinary American English before spawn, wait,
+or plan-present. Do not spend the turn only on tools and leave the
+Operator with no reply. Nested implementers do not excuse silence.
+
+This pin is adjacent to § *Operator speech is work* and § *Report
+finished nested work the same turn*. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+## Jobs queue (pinned 2026-09-19)
+
+One runner L2 owns surmount-1 builder jobs (`just check-remote`, then
+`just install`). Implementor L2s do product work. They do not each
+start `just check-remote`. The last finisher, or the runner, owns that
+gate. Never pile cargo onto surmount-1. One runner.
+
+Multiple implementors may run in parallel on disjoint paths. They pass
+reports, not builder recipes. Not every L2 uses the same workflow.
+Extract-style implementors, naming-style refactors, and Isolated
+Preview writers are different specialist L2s. Pass work to the
+specialist that owns that workflow. Pass surmount-1 results back to
+the L2s that need them. Do not spawn a swarm of identical Isolated
+Preview writers on the same files.
+
+`just test-remote` stays Operator-owned unless they also whitelist it.
+This pin does not weaken one live `just check-remote` at a time,
+fire-and-return, or the rule that the Operator owns the VPS builder.
+Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
+
 ## Take the Operator seriously (pinned 2026-09-09)
 
 Take the Operator seriously. Their words are the spec. A live grok-oss
@@ -914,7 +947,7 @@ goes up. Do not go deeper than L3.
 
 L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools when spawned. Easy work can stay on L2.
 
-Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2.
+Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
 
 L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 
@@ -1009,11 +1042,13 @@ A blocking `get_command_or_subagent_output` ten-minute loop serializes L1 so FOR
 
 After a product change in this tree, the same wave runs `just install`
 and `just check-remote`. Not later. Not only when the Operator nags.
-One live `just check-remote` at a time. Do not restart a live remote
-compile at five minutes. `just test-remote` stays operator-owned unless
-they also whitelist it. Never git commit. Dual-pin: this file hard
-constraint 3b-after-change-install; [`FORK.md`](FORK.md) Process same
-heading; host `~/.grok/AGENTS.md` same heading.
+One live `just check-remote` at a time. The runner L2 owns that gate
+(see § *Jobs queue*). Implementors do not each start
+`just check-remote`. Do not restart a live remote compile at five
+minutes. `just test-remote` stays operator-owned unless they also
+whitelist it. Never git commit. Dual-pin: this file hard constraint
+3b-after-change-install; [`FORK.md`](FORK.md) Process same heading;
+host `~/.grok/AGENTS.md` same heading.
 
 Host mill and Lake instance: `~/.grok/AGENTS.md` § *Session parallelism* and § *Do not wait on the isolated bottleneck*. Divergence home: [`FORK.md`](FORK.md) Process.
 

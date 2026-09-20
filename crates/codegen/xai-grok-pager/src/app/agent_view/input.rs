@@ -1930,6 +1930,7 @@ mod background_and_tasks_shortcut_tests {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),

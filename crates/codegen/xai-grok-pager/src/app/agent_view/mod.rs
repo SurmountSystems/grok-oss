@@ -1455,6 +1455,9 @@ pub struct AgentView {
     /// while [`Self::plan_feedback_in_flight`] is `Updating`. Cleared on a
     /// new `exit_plan_mode` present. Not session `plan.md`.
     pub(crate) isolated_preview_rewrite_wait_prompt: Option<String>,
+    /// Isolated Preview is showing the secondary plan from `/plan --soft`.
+    /// Soft planning must not reset the primary session `plan.md`.
+    pub(crate) isolated_preview_shows_secondary_plan: bool,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -2615,6 +2618,7 @@ pub(crate) mod test_fixtures {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),

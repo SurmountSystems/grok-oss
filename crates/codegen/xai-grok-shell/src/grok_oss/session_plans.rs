@@ -211,8 +211,20 @@ impl GrokOssStore {
     /// Present / plan-save: write the live body. Keeps dock_open, title, and
     /// comments when a row already exists.
     pub fn upsert_session_plan_body(&self, session_id: &str, body: &str) -> Result<()> {
+        self.upsert_session_plan_body_for(session_id, SESSION_PLAN_IDENTITY, body)
+    }
+
+    /// Write a named plan identity. Soft planning uses
+    /// [`crate::grok_oss::SECONDARY_PLAN_IDENTITY`] so Isolated Preview does
+    /// not reset the primary `plan.md` row.
+    pub fn upsert_session_plan_body_for(
+        &self,
+        session_id: &str,
+        plan_identity: &str,
+        body: &str,
+    ) -> Result<()> {
         let existing = self
-            .load_session_plan(session_id, SESSION_PLAN_IDENTITY)
+            .load_session_plan(session_id, plan_identity)
             .ok()
             .flatten();
         let title = existing
@@ -226,12 +238,20 @@ impl GrokOssStore {
             .unwrap_or_else(|| "[]".to_string());
         self.upsert_session_plan(
             session_id,
-            SESSION_PLAN_IDENTITY,
+            plan_identity,
             title.as_deref(),
             body,
             dock_open,
             &comments,
         )
+    }
+
+    /// Isolated Preview dock-open for a named identity.
+    pub fn session_plan_is_dock_open(&self, session_id: &str, plan_identity: &str) -> bool {
+        self.load_session_plan(session_id, plan_identity)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.dock_open)
     }
 
     /// Present / plan-save fail-open. Tests skip the operator store unless
@@ -280,7 +300,9 @@ impl GrokOssStore {
 #[cfg(test)]
 mod session_plans_tests {
     use super::*;
-    use crate::grok_oss::{SCHEMA_VERSION, SESSION_PLAN_IDENTITY, open_at};
+    use crate::grok_oss::{
+        SCHEMA_VERSION, SECONDARY_PLAN_IDENTITY, SESSION_PLAN_IDENTITY, open_at,
+    };
     use tempfile::TempDir;
     use xai_grok_tools::implementations::editor_infra::per_path_write_lock::try_acquire_write;
 
@@ -407,6 +429,85 @@ CREATE TABLE IF NOT EXISTS meta (
             .unwrap()
             .expect("dock_open row");
         assert!(loaded.dock_open);
+    }
+
+    /// Named contract: soft planning does not reset the primary plan; it
+    /// makes a secondary plan; Isolated Preview does not immediately pull
+    /// up leftover current `plan.md`.
+    #[test]
+    fn soft_planning_does_not_reset_the_primary_plan_it_makes_a_secondary_plan() {
+        let tmp = TempDir::new().unwrap();
+        let plan_md = tmp.path().join("plan.md");
+        let primary = "# Mill leftover primary\ncurrent leftover plan.md\n";
+        std::fs::write(&plan_md, primary).unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        store
+            .upsert_session_plan(
+                "sess-soft-secondary",
+                SESSION_PLAN_IDENTITY,
+                Some("Mill leftover primary"),
+                primary,
+                false,
+                "[]",
+            )
+            .unwrap();
+        let docked = store
+            .set_session_plan_dock_open("sess-soft-secondary", SECONDARY_PLAN_IDENTITY, true)
+            .expect("secondary Isolated Preview dock_open");
+        assert!(
+            docked,
+            "soft planning must dock Isolated Preview on the secondary plan"
+        );
+        store
+            .upsert_session_plan_body_for(
+                "sess-soft-secondary",
+                SECONDARY_PLAN_IDENTITY,
+                "# Secondary Isolated Preview\nnew feature seed\n",
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&plan_md).unwrap(),
+            primary,
+            "soft planning must not rewrite leftover current plan.md"
+        );
+        let primary_row = store
+            .load_session_plan("sess-soft-secondary", SESSION_PLAN_IDENTITY)
+            .unwrap()
+            .expect("primary row");
+        assert_eq!(
+            primary_row.body, primary,
+            "soft planning must not reset the primary plan; got {:?}",
+            primary_row.body
+        );
+        assert!(
+            !primary_row.dock_open,
+            "soft planning must not stamp Isolated Preview dock-open on the primary plan"
+        );
+        let secondary = store
+            .load_session_plan("sess-soft-secondary", SECONDARY_PLAN_IDENTITY)
+            .unwrap()
+            .expect("secondary row");
+        assert!(
+            secondary.dock_open,
+            "soft planning must make a secondary plan Isolated Preview dock"
+        );
+        assert!(
+            secondary.body.contains("new feature seed")
+                && !secondary.body.contains("Mill leftover primary"),
+            "Isolated Preview must not immediately pull up leftover current plan.md; got {:?}",
+            secondary.body
+        );
+        let painted = resolve_plan_body_sql_then_disk(
+            &store,
+            "sess-soft-secondary",
+            SECONDARY_PLAN_IDENTITY,
+            None,
+        )
+        .expect("secondary Isolated Preview body");
+        assert!(
+            painted.contains("new feature seed") && !painted.contains("Mill leftover primary"),
+            "Isolated Preview for the soft session must not immediately pull up leftover current plan.md; got {painted:?}"
+        );
     }
 
     /// Named contract: present / plan-save upserts the live body via

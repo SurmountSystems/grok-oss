@@ -4,6 +4,8 @@
 //! opens session transcript files on paint. Measured nested L2 tokens are
 //! session usage counts, not included SuperGrok period limits, not SuperGrok
 //! dollar credits, and not console team prepaid / console API credits.
+//! Operator-visible Subagents list chrome omits the word `tokens`. The unit
+//! is implicit (`90k`, `112.9k`). Each nested session id is its own window.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,10 +14,6 @@ use std::sync::{Mutex, OnceLock};
 
 /// Default TECH.md filename at the workspace root.
 pub const TECH_MD_FILENAME: &str = "TECH.md";
-
-/// Unit word on the Subagents list token suffix (`53.4k tokens`).
-/// Operator-visible chrome must not prefix this with `measured`.
-pub const MEASURED_TOKENS_SUFFIX_UNIT: &str = "tokens";
 
 /// Billing-truth sentence required in TECH.md (complete thought).
 pub const NOT_BILLING_METERS_SENTENCE: &str = "Measured nested L2 tokens are session usage counts, not included SuperGrok period limits, not SuperGrok dollar credits, and not console team prepaid / console API credits. SuperGrok is a paid product. Estimates are estimates, not billing truth.";
@@ -220,8 +218,12 @@ impl L2TokenTracker {
 
     /// Record a usage tick (measured session tokens, not billing meters).
     ///
-    /// ACP `SubagentProgress` `tokens_used` is a cumulative total. `fetch_max`
-    /// keeps the high-water so concurrent ticks cannot lose a later count.
+    /// ACP `SubagentProgress` `tokens_used` is that nested session's live
+    /// sampling window (`context_tokens_used`). `fetch_max` keeps a TECH.md
+    /// high-water so concurrent ticks cannot lose a later count. Subagents
+    /// list paint uses the live sample passed into
+    /// [`format_live_subagents_list_suffix`], not this high-water, so a later
+    /// compact cannot leave a stale 90k leftover.
     pub fn record_usage(&mut self, nested_session_id: &str, measured_tokens: u64) {
         if let Some(row) = self.by_id.get_mut(nested_session_id) {
             let _previous = row
@@ -254,19 +256,6 @@ impl L2TokenTracker {
         Some(format_measured_tokens_suffix(measured))
     }
 
-    /// Paint a Subagents list row from in-memory counts only.
-    ///
-    /// Operator contract: layout must not read the session transcript file.
-    /// This function takes the in-memory tracker and a description label. It
-    /// does not take a chat history path.
-    pub fn format_subagents_list_row(&self, nested_session_id: &str, description: &str) -> String {
-        format_subagents_list_row_from_memory(
-            description,
-            self.format_subagents_list_token_suffix(nested_session_id)
-                .as_deref(),
-        )
-    }
-
     /// Render TECH.md and write it to the injected path.
     pub fn persist_tech_md(&self) -> std::io::Result<()> {
         let body = render_tech_md(&self.by_id);
@@ -278,16 +267,15 @@ impl L2TokenTracker {
     }
 }
 
-/// Compact Subagents list suffix: `53.4k tokens`.
+/// Compact Subagents list suffix: `53.4k`, `90k`, `112.9k`.
 ///
 /// Same compact count style as the rest of grok-oss (`format_tokens_compact`).
-/// Contract A: must not contain the word `measured`. Must not paint a raw
-/// integer like 53407. Keep `tokens`. Under 1000 stays `42 tokens`.
+/// The unit is implicit. Must not contain the word `tokens` or `measured`.
+/// Must not paint a raw integer like 53407. Under 1000 stays `42`.
 pub fn format_measured_tokens_suffix(measured_tokens: u64) -> String {
-    let compact = crate::views::agent_status::format_tokens_compact(
+    crate::views::agent_status::format_tokens_compact(
         i64::try_from(measured_tokens).unwrap_or(i64::MAX),
-    );
-    format!("{compact} {MEASURED_TOKENS_SUFFIX_UNIT}")
+    )
 }
 
 /// Subagents list row paint. In-memory count only. Never opens the session transcript file.
@@ -301,27 +289,20 @@ pub fn format_subagents_list_row_from_memory(
     }
 }
 
-/// Operator-visible Subagents description suffix from in-memory usage.
+/// Compact suffix for a nested session window.
 ///
-/// `tokens_used` is the row's last usage tick (`None` before the first tick).
-/// Does not open the session transcript file. Called from `format_subagent_label`.
-pub fn format_subagents_list_description(description: &str, tokens_used: Option<u64>) -> String {
-    let suffix = tokens_used.map(format_measured_tokens_suffix);
-    format_subagents_list_row_from_memory(description, suffix.as_deref())
-}
-
-/// Live Subagents list row. Prefers the in-memory tracker; falls back to the
-/// last usage tick on `SubagentInfo` when this nested id is not tracked yet.
-/// Does not open the session transcript file.
-pub fn format_live_subagents_list_row(
+/// Live `SubagentProgress` (`tokens_used`) wins over the tracker high-water
+/// so compact cannot leave a stale leftover. Falls back to the tracker when
+/// this nested id has no live sample yet. Does not open the session
+/// transcript file. Never the word `tokens`.
+pub fn format_live_subagents_list_suffix(
     nested_session_id: &str,
-    description: &str,
     tokens_used: Option<u64>,
-) -> String {
-    peek_process_tracker(|t| match t.get(nested_session_id) {
-        Some(_) => t.format_subagents_list_row(nested_session_id, description),
-        None => format_subagents_list_description(description, tokens_used),
-    })
+) -> Option<String> {
+    match tokens_used {
+        Some(live) => Some(format_measured_tokens_suffix(live)),
+        None => peek_process_tracker(|t| t.format_subagents_list_token_suffix(nested_session_id)),
+    }
 }
 
 fn render_tech_md(by_id: &HashMap<String, NestedL2Tokens>) -> String {
@@ -386,16 +367,22 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Contract A: the shared Subagents description helper paints compact
-    /// count plus `tokens` after an in-memory usage tick. Must not contain
-    /// the word `measured`. Must not paint a raw integer like 12400. No
-    /// usage tick means no suffix.
+    /// Subagents list omits the word tokens. Live paint helper
+    /// [`format_subagents_list_row_from_memory`] paints compact count after
+    /// an in-memory usage tick. Must not contain `measured`. Must not paint
+    /// a raw integer like 12400. No usage tick means no suffix.
     #[test]
     fn format_subagents_list_description_shows_measured_tokens_suffix() {
-        let with_tick = format_subagents_list_description("rate-limit implementer", Some(12400));
+        let suffix = format_measured_tokens_suffix(12400);
+        let with_tick =
+            format_subagents_list_row_from_memory("rate-limit implementer", Some(&suffix));
         assert!(
-            with_tick.contains("12.4k tokens"),
-            "Subagents description must contain 12.4k tokens, got {with_tick:?}"
+            with_tick.contains("12.4k"),
+            "Subagents description must contain 12.4k, got {with_tick:?}"
+        );
+        assert!(
+            !with_tick.contains("tokens") && !with_tick.contains("token"),
+            "Subagents list omits the word tokens; got {with_tick:?}"
         );
         assert!(
             !with_tick.contains("measured"),
@@ -405,33 +392,40 @@ mod tests {
             !with_tick.contains("12400"),
             "must not paint a raw integer token count, got {with_tick:?}"
         );
-        assert_eq!(
-            format_measured_tokens_suffix(12400),
-            format!("12.4k {MEASURED_TOKENS_SUFFIX_UNIT}")
-        );
-        let before_tick = format_subagents_list_description("rate-limit implementer", None);
+        assert_eq!(format_measured_tokens_suffix(12400), "12.4k");
+        assert_eq!(format_measured_tokens_suffix(112_900), "112.9k");
+        let before_tick = format_subagents_list_row_from_memory("rate-limit implementer", None);
         assert_eq!(before_tick, "rate-limit implementer");
         assert!(
             !before_tick.contains("tokens"),
-            "no token suffix before the first usage tick, got {before_tick:?}"
+            "no compact suffix before the first usage tick, got {before_tick:?}"
         );
     }
 
-    /// Contract A: nested L2 Subagents list chrome uses the same compact
-    /// count style as the rest of grok-oss (K/M). Must contain compact plus
-    /// `tokens` (`53.4k tokens`). Must not contain `measured`. Must not
-    /// paint a raw integer like 53407. Match `format_tokens_compact`.
+    /// Subagents list omits the word tokens. Nested L2 chrome uses the same
+    /// compact count style as the rest of grok-oss (K/M). Must contain
+    /// `53.4k`. Must not contain `measured`. Must not paint a raw integer
+    /// like 53407. Match `format_tokens_compact`.
     #[test]
     fn subagents_list_shows_measured_tokens_per_nested_l2() {
         let mut tracker = L2TokenTracker::with_tech_md_path("/tmp/unused-tech.md");
         tracker.record_spawn("nested-l2-session", "Stale prompt still live");
         tracker.record_usage("nested-l2-session", 53407);
-        let row = tracker.format_subagents_list_row("nested-l2-session", "Stale prompt still live");
+        let row = format_subagents_list_row_from_memory(
+            "Stale prompt still live",
+            tracker
+                .format_subagents_list_token_suffix("nested-l2-session")
+                .as_deref(),
+        );
         let compact = crate::views::agent_status::format_tokens_compact(53407);
         assert_eq!(compact, "53.4k");
         assert!(
-            row.contains("53.4k tokens"),
-            "Subagents list row must contain 53.4k tokens, got {row:?}"
+            row.contains("53.4k"),
+            "Subagents list row must contain 53.4k, got {row:?}"
+        );
+        assert!(
+            !row.contains("tokens") && !row.contains("token"),
+            "Subagents list omits the word tokens; got {row:?}"
         );
         assert!(
             !row.contains("measured"),
@@ -445,9 +439,61 @@ mod tests {
             !row.contains("nested-l2-session") || row.contains("Stale prompt still live"),
             "row uses the description label, not UUID speech as the visible name"
         );
-        assert_eq!(format_measured_tokens_suffix(42), "42 tokens");
-        assert_eq!(format_measured_tokens_suffix(12400), "12.4k tokens");
-        assert_eq!(format_measured_tokens_suffix(1_500_000), "1.5M tokens");
+        assert_eq!(format_measured_tokens_suffix(42), "42");
+        assert_eq!(format_measured_tokens_suffix(12400), "12.4k");
+        assert_eq!(format_measured_tokens_suffix(90_000), "90k");
+        assert_eq!(format_measured_tokens_suffix(112_900), "112.9k");
+        assert_eq!(format_measured_tokens_suffix(112_600), "112.6k");
+        assert_eq!(format_measured_tokens_suffix(1_500_000), "1.5M");
+    }
+
+    /// Subagents list omits the word tokens. Truncation of a long job name
+    /// must not become `112.6k token...`. Iso still showed `112.6k tokens`.
+    #[test]
+    fn subagents_list_omits_the_word_tokens() {
+        let suffix = format_measured_tokens_suffix(112_600);
+        let row = format_subagents_list_row_from_memory("Isolated Preview", Some(&suffix));
+        assert!(
+            row.contains("112.6k"),
+            "Subagents list must paint 112.6k, got {row:?}"
+        );
+        assert!(
+            !row.contains("tokens") && !row.contains("token"),
+            "Subagents list omits the word tokens; truncation must not become 112.6k token...; got {row:?}"
+        );
+        assert_eq!(row, "Isolated Preview (112.6k)");
+    }
+
+    /// Live sampling wins over tracker high-water. A later smaller window
+    /// (compact) must not leave a stale 90k leftover on the list.
+    #[test]
+    fn format_live_subagents_list_row_uses_live_sample_not_tracker_high_water() {
+        on_nested_l2_spawn("nested-l2-live", "Residual");
+        on_nested_l2_usage("nested-l2-live", 90_000);
+        let stale = format_subagents_list_row_from_memory(
+            "Residual",
+            format_live_subagents_list_suffix("nested-l2-live", None).as_deref(),
+        );
+        assert!(
+            stale.contains("90k"),
+            "tracker fallback paints 90k before a live sample, got {stale:?}"
+        );
+        let live = format_subagents_list_row_from_memory(
+            "Residual",
+            format_live_subagents_list_suffix("nested-l2-live", Some(40_100)).as_deref(),
+        );
+        assert!(
+            live.contains("40.1k"),
+            "live sampling must paint 40.1k, got {live:?}"
+        );
+        assert!(
+            !live.contains("90k"),
+            "live sampling must not leave a stale 90k leftover, got {live:?}"
+        );
+        assert!(
+            !live.contains("tokens"),
+            "Subagents list omits the word tokens; got {live:?}"
+        );
     }
 
     /// Operator contract: TECH.md write records measured tokens on spawn,
@@ -530,15 +576,16 @@ mod tests {
             .format_subagents_list_token_suffix("nested-l2-session")
             .expect("suffix after usage tick");
         assert_eq!(suffix, format_measured_tokens_suffix(53407));
-        assert_eq!(suffix, format!("53.4k {MEASURED_TOKENS_SUFFIX_UNIT}"));
-        let row = tracker.format_subagents_list_row("nested-l2-session", "Stale prompt still live");
-        assert_eq!(
-            row,
-            format_subagents_list_row_from_memory("Stale prompt still live", Some(&suffix))
+        assert_eq!(suffix, "53.4k");
+        let row = format_subagents_list_row_from_memory("Stale prompt still live", Some(&suffix));
+        assert_eq!(row, "Stale prompt still live (53.4k)");
+        assert!(
+            row.contains("53.4k"),
+            "Subagents list row must contain 53.4k, got {row:?}"
         );
         assert!(
-            row.contains("53.4k tokens"),
-            "Subagents list row must contain 53.4k tokens, got {row:?}"
+            !row.contains("tokens"),
+            "Subagents list omits the word tokens; got {row:?}"
         );
         assert!(
             !row.contains("measured"),
@@ -567,7 +614,11 @@ mod tests {
                 .format_subagents_list_token_suffix("id-only-in-memory")
                 .as_deref(),
         );
-        assert!(row.contains("42 tokens"));
+        assert!(row.contains("42"));
+        assert!(
+            !row.contains("tokens"),
+            "Subagents list omits the word tokens; got {row:?}"
+        );
         assert!(
             !row.contains("measured"),
             "Contract A: Subagents nested token chrome must not contain measured, got {row:?}"
@@ -590,8 +641,9 @@ mod tests {
     /// OSS Subagents list tracks nested L2 session usage in-memory
     /// (`l2_token_tracking`) and paints compact chrome. A racy last-write
     /// u64 can drop 10232 when a stale smaller tick lands last. Named tests
-    /// are contracts: the high-water is 10232, chrome is `10.2k tokens`, and
-    /// the outcome must not be fitted to a racy last-write.
+    /// are contracts: the high-water is 10232, chrome is `10.2k`, and
+    /// the outcome must not be fitted to a racy last-write. The Subagents
+    /// list omits the word tokens.
     #[test]
     fn concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water() {
         let src = include_str!("l2_token_tracking.rs");
@@ -641,10 +693,18 @@ mod tests {
             measured, HIGH_WATER,
             "concurrent usage ticks must keep 10232, not a stale last-write like 8000"
         );
-        let row = t.format_subagents_list_row("nested-l2-session", "Atomic usage ticks");
+        let row = format_subagents_list_row_from_memory(
+            "Atomic usage ticks",
+            t.format_subagents_list_token_suffix("nested-l2-session")
+                .as_deref(),
+        );
         assert!(
-            row.contains("10.2k tokens"),
-            "Subagents list must paint compact 10.2k tokens after 10232, got {row:?}"
+            row.contains("10.2k"),
+            "Subagents list must paint compact 10.2k after 10232, got {row:?}"
+        );
+        assert!(
+            !row.contains("tokens"),
+            "Subagents list omits the word tokens; got {row:?}"
         );
         assert!(
             !row.contains("measured"),
@@ -658,9 +718,6 @@ mod tests {
             !row.contains("8000"),
             "must not paint a stale concurrent tick, got {row:?}"
         );
-        assert_eq!(
-            format_measured_tokens_suffix(HIGH_WATER),
-            format!("10.2k {MEASURED_TOKENS_SUFFIX_UNIT}")
-        );
+        assert_eq!(format_measured_tokens_suffix(HIGH_WATER), "10.2k");
     }
 }

@@ -273,13 +273,13 @@ When plan approval is open, letter keys type into the prompt and the plan pane b
 | `Tab` | Move focus between the plan preview and the prompt |
 | empty `Ctrl+C` | Exit (abandon the plan) |
 
-Empty `Enter` never approves a plan. Use the clickable **Approve** button.
+Empty `Enter` never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Use the clickable **Approve** button.
 
 ## During an active turn (agent running)
 
 The composer footer Enter cue is **send**, **queue**, or **interject**. It names what plain `Enter` will do.
 
-A `[Pasted: N lines]` chip in the Operator box is a prompt. Enter sends or interjects that body. It does not only expand the chip. Expand is paste-again or double-click. Isolated Preview idle after present, a non-empty Operator paste plus Enter, still Approves with those notes. Empty Enter never Approves.
+A `[Pasted: N lines]` chip in the Operator box is a prompt. Enter sends or interjects that body. It does not only expand the chip. Expand is paste-again or double-click. Isolated Preview idle after present, a non-empty Operator paste plus Enter, still Approves with those notes. Isolated Preview does not close when nested implementers continue. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)).
 
 While the agent is generating:
 

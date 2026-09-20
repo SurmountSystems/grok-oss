@@ -605,7 +605,7 @@ impl AgentView {
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
-        use crate::app::subagent::{format_context_badge, format_subagent_label};
+        use crate::app::subagent::{format_context_badge, format_subagent_label_among};
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
         self.sync_parented_specialists_into_child_view(child_sid);
@@ -679,8 +679,10 @@ impl AgentView {
         let elapsed = elapsed_ms
             .map(crate::util::format_duration)
             .unwrap_or_default();
+        let all: Vec<&crate::app::subagent::SubagentInfo> =
+            self.subagent_sessions.values().collect();
         let (type_label, description): (String, String) = match info {
-            Some(s) => format_subagent_label(s),
+            Some(s) => format_subagent_label_among(s, &all),
             None => (String::new(), raw_description.to_string()),
         };
         let status_completed = info.and_then(|s| s.status.as_deref()) == Some("completed");
@@ -1602,12 +1604,9 @@ impl AgentView {
         }
         if let Some(ref goal) = self.goal_state {
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
+            let active_subagent_tokens = crate::app::subagent::sum_live_nested_session_windows(
+                self.subagent_sessions.values(),
+            );
             status.push(
                 "goal",
                 crate::views::agent_status::goal_status_line(
@@ -4655,12 +4654,9 @@ impl AgentView {
             let todos = self.todo.todos();
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
+            let active_subagent_tokens = crate::app::subagent::sum_live_nested_session_windows(
+                self.subagent_sessions.values(),
+            );
             let close_rect = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,

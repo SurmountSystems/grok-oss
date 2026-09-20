@@ -277,8 +277,11 @@ pub(super) fn handle_exit_plan_mode(
 
     let keep_draft = !agent.prompt.text().trim().is_empty();
     let live_cursor = agent.prompt.cursor();
-    // Restore must not snapshot the Revise / Comment box as keep-draft
-    // review notes. Isolated present still Approves from Preview.
+    // Live present stashes via stash(). That stash match is not keep-draft
+    // for click Approve: idle notes already in the Operator box ride Approve
+    // as review comments. Restore copies text only and marks keep-draft as
+    // the next Operator turn (Enter SendPrompt, Approve does not wrap).
+    // stash() drains image chips.
     let stashed = if is_restore {
         crate::views::prompt_widget::StashedPrompt::default()
     } else {
@@ -297,7 +300,17 @@ pub(super) fn handle_exit_plan_mode(
         agent.latest_inline_plan_content = None;
     }
     if let Some(ref body) = state.plan_content {
-        agent.persist_session_plan_body(body);
+        if agent.isolated_preview_shows_secondary_plan && source == PlanReviewSource::Inline {
+            agent.persist_session_plan_body_for(
+                xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+                body,
+            );
+        } else {
+            if source == PlanReviewSource::FileBacked {
+                agent.isolated_preview_shows_secondary_plan = false;
+            }
+            agent.persist_session_plan_body(body);
+        }
     }
     // Live present re-arms decision CTAs after a prior Approve/Quit and
     // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
@@ -323,6 +336,11 @@ pub(super) fn handle_exit_plan_mode(
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
+        if is_restore && let Some(ref mut pav) = agent.plan_approval_view {
+            pav.stashed_prompt.text = agent.prompt.text().to_string();
+            pav.stashed_prompt.cursor = live_cursor;
+            pav.keep_draft_is_next_operator_turn = true;
+        }
     }
 
     agent.casual_commenting_range = None;

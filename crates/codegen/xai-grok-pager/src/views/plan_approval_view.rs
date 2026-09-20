@@ -24,6 +24,18 @@ The agent exited plan mode without writing a plan.
 - **Exit** - abandon and turn plan mode off
 ";
 
+/// Isolated Preview body for `/plan --soft` before `exit_plan_mode` writes
+/// the secondary plan. Must be non-empty after trim so the markdown viewer
+/// accepts it. Must not copy leftover primary `plan.md`.
+pub const SECONDARY_PLAN_PLACEHOLDER: &str = "\
+# Secondary plan
+
+Soft planning. This Isolated Preview is a secondary plan. It does not reset the primary session plan.md.
+
+- Empty Enter never Approves
+- Comment then Approve works after exit_plan_mode writes this secondary plan
+";
+
 /// Status-line label while plan mode is active without a live reverse-request
 /// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
 /// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]),
@@ -195,6 +207,11 @@ pub struct PlanApprovalViewState {
     /// Keystroke snapshots also write `feedback_draft`; they must not count
     /// as that Enter. A later matching Enter still SendPrompt.
     pub comment_held_from_enter: bool,
+    /// Keep-draft is the next Operator turn because Isolated Preview was
+    /// closed, reopened, or restored after close. Live present `stash()` is
+    /// not this: idle notes already in the Operator box at present ride
+    /// click Approve as review comments.
+    pub keep_draft_is_next_operator_turn: bool,
     /// Local idle decision park: no live `exit_plan_mode` reverse-request.
     /// Approve / Revise / Quit still work; Revise Interjects a rewrite.
     pub is_local_idle_decision: bool,
@@ -238,6 +255,7 @@ impl PlanApprovalViewState {
             stashed_feedback_prompt: None,
             feedback_draft: None,
             comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: false,
         }
     }
@@ -265,6 +283,7 @@ impl PlanApprovalViewState {
             stashed_feedback_prompt: None,
             feedback_draft: None,
             comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: true,
         }
     }

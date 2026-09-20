@@ -1787,6 +1787,66 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
     );
 }
 
+/// Operator: "Also approve with comment STILL does not work on the latest
+/// commit and build you gave me yesterday." Isolated Preview idle: leftover
+/// slash-palette `/` plus Operator notes plus Enter Approves with those
+/// notes. Click Approve with notes and no keystroke `feedback_draft` also
+/// rides those notes. Empty Enter never Approves.
+#[test]
+fn isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    const NOTES: &str = "keep this review comment after leftover slash";
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+        pav.prompt_intent = PlanPromptIntent::Revise;
+        pav.feedback_draft = None;
+    }
+    agent.prompt.set_text("/");
+    agent.prompt.refresh_slash(&agent.session.models);
+    agent.prompt.set_text(NOTES);
+    if let Some(pav) = agent.plan_approval_view.as_mut() {
+        pav.feedback_draft = None;
+    }
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+    }
+    let send = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match send {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(NOTES),
+                "leftover slash plus notes plus Enter must Approve with those notes, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Approve with comment must wrap the notes, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview idle leftover slash plus Operator notes plus Enter must Approve with those notes; got {other:?}"
+        ),
+    }
+    assert!(
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Enter with notes must Approve, not Plan-Exit"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve lands, got {:?}",
+        agent.prompt.text()
+    );
+}
+
 /// Isolated Preview idle plus typed Operator notes plus Enter Approves
 /// with those notes. Empty Enter never Approves.
 #[test]

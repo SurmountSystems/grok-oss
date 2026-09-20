@@ -609,6 +609,16 @@ impl AgentView {
         if let Some(action_id) = registry.lookup(key, When::PromptFocused) {
             match action_id {
                 ActionId::SendPrompt => {
+                    // Isolated Preview idle after present: a non-empty
+                    // Operator box plus Enter Approves with those notes.
+                    // Vanished Isolated Preview (pane shut, live waiter)
+                    // still Approves. Must not only expand a paste chip.
+                    // Empty Enter never Approves.
+                    if self.isolated_preview_idle_enter_approves_with_notes() {
+                        self.snapshot_or_clear_plan_feedback_draft();
+                        self.prompt.slash_close();
+                        return self.approve_plan();
+                    }
                     // Apple Terminal: Shift+Enter arrives as bare Enter (no
                     // Kitty protocol). Poll CoreGraphics for real modifier
                     // state — if Shift/Option/Cmd is held, insert a newline

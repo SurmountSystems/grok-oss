@@ -388,7 +388,11 @@ impl AgentView {
             return;
         }
         self.view_plan_requested = true;
-        self.dock_isolated_preview();
+        if self.secondary_session_plan_is_docked() {
+            self.dock_isolated_preview_with_feature(None);
+        } else {
+            self.dock_isolated_preview();
+        }
     }
 
     /// Slash `/view-plan` is a command, not the Revise / Comment draft.
@@ -1189,6 +1193,7 @@ impl AgentView {
             plan_decision_resolved: false,
             plan_feedback_in_flight: None,
             isolated_preview_rewrite_wait_prompt: None,
+            isolated_preview_shows_secondary_plan: false,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
@@ -3729,6 +3734,7 @@ mod resolve_turn_activity_tests {
                 turn_count: None,
                 tool_call_count: None,
                 tokens_used: None,
+                tokens_past: 0,
                 context_window_tokens: None,
                 context_usage_pct: None,
                 tools_used: vec![],
