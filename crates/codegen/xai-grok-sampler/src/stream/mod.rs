@@ -300,6 +300,7 @@ fn is_loop_phrase(unit: &str) -> bool {
 
 /// Operator screenshot 2026-09-20 Isolated Preview: the stream looped this
 /// pair until cancel at 19m18s.
+#[cfg(test)]
 pub(crate) const DEST_ENCODER_SKIP_LOOP: &str =
     "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.";
 
@@ -310,6 +311,10 @@ mod dest_encoder_skip_repetition_tests {
 
     #[test]
     fn dest_encoder_skip_loop_is_repetitive() {
+        assert_eq!(
+            DEST_ENCODER_SKIP_LOOP,
+            "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip."
+        );
         let one = format!("{DEST_ENCODER_SKIP_LOOP} ");
         assert!(
             !is_repetitive(&one.repeat(2)),
@@ -328,7 +333,10 @@ mod dest_encoder_skip_repetition_tests {
 
     #[test]
     fn dest_encoder_skip_single_sentence_four_times_is_repetitive() {
-        let sentence = "Spawn dests of dest encoder skip. ";
+        let (first, _) = DEST_ENCODER_SKIP_LOOP
+            .split_once(". ")
+            .expect("fixture is two sentences");
+        let sentence = format!("{first}. ");
         assert!(!is_repetitive(&sentence.repeat(3)));
         assert!(is_repetitive(&sentence.repeat(4)));
     }
@@ -349,7 +357,7 @@ mod dest_encoder_skip_repetition_tests {
 
     #[test]
     fn thought_line_loop_is_repetitive() {
-        let line = "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.\n";
+        let line = format!("{DEST_ENCODER_SKIP_LOOP}\n");
         assert!(is_repetitive(&line.repeat(3)));
     }
 }

@@ -481,11 +481,14 @@ mod tests {
     #[tokio::test]
     async fn chat_completions_stops_dest_encoder_skip_loop() {
         let looping = format!("{} ", super::DEST_ENCODER_SKIP_LOOP);
-        assert!(
-            looping.contains(
-                "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip."
-            ),
+        assert_eq!(
+            super::DEST_ENCODER_SKIP_LOOP,
+            "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.",
             "named test must quote the dest-encoder-skip loop"
+        );
+        assert!(
+            looping.contains(super::DEST_ENCODER_SKIP_LOOP),
+            "stream fixture must carry DEST_ENCODER_SKIP_LOOP"
         );
         let mut chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
             (0..20).map(|_| Ok(text_chunk(&looping))).collect();

@@ -331,11 +331,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Unwedge parked Isolated Preview
     - L3 specialists (when spawned)
+  - L2 Use dest encoder skip const
+    - L3 specialists (when spawned)
   - L2 User-guide exclusive plan stay
     - L3 specialists (when spawned)
   - L2 Wait then one check-remote
     - L3 specialists (when spawned)
   - L2 Wait then one check-remote
+    - L3 specialists (when spawned)
+  - L2 Wire DEST_ENCODER_SKIP_LOOP tests
     - L3 specialists (when spawned)
   - L2 Wire Subagents list helpers
     - L3 specialists (when spawned)
@@ -565,9 +569,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | TDD subagent path rwlock | nested L2 session usage | L2 | 77323 | estimate | exited |
 | Unstick Isolated Preview resume | nested L2 session usage | L2 | 196993 | estimate | exited |
 | Unwedge parked Isolated Preview | nested L2 session usage | L2 | 112874 | estimate | exited |
+| Use dest encoder skip const | nested L2 session usage | L2 | 83695 | estimate | exited |
 | User-guide exclusive plan stay | nested L2 session usage | L2 | 129812 | estimate | exited |
 | Wait then one check-remote | nested L2 session usage | L2 | 114808 | estimate | exited |
 | Wait then one check-remote | nested L2 session usage | L2 | 87994 | estimate | exited |
+| Wire DEST_ENCODER_SKIP_LOOP tests | nested L2 session usage | L2 | 77843 | estimate | exited |
 | Wire Subagents list helpers | nested L2 session usage | L2 | 118938 | estimate | exited |
 | Wire goal-clear no-interject | nested L2 session usage | L2 | 196106 | estimate | exited |
 | Wire or drop unused commenting fn | nested L2 session usage | L2 | 106056 | estimate | exited |
